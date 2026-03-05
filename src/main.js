@@ -64,15 +64,8 @@ class Horn {
 
   stop() {
     for (const source of this.#sources) {
-      try {
-        source.stop();
-      } catch {
-        // Already stopped
-      }
-      source.disconnect();
+      source.loop = false;
     }
-    this.#sources.clear();
-    this.onstopped();
   }
 
   onstopped() {}
