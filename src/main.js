@@ -19,7 +19,7 @@
 
 class Horn {
   #audioCtx = null;
-  #buffer = null;
+  #bufferPromise = null;
   #sources = new Set();
   #audioSrc = '/sounds/airhorn.mp3';
 
@@ -31,21 +31,27 @@ class Horn {
     }
   }
 
-  async #loadBuffer() {
-    if (this.#buffer || !this.#audioCtx) return;
-    const response = await fetch(this.#audioSrc);
-    const arrayBuffer = await response.arrayBuffer();
-    this.#buffer = await this.#audioCtx.decodeAudioData(arrayBuffer);
+  #loadBuffer() {
+    if (!this.#bufferPromise && this.#audioCtx) {
+      this.#bufferPromise = fetch(this.#audioSrc)
+        .then(response => response.arrayBuffer())
+        .then(arrayBuffer => this.#audioCtx.decodeAudioData(arrayBuffer))
+        .catch(err => {
+          this.#bufferPromise = null;
+          throw err;
+        });
+    }
+    return this.#bufferPromise;
   }
 
   async start({ loop = false } = {}) {
     if (!this.#audioCtx) return;
 
     await this.#audioCtx.resume();
-    await this.#loadBuffer();
+    const buffer = await this.#loadBuffer();
 
     const source = this.#audioCtx.createBufferSource();
-    source.buffer = this.#buffer;
+    source.buffer = buffer;
     source.connect(this.#audioCtx.destination);
     source.loop = loop;
     if (loop) {
@@ -146,7 +152,7 @@ class AirHorn {
   start({ loop = false } = {}) {
     this.#image.classList.add('horning');
     this.#image.setAttribute('aria-pressed', 'true');
-    this.#horn.start({ loop });
+    this.#horn.start({ loop }).catch(() => {});
 
     this.#horn.onstopped = () => {
       this.#image.classList.remove('horning');

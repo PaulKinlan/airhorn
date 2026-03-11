@@ -17,19 +17,21 @@
  *
  */
 
-const version = "0.7.0";
+const version = "0.7.1";
 const cacheName = `airhorner-${version}`;
+
+const precacheUrls = [
+  `/`,
+  `/index.html`,
+  `/styles/main.css`,
+  `/scripts/pwacompat.min.js`,
+  `/sounds/airhorn.mp3`
+];
 
 self.addEventListener('install', e => {
   e.waitUntil(
     caches.open(cacheName).then(cache => {
-      return cache.addAll([
-        `/`,
-        `/index.html`,
-        `/styles/main.css`,
-        `/scripts/pwacompat.min.js`,
-        `/sounds/airhorn.mp3`
-      ]).then(() => self.skipWaiting());
+      return cache.addAll(precacheUrls).then(() => self.skipWaiting());
     })
   );
 });
@@ -45,6 +47,26 @@ self.addEventListener('activate', event => {
 });
 
 self.addEventListener('fetch', event => {
+  const url = new URL(event.request.url);
+
+  // Hashed assets (e.g. /assets/index-Cb7tU7WW.js) are immutable —
+  // serve from cache or fetch and cache for offline use.
+  if (url.pathname.startsWith('/assets/')) {
+    event.respondWith(
+      caches.open(cacheName).then(cache =>
+        cache.match(event.request).then(cached => {
+          if (cached) return cached;
+          return fetch(event.request).then(response => {
+            cache.put(event.request, response.clone());
+            return response;
+          });
+        })
+      )
+    );
+    return;
+  }
+
+  // Precached resources: serve from cache, fall back to network.
   event.respondWith(
     caches.open(cacheName)
       .then(cache => cache.match(event.request, {ignoreSearch: true}))
