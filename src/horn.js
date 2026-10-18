@@ -22,6 +22,7 @@ export class Horn {
   #bufferPromise = null;
   #sources = new Set();
   #synths = new Set();
+  #pendingStarts = new Set();
   #audioSrc;
   #usingFallback = false;
 
@@ -84,23 +85,47 @@ export class Horn {
   async start({ loop = false } = {}) {
     if (!this.#audioCtx) return false;
 
-    if (typeof this.#audioCtx.resume === 'function') {
-      try {
-        await Promise.race([
-          this.#audioCtx.resume(),
-          new Promise(r => setTimeout(r, 100))
-        ]);
-      } catch {}
-    }
+    const startOp = {
+      loop,
+      cancelled: false,
+      stopRequested: false,
+      immediateStop: false
+    };
+    this.#pendingStarts.add(startOp);
 
     try {
-      const buffer = await this.#loadBuffer();
-      if (!buffer) throw new Error('No audio buffer decoded');
-      this.#usingFallback = false;
-      return this.#playSample(buffer, { loop });
-    } catch (err) {
-      this.#usingFallback = true;
-      return this.#playSynth({ loop });
+      if (typeof this.#audioCtx.resume === 'function') {
+        try {
+          await Promise.race([
+            this.#audioCtx.resume(),
+            new Promise(r => setTimeout(r, 100))
+          ]);
+        } catch {}
+      }
+
+      if (startOp.cancelled || (startOp.stopRequested && startOp.immediateStop)) {
+        return false;
+      }
+
+      try {
+        const buffer = await this.#loadBuffer();
+        if (startOp.cancelled || (startOp.stopRequested && startOp.immediateStop)) {
+          return false;
+        }
+        if (!buffer) throw new Error('No audio buffer decoded');
+        this.#usingFallback = false;
+        const playLoop = startOp.stopRequested ? false : startOp.loop;
+        return this.#playSample(buffer, { loop: playLoop });
+      } catch (err) {
+        if (startOp.cancelled || (startOp.stopRequested && startOp.immediateStop)) {
+          return false;
+        }
+        this.#usingFallback = true;
+        const playLoop = startOp.stopRequested ? false : startOp.loop;
+        return this.#playSynth({ loop: playLoop });
+      }
+    } finally {
+      this.#pendingStarts.delete(startOp);
     }
   }
 
@@ -206,6 +231,17 @@ export class Horn {
   stop({ immediate = false } = {}) {
     const ended = [];
 
+    // Notify any pending start operations waiting on buffer load / resume
+    for (const pending of this.#pendingStarts) {
+      pending.stopRequested = true;
+      if (immediate) {
+        pending.cancelled = true;
+        pending.immediateStop = true;
+      } else {
+        pending.loop = false;
+      }
+    }
+
     for (const source of this.#sources) {
       source.loop = false;
       if (immediate) {
@@ -238,10 +274,17 @@ export class Horn {
     }
 
     for (const synth of this.#synths) {
+      const wasLooping = synth.loop;
       synth.loop = false;
+
+      // On non-immediate release for single non-looping blast, let it ring out naturally
+      if (!immediate && !wasLooping) {
+        continue;
+      }
+
       const ctx = this.#audioCtx;
       const now = ctx.currentTime || 0;
-      const releaseTime = immediate ? 0.03 : 0.2;
+      const releaseTime = immediate ? 0.03 : 0.25;
 
       ended.push(new Promise((resolve) => {
         try {
