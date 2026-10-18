@@ -37,12 +37,14 @@
   </head>
   <body>
     <main id='container'>
+      <h1 class='visually-hidden'>The Air Horner</h1>
       <div id='airhorn'>
-        <button type='button' class='horn' aria-label='Air horn' aria-pressed='false'>
+        <button type='button' class='horn' aria-label='Air horn' aria-pressed='false' aria-describedby='horn-help'>
           <span class='inner' aria-hidden='true'>
             <span class='center'></span>
           </span>
         </button>
+        <p id='horn-help' class='visually-hidden'>Press and hold to sound the air horn. Release to stop.</p>
       </div>
     </main>
     <div id='installer'>
