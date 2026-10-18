@@ -1,0 +1,17 @@
+# tools/suite-map.tsv — the changed-path -> suite map. THE MAP IS THE GATE.
+# Format: <glob pattern><TAB><space-separated suites covering it>. Rows are ADDITIVE: name EVERY suite
+# that covers a file. Lines starting with # are comments. `!` rows are exemptions (docs/assets with no
+# suite) — add one only with a reason in the comment. An unmapped changed file FAILS the gate loudly.
+src/horn.js	tests/horn.test.js
+src/main.js	tests/horn.test.js
+index.html	tests/horn.test.js
+vite.config.js	tests/horn.test.js
+package.json	tests/horn.test.js
+package-lock.json	tests/horn.test.js
+server.ts	tests/horn.test.js
+tools/*	tests/horn.test.js
+# Static assets and prose carry no behaviour; no suite covers them.
+!*.md
+!LICENSE
+!.gitignore
+!public/**
