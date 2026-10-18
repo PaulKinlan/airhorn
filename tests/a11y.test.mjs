@@ -207,6 +207,9 @@ async function run() {
           hornRole: horn ? horn.getAttribute('role') : null,
           hornTabIndex: horn ? horn.getAttribute('tabindex') : null,
           hornCursor: styles.cursor,
+          hornOutlineColor: styles.outlineColor,
+          hornOutlineWidth: styles.outlineWidth,
+          bodyBackground: window.getComputedStyle(document.body).backgroundColor,
           installerIsAvailable: isAvailable,
           installerVisibility: installerStyles ? installerStyles.visibility : null,
           installerPointerEvents: installerStyles ? installerStyles.pointerEvents : null,
@@ -246,6 +249,26 @@ async function run() {
     }
     if (r.hiddenPointerEvents !== 'none') {
       throw new Error(`Expected hiddenPointerEvents to be 'none', got ${r.hiddenPointerEvents}`);
+    }
+
+    // WCAG 1.4.11 Non-text Contrast: the horn's boundary ring must clear 3:1
+    // against the page background (red on blue alone is 1.18:1).
+    const relLum = (rgb) => {
+      const [cr, cg, cb] = rgb.match(/[\d.]+/g).map(Number).map((v) => {
+        const s = v / 255;
+        return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+      });
+      return 0.2126 * cr + 0.7152 * cg + 0.0722 * cb;
+    };
+    const outlineLum = relLum(r.hornOutlineColor);
+    const pageLum = relLum(r.bodyBackground);
+    const boundaryRatio = (Math.max(outlineLum, pageLum) + 0.05) / (Math.min(outlineLum, pageLum) + 0.05);
+    console.log(`Horn boundary contrast: ${r.hornOutlineColor} on ${r.bodyBackground} = ${boundaryRatio.toFixed(2)}:1`);
+    if (parseFloat(r.hornOutlineWidth) < 1) {
+      throw new Error(`Expected horn outline width >= 1px, got ${r.hornOutlineWidth}`);
+    }
+    if (boundaryRatio < 3) {
+      throw new Error(`Expected horn boundary contrast >= 3:1, got ${boundaryRatio.toFixed(2)}:1 (${r.hornOutlineColor} on ${r.bodyBackground})`);
     }
 
     // Test Accessibility Tree for the button
