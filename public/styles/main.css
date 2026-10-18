@@ -40,6 +40,11 @@
     --horn-inner-pressed: #8e0000;
     --horn-edge: var(--blue-700);
     --horn-center-bg: #000;
+    /* WCAG 1.4.11 boundary ring: red on the blue page is 1.18:1, so the horn
+       needs its own >=3:1 edge. Navy on the blue page is 5.52:1. One value
+       serves both schemes: on the dark page the ring merges with the
+       background and the shape reads horn-vs-dark, which is 3.5:1+. */
+    --horn-boundary: var(--navy-800);
     --focus-ring: var(--navy-800);
     --install-bg: var(--blue-700);
     --install-ink: #fff;
@@ -147,6 +152,10 @@
     place-items: center;
     background-color: var(--horn-bg);
     box-shadow: 0 0.55rem 0.22rem 0 var(--horn-edge);
+    /* The permanent boundary ring (WCAG 1.4.11, 3:1 non-text). An outline,
+       not a border, so it never affects layout, follows border-radius, and
+       the :focus-visible ring below still overrides it on focus. */
+    outline: 1px solid var(--horn-boundary);
     transition:
       box-shadow 0.2s cubic-bezier(0.4, 0, 1, 1),
       translate 0.2s cubic-bezier(0.4, 0, 1, 1);
