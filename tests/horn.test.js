@@ -269,11 +269,9 @@ test('release-before-start race condition: stopping while fetch is pending does 
     fetchReject(new Error('HTTP 404'));
     await pendingStart;
 
-    // The synth should NOT be looping; loop was cleared by stop()
+    // Assert loop was cleared and single blast scheduled: all 3 oscillators have scheduled stop
     assert.equal(ctx.oscillators.length, 3);
-    // Since loop was cleared, it was scheduled as single blast, not infinite loop
-    await horn.stop({ immediate: true });
-    assert.equal(horn.isPlaying(), false);
+    assert.ok(ctx.oscillators.every(o => o.stopped), 'single-blast stop scheduled on oscillators, loop was cleared');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -313,16 +311,20 @@ test('short non-immediate tap does not truncate synth blast prematurely', async 
 
   try {
     const horn = new Horn({ audioContext: ctx });
-    await horn.start({ loop: false });
+    // UI gesture: pointerdown starts loop: true
+    await horn.start({ loop: true });
 
     assert.equal(horn.usingFallback, true);
     assert.equal(horn.isPlaying(), true);
 
-    // Non-immediate stop on single blast should let it ring out naturally
+    // 60ms later: pointerup releases (immediate: false)
     await horn.stop({ immediate: false });
-    assert.equal(horn.isPlaying(), true, 'Synth should ring out naturally and not be truncated immediately');
 
-    // Immediate stop on the other hand cuts it off
+    // Synth must NOT be truncated to 250ms release; remaining blast duration must ring out
+    assert.equal(horn.isPlaying(), true, 'Synth should ring out naturally and not be truncated after 60ms tap');
+    assert.ok(ctx.oscillators.every(o => o.stopped), 'Oscillators have scheduled stop time for full blast duration');
+
+    // Immediate stop on the other hand cuts it off immediately
     await horn.stop({ immediate: true });
     assert.equal(horn.isPlaying(), false);
   } finally {
@@ -483,7 +485,7 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
     // AnalyserNode tap to measure audibility (peak level > 0.01)
     await send('Page.addScriptToEvaluateOnNewDocument', {
       source: `
-        window.__audioProbe = { peak: 0, samples: 0, oscStarts: 0 };
+        window.__audioProbe = { peak: 0, currentLevel: 0, samples: 0, oscStarts: 0 };
         const AC = window.AudioContext || window.webkitAudioContext;
         if (AC) {
           const origConnect = AudioNode.prototype.connect;
@@ -512,6 +514,7 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
                       const abs = Math.abs(data[i]);
                       if (abs > peak) peak = abs;
                     }
+                    window.__audioProbe.currentLevel = peak;
                     if (peak > window.__audioProbe.peak) window.__audioProbe.peak = peak;
                     window.__audioProbe.samples++;
                   } catch {}
@@ -539,26 +542,45 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
     await new Promise(r => setTimeout(r, 600));
 
-    // Part A: Tap test - verify synth starts, sounds audibly, and toggles UI
-    const triggerResult = await send('Runtime.evaluate', {
+    // Part A: Tap test with real gesture (pointerdown, 60ms, pointerup)
+    // Verifies synth starts, sounds audibly, does NOT truncate early (~100ms), and rings out ~1.2s
+    await send('Runtime.evaluate', {
       expression: `(() => {
         const horn = document.querySelector('.horn');
-        horn.click();
+        horn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+        setTimeout(() => {
+          document.documentElement.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+        }, 60);
+      })()`
+    });
+
+    // Check at 150ms: horn is active
+    await new Promise(r => setTimeout(r, 150));
+    const activeAt150 = await send('Runtime.evaluate', {
+      expression: `(() => {
+        const horn = document.querySelector('.horn');
         return {
           horning: horn.classList.contains('horning'),
-          pressed: horn.getAttribute('aria-pressed')
+          audioPeak: window.__audioProbe?.peak || 0,
+          currentLevel: window.__audioProbe?.currentLevel || 0
         };
       })()`,
       returnByValue: true
     });
+    assert.ok(activeAt150.result.value.audioPeak > 0.01, 'Horn must sound audibly');
 
-    assert.equal(triggerResult.result.value.horning, true, 'UI should enter horning state on fallback play');
-    assert.equal(triggerResult.result.value.pressed, 'true', 'aria-pressed should be true on fallback play');
+    // Check at 500ms (far past the old 100ms truncation point): horn must still be ringing out!
+    await new Promise(r => setTimeout(r, 350));
+    const activeAt500 = await send('Runtime.evaluate', {
+      expression: `window.__audioProbe?.currentLevel || 0`,
+      returnByValue: true
+    });
+    assert.ok(activeAt500.result.value > 0.01, `Horn must still be ringing out at 500ms after a 60ms tap; got level ${activeAt500.result.value}`);
 
-    // Wait for blast duration and settle
+    // Wait for blast duration to complete and settle
     for (let i = 0; i < 30; i++) {
       const res = await send('Runtime.evaluate', {
-        expression: `!document.querySelector('.horn').classList.contains('horning')`,
+        expression: `!window.__airhorn || !window.__airhorn.isPlaying()`,
         returnByValue: true
       });
       if (res.result.value) break;

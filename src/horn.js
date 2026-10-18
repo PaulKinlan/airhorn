@@ -190,6 +190,7 @@ export class Horn {
       oscillators,
       masterGain,
       loop,
+      startTime: now,
       stopped: false,
       stopTimer: null
     };
@@ -277,13 +278,33 @@ export class Horn {
       const wasLooping = synth.loop;
       synth.loop = false;
 
-      // On non-immediate release for single non-looping blast, let it ring out naturally
-      if (!immediate && !wasLooping) {
-        continue;
-      }
-
       const ctx = this.#audioCtx;
       const now = ctx.currentTime || 0;
+
+      if (!immediate) {
+        // Natural release: ensure minimum blast duration (~1.2s total from synth.startTime)
+        // just like the sample path where disabling loop lets the remaining sample ring out.
+        const blastDuration = 1.2;
+        const elapsed = Math.max(0, now - (synth.startTime || now));
+        const remainingBlast = Math.max(0, blastDuration - elapsed);
+
+        if (remainingBlast > 0.25) {
+          // Tap or short hold: let the blast ring out to its natural completion
+          if (!synth.stopTimer) {
+            const releaseStart = (synth.startTime || now) + blastDuration - 0.2;
+            try {
+              synth.masterGain.gain.setValueAtTime(0.5, Math.max(now, releaseStart));
+              synth.masterGain.gain.exponentialRampToValueAtTime(0.0001, (synth.startTime || now) + blastDuration);
+            } catch {}
+            for (const osc of synth.oscillators) {
+              try { osc.stop((synth.startTime || now) + blastDuration); } catch {}
+            }
+            synth.stopTimer = setTimeout(synth.cleanup, remainingBlast * 1000 + 50);
+          }
+          continue;
+        }
+      }
+
       const releaseTime = immediate ? 0.03 : 0.25;
 
       ended.push(new Promise((resolve) => {
