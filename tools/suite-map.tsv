@@ -42,8 +42,8 @@ tests/webmcp-browser.test.mjs	tests/webmcp-browser.test.mjs
 # drives the built app end to end; it is deliberately explicit-only, so it is exempt from the
 # fast gate rather than mapped to sources it would then run for on every change (airhorn-i8i).
 !tests/acceptance.mjs
-# Shared browser-test support code (the quiescence probe) is imported by suites, not a suite
-# itself, so exempting it left a hole: a change *only* to tests/support/** ran zero suites and
-# the gate reported PASS (airhorn-10q changed quiescence.mjs, which both browser suites import).
-# Map it to the suites that import it instead.
+# Shared browser-test support code (the quiescence probe, the gate's report hook) is imported
+# by suites, not a suite itself, so exempting it left a hole: a change to *only*
+# tests/support/** ran zero suites and the gate still reported PASS. Map it to the suites that
+# import it instead (airhorn-10q for quiescence.mjs, airhorn-n00 for the report hook).
 tests/support/**	tests/a11y.test.mjs tests/sw-offline.test.mjs
