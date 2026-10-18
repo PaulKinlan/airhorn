@@ -38,26 +38,47 @@ body {
 
 #installer {
     position: absolute;
-    opacity: 0;
     top: 0;
     right: 0;
     text-align: center;
-    transition: opacity 300ms ease-in-out;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 300ms ease-in-out, visibility 0s linear 300ms;
 }
 
 #installer.available {
     opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transition: opacity 300ms ease-in-out;
 }
 
 #installer .button {
     border: white 1px solid;
     margin: 10px;
     padding: 10px;
-    color: white;
-    background-color: transparent;
+    color: #FFFFFF;
+    background-color: #1565C0;
+    cursor: pointer;
+    font: inherit;
+    border-radius: 4px;
+}
+
+#installer .button:focus-visible {
+    outline: 2px solid #FFFFFF;
+    outline-offset: 4px;
 }
 
 .horn {
+    appearance: none;
+    -webkit-appearance: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
     width: 50vmin;
     height: 50vmin;
 }
@@ -105,6 +126,10 @@ body {
     background-color: #F44336;
     box-shadow: 0 5px 2px 0 #1565C0;
     transition: box-shadow .2s cubic-bezier(.4, 0, 1, 1);
+}
+.horn:focus-visible {
+    outline: 4px solid #FFFFFF;
+    outline-offset: 8px;
 }
 .horn,
 .horn .inner {

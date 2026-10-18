@@ -30,27 +30,19 @@
     <meta name='twitter:image' content='https://airhorner.com/images/touch/android-launchericon-192-192.png'>
     <meta name='twitter:creator' content='@paul_kinlan'>
     <link rel='stylesheet' href='/styles/main.css'>
-    <script src='/scripts/pwacompat.min.js' async></script>
-    <script async src='https://www.googletagmanager.com/gtag/js?id=UA-59325548-2'></script>
-    <script>
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      gtag('js', new Date());
-      gtag('config', 'UA-59325548-2');
-    </script>
   </head>
   <body>
-    <div id='container'>
+    <main id='container'>
       <div id='airhorn'>
-        <div class='horn' role='button' aria-pressed='false' tabindex='0'>
-          <div class='inner'>
-            <div class='center'></div>
-          </div>
-        </div>
+        <button type='button' class='horn' aria-label='Air horn' aria-pressed='false'>
+          <span class='inner' aria-hidden='true'>
+            <span class='center'></span>
+          </span>
+        </button>
       </div>
-    </div>
+    </main>
     <div id='installer'>
-      <button class='button'>Install</button>
+      <button type='button' class='button'>Install</button>
     </div>
     <script type='module' src='/src/main.js'></script>
     <script>

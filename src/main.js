@@ -17,6 +17,12 @@
  *
  */
 
+function trackEvent(eventName, params) {
+  if (typeof gtag === 'function') {
+    gtag('event', eventName, params);
+  }
+}
+
 class Horn {
   #audioCtx = null;
   #bufferPromise = null;
@@ -88,13 +94,13 @@ class Installer {
       this.#promptEvent = e;
       e.preventDefault();
       root.classList.add('available');
-      gtag('event', 'install_available');
+      trackEvent('install_available');
     });
 
     window.addEventListener('appinstalled', () => {
       this.#promptEvent = null;
       root.classList.remove('available');
-      gtag('event', 'app_installed');
+      trackEvent('app_installed');
     });
 
     root.addEventListener('click', () => this.#install());
@@ -104,7 +110,7 @@ class Installer {
     if (!this.#promptEvent) return;
     this.#promptEvent.prompt();
     const result = await this.#promptEvent.userChoice;
-    gtag('event', 'install_prompt_result', { outcome: result.outcome });
+    trackEvent('install_prompt_result', { outcome: result.outcome });
     this.#promptEvent = null;
     this.#root.classList.remove('available');
   }
@@ -123,19 +129,30 @@ class AirHorn {
       navigator.clearAppBadge();
     }
 
+    let handledByPointerOrKey = false;
+
     this.#image.addEventListener('pointerdown', (e) => {
       e.preventDefault();
+      handledByPointerOrKey = true;
       this.start({ loop: true });
     });
 
-    document.documentElement.addEventListener('pointerup', () => this.stop());
-    document.documentElement.addEventListener('pointercancel', () => this.stop());
+    document.documentElement.addEventListener('pointerup', () => {
+      this.stop();
+      setTimeout(() => { handledByPointerOrKey = false; }, 100);
+    });
+
+    document.documentElement.addEventListener('pointercancel', () => {
+      this.stop();
+      setTimeout(() => { handledByPointerOrKey = false; }, 100);
+    });
 
     let pressing = false;
 
     this.#image.addEventListener('keydown', (e) => {
       if (!pressing && ['Space', 'Enter'].includes(e.code)) {
         e.preventDefault();
+        handledByPointerOrKey = true;
         this.start({ loop: true });
         pressing = true;
       }
@@ -145,6 +162,13 @@ class AirHorn {
       if (pressing) {
         this.stop();
         pressing = false;
+        setTimeout(() => { handledByPointerOrKey = false; }, 100);
+      }
+    });
+
+    this.#image.addEventListener('click', () => {
+      if (!handledByPointerOrKey) {
+        this.start({ loop: false });
       }
     });
   }
@@ -164,7 +188,7 @@ class AirHorn {
       navigator.setAppBadge(this.#counter);
     }
 
-    gtag('event', 'horn_play');
+    trackEvent('horn_play');
   }
 
   stop() {

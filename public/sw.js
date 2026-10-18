@@ -17,14 +17,13 @@
  *
  */
 
-const version = "0.7.1";
+const version = "0.7.2";
 const cacheName = `airhorner-${version}`;
 
 const precacheUrls = [
   `/`,
   `/index.html`,
   `/styles/main.css`,
-  `/scripts/pwacompat.min.js`,
   `/sounds/airhorn.mp3`
 ];
 
