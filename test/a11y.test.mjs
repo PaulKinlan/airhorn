@@ -135,7 +135,16 @@ async function run() {
 
     console.log('Navigating to test page...');
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    
+    // Wait for document to be ready and styles/CSS fully applied
+    for (let i = 0; i < 50; i++) {
+      const ready = await send('Runtime.evaluate', {
+        expression: `document.readyState === 'complete' && !!document.querySelector('.horn') && window.getComputedStyle(document.body).backgroundColor === 'rgb(33, 150, 243)'`,
+        returnByValue: true
+      });
+      if (ready.result.value) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
 
     // Evaluate checks
     const evalResult = await send('Runtime.evaluate', {
@@ -148,10 +157,13 @@ async function run() {
         const isAvailable = installer.classList.contains('available');
         
         // Test hidden state without .available
+        installer.style.transition = 'none';
         installer.classList.remove('available');
-        await new Promise(r => setTimeout(r, 350));
-        const hiddenVisibility = window.getComputedStyle(installer).visibility;
-        const hiddenPointerEvents = window.getComputedStyle(installer).pointerEvents;
+        void installer.offsetHeight;
+        const csInst = window.getComputedStyle(installer);
+        const hiddenVisibility = csInst.visibility;
+        const hiddenPointerEvents = csInst.pointerEvents;
+        installer.style.transition = '';
         if (isAvailable) {
           installer.classList.add('available');
         }

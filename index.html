@@ -60,9 +60,10 @@
           });
         });
 
+        const hadController = !!navigator.serviceWorker.controller;
         let refreshing = false;
         navigator.serviceWorker.addEventListener('controllerchange', () => {
-          if (!refreshing) {
+          if (hadController && !refreshing) {
             refreshing = true;
             window.location.reload();
           }
