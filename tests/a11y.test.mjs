@@ -169,14 +169,29 @@ async function run() {
     console.log('Navigating to test page...');
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
     
-    // Wait for document to be ready and styles/CSS fully applied
-    for (let i = 0; i < 50; i++) {
+    // Wait for the built page to be running with its stylesheet applied. This
+    // used to fall through silently after 5s, so a slow load (other lanes'
+    // browsers share this VM) left the suite asserting against an unstyled page -
+    // where there is no boundary ring at all, and the old guard still passed.
+    // The condition avoids colours so it does not depend on the colour scheme:
+    // `border-radius: 50%` on the horn only comes from the stylesheet.
+    let pageReady = false;
+    for (let i = 0; i < 150; i++) {
       const ready = await send('Runtime.evaluate', {
-        expression: `document.readyState === 'complete' && !!document.querySelector('.horn') && window.getComputedStyle(document.body).backgroundColor === 'rgb(33, 150, 243)'`,
+        expression: `document.readyState === 'complete' && (() => {
+          const horn = document.querySelector('.horn');
+          return !!horn && window.getComputedStyle(horn).borderRadius !== '0px';
+        })()`,
         returnByValue: true
       });
-      if (ready.result.value) break;
+      if (ready.result.value) { pageReady = true; break; }
       await new Promise(r => setTimeout(r, 100));
+    }
+    if (!pageReady) {
+      throw new Error(
+        'Page never became ready: no complete page with the stylesheet applied within 15s ' +
+        '(unstyled page cannot prove anything about the horn boundary ring)'
+      );
     }
 
     // Evaluate checks
@@ -211,6 +226,7 @@ async function run() {
           hornCursor: styles.cursor,
           hornOutlineColor: styles.outlineColor,
           hornOutlineWidth: styles.outlineWidth,
+          hornOutlineStyle: styles.outlineStyle,
           bodyBackground: window.getComputedStyle(document.body).backgroundColor,
           installerIsAvailable: isAvailable,
           installerVisibility: installerStyles ? installerStyles.visibility : null,
@@ -266,8 +282,44 @@ async function run() {
     const pageLum = relLum(r.bodyBackground);
     const boundaryRatio = (Math.max(outlineLum, pageLum) + 0.05) / (Math.min(outlineLum, pageLum) + 0.05);
     console.log(`Horn boundary contrast: ${r.hornOutlineColor} on ${r.bodyBackground} = ${boundaryRatio.toFixed(2)}:1`);
+    // Width alone proves nothing: Chrome reports the outline's INITIAL values when
+    // nothing is painted, so a removed ring still measures 3px ("medium") and its
+    // colour reads as currentColor, which happens to clear 3:1 on this background
+    // (airhorn-29y). Assert the outline is actually painted, with a visible colour.
+    if (!r.hornOutlineStyle || r.hornOutlineStyle === 'none' || r.hornOutlineStyle === 'hidden') {
+      throw new Error(
+        `Expected the horn boundary ring to be painted, got outline-style '${r.hornOutlineStyle}' ` +
+        `(width '${r.hornOutlineWidth}' is the initial value, not a drawn ring)`
+      );
+    }
     if (parseFloat(r.hornOutlineWidth) < 1) {
       throw new Error(`Expected horn outline width >= 1px, got ${r.hornOutlineWidth}`);
+    }
+    // An opaque `rgb(r, g, b)` carries no alpha: its last component is the blue
+    // channel, so reading it as alpha falsely rejected a valid black ring
+    // (airhorn-gg8 - black on this page is 6.72:1, which the contrast check above
+    // already accepts). Only a 4-component rgba(), or a slash-separated alpha in
+    // the modern notation, actually expresses transparency.
+    const alphaOf = (color) => {
+      const text = String(color).trim();
+      const comma = /^rgba?\(([^)]*)\)$/i.exec(text);
+      // Space-separated modern notation also matches the `rgb(...)` shape, so only
+      // treat it as the legacy form when it really is comma-separated.
+      if (comma && comma[1].includes(',')) {
+        const parts = comma[1].split(',').map((v) => parseFloat(v));
+        return parts.length === 4 && Number.isFinite(parts[3]) ? parts[3] : 1;
+      }
+      const slash = /\(\s*[^)]*\/\s*([\d.]+)(%?)\s*\)$/.exec(text);
+      if (slash) {
+        const value = parseFloat(slash[1]);
+        return slash[2] === '%' ? value / 100 : value;
+      }
+      return 1; // unknown notation: never invent transparency
+    };
+    if (alphaOf(r.hornOutlineColor) === 0) {
+      throw new Error(
+        `Expected a visible horn boundary ring, got a fully transparent outline colour ${r.hornOutlineColor}`
+      );
     }
     if (boundaryRatio < 3) {
       throw new Error(`Expected horn boundary contrast >= 3:1, got ${boundaryRatio.toFixed(2)}:1 (${r.hornOutlineColor} on ${r.bodyBackground})`);
