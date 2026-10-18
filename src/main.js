@@ -42,11 +42,21 @@ class Installer {
 
     window.addEventListener('appinstalled', () => {
       this.#promptEvent = null;
+      this.#restoreFocus();
       root.classList.remove('available');
       trackEvent('app_installed');
     });
 
     root.addEventListener('click', () => this.#install());
+  }
+
+  #restoreFocus() {
+    if (this.#root.contains(document.activeElement)) {
+      const hornButton = document.querySelector('.horn');
+      if (hornButton && typeof hornButton.focus === 'function') {
+        hornButton.focus();
+      }
+    }
   }
 
   async #install() {
@@ -55,7 +65,13 @@ class Installer {
     const result = await this.#promptEvent.userChoice;
     trackEvent('install_prompt_result', { outcome: result.outcome });
     this.#promptEvent = null;
+    this.#restoreFocus();
     this.#root.classList.remove('available');
+
+    const status = document.getElementById('install-status');
+    if (status) {
+      status.textContent = result?.outcome === 'accepted' ? 'App installed' : 'Installation cancelled';
+    }
   }
 }
 

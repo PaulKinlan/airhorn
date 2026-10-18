@@ -352,6 +352,49 @@ async function run() {
       throw new Error('Horn did not enter horning state on synthetic click');
     }
 
+    // Test installer focus restoration (WCAG 2.4.3): focus must move to .horn, not drop to <body>
+    console.log('Testing installer focus restoration when hidden...');
+    const focusTestResult = await send('Runtime.evaluate', {
+      expression: `(() => {
+        const installer = document.getElementById('installer');
+        const installBtn = installer.querySelector('button');
+        const horn = document.querySelector('.horn');
+
+        // Simulate install prompt available and focused
+        installer.classList.add('available');
+        installBtn.focus();
+        const initialFocused = document.activeElement === installBtn;
+
+        // Trigger appinstalled event (which calls #restoreFocus() and removes .available)
+        window.dispatchEvent(new Event('appinstalled'));
+
+        const postActiveElement = document.activeElement;
+        const focusedHorn = postActiveElement === horn;
+        const droppedToBody = postActiveElement === document.body;
+
+        return {
+          initialFocused,
+          focusedHorn,
+          droppedToBody,
+          activeElementTag: postActiveElement ? postActiveElement.tagName : null,
+          activeElementClass: postActiveElement ? postActiveElement.className : null,
+        };
+      })()`,
+      returnByValue: true
+    });
+
+    console.log('Installer focus test result:', focusTestResult.result.value);
+    const ftr = focusTestResult.result.value;
+    if (!ftr.initialFocused) {
+      throw new Error('Could not focus install button');
+    }
+    if (ftr.droppedToBody) {
+      throw new Error('Focus dropped to <body> when install button was hidden');
+    }
+    if (!ftr.focusedHorn) {
+      throw new Error(`Expected focus on .horn after install button was hidden, got: ${ftr.activeElementTag}.${ftr.activeElementClass}`);
+    }
+
     // Take screenshot evidence
     const screenshot = await send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync('/tmp/airhorn-a11y-verified.png', Buffer.from(screenshot.data, 'base64'));
