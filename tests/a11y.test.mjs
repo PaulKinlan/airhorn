@@ -337,6 +337,7 @@ async function run() {
     // Test synthetic click (AT activation)
     console.log('Testing AT synthetic click...');
     await new Promise((resolve) => setTimeout(resolve, 300));
+    const interactionStart = Date.now();
     const clickResult = await send('Runtime.evaluate', {
       expression: `(() => {
         document.querySelector('.horn').click();
@@ -410,16 +411,22 @@ async function run() {
       await new Promise(r => setTimeout(r, 100));
     }
 
-    // Post-blast quiet settle window: ensure late asynchronous timers and microtasks settle
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    // Enforce an absolute time floor of at least 1800ms from interactionStart
+    const elapsedSinceInteraction = Date.now() - interactionStart;
+    if (elapsedSinceInteraction < 1800) {
+      await new Promise(r => setTimeout(r, 1800 - elapsedSinceInteraction));
+    }
 
-    // Check for in-page unhandled exceptions or rejections
-    const inPageErrors = await send('Runtime.evaluate', {
-      expression: 'window.__pageErrors || []',
-      returnByValue: true
-    });
-    if (inPageErrors.result.value && inPageErrors.result.value.length > 0) {
-      throw new Error(`In-page errors detected: ${JSON.stringify(inPageErrors.result.value)}`);
+    // Quiet poll: verify window.__pageErrors remains empty across 3 consecutive checks
+    for (let q = 0; q < 3; q++) {
+      const inPageErrors = await send('Runtime.evaluate', {
+        expression: 'window.__pageErrors || []',
+        returnByValue: true
+      });
+      if (inPageErrors.result.value && inPageErrors.result.value.length > 0) {
+        throw new Error(`In-page errors detected: ${JSON.stringify(inPageErrors.result.value)}`);
+      }
+      await new Promise(r => setTimeout(r, 100));
     }
 
     // Check for any console errors or uncaught exceptions recorded via CDP

@@ -308,19 +308,34 @@ async function testSwAndManifest() {
     }
     console.log('Real SW activate handler verified: old caches purged, new build cache activated!');
 
-    // Settle window: wait for asynchronous tasks and microtasks to settle
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-
-    if (consoleErrors.length > 0) {
-      throw new Error(`Console errors or uncaught exceptions detected: ${JSON.stringify(consoleErrors)}`);
+    // Post-activation quiet settle: floor of at least 1500ms followed by 3 quiet checks
+    const swActivationTime = Date.now();
+    for (let i = 0; i < 30; i++) {
+      const activeState = await send('Runtime.evaluate', {
+        expression: 'navigator.serviceWorker.controller && navigator.serviceWorker.controller.state === "activated"',
+        returnByValue: true
+      });
+      if (activeState.result.value) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    const swElapsed = Date.now() - swActivationTime;
+    if (swElapsed < 1500) {
+      await new Promise(r => setTimeout(r, 1500 - swElapsed));
     }
 
-    const inPageErrors = await send('Runtime.evaluate', {
-      expression: 'window.__pageErrors || []',
-      returnByValue: true
-    });
-    if (inPageErrors.result.value && inPageErrors.result.value.length > 0) {
-      throw new Error(`In-page errors detected: ${JSON.stringify(inPageErrors.result.value)}`);
+    // Quiet poll: verify window.__pageErrors and console remain empty across 3 consecutive checks
+    for (let q = 0; q < 3; q++) {
+      if (consoleErrors.length > 0) {
+        throw new Error(`Console errors or uncaught exceptions detected: ${JSON.stringify(consoleErrors)}`);
+      }
+      const inPageErrors = await send('Runtime.evaluate', {
+        expression: 'window.__pageErrors || []',
+        returnByValue: true
+      });
+      if (inPageErrors.result.value && inPageErrors.result.value.length > 0) {
+        throw new Error(`In-page errors detected: ${JSON.stringify(inPageErrors.result.value)}`);
+      }
+      await new Promise(r => setTimeout(r, 100));
     }
 
     console.log('ALL SERVICE WORKER & MANIFEST CHECKS PASSED!');
