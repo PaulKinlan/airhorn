@@ -51,9 +51,24 @@ async function testSwAndManifest() {
   }
   console.log('manifest.json verified successfully!');
 
+  let swVersionOverride = null;
+
   // 2. Start HTTP server
   const server = http.createServer((req, res) => {
-    let filePath = path.join(distDir, req.url === '/' ? 'index.html' : req.url.split('?')[0]);
+    let reqUrl = req.url.split('?')[0];
+    if (reqUrl === '/sw.js' && swVersionOverride) {
+      let content = fs.readFileSync(path.join(distDir, 'sw.js'), 'utf-8');
+      content = content.replace(/airhorner-2\.0\.0-[a-zA-Z0-9_-]+/g, `airhorner-${swVersionOverride}`);
+      content = content.replace(/const version = "[^"]+"/g, `const version = "${swVersionOverride}"`);
+      res.writeHead(200, {
+        'Content-Type': 'application/javascript',
+        'Service-Worker-Allowed': '/'
+      });
+      res.end(content);
+      return;
+    }
+
+    let filePath = path.join(distDir, reqUrl === '/' ? 'index.html' : reqUrl);
     if (!fs.existsSync(filePath)) {
       res.writeHead(404);
       res.end('Not found');
@@ -255,41 +270,43 @@ async function testSwAndManifest() {
       uploadThroughput: -1
     });
 
-    // Test replacing old cache (e.g. legacy airhorner-0.7.1)
-    console.log('--- Testing old cache replacement & cleanup ---');
-    const cleanupTest = await send('Runtime.evaluate', {
-      expression: `(async () => {
-        // Create a stale legacy cache
-        await caches.open('airhorner-0.7.1');
-        await caches.open('airhorner-old-build');
-        const beforeKeys = await caches.keys();
+    // Test replacing old cache with a REAL second build
+    console.log('--- Testing real SW update and activate cache replacement ---');
+    swVersionOverride = '2.0.0-build2';
 
-        // Trigger SW activate cleanup logic
-        const reg = await navigator.serviceWorker.ready;
-        // Dispatch message or force activation
-        const curKeys = await caches.keys();
-        const activeName = curKeys.find(k => k.startsWith('airhorner-2.0.0-'));
-        
-        // Simulating SW activate cache sweep:
-        await Promise.all(
-          curKeys.filter(n => n.startsWith('airhorner-') && n !== activeName).map(n => caches.delete(n))
-        );
-        const afterKeys = await caches.keys();
-        return { beforeKeys, afterKeys, activeName };
+    // Pre-seed legacy cache and trigger service worker update
+    await send('Runtime.evaluate', {
+      expression: `(async () => {
+        await caches.open('airhorner-0.7.1');
+        const reg = await navigator.serviceWorker.getRegistration();
+        await reg.update();
       })()`,
+      awaitPromise: true
+    });
+
+    // Wait for the new service worker to install, activate, and reload the page via controllerchange
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Verify cache replacement after new SW activate handler ran
+    const afterKeysResult = await send('Runtime.evaluate', {
+      expression: `caches.keys()`,
       awaitPromise: true,
       returnByValue: true
     });
 
-    console.log('Cache replacement test:', cleanupTest.result.value);
-    const ct = cleanupTest.result.value;
-    if (ct.afterKeys.includes('airhorner-0.7.1') || ct.afterKeys.includes('airhorner-old-build')) {
-      throw new Error(`Old caches were not removed: ${JSON.stringify(ct.afterKeys)}`);
+    const afterKeys = afterKeysResult.result.value;
+    console.log('Caches after real SW update:', afterKeys);
+
+    if (!afterKeys.includes('airhorner-2.0.0-build2')) {
+      throw new Error(`Expected new cache 'airhorner-2.0.0-build2' in caches after update, got: ${JSON.stringify(afterKeys)}`);
     }
-    if (!ct.afterKeys.includes(ct.activeName)) {
-      throw new Error(`Active cache was unexpectedly deleted: ${JSON.stringify(ct.afterKeys)}`);
+    if (afterKeys.includes('airhorner-0.7.1')) {
+      throw new Error(`Legacy cache 'airhorner-0.7.1' was NOT deleted by sw.js activate handler: ${JSON.stringify(afterKeys)}`);
     }
-    console.log('Old cache replacement and cleanup verified!');
+    if (afterKeys.includes(activeCache)) {
+      throw new Error(`Previous build cache '${activeCache}' was NOT deleted by new build's activate handler: ${JSON.stringify(afterKeys)}`);
+    }
+    console.log('Real SW activate handler verified: old caches purged, new build cache activated!');
 
     if (consoleErrors.length > 0) {
       throw new Error(`Console errors or uncaught exceptions detected: ${JSON.stringify(consoleErrors)}`);
