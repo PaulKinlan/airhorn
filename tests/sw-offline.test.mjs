@@ -113,8 +113,15 @@ async function testSwAndManifest() {
 
   let msgId = 1;
   const pending = new Map();
+  const consoleErrors = [];
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
+    if (msg.method === 'Runtime.exceptionThrown') {
+      const details = msg.params.exceptionDetails;
+      consoleErrors.push(details?.exception?.description || details?.text || 'Uncaught exception');
+    } else if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') {
+      consoleErrors.push(msg.params.args?.map(a => a.value).join(' '));
+    }
     if (msg.id && pending.has(msg.id)) {
       const { resolve, reject } = pending.get(msg.id);
       pending.delete(msg.id);
@@ -133,7 +140,20 @@ async function testSwAndManifest() {
 
   try {
     await send('Page.enable');
+    await send('Runtime.enable');
     await send('Network.enable');
+
+    await send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `
+        window.__pageErrors = [];
+        window.addEventListener('error', (e) => {
+          window.__pageErrors.push(e.message || (e.error ? e.error.message : String(e)));
+        });
+        window.addEventListener('unhandledrejection', (e) => {
+          window.__pageErrors.push(e.reason?.message || String(e.reason));
+        });
+      `
+    });
 
     console.log('--- Loading page online to install Service Worker ---');
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
@@ -270,6 +290,18 @@ async function testSwAndManifest() {
       throw new Error(`Active cache was unexpectedly deleted: ${JSON.stringify(ct.afterKeys)}`);
     }
     console.log('Old cache replacement and cleanup verified!');
+
+    if (consoleErrors.length > 0) {
+      throw new Error(`Console errors or uncaught exceptions detected: ${JSON.stringify(consoleErrors)}`);
+    }
+
+    const inPageErrors = await send('Runtime.evaluate', {
+      expression: 'window.__pageErrors || []',
+      returnByValue: true
+    });
+    if (inPageErrors.result.value && inPageErrors.result.value.length > 0) {
+      throw new Error(`In-page errors detected: ${JSON.stringify(inPageErrors.result.value)}`);
+    }
 
     console.log('ALL SERVICE WORKER & MANIFEST CHECKS PASSED!');
   } finally {

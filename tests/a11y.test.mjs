@@ -109,6 +109,14 @@ async function run() {
         if (msg.params.entry.level === 'error') {
           consoleMessages.push({ type: 'error', text: msg.params.entry.text });
         }
+      } else if (msg.method === 'Runtime.exceptionThrown') {
+        const details = msg.params.exceptionDetails;
+        const text = details?.exception?.description || details?.text || 'Uncaught exception';
+        consoleMessages.push({
+          type: 'error',
+          text,
+          exceptionDetails: details
+        });
       }
       if (msg.id && pending.has(msg.id)) {
         const { resolve, reject } = pending.get(msg.id);
@@ -132,6 +140,29 @@ async function run() {
     await send('Log.enable');
     await send('DOM.enable');
     await send('Accessibility.enable');
+
+    // Track in-page errors and unhandled rejections
+    await send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `
+        window.__pageErrors = [];
+        window.addEventListener('error', (e) => {
+          window.__pageErrors.push({
+            type: 'error',
+            message: e.message || (e.error ? e.error.message : String(e)),
+            filename: e.filename,
+            lineno: e.lineno,
+            stack: e.error ? e.error.stack : null
+          });
+        });
+        window.addEventListener('unhandledrejection', (e) => {
+          window.__pageErrors.push({
+            type: 'unhandledrejection',
+            message: e.reason?.message || String(e.reason),
+            stack: e.reason?.stack || null
+          });
+        });
+      `
+    });
 
     console.log('Navigating to test page...');
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
@@ -326,11 +357,20 @@ async function run() {
     fs.writeFileSync('/tmp/airhorn-a11y-verified.png', Buffer.from(screenshot.data, 'base64'));
     console.log('Screenshot saved to /tmp/airhorn-a11y-verified.png');
 
-    // Check for any console errors
+    // Check for in-page unhandled exceptions or rejections
+    const inPageErrors = await send('Runtime.evaluate', {
+      expression: 'window.__pageErrors || []',
+      returnByValue: true
+    });
+    if (inPageErrors.result.value && inPageErrors.result.value.length > 0) {
+      throw new Error(`In-page errors detected: ${JSON.stringify(inPageErrors.result.value)}`);
+    }
+
+    // Check for any console errors or uncaught exceptions recorded via CDP
     console.log('Console messages recorded:', consoleMessages);
     const errors = consoleMessages.filter(m => m.type === 'error');
     if (errors.length > 0) {
-      throw new Error(`Console errors detected: ${JSON.stringify(errors)}`);
+      throw new Error(`Console errors or uncaught exceptions detected: ${JSON.stringify(errors)}`);
     }
 
     console.log('ALL VERIFICATION CHECKS PASSED!');
