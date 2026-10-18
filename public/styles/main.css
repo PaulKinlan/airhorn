@@ -178,6 +178,8 @@
 
       & .inner {
         background-color: var(--horn-inner-pressed);
+        /* A lit rim, so the press is obvious even when motion is off. */
+        box-shadow: inset 0 0 0 0.4rem rgb(255 255 255 / 0.16);
         animation: inner-pulse 10ms infinite alternate;
       }
 
