@@ -17,32 +17,56 @@
  *
  */
 
-const version = "0.7.2";
+const version = "__BUILD_HASH__";
 const cacheName = `airhorner-${version}`;
 
 const precacheUrls = [
   `/`,
   `/index.html`,
   `/styles/main.css`,
-  `/sounds/airhorn.mp3`
+  `/sounds/airhorn.mp3`,
+  /* __PRECACHE_ASSETS__ */
 ];
 
-self.addEventListener('install', e => {
-  e.waitUntil(
-    caches.open(cacheName).then(cache => {
-      return cache.addAll(precacheUrls).then(() => self.skipWaiting());
-    })
-  );
+async function precache() {
+  const cache = await caches.open(cacheName);
+  const validUrls = precacheUrls.filter(url => typeof url === 'string' && url.length > 0);
+  await cache.addAll(validUrls);
+
+  // Dynamic fallback: ensure any hashed /assets/ in index.html are precached
+  try {
+    const res = await fetch('/index.html');
+    if (res.ok) {
+      const html = await res.text();
+      const assetMatches = html.matchAll(/(?:src|href)=['"](\/assets\/[^'"]+)['"]/g);
+      const dynamicUrls = Array.from(assetMatches, m => m[1]);
+      if (dynamicUrls.length > 0) {
+        await cache.addAll(dynamicUrls);
+      }
+    }
+  } catch (err) {
+    console.warn('Fallback asset precaching error:', err);
+  }
+}
+
+self.addEventListener('install', event => {
+  event.waitUntil(precache().then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(names =>
       Promise.all(
-        names.filter(n => n !== cacheName).map(n => caches.delete(n))
+        names.filter(n => n.startsWith('airhorner-') && n !== cacheName).map(n => caches.delete(n))
       )
     ).then(() => self.clients.claim())
   );
+});
+
+self.addEventListener('message', event => {
+  if (event.data === 'skipWaiting') {
+    self.skipWaiting();
+  }
 });
 
 self.addEventListener('fetch', event => {

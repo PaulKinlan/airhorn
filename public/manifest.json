@@ -1,7 +1,15 @@
 {
   "name": "The Air Horner",
   "short_name": "Airhorner",
+  "id": "/?homescreen=1",
   "description": "The world's best airhorner, and it's free",
+  "categories": [
+    "entertainment",
+    "utilities"
+  ],
+  "launch_handler": {
+    "client_mode": "focus-existing"
+  },
   "icons": [
       {
         "src": "/images/touch/android-launchericon-48-48.png",
@@ -75,5 +83,36 @@
   "scope": "/",
   "display": "standalone",
   "background_color": "#2196F3",
-  "theme_color": "#2196F3"
+  "theme_color": "#2196F3",
+  "shortcuts": [
+    {
+      "name": "Instant Blast",
+      "short_name": "Blast",
+      "description": "Sound the air horn immediately",
+      "url": "/#instant",
+      "icons": [
+        {
+          "src": "/images/touch/android-launchericon-96-96.png",
+          "sizes": "96x96",
+          "type": "image/png"
+        }
+      ]
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/images/screenshot-wide.png",
+      "sizes": "1280x720",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "The Air Horner wide view"
+    },
+    {
+      "src": "/images/screenshot-narrow.png",
+      "sizes": "720x1280",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "The Air Horner mobile view"
+    }
+  ]
 }
