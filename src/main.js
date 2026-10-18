@@ -17,6 +17,8 @@
  *
  */
 
+import { registerHornTools } from './webmcp.js';
+
 function trackEvent(eventName, params) {
   if (typeof gtag === 'function') {
     gtag('event', eventName, params);
@@ -37,6 +39,14 @@ class Horn {
     }
   }
 
+  hasAudioContext() {
+    return this.#audioCtx !== null;
+  }
+
+  isPlaying() {
+    return this.#sources.size > 0;
+  }
+
   #loadBuffer() {
     if (!this.#bufferPromise && this.#audioCtx) {
       this.#bufferPromise = fetch(this.#audioSrc)
@@ -51,7 +61,7 @@ class Horn {
   }
 
   async start({ loop = false } = {}) {
-    if (!this.#audioCtx) return;
+    if (!this.#audioCtx) return false;
 
     await this.#audioCtx.resume();
     const buffer = await this.#loadBuffer();
@@ -72,12 +82,42 @@ class Horn {
     };
     source.start(0);
     this.#sources.add(source);
+    return true;
   }
 
-  stop() {
+  /**
+   * Silence the horn. By default the sample rings out naturally (matching the
+   * on-screen button); `immediate` cuts it off, for callers such as the WebMCP
+   * `stop_horn` tool that promise to stop the sound now.
+   * Resolves once every source has ended.
+   */
+  stop({ immediate = false } = {}) {
+    const ended = [];
     for (const source of this.#sources) {
       source.loop = false;
+      if (immediate) {
+        ended.push(new Promise((resolve) => {
+          let settled = false;
+          let timer = null;
+          const done = () => {
+            if (settled) return;
+            settled = true;
+            if (timer !== null) clearTimeout(timer);
+            resolve();
+          };
+          // Fallback so a source that already ended can never hang the caller.
+          timer = setTimeout(done, 500);
+          source.addEventListener('ended', done, { once: true });
+          try {
+            source.stop(0);
+          } catch {
+            // Already stopped or ended: the source is on its way out anyway.
+            done();
+          }
+        }));
+      }
     }
+    return Promise.all(ended);
   }
 
   onstopped() {}
@@ -120,6 +160,7 @@ class AirHorn {
   #horn;
   #image;
   #counter = 0;
+  #loop = false;
 
   constructor(root) {
     this.#image = root.querySelector('.horn');
@@ -174,11 +215,15 @@ class AirHorn {
   }
 
   start({ loop = false } = {}) {
+    this.#loop = loop;
     this.#image.classList.add('horning');
     this.#image.setAttribute('aria-pressed', 'true');
-    this.#horn.start({ loop }).catch(() => {});
+
+    // Resolves once the sample is actually playing (or failed to start).
+    const started = this.#horn.start({ loop }).catch(() => false);
 
     this.#horn.onstopped = () => {
+      this.#loop = false;
       this.#image.classList.remove('horning');
       this.#image.setAttribute('aria-pressed', 'false');
     };
@@ -189,18 +234,37 @@ class AirHorn {
     }
 
     trackEvent('horn_play');
+
+    return started;
   }
 
-  stop() {
+  isPlaying() {
+    return this.#horn.isPlaying();
+  }
+
+  isLooping() {
+    return this.#loop && this.#horn.isPlaying();
+  }
+
+  hasAudioContext() {
+    return this.#horn.hasAudioContext();
+  }
+
+  stop({ immediate = false } = {}) {
+    this.#loop = false;
     this.#image.classList.remove('horning');
     this.#image.setAttribute('aria-pressed', 'false');
-    this.#horn.stop();
+    return this.#horn.stop({ immediate });
   }
 }
 
 window.addEventListener('load', () => {
   const airhorn = new AirHorn(document.getElementById('airhorn'));
   new Installer(document.getElementById('installer'));
+
+  registerHornTools(airhorn).catch(() => {
+    // WebMCP is an enhancement: never let a registration failure break the horn.
+  });
 
   if (location.hash === '#instant') {
     airhorn.start({ loop: false });
