@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "airhorn",
+  "project_id": "6b7fec0d-c74d-466b-b829-9e3847cf7ea8"
+}
