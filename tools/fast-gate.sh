@@ -232,6 +232,9 @@ wait
 # TAP summary, for script-tier suites the hook's own line (which names the step a
 # failure was attributed to). "no result" is reported as such - a suite that dies
 # before reporting must never read as a pass.
+# Returns non-zero when the suite produced no valid result, so the caller can fail
+# the gate. A missing result is a reporting regression, not a pass (airhorn-yy1): a
+# suite that exits 0 without saying what it ran proves nothing.
 report_cases() { # $1 = suite, $2 = log
   case $(tier_of "$1") in
     node-test)
@@ -242,30 +245,40 @@ report_cases() { # $1 = suite, $2 = log
         if [ "${fail:-0}" != 0 ]; then
           sed -nE 's/^not ok [0-9]+ - (.*)$/fast-gate:   failing: \1/p' "$2" | head -5
         fi
-      else
-        echo "fast-gate: cases: $1 :: no TAP summary (suite died before reporting)"
+        return 0
       fi
+      echo "fast-gate: cases: $1 :: no TAP summary (suite exited without reporting)"
+      return 1
       ;;
     script)
       line=$(grep -m1 '^##CASES## ' "$2" 2>/dev/null | sed 's/^##CASES## //')
       if [ -n "$line" ]; then
         echo "fast-gate: cases: $1 :: $line"
-      else
-        echo "fast-gate: cases: $1 :: no result (suite died before reporting; treat as failure)"
+        return 0
       fi
+      echo "fast-gate: cases: $1 :: no result (suite exited without reporting)"
+      return 1
       ;;
   esac
+  return 0
 }
 
 rc=0
 for s in "${RUN[@]}"; do
   key=$(printf '%s' "$s" | tr '/.' '__')
-  if [ "$(cat "$TMP/$key.rc" 2>/dev/null)" = 0 ]; then
+  suite_rc=$(cat "$TMP/$key.rc" 2>/dev/null)
+  cases_out=$(report_cases "$s" "$TMP/$key.log")
+  cases_rc=$?
+  printf '%s\n' "$cases_out" | tee -a "$RESULTS_DIR/summary.txt"
+  if [ "$suite_rc" = 0 ] && [ "$cases_rc" = 0 ]; then
     echo "fast-gate: passed: $s"
-    report_cases "$s" "$TMP/$key.log" | tee -a "$RESULTS_DIR/summary.txt"
+  elif [ "$suite_rc" = 0 ]; then
+    # exit 0 but nothing reported: the suite cannot prove what it ran.
+    echo "fast-gate: failed: $s (exit 0 but no result; reporting is broken)"
+    echo "fast-gate: a selected suite must report its cases; silence is not a pass" >&2
+    rc=1
   else
     echo "fast-gate: failed: $s"
-    report_cases "$s" "$TMP/$key.log" | tee -a "$RESULTS_DIR/summary.txt"
     sed 's/^/    /' "$TMP/$key.log" 2>/dev/null | tail -40
     rc=1
   fi
