@@ -400,8 +400,18 @@ async function run() {
     fs.writeFileSync('/tmp/airhorn-a11y-verified.png', Buffer.from(screenshot.data, 'base64'));
     console.log('Screenshot saved to /tmp/airhorn-a11y-verified.png');
 
-    // Settle window: wait for asynchronous tasks, event callbacks, and microtasks to settle
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    // Wait for the horn blast duration to complete and .horning to clear
+    for (let i = 0; i < 30; i++) {
+      const res = await send('Runtime.evaluate', {
+        expression: `!document.querySelector('.horn').classList.contains('horning')`,
+        returnByValue: true
+      });
+      if (res.result.value) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+
+    // Post-blast quiet settle window: ensure late asynchronous timers and microtasks settle
+    await new Promise((resolve) => setTimeout(resolve, 600));
 
     // Check for in-page unhandled exceptions or rejections
     const inPageErrors = await send('Runtime.evaluate', {
