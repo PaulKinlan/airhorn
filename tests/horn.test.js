@@ -1,441 +1,706 @@
 /*
- *
- *  Air Horner
- *  Copyright 2015 Google Inc. All rights reserved.
- *
- *  Licensed under the Apache License, Version 2.0 (the 'License');
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
- *
- *      https://www.apache.org/licenses/LICENSE-2.0
- *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an 'AS IS' BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License
- *
- *
- *  Unit tests for the Horn class lifecycle/state (src/horn.js).
- *
- *  The Horn class is browser code, but it only touches three browser globals —
- *  window.AudioContext, window.webkitAudioContext and fetch — so these tests
- *  run headless under `node --test` with fakes installed for the duration of
- *  each test. No network, no audio device, no DOM.
- *
- *  Everything is asserted through the public surface (constructor, start,
- *  stop, onstopped) and through observable calls on the fakes; the private
- *  fields (#sources, #bufferPromise) are deliberately reached only via
- *  behaviour.
+ *  Unit tests for src/horn.js: primary sample path and Web Audio synthesized fallback.
+ *  Run with: node tests/horn.test.js
  */
-import { test, describe } from 'node:test';
+
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Horn } from '../src/horn.js';
 
-const AIRHORN_URL = '/sounds/airhorn.mp3';
+class FakeAudioParam {
+  value = 1;
+  setValueAtTime(val) { this.value = val; }
+  exponentialRampToValueAtTime(val) { this.value = val; }
+  cancelScheduledValues() {}
+}
 
-/**
- * Build a fake AudioContext class plus the sources it has created.
- * opts.decodeFails  — decodeAudioData rejects (buffer load failure)
- * opts.resumeThrows — resume() rejects (context refuses to leave suspended)
- */
-function makeAudioContext(opts = {}) {
-  const sources = [];
-  const calls = { resume: 0, decoded: [] };
+class FakeAudioNode {
+  connect() {}
+  disconnect() {}
+}
 
-  class FakeBufferSource {
-    constructor() {
-      this.buffer = null;
-      this.loop = false;
-      this.loopStart = 0;
-      this.loopEnd = 0;
-      this.connectedTo = [];
-      this.startArgs = null;
-      this.startCalls = 0;
-      this.stopCalls = 0; // Horn must never call this (gradual-fade fix)
-      this.onended = null;
-    }
-    connect(dest) {
-      this.connectedTo.push(dest);
-    }
-    addEventListener(type, listener) {
-      // Mirror the DOMEventTarget surface Horn's immediate-stop path relies on.
-      if (type === 'ended') this.endedListeners = (this.endedListeners || []).concat(listener);
-    }
-    emitEnded() {
-      for (const listener of this.endedListeners || []) listener();
-      this.end(); // the onended property fires too, as in a real AudioBufferSourceNode
-    }
-    start(...args) {
-      this.startCalls++;
-      this.startArgs = args;
-    }
-    stop() {
-      this.stopCalls++;
-    }
-    end() {
-      // Test-side helper: simulate the media finishing.
-      if (typeof this.onended === 'function') this.onended();
-    }
+class FakeGainNode extends FakeAudioNode {
+  gain = new FakeAudioParam();
+}
+
+class FakeOscillatorNode extends FakeAudioNode {
+  type = 'sine';
+  frequency = new FakeAudioParam();
+  started = false;
+  stopped = false;
+  start() { this.started = true; }
+  stop() { this.stopped = true; }
+}
+
+class FakeBufferSourceNode extends EventTarget {
+  buffer = null;
+  loop = false;
+  loopStart = 0;
+  loopEnd = 0;
+  started = false;
+  stopped = false;
+  onended = null;
+  connect() {}
+  disconnect() {}
+  start() { this.started = true; }
+  stop() {
+    this.stopped = true;
+    this.dispatchEvent(new Event('ended'));
+    if (this.onended) this.onended();
+  }
+}
+
+class FakeAudioContext {
+  currentTime = 0;
+  destination = new FakeAudioNode();
+  sources = [];
+  oscillators = [];
+  gains = [];
+  resumed = false;
+  shouldFailDecode = false;
+
+  async resume() {
+    this.resumed = true;
   }
 
-  class FakeAudioContext {
-    constructor() {
-      this.destination = { kind: 'destination' };
-      this.state = 'running';
-      this.sources = sources;
-      this.calls = calls;
-    }
-    async resume() {
-      calls.resume++;
-      if (opts.resumeThrows) throw new Error('resume failed');
-    }
-    createBufferSource() {
-      const s = new FakeBufferSource();
-      sources.push(s);
-      return s;
-    }
-    decodeAudioData(arrayBuffer) {
-      calls.decoded.push(arrayBuffer);
-      if (opts.decodeFails) return Promise.reject(new Error('decode failed'));
-      return Promise.resolve({ kind: 'audio-buffer', arrayBuffer });
-    }
+  createBufferSource() {
+    const s = new FakeBufferSourceNode();
+    this.sources.push(s);
+    return s;
   }
 
-  return { FakeAudioContext, sources, calls };
+  createGain() {
+    const g = new FakeGainNode();
+    this.gains.push(g);
+    return g;
+  }
+
+  createOscillator() {
+    const o = new FakeOscillatorNode();
+    this.oscillators.push(o);
+    return o;
+  }
+
+  decodeAudioData(arrayBuffer, success, error) {
+    if (this.shouldFailDecode) {
+      const err = new Error('Audio decoding failed');
+      if (error) error(err);
+      return Promise.reject(err);
+    }
+    const buf = { duration: 1.5, length: 44100 * 1.5, sampleRate: 44100 };
+    if (success) success(buf);
+    return Promise.resolve(buf);
+  }
 }
 
-/** Install browser globals; returns an undo function that restores everything. */
-function withBrowserGlobals({ AudioContext, webkitAudioContext, fetchImpl }) {
-  const prev = {
-    hadWindow: 'window' in globalThis,
-    window: globalThis.window,
-    ac: [globalThis.hasOwnProperty('AudioContext'), globalThis.AudioContext],
-    wac: [globalThis.hasOwnProperty('webkitAudioContext'), globalThis.webkitAudioContext],
-    fetch: [globalThis.hasOwnProperty('fetch'), globalThis.fetch],
-  };
-  const setKey = (key, value) => {
-    if (value === undefined) delete globalThis[key];
-    else globalThis[key] = value;
-  };
 
-  globalThis.window = globalThis; // Horn reads bare `window.AudioContext`
-  setKey('AudioContext', AudioContext);
-  setKey('webkitAudioContext', webkitAudioContext);
-  setKey('fetch', fetchImpl);
 
-  return () => {
-    const restore = ([had, value], key) => {
-      if (had) globalThis[key] = value;
-      else delete globalThis[key];
-    };
-    restore(prev.ac, 'AudioContext');
-    restore(prev.wac, 'webkitAudioContext');
-    restore(prev.fetch, 'fetch');
-    if (prev.hadWindow) globalThis.window = prev.window;
-    else delete globalThis.window;
-  };
-}
-
-/** A fetch fake that records requested URLs and hands back a fresh ArrayBuffer. */
-function makeFetch() {
-  const calls = [];
-  const fetchImpl = async (url) => {
-    calls.push(url);
-    return {
-      arrayBuffer: async () => new ArrayBuffer(16),
-    };
-  };
-  fetchImpl.calls = calls;
-  return fetchImpl;
-}
-
-describe('Horn lifecycle', () => {
-  test('constructor without AudioContext support is inert: start() is a no-op and nothing is fetched', async () => {
-    let fetched = 0;
-    const undo = withBrowserGlobals({
-      AudioContext: undefined,
-      webkitAudioContext: undefined,
-      fetchImpl: async () => {
-        fetched++;
-        throw new Error('must not fetch without an AudioContext');
-      },
-    });
-    try {
-      const horn = new Horn(); // must not throw
-      await horn.start({ loop: true }); // must not throw
-      assert.equal(fetched, 0);
-    } finally {
-      undo();
-    }
+test('plays sample when fetch and decode succeed', async () => {
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    arrayBuffer: async () => new ArrayBuffer(32)
   });
 
-  test('start() resumes the context, fetches the sample, decodes it and plays a connected source', async () => {
-    const { FakeAudioContext, sources, calls } = makeAudioContext();
-    const fetchImpl = makeFetch();
-    const undo = withBrowserGlobals({
-      AudioContext: FakeAudioContext,
-      fetchImpl,
-    });
-    try {
-      const horn = new Horn();
-      await horn.start();
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    assert.equal(horn.hasAudioContext(), true);
+    assert.equal(horn.isPlaying(), false);
 
-      assert.equal(calls.resume, 1, 'context resumed');
-      assert.deepEqual(fetchImpl.calls, [AIRHORN_URL], 'sample fetched once');
-      assert.equal(calls.decoded.length, 1, 'buffer decoded');
+    const started = await horn.start({ loop: false });
+    assert.equal(started, true);
+    assert.equal(horn.usingFallback, false);
+    assert.equal(horn.isPlaying(), true);
+    assert.equal(ctx.sources.length, 1);
+    assert.equal(ctx.sources[0].started, true);
+    assert.equal(ctx.sources[0].loop, false);
 
-      assert.equal(sources.length, 1, 'one source created');
-      const source = sources[0];
-      assert.equal(source.startCalls, 1);
-      assert.deepEqual(source.startArgs, [0], 'source started immediately');
-      assert.deepEqual(source.connectedTo, [{ kind: 'destination' }], 'routed to destination');
-      assert.ok(source.buffer, 'sample buffer attached');
-      assert.equal(source.buffer.kind, 'audio-buffer');
-      assert.equal(source.loop, false, 'one-shot by default');
-      assert.equal(typeof source.onended, 'function', 'end handler registered');
-    } finally {
-      undo();
-    }
-  });
+    let stoppedCalled = false;
+    horn.onstopped = () => { stoppedCalled = true; };
 
-  test('start() reports support and playing state: false/inert without AudioContext, true once playing', async () => {
-    const undoNone = withBrowserGlobals({
-      AudioContext: undefined,
-      fetchImpl: async () => {
-        throw new Error('must not fetch');
-      },
-    });
-    try {
-      const inert = new Horn();
-      assert.equal(inert.hasAudioContext(), false);
-      assert.equal(inert.isPlaying(), false);
-      assert.equal(await inert.start(), false, 'start() returns false when there is no context');
-    } finally {
-      undoNone();
-    }
-
-    const { FakeAudioContext, sources } = makeAudioContext();
-    const undo = withBrowserGlobals({ AudioContext: FakeAudioContext, fetchImpl: makeFetch() });
-    try {
-      const horn = new Horn();
-      assert.equal(horn.hasAudioContext(), true);
-      assert.equal(horn.isPlaying(), false);
-      assert.equal(await horn.start(), true, 'start() returns true when it schedules a source');
-      assert.equal(horn.isPlaying(), true);
-      sources[0].end();
-      assert.equal(horn.isPlaying(), false, 'playing state clears when the source ends');
-    } finally {
-      undo();
-    }
-  });
-
-  test('start({loop: true}) configures the looping region of the sample', async () => {
-    const { FakeAudioContext, sources } = makeAudioContext();
-    const undo = withBrowserGlobals({ AudioContext: FakeAudioContext, fetchImpl: makeFetch() });
-    try {
-      const horn = new Horn();
-      await horn.start({ loop: true });
-
-      const source = sources[0];
-      assert.equal(source.loop, true);
-      assert.equal(source.loopStart, 0.24);
-      assert.equal(source.loopEnd, 0.34);
-    } finally {
-      undo();
-    }
-  });
-
-  test('the sample buffer is fetched and decoded once and reused across starts', async () => {
-    const { FakeAudioContext, calls } = makeAudioContext();
-    const fetchImpl = makeFetch();
-    const undo = withBrowserGlobals({ AudioContext: FakeAudioContext, fetchImpl });
-    try {
-      const horn = new Horn();
-      await Promise.all([horn.start(), horn.start({ loop: true })]);
-
-      assert.equal(fetchImpl.calls.length, 1, 'one fetch despite two starts');
-      assert.equal(calls.decoded.length, 1, 'one decode despite two starts');
-    } finally {
-      undo();
-    }
-  });
+    await horn.stop({ immediate: true });
+    assert.equal(horn.isPlaying(), false);
+    assert.equal(stoppedCalled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
-describe('Horn stop', () => {
-  test('stop() disables looping so the sample fades out; it never kills the source', async () => {
-    const { FakeAudioContext, sources } = makeAudioContext();
-    const undo = withBrowserGlobals({ AudioContext: FakeAudioContext, fetchImpl: makeFetch() });
-    try {
-      const horn = new Horn();
-      await horn.start({ loop: true });
-      const source = sources[0];
-
-      horn.stop();
-
-      assert.equal(source.loop, false, 'looping disabled');
-      assert.equal(source.stopCalls, 0, 'source.stop() never called (gradual fade, not a hard kill)');
-      assert.equal(source.startCalls, 1, 'source left playing');
-    } finally {
-      undo();
-    }
+test('falls back to synth when fetch returns 404', async () => {
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 404
   });
 
-  test('stop() disables looping on every active source', async () => {
-    const { FakeAudioContext, sources } = makeAudioContext();
-    const undo = withBrowserGlobals({ AudioContext: FakeAudioContext, fetchImpl: makeFetch() });
-    try {
-      const horn = new Horn();
-      await horn.start({ loop: true });
-      await horn.start({ loop: true });
-      assert.equal(sources.length, 2);
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    assert.equal(horn.hasAudioContext(), true);
 
-      horn.stop();
+    const started = await horn.start({ loop: false });
+    assert.equal(started, true);
+    assert.equal(horn.usingFallback, true);
+    assert.equal(horn.isPlaying(), true);
+    assert.equal(ctx.sources.length, 0);
+    assert.equal(ctx.oscillators.length, 3);
+    assert.ok(ctx.oscillators.every(o => o.type === 'sawtooth' && o.started));
 
-      for (const source of sources) {
-        assert.equal(source.loop, false);
-        assert.equal(source.stopCalls, 0);
+    let stoppedCalled = false;
+    horn.onstopped = () => { stoppedCalled = true; };
+
+    await horn.stop({ immediate: true });
+    assert.equal(horn.isPlaying(), false);
+    assert.equal(stoppedCalled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('falls back to synth when fetch throws network error', async () => {
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  globalThis.fetch = async () => {
+    throw new Error('Failed to fetch (offline / network error)');
+  };
+
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    const started = await horn.start({ loop: false });
+    assert.equal(started, true);
+    assert.equal(horn.usingFallback, true);
+    assert.equal(horn.isPlaying(), true);
+    assert.equal(ctx.oscillators.length, 3);
+
+    await horn.stop({ immediate: true });
+    assert.equal(horn.isPlaying(), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('falls back to synth when decodeAudioData fails', async () => {
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  ctx.shouldFailDecode = true;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    arrayBuffer: async () => new ArrayBuffer(16)
+  });
+
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    const started = await horn.start({ loop: false });
+    assert.equal(started, true);
+    assert.equal(horn.usingFallback, true);
+    assert.equal(horn.isPlaying(), true);
+    assert.equal(ctx.oscillators.length, 3);
+
+    await horn.stop({ immediate: true });
+    assert.equal(horn.isPlaying(), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('preserves loop semantics in sample mode', async () => {
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    arrayBuffer: async () => new ArrayBuffer(32)
+  });
+
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    await horn.start({ loop: true });
+
+    assert.equal(ctx.sources[0].loop, true);
+    assert.equal(ctx.sources[0].loopStart, 0.24);
+    assert.equal(ctx.sources[0].loopEnd, 0.34);
+
+    await horn.stop({ immediate: true });
+    assert.equal(ctx.sources[0].loop, false);
+    assert.equal(horn.isPlaying(), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('preserves loop semantics in synth mode', async () => {
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  globalThis.fetch = async () => ({ ok: false, status: 500 });
+
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    await horn.start({ loop: true });
+
+    assert.equal(horn.usingFallback, true);
+    assert.equal(horn.isPlaying(), true);
+
+    await horn.stop({ immediate: true });
+    assert.equal(horn.isPlaying(), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('release-before-start race condition: stopping while fetch is pending does not leave unstoppable looping synth', async () => {
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  let fetchReject;
+  globalThis.fetch = () => new Promise((_, rej) => {
+    fetchReject = rej;
+  });
+
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    const pendingStart = horn.start({ loop: true });
+
+    // Release arrives while fetch is still in flight
+    await horn.stop({ immediate: false });
+
+    // Now fetch fails with 404
+    fetchReject(new Error('HTTP 404'));
+    await pendingStart;
+
+    // Assert loop was cleared and single blast scheduled: all 3 oscillators have scheduled stop
+    assert.equal(ctx.oscillators.length, 3);
+    assert.ok(ctx.oscillators.every(o => o.stopped), 'single-blast stop scheduled on oscillators, loop was cleared');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('stale start resolving >1000ms after release is discarded without playing blast', async () => {
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  let fetchReject;
+  globalThis.fetch = () => new Promise((_, rej) => {
+    fetchReject = rej;
+  });
+
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    const pendingStart = horn.start({ loop: true });
+
+    // Release arrives while fetch is in flight
+    await horn.stop({ immediate: false });
+
+    // Simulate >1000ms delay on slow network before fetch rejects
+    await new Promise(r => setTimeout(r, 1050));
+    fetchReject(new Error('HTTP 404 (slow lie-fi failure)'));
+    const result = await pendingStart;
+
+    // Discarded as stale start; no blast started
+    assert.equal(result, false);
+    assert.equal(horn.isPlaying(), false);
+    assert.equal(ctx.oscillators.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('immediate stop while fetch is pending cancels start completely', async () => {
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  let fetchReject;
+  globalThis.fetch = () => new Promise((_, rej) => {
+    fetchReject = rej;
+  });
+
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    const pendingStart = horn.start({ loop: true });
+
+    // Immediate stop arrives while fetch is still in flight (e.g. stop_horn tool)
+    await horn.stop({ immediate: true });
+
+    fetchReject(new Error('HTTP 404'));
+    const result = await pendingStart;
+
+    // Start was completely cancelled
+    assert.equal(result, false);
+    assert.equal(horn.isPlaying(), false);
+    assert.equal(ctx.oscillators.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('short non-immediate tap does not truncate synth blast prematurely', async () => {
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  globalThis.fetch = async () => ({ ok: false, status: 500 });
+
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    // UI gesture: pointerdown starts loop: true
+    await horn.start({ loop: true });
+
+    assert.equal(horn.usingFallback, true);
+    assert.equal(horn.isPlaying(), true);
+
+    // 60ms later: pointerup releases (immediate: false)
+    await horn.stop({ immediate: false });
+
+    // Synth must NOT be truncated to 250ms release; remaining blast duration must ring out
+    assert.equal(horn.isPlaying(), true, 'Synth should ring out naturally and not be truncated after 60ms tap');
+    assert.ok(ctx.oscillators.every(o => o.stopped), 'Oscillators have scheduled stop time for full blast duration');
+
+    // Immediate stop on the other hand cuts it off immediately
+    await horn.stop({ immediate: true });
+    assert.equal(horn.isPlaying(), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('gracefully handles unavailable AudioContext', async () => {
+  const horn = new Horn({ audioContext: null });
+  assert.equal(horn.hasAudioContext(), false);
+  const started = await horn.start();
+  assert.equal(started, false);
+  assert.equal(horn.isPlaying(), false);
+});
+
+test('browser verification: forced mp3 404 still activates synth, sounds audibly, and toggles UI', async () => {
+  const { spawn } = await import('node:child_process');
+  const http = await import('node:http');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const distDir = path.join(__dirname, '../dist');
+  if (!fs.existsSync(distDir)) {
+    throw new Error('dist directory does not exist. Run vite build first.');
+  }
+
+  let server = null;
+  let chrome = null;
+  let ws = null;
+  const profileDir = '/tmp/chrome-horn-fallback-' + Date.now();
+
+  try {
+    let delayMp3 = 0;
+    server = http.createServer(async (req, res) => {
+      const reqUrl = req.url.split('?')[0];
+      if (reqUrl === '/sounds/airhorn.mp3') {
+        if (delayMp3 > 0) {
+          await new Promise(r => setTimeout(r, delayMp3));
+        }
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not Found (forced fallback simulation)');
+        return;
       }
-    } finally {
-      undo();
-    }
-  });
+      if (reqUrl === '/sw.js') {
+        // Return a benign no-op service worker that does not cache or intercept mp3
+        res.writeHead(200, {
+          'Content-Type': 'application/javascript',
+          'Service-Worker-Allowed': '/'
+        });
+        res.end('// No-op SW for test\nself.addEventListener("install", () => self.skipWaiting());\nself.addEventListener("activate", () => self.clients.claim());');
+        return;
+      }
 
-  test('stop({immediate: true}) cuts playback: calls source.stop(), disables looping, resolves on ended', async () => {
-    const { FakeAudioContext, sources } = makeAudioContext();
-    const undo = withBrowserGlobals({ AudioContext: FakeAudioContext, fetchImpl: makeFetch() });
-    try {
-      const horn = new Horn();
-      await horn.start({ loop: true });
-      const source = sources[0];
+      const mimeTypes = {
+        '.html': 'text/html',
+        '.js': 'application/javascript',
+        '.css': 'text/css',
+        '.json': 'application/json',
+        '.png': 'image/png',
+        '.svg': 'image/svg+xml',
+        '.mp3': 'audio/mpeg',
+        '.ico': 'image/x-icon',
+      };
 
-      const stopped = horn.stop({ immediate: true });
-      assert.equal(source.loop, false, 'looping disabled');
-      assert.equal(source.stopCalls, 1, 'source.stop(0) called for the immediate cut');
-
-      // The promise must not resolve before the source reports 'ended'...
-      let resolved = false;
-      stopped.then(() => {
-        resolved = true;
+      let filePath = path.join(distDir, reqUrl === '/' ? 'index.html' : reqUrl);
+      if (!fs.existsSync(filePath)) {
+        res.writeHead(404);
+        res.end('Not found');
+        return;
+      }
+      const ext = path.extname(filePath);
+      res.writeHead(200, {
+        'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+        'Service-Worker-Allowed': '/'
       });
-      await new Promise((r) => setTimeout(r, 5));
-      assert.equal(resolved, false, 'waits for the ended event');
+      fs.createReadStream(filePath).pipe(res);
+    });
 
-      source.emitEnded(); // fires both the addEventListener listeners and onended
-      await stopped;
-      assert.equal(resolved, true, 'resolves once the source has ended');
-    } finally {
-      undo();
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const port = server.address().port;
+
+    const chromeBin = process.env.CHROME_BIN ||
+      (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
+      fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : 'google-chrome');
+
+    chrome = spawn(chromeBin, [
+      '--headless=new',
+      '--no-sandbox',
+      '--disable-gpu',
+      '--autoplay-policy=no-user-gesture-required',
+      '--remote-debugging-port=0',
+      `--user-data-dir=${profileDir}`,
+      'about:blank'
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let wsUrl = null;
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Chrome timeout')), 10000);
+      chrome.stderr.on('data', (d) => {
+        const match = d.toString().match(/ws:\/\/[^\s]+/);
+        if (match) {
+          wsUrl = match[0];
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+      chrome.on('error', (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+    });
+
+    const chromePort = new URL(wsUrl).port;
+    const targetsRes = await fetch(`http://127.0.0.1:${chromePort}/json/list`);
+    const targets = await targetsRes.json();
+    const pageWsUrl = targets.find(t => t.type === 'page').webSocketDebuggerUrl;
+
+    ws = new WebSocket(pageWsUrl);
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('WebSocket onopen timeout')), 5000);
+      ws.onopen = () => { clearTimeout(timeout); resolve(); };
+      ws.onerror = (e) => { clearTimeout(timeout); reject(e); };
+    });
+
+    let msgId = 1;
+    const pending = new Map();
+    const consoleErrors = [];
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') {
+        consoleErrors.push(msg.params.args?.map(a => a.value).join(' '));
+      }
+      if (msg.method === 'Runtime.exceptionThrown') {
+        const details = msg.params.exceptionDetails;
+        consoleErrors.push(details?.exception?.description || details?.text || 'Uncaught exception');
+      }
+      if (msg.id && pending.has(msg.id)) {
+        const { resolve, reject } = pending.get(msg.id);
+        pending.delete(msg.id);
+        if (msg.error) reject(new Error(msg.error.message));
+        else resolve(msg.result);
+      }
+    };
+
+    const send = (method, params = {}) => {
+      const id = msgId++;
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        ws.send(JSON.stringify({ id, method, params }));
+      });
+    };
+
+    await send('Page.enable');
+    await send('Runtime.enable');
+
+    // AnalyserNode tap to measure audibility (peak level > 0.01)
+    await send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `
+        window.__audioProbe = { peak: 0, currentLevel: 0, samples: 0, oscStarts: 0 };
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) {
+          const origConnect = AudioNode.prototype.connect;
+          AudioNode.prototype.connect = function (dest, ...rest) {
+            const ret = origConnect.apply(this, [dest, ...rest]);
+            if (dest && this.context && dest === this.context.destination && !this.__isProbeNode) {
+              this.__isProbeNode = true;
+              try {
+                const ctx = this.context;
+                const analyser = ctx.createAnalyser();
+                analyser.__isProbeNode = true;
+                analyser.fftSize = 2048;
+                const data = new Float32Array(analyser.fftSize);
+                const silentSink = ctx.createGain();
+                silentSink.__isProbeNode = true;
+                silentSink.gain.value = 0;
+                origConnect.call(this, analyser);
+                origConnect.call(analyser, silentSink);
+                origConnect.call(silentSink, ctx.destination);
+
+                setInterval(() => {
+                  try {
+                    analyser.getFloatTimeDomainData(data);
+                    let peak = 0;
+                    for (let i = 0; i < data.length; i++) {
+                      const abs = Math.abs(data[i]);
+                      if (abs > peak) peak = abs;
+                    }
+                    window.__audioProbe.currentLevel = peak;
+                    if (peak > window.__audioProbe.peak) window.__audioProbe.peak = peak;
+                    window.__audioProbe.samples++;
+                  } catch {}
+                }, 20);
+              } catch (e) {
+                console.error('Probe hook error', e);
+              }
+            }
+            return ret;
+          };
+          const origCreateOsc = AC.prototype.createOscillator;
+          AC.prototype.createOscillator = function (...args) {
+            const osc = origCreateOsc.apply(this, args);
+            const origStart = osc.start.bind(osc);
+            osc.start = function (...startArgs) {
+              window.__audioProbe.oscStarts++;
+              return origStart(...startArgs);
+            };
+            return osc;
+          };
+        }
+      `
+    });
+
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+    await new Promise(r => setTimeout(r, 600));
+
+    // Part A: Tap test with real gesture (pointerdown, 60ms, pointerup)
+    // Verifies synth starts, sounds audibly, does NOT truncate early (~100ms), and rings out ~1.2s
+    await send('Runtime.evaluate', {
+      expression: `(() => {
+        const horn = document.querySelector('.horn');
+        horn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+        setTimeout(() => {
+          document.documentElement.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+        }, 60);
+      })()`
+    });
+
+    // Check at 150ms: horn is active
+    await new Promise(r => setTimeout(r, 150));
+    const activeAt150 = await send('Runtime.evaluate', {
+      expression: `(() => {
+        const horn = document.querySelector('.horn');
+        return {
+          horning: horn.classList.contains('horning'),
+          audioPeak: window.__audioProbe?.peak || 0,
+          currentLevel: window.__audioProbe?.currentLevel || 0
+        };
+      })()`,
+      returnByValue: true
+    });
+    assert.ok(activeAt150.result.value.audioPeak > 0.01, 'Horn must sound audibly');
+
+    // Check at 500ms (far past the old 100ms truncation point): horn must still be ringing out!
+    await new Promise(r => setTimeout(r, 350));
+    const activeAt500 = await send('Runtime.evaluate', {
+      expression: `window.__audioProbe?.currentLevel || 0`,
+      returnByValue: true
+    });
+    assert.ok(activeAt500.result.value > 0.01, `Horn must still be ringing out at 500ms after a 60ms tap; got level ${activeAt500.result.value}`);
+
+    // Wait for blast duration to complete and settle
+    for (let i = 0; i < 30; i++) {
+      const res = await send('Runtime.evaluate', {
+        expression: `!window.__airhorn || !window.__airhorn.isPlaying()`,
+        returnByValue: true
+      });
+      if (res.result.value) break;
+      await new Promise(r => setTimeout(r, 100));
     }
-  });
 
-  test('stop() with nothing playing is a safe no-op', () => {
-    const { FakeAudioContext } = makeAudioContext();
-    const undo = withBrowserGlobals({ AudioContext: FakeAudioContext, fetchImpl: makeFetch() });
+    const settledResult = await send('Runtime.evaluate', {
+      expression: `(() => {
+        const horn = document.querySelector('.horn');
+        return {
+          horning: horn.classList.contains('horning'),
+          pressed: horn.getAttribute('aria-pressed'),
+          classes: horn.className,
+          airhornExists: !!window.__airhorn,
+          isPlaying: window.__airhorn ? window.__airhorn.isPlaying() : null,
+          isLooping: window.__airhorn ? window.__airhorn.isLooping() : null,
+          audioPeak: window.__audioProbe?.peak || 0,
+          oscStarts: window.__audioProbe?.oscStarts || 0
+        };
+      })()`,
+      returnByValue: true
+    });
+
+    assert.equal(settledResult.result.value.horning, false, 'UI should exit horning state after blast finishes');
+    assert.equal(settledResult.result.value.pressed, 'false', 'aria-pressed should revert to false');
+    assert.equal(settledResult.result.value.isPlaying, false, 'Audio should finish playing');
+    assert.ok(settledResult.result.value.audioPeak > 0.01, `Fallback synth must be audible: peak was ${settledResult.result.value.audioPeak}`);
+    assert.ok(settledResult.result.value.oscStarts >= 3, `Expected at least 3 oscillators to start, got ${settledResult.result.value.oscStarts}`);
+
+    // Part B: Release-before-start race condition with delayed 404
+    delayMp3 = 250;
+    await send('Runtime.evaluate', {
+      expression: `(() => {
+        const horn = document.querySelector('.horn');
+        horn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+        setTimeout(() => {
+          document.documentElement.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+        }, 50);
+      })()`
+    });
+
+    // Wait until start resolves or sound starts playing
+    for (let i = 0; i < 20; i++) {
+      const res = await send('Runtime.evaluate', {
+        expression: `window.__airhorn && window.__airhorn.isPlaying()`,
+        returnByValue: true
+      });
+      if (res.result.value) break;
+      await new Promise(r => setTimeout(r, 50));
+    }
+
+    // Now wait until playback finishes and blast settles
+    for (let i = 0; i < 30; i++) {
+      const res = await send('Runtime.evaluate', {
+        expression: `!window.__airhorn || (!window.__airhorn.isPlaying() && !document.querySelector('.horn').classList.contains('horning'))`,
+        returnByValue: true
+      });
+      if (res.result.value) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+
+    const raceResult = await send('Runtime.evaluate', {
+      expression: `(() => {
+        return {
+          isPlaying: window.__airhorn?.isPlaying(),
+          isLooping: window.__airhorn?.isLooping(),
+          horning: document.querySelector('.horn')?.classList.contains('horning')
+        };
+      })()`,
+      returnByValue: true
+    });
+
+    assert.equal(raceResult.result.value.isPlaying, false, 'Quick release before mp3 404 finishes should not leave looping sound');
+    assert.equal(raceResult.result.value.isLooping, false, 'isLooping must be false');
+    assert.equal(raceResult.result.value.horning, false, 'horning must be false');
+
+    assert.deepEqual(consoleErrors, [], 'No uncaught exceptions or errors on fallback playback');
+  } finally {
+    if (ws) {
+      try { ws.close(); } catch {}
+    }
+    if (chrome) {
+      chrome.kill('SIGTERM');
+    }
+    if (server) {
+      server.close();
+    }
     try {
-      const horn = new Horn();
-      assert.doesNotThrow(() => horn.stop());
-    } finally {
-      undo();
-    }
-  });
+      fs.rmSync(profileDir, { recursive: true, force: true });
+    } catch {}
+  }
 });
 
-describe('Horn onstopped', () => {
-  test('onstopped fires only when the last active source ends', async () => {
-    const { FakeAudioContext, sources } = makeAudioContext();
-    const undo = withBrowserGlobals({ AudioContext: FakeAudioContext, fetchImpl: makeFetch() });
-    try {
-      const horn = new Horn();
-      await horn.start();
-      await horn.start();
-      assert.equal(sources.length, 2);
 
-      let stopped = 0;
-      horn.onstopped = () => stopped++;
-
-      sources[0].end();
-      assert.equal(stopped, 0, 'one source still playing');
-      sources[0].end(); // repeat notifications for an ended source must not re-fire
-      assert.equal(stopped, 0, 'ended source stays retired');
-
-      sources[1].end();
-      assert.equal(stopped, 1, 'fires exactly once, when the last source ends');
-    } finally {
-      undo();
-    }
-  });
-
-  test('a single source ending fires onstopped', async () => {
-    const { FakeAudioContext, sources } = makeAudioContext();
-    const undo = withBrowserGlobals({ AudioContext: FakeAudioContext, fetchImpl: makeFetch() });
-    try {
-      const horn = new Horn();
-      await horn.start();
-
-      let stopped = 0;
-      horn.onstopped = () => stopped++;
-      sources[0].end();
-
-      assert.equal(stopped, 1);
-    } finally {
-      undo();
-    }
-  });
-});
-
-describe('Horn error handling', () => {
-  test('a failed buffer load rejects start() and is retried on the next start', async () => {
-    // First context fails to decode; after the failure a fresh Horn must be
-    // able to load again — the failed promise must not be memoized forever.
-    const failing = makeAudioContext({ decodeFails: true });
-    const undo1 = withBrowserGlobals({ AudioContext: failing.FakeAudioContext, fetchImpl: makeFetch() });
-    try {
-      const horn = new Horn();
-      await assert.rejects(() => horn.start(), /decode failed/);
-    } finally {
-      undo1();
-    }
-
-    const working = makeAudioContext();
-    const undo2 = withBrowserGlobals({ AudioContext: working.FakeAudioContext, fetchImpl: makeFetch() });
-    try {
-      const horn = new Horn();
-      await horn.start(); // retry succeeds
-      assert.equal(working.sources.length, 1);
-    } finally {
-      undo2();
-    }
-  });
-
-  test('the same horn can load successfully after a failed decode', async () => {
-    let decodeFails = true;
-    // makeAudioContext reads opts.decodeFails at decode time, so a getter lets
-    // the test flip the failure off mid-suite for the SAME horn instance.
-    const ctx = makeAudioContext({ get decodeFails() { return decodeFails; } });
-    const undo = withBrowserGlobals({ AudioContext: ctx.FakeAudioContext, fetchImpl: makeFetch() });
-    try {
-      const horn = new Horn();
-      await assert.rejects(() => horn.start(), /decode failed/);
-
-      decodeFails = false;
-      await horn.start(); // the retry path on the SAME instance
-      assert.equal(ctx.sources.length, 1);
-      assert.equal(ctx.calls.decoded.length, 2, 'buffer was re-fetched for the retry');
-    } finally {
-      undo();
-    }
-  });
-
-  test('a failing resume() rejects start() and no source is created', async () => {
-    const { FakeAudioContext, sources } = makeAudioContext({ resumeThrows: true });
-    const undo = withBrowserGlobals({ AudioContext: FakeAudioContext, fetchImpl: makeFetch() });
-    try {
-      const horn = new Horn();
-      await assert.rejects(() => horn.start(), /resume failed/);
-      assert.equal(sources.length, 0, 'nothing scheduled when the context will not resume');
-    } finally {
-      undo();
-    }
-  });
-});

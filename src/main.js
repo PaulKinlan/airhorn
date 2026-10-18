@@ -17,8 +17,8 @@
  *
  */
 
-import { Horn } from './horn.js';
 import { registerHornTools } from './webmcp.js';
+import { Horn } from './horn.js';
 
 function trackEvent(eventName, params) {
   if (typeof gtag === 'function') {
@@ -42,11 +42,21 @@ class Installer {
 
     window.addEventListener('appinstalled', () => {
       this.#promptEvent = null;
+      this.#restoreFocus();
       root.classList.remove('available');
       trackEvent('app_installed');
     });
 
     root.addEventListener('click', () => this.#install());
+  }
+
+  #restoreFocus() {
+    if (this.#root.contains(document.activeElement)) {
+      const hornButton = document.querySelector('.horn');
+      if (hornButton && typeof hornButton.focus === 'function') {
+        hornButton.focus();
+      }
+    }
   }
 
   async #install() {
@@ -55,7 +65,13 @@ class Installer {
     const result = await this.#promptEvent.userChoice;
     trackEvent('install_prompt_result', { outcome: result.outcome });
     this.#promptEvent = null;
+    this.#restoreFocus();
     this.#root.classList.remove('available');
+
+    const status = document.getElementById('install-status');
+    if (status) {
+      status.textContent = result?.outcome === 'accepted' ? 'App installed' : 'Installation cancelled';
+    }
   }
 }
 
@@ -163,6 +179,7 @@ class AirHorn {
 
 window.addEventListener('load', () => {
   const airhorn = new AirHorn(document.getElementById('airhorn'));
+  window.__airhorn = airhorn;
   new Installer(document.getElementById('installer'));
 
   registerHornTools(airhorn).catch(() => {

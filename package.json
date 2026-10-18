@@ -1,6 +1,7 @@
 {
   "name": "airhorn",
   "version": "2.0.0",
+  "type": "module",
   "description": "A sample web app that lets you use your site as an airhorn.",
   "private": true,
   "scripts": {
