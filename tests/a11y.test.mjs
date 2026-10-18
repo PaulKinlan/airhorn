@@ -357,6 +357,9 @@ async function run() {
     fs.writeFileSync('/tmp/airhorn-a11y-verified.png', Buffer.from(screenshot.data, 'base64'));
     console.log('Screenshot saved to /tmp/airhorn-a11y-verified.png');
 
+    // Settle window: wait for asynchronous tasks, event callbacks, and microtasks to settle
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
     // Check for in-page unhandled exceptions or rejections
     const inPageErrors = await send('Runtime.evaluate', {
       expression: 'window.__pageErrors || []',
