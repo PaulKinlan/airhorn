@@ -3,6 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { quiescenceProbe, waitForQuiescence, lateErrorMutant } from './support/quiescence.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -161,6 +162,7 @@ async function run() {
             stack: e.reason?.stack || null
           });
         });
+        ${quiescenceProbe}
       `
     });
 
@@ -207,6 +209,9 @@ async function run() {
           hornRole: horn ? horn.getAttribute('role') : null,
           hornTabIndex: horn ? horn.getAttribute('tabindex') : null,
           hornCursor: styles.cursor,
+          hornOutlineColor: styles.outlineColor,
+          hornOutlineWidth: styles.outlineWidth,
+          bodyBackground: window.getComputedStyle(document.body).backgroundColor,
           installerIsAvailable: isAvailable,
           installerVisibility: installerStyles ? installerStyles.visibility : null,
           installerPointerEvents: installerStyles ? installerStyles.pointerEvents : null,
@@ -246,6 +251,26 @@ async function run() {
     }
     if (r.hiddenPointerEvents !== 'none') {
       throw new Error(`Expected hiddenPointerEvents to be 'none', got ${r.hiddenPointerEvents}`);
+    }
+
+    // WCAG 1.4.11 Non-text Contrast: the horn's boundary ring must clear 3:1
+    // against the page background (red on blue alone is 1.18:1).
+    const relLum = (rgb) => {
+      const [cr, cg, cb] = rgb.match(/[\d.]+/g).map(Number).map((v) => {
+        const s = v / 255;
+        return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+      });
+      return 0.2126 * cr + 0.7152 * cg + 0.0722 * cb;
+    };
+    const outlineLum = relLum(r.hornOutlineColor);
+    const pageLum = relLum(r.bodyBackground);
+    const boundaryRatio = (Math.max(outlineLum, pageLum) + 0.05) / (Math.min(outlineLum, pageLum) + 0.05);
+    console.log(`Horn boundary contrast: ${r.hornOutlineColor} on ${r.bodyBackground} = ${boundaryRatio.toFixed(2)}:1`);
+    if (parseFloat(r.hornOutlineWidth) < 1) {
+      throw new Error(`Expected horn outline width >= 1px, got ${r.hornOutlineWidth}`);
+    }
+    if (boundaryRatio < 3) {
+      throw new Error(`Expected horn boundary contrast >= 3:1, got ${boundaryRatio.toFixed(2)}:1 (${r.hornOutlineColor} on ${r.bodyBackground})`);
     }
 
     // Test Accessibility Tree for the button
@@ -401,32 +426,33 @@ async function run() {
     fs.writeFileSync('/tmp/airhorn-a11y-verified.png', Buffer.from(screenshot.data, 'base64'));
     console.log('Screenshot saved to /tmp/airhorn-a11y-verified.png');
 
-    // Wait for the horn blast duration to complete and .horning to clear
-    for (let i = 0; i < 30; i++) {
-      const res = await send('Runtime.evaluate', {
-        expression: `!document.querySelector('.horn').classList.contains('horning')`,
-        returnByValue: true
-      });
-      if (res.result.value) break;
-      await new Promise(r => setTimeout(r, 100));
+    // Wait for observed quiescence instead of sleeping for a guessed duration.
+    // TEST_LATE_ERROR_MS injects a mutant: an async throw that lands after the
+    // last interaction, through the same timer the app would use. The wait has to
+    // see the pending timer, let it fire, and then the error check below fails.
+    const lateErrorMs = Number(process.env.TEST_LATE_ERROR_MS || 0);
+    if (lateErrorMs > 0) {
+      console.log(`Injecting late error mutant: throw ${lateErrorMs}ms after the last interaction`);
+      await send('Runtime.evaluate', { expression: lateErrorMutant(lateErrorMs) });
     }
 
-    // Enforce an absolute time floor of at least 1800ms from interactionStart
-    const elapsedSinceInteraction = Date.now() - interactionStart;
-    if (elapsedSinceInteraction < 1800) {
-      await new Promise(r => setTimeout(r, 1800 - elapsedSinceInteraction));
-    }
+    const settled = await waitForQuiescence(send, {
+      // The blast from the synthetic click is still ringing out; wait for the
+      // page's own state to finish rather than for a constant.
+      quietExpression: `!document.querySelector('.horn.horning')`
+    });
+    console.log(
+      `Page quiescent after ${settled.waitedMs}ms: ${settled.pending.scheduled} async task(s) ` +
+      `scheduled, ${settled.pending.completed} completed, ${settled.samples} samples`
+    );
 
-    // Quiet poll: verify window.__pageErrors remains empty across 3 consecutive checks
-    for (let q = 0; q < 3; q++) {
-      const inPageErrors = await send('Runtime.evaluate', {
-        expression: 'window.__pageErrors || []',
-        returnByValue: true
-      });
-      if (inPageErrors.result.value && inPageErrors.result.value.length > 0) {
-        throw new Error(`In-page errors detected: ${JSON.stringify(inPageErrors.result.value)}`);
-      }
-      await new Promise(r => setTimeout(r, 100));
+    // Check for in-page unhandled exceptions or rejections
+    const inPageErrors = await send('Runtime.evaluate', {
+      expression: 'window.__pageErrors || []',
+      returnByValue: true
+    });
+    if (inPageErrors.result.value && inPageErrors.result.value.length > 0) {
+      throw new Error(`In-page errors detected: ${JSON.stringify(inPageErrors.result.value)}`);
     }
 
     // Check for any console errors or uncaught exceptions recorded via CDP

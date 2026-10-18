@@ -3,6 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { quiescenceProbe, waitForQuiescence, lateErrorMutant } from './support/quiescence.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -167,6 +168,7 @@ async function testSwAndManifest() {
         window.addEventListener('unhandledrejection', (e) => {
           window.__pageErrors.push(e.reason?.message || String(e.reason));
         });
+        ${quiescenceProbe}
       `
     });
 
@@ -308,34 +310,31 @@ async function testSwAndManifest() {
     }
     console.log('Real SW activate handler verified: old caches purged, new build cache activated!');
 
-    // Post-activation quiet settle: floor of at least 1500ms followed by 3 quiet checks
-    const swActivationTime = Date.now();
-    for (let i = 0; i < 30; i++) {
-      const activeState = await send('Runtime.evaluate', {
-        expression: 'navigator.serviceWorker.controller && navigator.serviceWorker.controller.state === "activated"',
-        returnByValue: true
-      });
-      if (activeState.result.value) break;
-      await new Promise(r => setTimeout(r, 100));
-    }
-    const swElapsed = Date.now() - swActivationTime;
-    if (swElapsed < 1500) {
-      await new Promise(r => setTimeout(r, 1500 - swElapsed));
+    // Wait for observed quiescence instead of sleeping for a guessed duration.
+    // TEST_LATE_ERROR_MS injects a mutant: an async throw after the last
+    // interaction, which the wait must notice and the error checks must catch.
+    const lateErrorMs = Number(process.env.TEST_LATE_ERROR_MS || 0);
+    if (lateErrorMs > 0) {
+      console.log(`Injecting late error mutant: throw ${lateErrorMs}ms after the last interaction`);
+      await send('Runtime.evaluate', { expression: lateErrorMutant(lateErrorMs) });
     }
 
-    // Quiet poll: verify window.__pageErrors and console remain empty across 3 consecutive checks
-    for (let q = 0; q < 3; q++) {
-      if (consoleErrors.length > 0) {
-        throw new Error(`Console errors or uncaught exceptions detected: ${JSON.stringify(consoleErrors)}`);
-      }
-      const inPageErrors = await send('Runtime.evaluate', {
-        expression: 'window.__pageErrors || []',
-        returnByValue: true
-      });
-      if (inPageErrors.result.value && inPageErrors.result.value.length > 0) {
-        throw new Error(`In-page errors detected: ${JSON.stringify(inPageErrors.result.value)}`);
-      }
-      await new Promise(r => setTimeout(r, 100));
+    const settled = await waitForQuiescence(send);
+    console.log(
+      `Page quiescent after ${settled.waitedMs}ms: ${settled.pending.scheduled} async task(s) ` +
+      `scheduled, ${settled.pending.completed} completed, ${settled.samples} samples`
+    );
+
+    if (consoleErrors.length > 0) {
+      throw new Error(`Console errors or uncaught exceptions detected: ${JSON.stringify(consoleErrors)}`);
+    }
+
+    const inPageErrors = await send('Runtime.evaluate', {
+      expression: 'window.__pageErrors || []',
+      returnByValue: true
+    });
+    if (inPageErrors.result.value && inPageErrors.result.value.length > 0) {
+      throw new Error(`In-page errors detected: ${JSON.stringify(inPageErrors.result.value)}`);
     }
 
     console.log('ALL SERVICE WORKER & MANIFEST CHECKS PASSED!');
