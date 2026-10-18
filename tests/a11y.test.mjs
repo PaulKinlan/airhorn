@@ -295,8 +295,28 @@ async function run() {
     if (parseFloat(r.hornOutlineWidth) < 1) {
       throw new Error(`Expected horn outline width >= 1px, got ${r.hornOutlineWidth}`);
     }
-    const outlineAlpha = /rgba?\([^)]*,\s*([\d.]+)\s*\)/.exec(r.hornOutlineColor);
-    if (outlineAlpha && Number(outlineAlpha[1]) === 0) {
+    // An opaque `rgb(r, g, b)` carries no alpha: its last component is the blue
+    // channel, so reading it as alpha falsely rejected a valid black ring
+    // (airhorn-gg8 - black on this page is 6.72:1, which the contrast check above
+    // already accepts). Only a 4-component rgba(), or a slash-separated alpha in
+    // the modern notation, actually expresses transparency.
+    const alphaOf = (color) => {
+      const text = String(color).trim();
+      const comma = /^rgba?\(([^)]*)\)$/i.exec(text);
+      // Space-separated modern notation also matches the `rgb(...)` shape, so only
+      // treat it as the legacy form when it really is comma-separated.
+      if (comma && comma[1].includes(',')) {
+        const parts = comma[1].split(',').map((v) => parseFloat(v));
+        return parts.length === 4 && Number.isFinite(parts[3]) ? parts[3] : 1;
+      }
+      const slash = /\(\s*[^)]*\/\s*([\d.]+)(%?)\s*\)$/.exec(text);
+      if (slash) {
+        const value = parseFloat(slash[1]);
+        return slash[2] === '%' ? value / 100 : value;
+      }
+      return 1; // unknown notation: never invent transparency
+    };
+    if (alphaOf(r.hornOutlineColor) === 0) {
       throw new Error(
         `Expected a visible horn boundary ring, got a fully transparent outline colour ${r.hornOutlineColor}`
       );
