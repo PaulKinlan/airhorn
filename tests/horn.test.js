@@ -3,6 +3,7 @@
  *  Run with: node tests/horn.test.js
  */
 
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Horn } from '../src/horn.js';
 
@@ -92,10 +93,7 @@ class FakeAudioContext {
   }
 }
 
-const tests = [];
-function test(name, fn) {
-  tests.push({ name, fn });
-}
+
 
 test('plays sample when fetch and decode succeed', async () => {
   const originalFetch = globalThis.fetch;
@@ -654,17 +652,4 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
   }
 });
 
-let failures = 0;
-for (const { name, fn } of tests) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (err) {
-    failures += 1;
-    console.error(`not ok - ${name}`);
-    console.error(err);
-  }
-}
 
-console.log(`\n${tests.length - failures}/${tests.length} Horn audio tests passed`);
-if (failures > 0) process.exit(1);
