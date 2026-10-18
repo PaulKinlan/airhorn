@@ -308,6 +308,9 @@ async function testSwAndManifest() {
     }
     console.log('Real SW activate handler verified: old caches purged, new build cache activated!');
 
+    // Settle window: wait for asynchronous tasks and microtasks to settle
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
     if (consoleErrors.length > 0) {
       throw new Error(`Console errors or uncaught exceptions detected: ${JSON.stringify(consoleErrors)}`);
     }
