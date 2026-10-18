@@ -1,15 +1,30 @@
 # tools/suite-map.tsv — the changed-path -> suite map. THE MAP IS THE GATE.
 # Format: <glob pattern><TAB><space-separated suites covering it>. Rows are ADDITIVE: name EVERY suite
-# that covers a file. Lines starting with # are comments. `!` rows are exemptions (docs/assets with no
-# suite) — add one only with a reason in the comment. An unmapped changed file FAILS the gate loudly.
-src/horn.js	tests/horn.test.js
-src/main.js	tests/horn.test.js
-index.html	tests/horn.test.js
-vite.config.js	tests/horn.test.js
-package.json	tests/horn.test.js
-package-lock.json	tests/horn.test.js
+# that covers a file. Lines starting with # are comments. `!` rows are exemptions (files with no suite)
+# — add one only with a reason. `~` rows are PENDING suites: declared, arriving with a sibling branch
+# (fleet/a11y); while the suite file is absent, selecting it SKIPS with 'fast-gate: pending:' instead
+# of failing, and once it lands it runs like any other suite. A PLAIN row naming a missing suite is a
+# stale map and fails the gate. Every suite in the tree must be reachable from a row (`~` counts) or
+# exempted with `!`, or the gate fails loudly (reverse check).
+src/horn.js	tests/horn.test.js tests/a11y.test.mjs
+src/main.js	tests/horn.test.js tests/a11y.test.mjs
+index.html	tests/horn.test.js tests/a11y.test.mjs
+vite.config.js	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs
+package.json	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs
+package-lock.json	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs
 server.ts	tests/horn.test.js
 tools/*	tests/horn.test.js
+# The SW/offline suite covers the PWA surface (it verifies sw caching + manifest contents in dist).
+public/sw.js	tests/sw-offline.test.mjs
+public/manifest.json	tests/sw-offline.test.mjs
+public/sounds/**	tests/sw-offline.test.mjs
+# Suite self-rows: the reverse check (every tree suite reachable from the map) reads these.
+tests/horn.test.js	tests/horn.test.js
+~tests/a11y.test.mjs	tests/a11y.test.mjs
+~tests/sw-offline.test.mjs	tests/sw-offline.test.mjs
+# Same suites at the singular test/ spelling from fleet/a11y's earlier tips; inert unless they exist.
+~test/a11y.test.mjs	test/a11y.test.mjs
+~test/sw-offline.test.mjs	test/sw-offline.test.mjs
 # Static assets and prose carry no behaviour; no suite covers them.
 !*.md
 !LICENSE

@@ -7,7 +7,10 @@
 #   fast-gate: passed: <suite>
 #   fast-gate: failed: <suite>
 #   fast-gate: unmapped: <path>          (fail-loud; the process exits 1)
-# Do not reformat those lines.
+# Do not reformat those lines. Additional loud lines that are NOT in the contract:
+#   fast-gate: pending: <suite>          (declared by a `~` row, file not landed yet; skipped, not counted)
+#   fast-gate: unmapped-suite: <suite>   (suite in the tree but not reachable from the map; exit 1)
+# The gate builds dist/ before running (browser suites serve it); a build failure exits 1.
 #
 # Usage:
 #   bash tools/fast-gate.sh                     # changed paths vs the merge-base with origin/master
@@ -74,17 +77,36 @@ is_exempt() { # $1 = path ; true iff an `!` row matches it
 
 suites_for() { # $1 = path -> newline-separated suites (empty = unmapped)
   local pat rest
-  # A changed suite maps to itself. A renamed/deleted-but-still-mapped suite is caught below.
-  case $1 in tests/*.test.js|tests/*.test.mjs|tests/*.test.ts) echo "$1"; return ;; esac
+  # A changed suite maps to itself (both spellings of the suite directory, js/mjs/ts).
+  case $1 in tests/*.test.js|tests/*.test.mjs|tests/*.test.ts|test/*.test.js|test/*.test.mjs|test/*.test.ts) echo "$1"; return ;; esac
   # ACCUMULATE every matching row, do not stop at the first (fleet-w7so): rows are additive, the caller
   # de-duplicates, so naming a suite twice is harmless — but silently dropping a row's coverage is not.
+  # `~` rows are PENDING declarations and map no files (see is_pending).
   while IFS=$'\t' read -r pat rest; do
-    case $pat in ''|\#*|\!*) continue ;; esac
+    case $pat in ''|\#*|\!*|~*) continue ;; esac
     if [[ $1 == $pat ]]; then
       printf '%s\n' $rest          # word-split on purpose: one row names several suites
     fi
   done < "$MAP"
   return
+}
+
+is_pending() { # $1 = suite path ; true iff a `~` row DECLARES it (arriving with a sibling branch)
+  local pat rest s   # local s: the inner loop must NOT clobber the caller's iteration variable
+  while IFS=$'	' read -r pat rest; do
+    case $pat in ~*) ;; *) continue ;; esac
+    for s in $rest; do [ "$s" = "$1" ] && return 0; done
+  done < "$MAP"
+  return 1
+}
+
+map_reaches() { # $1 = suite path ; true iff a NON-exemption row names it (plain or `~`)
+  local pat rest s   # local s: see is_pending - this bug once appended the wrong suite to the FAIL list
+  while IFS=$'\t' read -r pat rest; do
+    case $pat in ''|\#*|\!*) continue ;; esac
+    for s in $rest; do [ "$s" = "$1" ] && return 0; done
+  done < "$MAP"
+  return 1
 }
 
 UNMAPPED=(); EXEMPT_COUNT=0; SELECTED=()
@@ -109,6 +131,25 @@ if [ "${#UNMAPPED[@]}" -gt 0 ]; then
   exit 1
 fi
 
+# --- reverse check (fleet-1n0z mode a, other direction): every suite PRESENT in the tree must be -----
+# --- reachable from the map (a row naming it, or an explicit `!` ignore), or the gate fails. --------
+# Without this, a second suite covering src/main.js that forgot its map row silently never runs for
+# the code it covers, while the gate still prints a positive suite count.
+TREE_SUITE_NOT_REACHABLE=()
+for s in tests/*.test.js tests/*.test.mjs tests/*.test.ts test/*.test.js test/*.test.mjs test/*.test.ts; do
+  [ -f "$ROOT/$s" ] || continue          # unmatched globs stay literal; skip them
+  if is_exempt "$s" || map_reaches "$s"; then continue; fi
+  TREE_SUITE_NOT_REACHABLE+=("$s")
+done
+if [ "${#TREE_SUITE_NOT_REACHABLE[@]}" -gt 0 ]; then
+  for s in "${TREE_SUITE_NOT_REACHABLE[@]}"; do echo "fast-gate: unmapped-suite: $s"; done
+  echo "fast-gate: FAIL - ${#TREE_SUITE_NOT_REACHABLE[@]} suite(s) in the tree are not reachable from" >&2
+  echo "fast-gate: tools/suite-map.tsv, so changes to the files they cover would never select them." >&2
+  echo "fast-gate: add a row naming the suite (every suite needs one, e.g. its own self-row), or an" >&2
+  echo "fast-gate: '!<suite>' exemption with a reason if it genuinely must not run in this gate." >&2
+  exit 1
+fi
+
 mapfile -t SELECTED < <(printf '%s\n' ${SELECTED[@]+"${SELECTED[@]}"} | sed '/^$/d' | sort -u)
 
 if [ "${#SELECTED[@]}" -eq 0 ]; then
@@ -125,20 +166,41 @@ if [ "$LIST" -eq 1 ]; then
   exit 0
 fi
 
-# --- run them, one process per suite, bounded parallelism ---------------------------------------------
+# --- split selected suites: RUN (exists) vs PENDING (declared by a `~` row, not landed yet) ----------
+# A selected suite whose file is missing is a STALE map (fail) unless a `~` row declares it as pending
+# (arriving with a sibling branch) - then it is skipped loudly and simply not counted.
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-MISSING=()
-for s in "${SELECTED[@]}"; do [ -f "$ROOT/$s" ] || MISSING+=("$s"); done
+RUN=(); PENDING=(); MISSING=()
+for s in "${SELECTED[@]}"; do
+  if [ -f "$ROOT/$s" ]; then RUN+=("$s");
+  elif is_pending "$s"; then PENDING+=("$s"); printf 'fast-gate: pending: %s\n' "$s";
+  else MISSING+=("$s"); fi
+done
 if [ "${#MISSING[@]}" -gt 0 ]; then
   printf 'fast-gate: missing: %s\n' "${MISSING[@]}"
   echo "fast-gate: FAIL - ${#MISSING[@]} suite(s) named in tools/suite-map.tsv do not exist; the map is" >&2
-  echo "fast-gate: stale (a renamed or deleted suite reads as green forever otherwise). Fix the map." >&2
+  echo "fast-gate: stale (a renamed or deleted suite reads as green forever otherwise). Fix the map," >&2
+  echo "fast-gate: or mark the suite as '~'-pending if it arrives with a sibling branch." >&2
   exit 1
 fi
 
-printf 'fast-gate: running: %s\n' "${SELECTED[@]}"
+if [ "${#RUN[@]}" -eq 0 ]; then
+  echo "fast-gate: PASS (0 suite(s), ${#CHANGED[@]} changed file(s), all pending)"
+  exit 0
+fi
+
+# --- build once: browser suites serve dist/ (a11y, sw-offline); the build is ~0.3s --------------------
+echo "fast-gate: building dist (browser suites serve it)"
+if ! (cd "$ROOT" && npm run build --silent) >"$TMP/build.log" 2>&1; then
+  echo "fast-gate: failed: build"
+  sed 's/^/    /' "$TMP/build.log" 2>/dev/null | tail -20
+  echo "fast-gate: FAIL - build failed; browser suites cannot run." >&2
+  exit 1
+fi
+
+printf 'fast-gate: running: %s\n' "${RUN[@]}"
 n=0
-for s in "${SELECTED[@]}"; do
+for s in "${RUN[@]}"; do
   key=$(printf '%s' "$s" | tr '/.' '__')
   ( cd "$ROOT" && $FAST_GATE_RUNNER "$s" >"$TMP/$key.log" 2>&1; echo $? >"$TMP/$key.rc" ) &
   n=$((n + 1))
@@ -147,7 +209,7 @@ done
 wait
 
 rc=0
-for s in "${SELECTED[@]}"; do
+for s in "${RUN[@]}"; do
   key=$(printf '%s' "$s" | tr '/.' '__')
   if [ "$(cat "$TMP/$key.rc" 2>/dev/null)" = 0 ]; then
     echo "fast-gate: passed: $s"
@@ -157,6 +219,6 @@ for s in "${SELECTED[@]}"; do
     rc=1
   fi
 done
-[ "$rc" -eq 0 ] && echo "fast-gate: PASS (${#SELECTED[@]} suite(s), ${#CHANGED[@]} changed file(s))" \
+[ "$rc" -eq 0 ] && echo "fast-gate: PASS (${#RUN[@]} suite(s), ${#CHANGED[@]} changed file(s))" \
                 || echo "fast-gate: FAIL (see the suite logs above)" >&2
 exit $rc
