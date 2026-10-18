@@ -58,6 +58,14 @@ function makeAudioContext(opts = {}) {
     connect(dest) {
       this.connectedTo.push(dest);
     }
+    addEventListener(type, listener) {
+      // Mirror the DOMEventTarget surface Horn's immediate-stop path relies on.
+      if (type === 'ended') this.endedListeners = (this.endedListeners || []).concat(listener);
+    }
+    emitEnded() {
+      for (const listener of this.endedListeners || []) listener();
+      this.end(); // the onended property fires too, as in a real AudioBufferSourceNode
+    }
     start(...args) {
       this.startCalls++;
       this.startArgs = args;
@@ -191,6 +199,37 @@ describe('Horn lifecycle', () => {
     }
   });
 
+  test('start() reports support and playing state: false/inert without AudioContext, true once playing', async () => {
+    const undoNone = withBrowserGlobals({
+      AudioContext: undefined,
+      fetchImpl: async () => {
+        throw new Error('must not fetch');
+      },
+    });
+    try {
+      const inert = new Horn();
+      assert.equal(inert.hasAudioContext(), false);
+      assert.equal(inert.isPlaying(), false);
+      assert.equal(await inert.start(), false, 'start() returns false when there is no context');
+    } finally {
+      undoNone();
+    }
+
+    const { FakeAudioContext, sources } = makeAudioContext();
+    const undo = withBrowserGlobals({ AudioContext: FakeAudioContext, fetchImpl: makeFetch() });
+    try {
+      const horn = new Horn();
+      assert.equal(horn.hasAudioContext(), true);
+      assert.equal(horn.isPlaying(), false);
+      assert.equal(await horn.start(), true, 'start() returns true when it schedules a source');
+      assert.equal(horn.isPlaying(), true);
+      sources[0].end();
+      assert.equal(horn.isPlaying(), false, 'playing state clears when the source ends');
+    } finally {
+      undo();
+    }
+  });
+
   test('start({loop: true}) configures the looping region of the sample', async () => {
     const { FakeAudioContext, sources } = makeAudioContext();
     const undo = withBrowserGlobals({ AudioContext: FakeAudioContext, fetchImpl: makeFetch() });
@@ -257,6 +296,34 @@ describe('Horn stop', () => {
         assert.equal(source.loop, false);
         assert.equal(source.stopCalls, 0);
       }
+    } finally {
+      undo();
+    }
+  });
+
+  test('stop({immediate: true}) cuts playback: calls source.stop(), disables looping, resolves on ended', async () => {
+    const { FakeAudioContext, sources } = makeAudioContext();
+    const undo = withBrowserGlobals({ AudioContext: FakeAudioContext, fetchImpl: makeFetch() });
+    try {
+      const horn = new Horn();
+      await horn.start({ loop: true });
+      const source = sources[0];
+
+      const stopped = horn.stop({ immediate: true });
+      assert.equal(source.loop, false, 'looping disabled');
+      assert.equal(source.stopCalls, 1, 'source.stop(0) called for the immediate cut');
+
+      // The promise must not resolve before the source reports 'ended'...
+      let resolved = false;
+      stopped.then(() => {
+        resolved = true;
+      });
+      await new Promise((r) => setTimeout(r, 5));
+      assert.equal(resolved, false, 'waits for the ended event');
+
+      source.emitEnded(); // fires both the addEventListener listeners and onended
+      await stopped;
+      assert.equal(resolved, true, 'resolves once the source has ended');
     } finally {
       undo();
     }
