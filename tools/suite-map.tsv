@@ -38,3 +38,9 @@ tests/webmcp-browser.test.mjs	tests/webmcp-browser.test.mjs
 !LICENSE
 !.gitignore
 !public/**
+# The whole-product acceptance pass (npm run test:acceptance) launches its own browser and
+# drives the built app end to end; it is deliberately explicit-only, so it is exempt from the
+# fast gate rather than mapped to sources it would then run for on every change (airhorn-i8i).
+!tests/acceptance.mjs
+# Shared browser-test support code (the quiescence probe) is imported by suites, not a suite.
+!tests/support/**
