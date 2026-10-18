@@ -82,19 +82,24 @@ google-chrome --enable-features=WebMCP,WebMCPTesting https://airhorner.com/
 ## Tests
 
 ```bash
-npm test                  # build, then the four suites below
+npm test                  # build, then every suite below
 npm run test:acceptance   # whole-product pass in one real browser
 ```
 
-`npm test` builds `dist/`, then runs:
+`npm test` builds `dist/`, then runs every `tests/**/*.test.{js,mjs}` suite with
+`node --test --test-concurrency=1`:
 
-- `tests/webmcp.test.mjs` — the tool definitions and their wiring (no browser);
+- `tests/horn.test.js` — the `Horn` audio class (buffer loading, loop and stop, the
+  synthesised fallback) against fake browser globals, with no browser or audio device;
+- `tests/webmcp.test.mjs` — the tool definitions and their wiring;
 - `tests/a11y.test.mjs` — accessibility tree, keyboard operation, focus ring;
 - `tests/sw-offline.test.mjs` — manifest, service worker activation and offline
   reload;
 - `tests/webmcp-browser.test.mjs` — the tools driven end to end in a browser.
 
-The last three launch headless Chromium against the built `dist/`.
+The last three launch headless Chromium against the built `dist/`, and finish by
+waiting for the page to go quiet — no outstanding timers, intervals or fetches — before
+asserting that nothing threw, rather than sleeping for a fixed window.
 
 `npm run test:acceptance` is the whole-product pass: one browser session that presses
 the horn with the pointer, works it from the keyboard, installs and reloads it
