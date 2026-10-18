@@ -277,6 +277,35 @@ test('release-before-start race condition: stopping while fetch is pending does 
   }
 });
 
+test('stale start resolving >1000ms after release is discarded without playing blast', async () => {
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  let fetchReject;
+  globalThis.fetch = () => new Promise((_, rej) => {
+    fetchReject = rej;
+  });
+
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    const pendingStart = horn.start({ loop: true });
+
+    // Release arrives while fetch is in flight
+    await horn.stop({ immediate: false });
+
+    // Simulate >1000ms delay on slow network before fetch rejects
+    await new Promise(r => setTimeout(r, 1050));
+    fetchReject(new Error('HTTP 404 (slow lie-fi failure)'));
+    const result = await pendingStart;
+
+    // Discarded as stale start; no blast started
+    assert.equal(result, false);
+    assert.equal(horn.isPlaying(), false);
+    assert.equal(ctx.oscillators.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('immediate stop while fetch is pending cancels start completely', async () => {
   const originalFetch = globalThis.fetch;
   const ctx = new FakeAudioContext();

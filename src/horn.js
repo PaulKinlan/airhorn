@@ -87,6 +87,8 @@ export class Horn {
 
     const startOp = {
       loop,
+      startTime: Date.now(),
+      stopTime: null,
       cancelled: false,
       stopRequested: false,
       immediateStop: false
@@ -112,12 +114,22 @@ export class Horn {
         if (startOp.cancelled || (startOp.stopRequested && startOp.immediateStop)) {
           return false;
         }
+        // If release occurred more than 1000ms ago (stale start on slow network/lie-fi),
+        // do not play a delayed blast long after the user let go.
+        if (startOp.stopRequested && startOp.stopTime && (Date.now() - startOp.stopTime > 1000)) {
+          return false;
+        }
         if (!buffer) throw new Error('No audio buffer decoded');
         this.#usingFallback = false;
         const playLoop = startOp.stopRequested ? false : startOp.loop;
         return this.#playSample(buffer, { loop: playLoop });
       } catch (err) {
         if (startOp.cancelled || (startOp.stopRequested && startOp.immediateStop)) {
+          return false;
+        }
+        // If release occurred more than 1000ms ago (stale start on slow network/lie-fi),
+        // do not play a delayed blast long after the user let go.
+        if (startOp.stopRequested && startOp.stopTime && (Date.now() - startOp.stopTime > 1000)) {
           return false;
         }
         this.#usingFallback = true;
@@ -235,6 +247,9 @@ export class Horn {
     // Notify any pending start operations waiting on buffer load / resume
     for (const pending of this.#pendingStarts) {
       pending.stopRequested = true;
+      if (!pending.stopTime) {
+        pending.stopTime = Date.now();
+      }
       if (immediate) {
         pending.cancelled = true;
         pending.immediateStop = true;
