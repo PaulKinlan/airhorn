@@ -1,13 +1,14 @@
 {
   "name": "airhorn",
   "version": "2.0.0",
+  "type": "module",
   "description": "A sample web app that lets you use your site as an airhorn.",
   "private": true,
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vite build && node tests/webmcp.test.mjs && node tests/a11y.test.mjs && node tests/sw-offline.test.mjs && node tests/webmcp-browser.test.mjs"
+    "test": "vite build && node tests/horn.test.js && node tests/webmcp.test.mjs && node tests/a11y.test.mjs && node tests/sw-offline.test.mjs && node tests/webmcp-browser.test.mjs"
   },
   "devDependencies": {
     "vite": "^6.2.0"
