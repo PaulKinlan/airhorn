@@ -16,155 +16,284 @@
  *  limitations under the License
  *
  */
-body {
+
+/* Layer order, declared once so the intent of the cascade is explicit:
+   tokens feed base, base feeds the components. */
+@layer tokens, base, components;
+
+@layer tokens {
+  :root {
+    /* Brand palette: mode independent. */
+    --blue-500: #2196f3;
+    --blue-700: #1565c0;
+    --red-500: #f44336;
+    --red-900: #b71c1c;
+    --navy-800: #0b1c2c;
+    --navy-900: #07131f;
+    --ink-100: #eef4fb;
+
+    /* Mode dependent tokens: light values first, then the media query and
+       light-dark() upgrades below. */
+    --page-bg: var(--blue-500);
+    --horn-bg: var(--red-500);
+    --horn-inner-bg: var(--red-900);
+    --horn-inner-pressed: #8e0000;
+    --horn-edge: var(--blue-700);
+    --horn-center-bg: #000;
+    --focus-ring: var(--navy-800);
+    --install-bg: var(--blue-700);
+    --install-ink: #fff;
+    --install-edge: #fff;
+
+    /* Browsers with color-scheme but no light-dark(): swap the tokens here. */
+    @media (prefers-color-scheme: dark) {
+      --page-bg: var(--navy-900);
+      --horn-bg: #d32f2f;
+      --horn-inner-bg: #7f0000;
+      --horn-inner-pressed: #a01b1b;
+      --horn-edge: #1b3a57;
+      --focus-ring: #fff;
+      --install-bg: #1a4f8f;
+      --install-ink: var(--ink-100);
+    }
+
+    /* Modern path: one declaration per token, resolved from color-scheme. */
+    @supports (color: light-dark(#000, #fff)) {
+      --page-bg: light-dark(var(--blue-500), var(--navy-900));
+      --horn-bg: light-dark(var(--red-500), #d32f2f);
+      --horn-inner-bg: light-dark(var(--red-900), #7f0000);
+      --horn-inner-pressed: light-dark(#8e0000, #a01b1b);
+      --horn-edge: light-dark(var(--blue-700), #1b3a57);
+      --horn-center-bg: light-dark(#000, #050505);
+      --focus-ring: light-dark(var(--navy-800), #fff);
+      --install-bg: light-dark(var(--blue-700), #1a4f8f);
+      --install-ink: light-dark(#fff, var(--ink-100));
+    }
+
+    /* Tells the UA (scrollbars, form controls, canvas) which schemes we paint,
+       so the OS dark preference is honoured before the first paint. */
+    color-scheme: light dark;
+  }
+}
+
+@layer base {
+  html,
+  body {
+    block-size: 100%;
+  }
+
+  body {
     margin: 0;
-    background-color: #2196F3;
-}
-* {
+    background-color: var(--page-bg);
+    /* Pressing and holding the horn must not start a pull-to-refresh. */
+    overscroll-behavior: none;
+    /* Replaces the old `* { user-select: none }`: the property inherits, so
+       setting it once here covers the whole page. */
     user-select: none;
-}
-html,
-body {
-    height: 100%;
+  }
+
+  #container {
+    block-size: 100%;
+    display: grid;
+    place-items: center;
+  }
 }
 
-#container {
-    height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-direction: column;
-}
+@layer components {
+  #airhorn {
+    /* Size container: the horn below scales from the space it is given, so it
+       behaves the same in a 320px window, a split pane or a desktop window. */
+    container-type: size;
+    inline-size: 100%;
+    block-size: 100%;
+    min-inline-size: 0;
+    min-block-size: 0;
+    display: grid;
+    place-items: center;
+  }
 
-#installer {
-    position: absolute;
-    top: 0;
-    right: 0;
+  .horn {
+    /* 50cqmin keeps the original 50vmin proportions; the rem cap stops the
+       horn from swallowing a large desktop window. */
+    --horn-size: min(50cqmin, 26rem);
+
+    box-sizing: border-box;
+    appearance: none;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+
+    inline-size: var(--horn-size);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background-color: var(--horn-bg);
+    box-shadow: 0 0.55rem 0.22rem 0 var(--horn-edge);
+    transition:
+      box-shadow 0.2s cubic-bezier(0.4, 0, 1, 1),
+      translate 0.2s cubic-bezier(0.4, 0, 1, 1);
+
+    /* Stops the 300ms double-tap-zoom delay on the one control that matters,
+       without disabling panning or pinch zoom. */
+    touch-action: manipulation;
+
+    /* Two-tone-safe ring: near-black on the light blue page, white on the
+       dark page, both well above the 3:1 non-text contrast minimum. */
+    &:focus-visible {
+      outline: 3px solid var(--focus-ring);
+      outline-offset: 0.4rem;
+    }
+
+    & .inner {
+      inline-size: 80%;
+      block-size: 80%;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background-color: var(--horn-inner-bg);
+      transition: background-color 0.2s cubic-bezier(0.4, 0, 1, 1);
+    }
+
+    & .center {
+      inline-size: 12.5%;
+      block-size: 12.5%;
+      border-radius: 50%;
+      background-color: var(--horn-center-bg);
+      opacity: 0.9;
+    }
+
+    /* Pressed state. Styling keys off aria-pressed, the semantic state screen
+       readers already announce; .horning stays the DOM hook the JS and tests
+       use, so either one lighting up shows the press. */
+    &:is(.horning, [aria-pressed='true']) {
+      /* Pushed in: the raised edge collapses and the whole horn settles down.
+         This is the state cue that survives prefers-reduced-motion. */
+      translate: 0 0.35rem;
+      box-shadow: 0 0 0 0 var(--horn-edge);
+      animation: horn-pulse 10ms infinite alternate;
+
+      & .inner {
+        background-color: var(--horn-inner-pressed);
+        animation: inner-pulse 10ms infinite alternate;
+      }
+
+      & .center {
+        animation: center-pulse 50ms infinite alternate;
+      }
+    }
+
+    /* No motion: the press still reads clearly (the raised edge collapses and
+       the inner ring darkens), it just stops vibrating. */
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+
+      &:is(.horning, [aria-pressed='true']) {
+        animation: none;
+
+        & .inner {
+          animation: none;
+        }
+
+        & .center {
+          animation: none;
+        }
+      }
+    }
+
+    /* Forced colors strips background-color and box-shadow, so the round shape
+       and the pressed state need borders/outlines to stay visible. */
+    @media (forced-colors: active) {
+      border: 2px solid ButtonText;
+
+      &:is(.horning, [aria-pressed='true']) {
+        outline: 2px solid Highlight;
+        outline-offset: 2px;
+      }
+    }
+  }
+
+  #installer {
+    position: fixed;
+    inset-block-start: 0;
+    inset-inline-end: 0;
     text-align: center;
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
     transition: opacity 300ms ease-in-out, visibility 0s linear 300ms;
+
+    &.available {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transition: opacity 300ms ease-in-out;
+    }
+
+    & .button {
+      margin: 0.625rem;
+      padding: 0.625rem 0.875rem;
+      border: 1px solid var(--install-edge);
+      border-radius: 0.5rem;
+      background-color: var(--install-bg);
+      color: var(--install-ink);
+      font: inherit;
+      cursor: pointer;
+      touch-action: manipulation;
+      transition: background-color 0.2s ease-out;
+
+      &:hover {
+        background-color: color-mix(in oklab, var(--install-bg), #fff 12%);
+      }
+
+      &:focus-visible {
+        outline: 3px solid var(--focus-ring);
+        outline-offset: 3px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+
+      &.available {
+        transition: none;
+      }
+
+      & .button {
+        transition: none;
+      }
+    }
+  }
 }
 
-#installer.available {
-    opacity: 1;
-    visibility: visible;
-    pointer-events: auto;
-    transition: opacity 300ms ease-in-out;
+/* Press animation. The original shrank/grew box sizes; scaling instead keeps
+   the work on the compositor. Ratios are the old vmin deltas. */
+@keyframes horn-pulse {
+  from {
+    scale: 1;
+  }
+  to {
+    scale: 1.002 1.004;
+  }
 }
 
-#installer .button {
-    border: white 1px solid;
-    margin: 10px;
-    padding: 10px;
-    color: #FFFFFF;
-    background-color: #1565C0;
-    cursor: pointer;
-    font: inherit;
-    border-radius: 4px;
+@keyframes inner-pulse {
+  from {
+    scale: 1;
+  }
+  to {
+    scale: 1.005 1.0025;
+  }
 }
 
-#installer .button:focus-visible {
-    outline: 2px solid #FFFFFF;
-    outline-offset: 4px;
-}
-
-.horn {
-    appearance: none;
-    -webkit-appearance: none;
-    border: none;
-    padding: 0;
-    margin: 0;
-    font: inherit;
-    color: inherit;
-    cursor: pointer;
-    width: 50vmin;
-    height: 50vmin;
-}
-.horn .inner {
-    width: 40vmin;
-    height: 40vmin;
-}
-.horn .inner .center {
-    width: 5vmin;
-    height: 5vmin;
-}
-
-@keyframes center-horning {
-    from {
-        width: 5vmin;
-        height: 5vmin;
-    }
-    to {
-        width: 4.6vmin;
-        height: 5.4vmin;
-    }
-}
-@keyframes middle-horning {
-    from {
-        width: 40vmin;
-        height: 40vmin;
-    }
-    to {
-        width: 40.2vmin;
-        height: 40.1vmin;
-    }
-}
-@keyframes horning {
-    from {
-        width: 50vmin;
-        height: 50vmin;
-    }
-    to {
-        width: 50.1vmin;
-        height: 50.2vmin;
-    }
-}
-
-.horn {
-    background-color: #F44336;
-    box-shadow: 0 5px 2px 0 #1565C0;
-    transition: box-shadow .2s cubic-bezier(.4, 0, 1, 1);
-}
-.horn:focus-visible {
-    outline: 4px solid #FFFFFF;
-    outline-offset: 8px;
-}
-.horn,
-.horn .inner {
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-.horn .inner {
-    background-color: #B71C1C;
-}
-.horn .inner .center {
-    background-color: #000;
-    opacity: .9;
-    border-radius: 50%;
-}
-.horn.horning {
-    box-shadow: 0 0 0 0 #1565C0;
-    animation-name: horning;
-    animation-iteration-count: infinite;
-    animation-direction: alternate;
-}
-.horn.horning,
-.horn.horning .inner {
-    animation-duration: 10ms;
-}
-.horn.horning .inner {
-    animation-name: middle-horning;
-}
-.horn.horning .inner,
-.horn.horning .center {
-    animation-iteration-count: infinite;
-    animation-direction: alternate;
-}
-.horn.horning .center {
-    animation-duration: 50ms;
-    animation-name: center-horning;
+@keyframes center-pulse {
+  from {
+    scale: 1;
+  }
+  to {
+    scale: 0.92 1.08;
+  }
 }
