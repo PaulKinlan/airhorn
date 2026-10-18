@@ -3,6 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { quiescenceProbe, waitForQuiescence, lateErrorMutant } from './support/quiescence.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -167,6 +168,7 @@ async function testSwAndManifest() {
         window.addEventListener('unhandledrejection', (e) => {
           window.__pageErrors.push(e.reason?.message || String(e.reason));
         });
+        ${quiescenceProbe}
       `
     });
 
@@ -308,8 +310,20 @@ async function testSwAndManifest() {
     }
     console.log('Real SW activate handler verified: old caches purged, new build cache activated!');
 
-    // Settle window: wait for asynchronous tasks and microtasks to settle
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    // Wait for observed quiescence instead of sleeping for a guessed duration.
+    // TEST_LATE_ERROR_MS injects a mutant: an async throw after the last
+    // interaction, which the wait must notice and the error checks must catch.
+    const lateErrorMs = Number(process.env.TEST_LATE_ERROR_MS || 0);
+    if (lateErrorMs > 0) {
+      console.log(`Injecting late error mutant: throw ${lateErrorMs}ms after the last interaction`);
+      await send('Runtime.evaluate', { expression: lateErrorMutant(lateErrorMs) });
+    }
+
+    const settled = await waitForQuiescence(send);
+    console.log(
+      `Page quiescent after ${settled.waitedMs}ms: ${settled.pending.scheduled} async task(s) ` +
+      `scheduled, ${settled.pending.completed} completed, ${settled.samples} samples`
+    );
 
     if (consoleErrors.length > 0) {
       throw new Error(`Console errors or uncaught exceptions detected: ${JSON.stringify(consoleErrors)}`);

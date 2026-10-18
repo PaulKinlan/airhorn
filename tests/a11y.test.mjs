@@ -3,6 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { quiescenceProbe, waitForQuiescence, lateErrorMutant } from './support/quiescence.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -161,6 +162,7 @@ async function run() {
             stack: e.reason?.stack || null
           });
         });
+        ${quiescenceProbe}
       `
     });
 
@@ -357,8 +359,25 @@ async function run() {
     fs.writeFileSync('/tmp/airhorn-a11y-verified.png', Buffer.from(screenshot.data, 'base64'));
     console.log('Screenshot saved to /tmp/airhorn-a11y-verified.png');
 
-    // Settle window: wait for asynchronous tasks, event callbacks, and microtasks to settle
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    // Wait for observed quiescence instead of sleeping for a guessed duration.
+    // TEST_LATE_ERROR_MS injects a mutant: an async throw that lands after the
+    // last interaction, through the same timer the app would use. The wait has to
+    // see the pending timer, let it fire, and then the error check below fails.
+    const lateErrorMs = Number(process.env.TEST_LATE_ERROR_MS || 0);
+    if (lateErrorMs > 0) {
+      console.log(`Injecting late error mutant: throw ${lateErrorMs}ms after the last interaction`);
+      await send('Runtime.evaluate', { expression: lateErrorMutant(lateErrorMs) });
+    }
+
+    const settled = await waitForQuiescence(send, {
+      // The blast from the synthetic click is still ringing out; wait for the
+      // page's own state to finish rather than for a constant.
+      quietExpression: `!document.querySelector('.horn.horning')`
+    });
+    console.log(
+      `Page quiescent after ${settled.waitedMs}ms: ${settled.pending.scheduled} async task(s) ` +
+      `scheduled, ${settled.pending.completed} completed, ${settled.samples} samples`
+    );
 
     // Check for in-page unhandled exceptions or rejections
     const inPageErrors = await send('Runtime.evaluate', {
