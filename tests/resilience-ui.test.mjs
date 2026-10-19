@@ -167,6 +167,17 @@ async function testBootWatchdog() {
     return res.result.value;
   };
 
+  // Like evaluate, but waits for the expression's promise to settle - for
+  // page-side async work whose COMPLETION the next step depends on (an
+  // unregister that races the next navigation is not a teardown).
+  const evaluateAwaited = async (expression) => {
+    const res = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+    if (res.exceptionDetails) {
+      throw new Error(`evaluateAwaited failed: ${res.exceptionDetails.text} ${res.exceptionDetails.exception?.description || ''}`);
+    }
+    return res.result.value;
+  };
+
   // Poll a page expression until truthy. Evaluation errors (context not yet
   // ready mid-navigation) are retried, not fatal.
   const waitUntil = async (expression, timeoutMs, label) => {
@@ -206,6 +217,7 @@ async function testBootWatchdog() {
         // sessionStorage so it survives the service-worker-update reload.
         // This runs at document start, before the region exists, so attach
         // the observer once the DOM has it.
+        window.__hadControllerAtParse = !!navigator.serviceWorker.controller;
         window.__statusLog = JSON.parse(sessionStorage.getItem('__statusLog') || '[]');
         const hookRegion = () => {
           const region = document.getElementById('app-status');
@@ -368,6 +380,13 @@ async function testBootWatchdog() {
     await waitUntil(`window.__statusLog.some(m => /updating/i.test(m))`, 5000, 'installing-phase notice');
     const updateMsgs = await evaluate(`window.__statusLog.filter(m => /new version|updating/i.test(m))`);
     console.log('  update notice(s):', JSON.stringify(updateMsgs));
+    // airhorn-swq: a SUCCESSFUL update replaces the old worker, whose
+    // statechange listener then sees 'redundant'. That must never produce
+    // the failure copy - only a never-installed worker is a lost upgrade.
+    const falseFailure = await evaluate(`window.__statusLog.filter(m => /could not update/i.test(m))`);
+    if (falseFailure.length > 0) {
+      throw new Error(`successful update announced a failure: ${JSON.stringify(falseFailure)}`);
+    }
     await shot('update-notice');
     // The page updates itself via the existing controllerchange reload; wait
     // for v2 to be the active controller, then confirm the fresh page boots
@@ -488,6 +507,41 @@ async function testBootWatchdog() {
     if (!stillDead) throw new Error('app booted although the bundle threw during setup');
     await send('Fetch.disable');
     console.log('  setup throw: banner shown, app unbooted (marker only fires when usable)');
+
+    // --- Case 10: a successful update must never announce failure (airhorn-swq) --
+    console.log('--- Case 10: successful update, no false failure notice');
+    // The reviewer's repro: the FIRST generation's worker keeps its
+    // statechange listener; when a successful update replaces it, it hears
+    // 'redundant' while a controller exists. To observe that deterministically
+    // (the usual update page reloads itself via controllerchange and can die
+    // before the event), run a whole update generation on a page that cannot
+    // reload: unregister, reload so no controller exists at parse, then
+    // update - every event lands on this living page.
+    await evaluateAwaited(`(async () => {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg) await reg.unregister();
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    })()`);
+    // The old worker dies with its last client (this page); give the browser
+    // a beat to drop the registration before the fresh navigation.
+    await new Promise(r => setTimeout(r, 500));
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+    await waitUntil('typeof window.__airhorn !== "undefined"', 8000, 'fresh page to boot (v1 generation)');
+    if ((await evaluate(`window.__hadControllerAtParse`)) !== false) {
+      throw new Error('expected a page with no controller at parse for the no-reload update generation');
+    }
+    swBody = swV2;
+    await evaluate(`navigator.serviceWorker.getRegistration().then(reg => reg.update())`);
+    await waitUntil(`window.__statusLog.some(m => /new version is ready/i.test(m))`, 10000, 'successful update to complete');
+    await new Promise(r => setTimeout(r, 1500)); // let the replaced worker settle
+    const falseFailures = await evaluate(`window.__statusLog.filter(m => /could not update/i.test(m))`);
+    if (falseFailures.length > 0) {
+      throw new Error(`successful update announced a failure: ${JSON.stringify(falseFailures)}`);
+    }
+    swBody = swV1;
+    await shot('successful-update-no-failure');
+    console.log('  swq: successful update announced progress only - no failure copy');
 
     console.log('ALL RESILIENCE-UI CHECKS PASSED!');
   } finally {
