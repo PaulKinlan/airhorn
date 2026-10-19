@@ -39,9 +39,11 @@ tests/webmcp-browser.test.mjs	tests/webmcp-browser.test.mjs
 !.gitignore
 !public/**
 # The whole-product acceptance pass (npm run test:acceptance) launches its own browser and
-# drives the built app end to end; it is deliberately explicit-only, so it is exempt from the
-# fast gate rather than mapped to sources it would then run for on every change (airhorn-i8i).
-!tests/acceptance.mjs
+# drives the built app end to end; it is deliberately explicit-only, so it is **not** mapped to
+# sources - that would run it on nearly every change (airhorn-i8i). But it must be gated when the
+# pass *itself* changes: exempting the file entirely left edits to it with no coverage at all
+# ("0 suite(s), all exempt" - airhorn-up2), which is how the fallback item got in unseen.
+tests/acceptance.mjs	tests/acceptance.mjs
 # Shared browser-test support code (the quiescence probe, the gate's report hook) is imported
 # by suites, not a suite itself, so exempting it left a hole: a change to *only*
 # tests/support/** ran zero suites and the gate still reported PASS. Map it to the suites that
