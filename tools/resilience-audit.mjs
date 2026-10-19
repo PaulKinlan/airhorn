@@ -814,6 +814,7 @@ async function runAudit() {
       const shellLoaded = await reload(cdp, sessionId);
       const afterShellCorruption = await readState(cdp, sessionId);
       const shellShot = await shot(cdp, sessionId, '6-corrupt-shell-offline');
+      const hornAfterShell = await pressHorn(cdp, sessionId);
 
       // Back online: does the app recover by itself, or is the poison sticky?
       await cdp.send('Network.emulateNetworkConditions', {
@@ -841,11 +842,16 @@ async function runAudit() {
         corruptedShellEntries: shellCorrupted,
         shellNavigationCompleted: shellLoaded,
         rendersAfterShellCorruption: afterShellCorruption.horn.present,
-        // the headline row: after both corruptions the app is a garbage page
+        hornUsableAfterShellCorruption: hornAfterShell.sounded,
+        // the headline row: the state after both corruptions, with every
+        // headline field MEASURED (airhorn-0aq). The literal `hornUsable:
+        // false` here outlived the bug it described - once the worker healed
+        // corrupt entries again (airhorn-un5), the row still claimed the app
+        // was unusable while the per-stage measurement said otherwise.
         renders: afterShellCorruption.horn.present,
         hornVisible: afterShellCorruption.horn.visible,
         ...summarise(afterShellCorruption),
-        hornUsable: false,
+        hornUsable: hornAfterShell.sounded,
         recoveredOnline: !!onlineAgain && onlineAgain.horn.present,
         recoveredAfterSecondLoad: !!onlineSecond && onlineSecond.horn.present,
         recoveredAfterSwUpdate: !!(afterUpdate && afterUpdate.horn.present),
