@@ -319,6 +319,14 @@ const READ_STATE = `(() => {
       // light traversal, so without this its subtree - and its shadow -
       // is never seen (airhorn-ami).
       if (node.shadowRoot) visit(node.shadowRoot);
+      // The visited ROOT's own direct text nodes: querySelectorAll('*')
+      // returns descendants only, so a light-DOM region whose message is
+      // its own text node would read empty and flip 'explains itself'
+      // to NO (airhorn-q8j). Each element's own text is collected exactly
+      // once - as its parent-traversal's 'own', or here for the root.
+      const rootOwn = [...node.childNodes].filter((n) => n.nodeType === 3)
+        .map((n) => n.textContent).join(' ').replace(/\\s+/g, ' ').trim();
+      if (rootOwn) out.push(rootOwn);
       for (const child of node.querySelectorAll('*')) {
         if (child.checkVisibility && !child.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })) continue;
         const own = [...child.childNodes].filter((n) => n.nodeType === 3)
