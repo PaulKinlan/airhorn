@@ -314,20 +314,21 @@ const READ_STATE = `(() => {
   // are descended instead of stopping at one level.
   const renderedFragments = (root) => {
     const out = [];
-    // A shadow root renders through its host; elements render through
-    // checkVisibility (ancestors included); documents are always read.
+    // A shadow root renders through its host; documents are always read.
+    // One checkVisibility per element with the full option set is ENOUGH:
+    // measured in Chrome, it already reports an ancestor's c-v:hidden or
+    // settled auto-skip (the descendant has no box), and visibility is
+    // per-element so a visibility:visible child of a visibility:hidden
+    // ancestor stays rendered (od1's cleared case). The one gap is the
+    // element's OWN c-v:hidden, which checkVisibility reports as visible -
+    // read computed content-visibility for that directly. No ancestor walk:
+    // it over-suppressed visibility overrides and display:contents
+    // ancestors (airhorn-6xu) at O(depth) per element (airhorn-8rz).
     const rendered = (n) => {
       if (n.nodeType === 11 && n.host) n = n.host;
       if (n.nodeType !== 1) return true;
-      // Walk ancestors: a descendant's own checkVisibility does not see an
-      // ANCESTOR's content-visibility skip (airhorn-v3t); c-v:hidden is a
-      // definite skip, c-v:auto skips when the ancestor itself is not
-      // rendered (which checkVisibility reports for that ancestor).
-      for (let a = n; a; a = a.parentElement) {
-        if (a.checkVisibility && !a.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })) return false;
-        if (getComputedStyle(a).contentVisibility === 'hidden') return false;
-      }
-      return true;
+      if (n.checkVisibility && !n.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })) return false;
+      return getComputedStyle(n).contentVisibility !== 'hidden';
     };
     const ownText = (n) => [...n.childNodes].filter((c) => c.nodeType === 3)
       .map((c) => c.textContent).join(' ').replace(/\\s+/g, ' ').trim();
