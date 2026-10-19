@@ -184,6 +184,13 @@ test('the tools parse fails on a symlinked broken script and passes a valid one 
     fs.symlinkSync(path.join(tmp, 'valid.mjs'), link);
     const validRun = runSelf();
     assert.equal(validRun.status, 0, `a symlinked VALID tools script must pass the suite: ${validRun.tail}`);
+
+    // Dangling: the resolution must fail LOUDLY, not silently skip - a
+    // 'continue' here reads as coverage KNOWN over a hole (airhorn-56e).
+    fs.rmSync(link, { force: true });
+    fs.symlinkSync(path.join(tmp, 'never-created.mjs'), link);
+    const danglingRun = runSelf();
+    assert.notEqual(danglingRun.status, 0, `a DANGLING symlinked tools script must fail the suite: ${danglingRun.tail}`);
   } finally {
     fs.rmSync(link, { force: true });
     fs.rmSync(tmp, { recursive: true, force: true });
