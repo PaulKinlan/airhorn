@@ -67,7 +67,7 @@ function makeEvidenceDir() {
  * ------------------------------------------------------------------------- */
 const instrumentation = `
   (() => {
-    window.__probe = { starts: 0, peak: 0, level: 0, samples: 0, ctxState: null };
+    window.__probe = { starts: 0, oscStarts: 0, peak: 0, level: 0, samples: 0, ctxState: null };
     window.__badge = { calls: [], cleared: 0 };
     window.__pageErrors = [];
     window.addEventListener('error', (e) => {
@@ -82,44 +82,61 @@ const instrumentation = `
 
     const AC = window.AudioContext || window.webkitAudioContext;
     if (AC) {
+      const origCreateOsc = AC.prototype.createOscillator;
+      if (origCreateOsc) {
+        AC.prototype.createOscillator = function (...args) {
+          const osc = origCreateOsc.apply(this, args);
+          const origStart = osc.start.bind(osc);
+          osc.start = function (...startArgs) {
+            window.__probe.oscStarts = (window.__probe.oscStarts || 0) + 1;
+            return origStart(...startArgs);
+          };
+          return osc;
+        };
+      }
+
+      const origConnect = AudioNode.prototype.connect;
+      AudioNode.prototype.connect = function (destination, ...rest) {
+        const result = origConnect.apply(this, [destination, ...rest]);
+        if (destination && destination === this.context?.destination && !this.__isProbeNode) {
+          try {
+            const ctx = this.context;
+            const analyser = ctx.createAnalyser();
+            analyser.__isProbeNode = true;
+            analyser.fftSize = 2048;
+            const data = new Float32Array(analyser.fftSize);
+            const silentSink = ctx.createGain();
+            silentSink.__isProbeNode = true;
+            silentSink.gain.value = 0;
+            origConnect.call(this, analyser);
+            origConnect.call(analyser, silentSink);
+            origConnect.call(silentSink, ctx.destination);
+
+            const timer = setInterval(() => {
+              analyser.getFloatTimeDomainData(data);
+              let peak = 0;
+              for (let i = 0; i < data.length; i += 1) {
+                const abs = Math.abs(data[i]);
+                if (abs > peak) peak = abs;
+              }
+              window.__probe.level = peak;
+              if (peak > window.__probe.peak) window.__probe.peak = peak;
+              window.__probe.samples += 1;
+              window.__probe.ctxState = ctx.state;
+            }, 20);
+            setTimeout(() => clearInterval(timer), 20000);
+          } catch {}
+        }
+        return result;
+      };
+
       const createBufferSource = AC.prototype.createBufferSource;
       AC.prototype.createBufferSource = function (...args) {
-        const ctx = this;
         const source = createBufferSource.apply(this, args);
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 2048;
-        const data = new Float32Array(analyser.fftSize);
-        // Keep the analyser connected without adding a second audible path.
-        const silentSink = ctx.createGain();
-        silentSink.gain.value = 0;
-        silentSink.connect(ctx.destination);
-        analyser.connect(silentSink);
-
-        const connect = source.connect.bind(source);
-        source.connect = (destination, ...rest) => {
-          const result = connect(destination, ...rest);
-          if (destination !== analyser) connect(analyser);
-          return result;
-        };
-
-        const start = source.start.bind(source);
+        const origStart = source.start.bind(source);
         source.start = (...startArgs) => {
           window.__probe.starts += 1;
-          const result = start(...startArgs);
-          const timer = setInterval(() => {
-            analyser.getFloatTimeDomainData(data);
-            let peak = 0;
-            for (let i = 0; i < data.length; i += 1) {
-              const abs = Math.abs(data[i]);
-              if (abs > peak) peak = abs;
-            }
-            window.__probe.level = peak;
-            if (peak > window.__probe.peak) window.__probe.peak = peak;
-            window.__probe.samples += 1;
-            window.__probe.ctxState = ctx.state;
-          }, 20);
-          setTimeout(() => clearInterval(timer), 20000);
-          return result;
+          return origStart(...startArgs);
         };
         return source;
       };
@@ -576,6 +593,39 @@ async function run() {
       const offlinePressShot = await shot('07-offline-press.png');
       await releasePointer();
 
+      // Test synthesised fallback: missing/corrupted audio sample offline
+      await evaluate(`(async () => {
+        const keys = await caches.keys();
+        for (const k of keys) {
+          const cache = await caches.open(k);
+          const reqs = await cache.keys();
+          for (const req of reqs) {
+            if (req.url.includes('airhorn.mp3')) {
+              await cache.delete(req);
+            }
+          }
+        }
+      })()`);
+
+      await send('Network.clearBrowserCache');
+      await send('Network.setBlockedURLs', { urls: ['*airhorn.mp3*'] });
+
+      await send('Page.reload', { ignoreCache: false });
+      await waitFor(
+        `document.readyState === 'complete' && !!document.querySelector('.horn')`,
+        15000, 'offline reload without cached audio',
+      );
+      await sleep(300);
+
+      const duringFallback = await pressAndHold();
+      const fallbackShot = await shot('08-offline-fallback-press.png');
+      await releasePointer();
+      const afterFallback = await hornState();
+      const usingFallback = await evaluate('!!(window.__airhorn && window.__airhorn.usingFallback)');
+      const oscStarts = await evaluate('window.__probe.oscStarts || 0');
+
+      await send('Network.setBlockedURLs', { urls: [] });
+
       const problems = [];
       if (sw.state !== 'activated') problems.push(`service worker state=${sw.state}`);
       if (!/\/sw\.js$/.test(sw.script || '')) problems.push(`unexpected SW script ${sw.script}`);
@@ -588,14 +638,19 @@ async function run() {
       if (!offlineRender.controller) problems.push('no SW controller after offline reload');
       if (!(duringOffline.peak > 0.01)) problems.push(`no audio offline (peak=${duringOffline.peak})`);
       if (duringOffline.pressed !== 'true') problems.push('aria-pressed not set offline');
+      if (!usingFallback) problems.push('usingFallback is false when sample is missing offline');
+      if (!(oscStarts >= 3)) problems.push(`oscStarts=${oscStarts} (expected >= 3 harmonics)`);
+      if (!(duringFallback.peak > 0.01)) problems.push(`fallback synth produced no audio (peak=${duringFallback.peak})`);
+      if (duringFallback.pressed !== 'true') problems.push('fallback press did not set aria-pressed');
+      if (afterFallback.pressed !== 'false') problems.push('fallback release did not clear aria-pressed');
 
-      record('3. install/offline: SW activates, offline reload renders and plays',
+      record('3. install/offline: SW activates, offline reload renders and plays, synth fallback handles missing sample',
         problems.length === 0,
         problems.length ? problems.join('; ') :
           `SW ${sw.state}, ${sw.cached} precached entries; offline reload rendered ` +
-          `(bg ${offlineRender.stylesApplied}, peak=${duringOffline.peak.toFixed(3)})`,
-        [installedShot, offlineShot, offlinePressShot]);
-      notes.offline = { sw, offlineRender, duringOffline };
+          `(bg ${offlineRender.stylesApplied}, sample peak=${duringOffline.peak.toFixed(3)}, synth peak=${duringFallback.peak.toFixed(3)}, oscStarts=${oscStarts})`,
+        [installedShot, offlineShot, offlinePressShot, fallbackShot]);
+      notes.offline = { sw, offlineRender, duringOffline, duringFallback, oscStarts, usingFallback };
 
       await send('Network.emulateNetworkConditions', {
         offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1,

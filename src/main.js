@@ -169,6 +169,10 @@ class AirHorn {
     return this.#horn.hasAudioContext();
   }
 
+  get usingFallback() {
+    return this.#horn.usingFallback;
+  }
+
   stop({ immediate = false } = {}) {
     this.#loop = false;
     this.#image.classList.remove('horning');
