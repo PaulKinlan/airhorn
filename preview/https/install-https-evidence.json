@@ -1,0 +1,102 @@
+{
+  "generatedAt": "2026-10-19T20:11:26.390Z",
+  "hostname": "airhorn.test (mapped to 127.0.0.1 via --host-resolver-rules)",
+  "chromeUserAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+  "flagsUsed": [
+    "--headless=new",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--autoplay-policy=no-user-gesture-required",
+    "--host-resolver-rules=MAP airhorn.test 127.0.0.1",
+    "--ignore-certificate-errors-spki-list=<base64 sha256 of the cert SPKI>",
+    "--remote-debugging-port=0",
+    "--user-data-dir=<fresh tmp profile>"
+  ],
+  "flagFindings": "Blanket --ignore-certificate-errors was measured first and does NOT fire beforeinstallprompt on this Chrome (155.0.0.0 headless): the page loads and isSecureContext is true, but the installability checker still sees the invalid certificate. Trusting the key via --ignore-certificate-errors-spki-list is required; see flagFindings fields on each leg.",
+  "http": {
+    "origin": "http://airhorn.test:33673/",
+    "label": "http-insecure",
+    "href": "http://airhorn.test:33673/",
+    "installCollectorType": "object",
+    "secureContext": false,
+    "serviceWorkerRegistration": {
+      "error": "TypeError: Cannot read properties of undefined (reading 'getRegistration')"
+    },
+    "serviceWorker": {
+      "unavailable": "insecure context"
+    },
+    "manifest": {
+      "name": "The Air Horner",
+      "start_url": "/?homescreen=1",
+      "scope": "/",
+      "display": "standalone",
+      "icons_192_512": [
+        "192x192",
+        "512x512",
+        "192x192",
+        "512x512"
+      ]
+    },
+    "startUrlInScope": false,
+    "installPrompt": {
+      "fired": false,
+      "at": 0,
+      "platforms": null,
+      "promptError": null,
+      "choice": null
+    },
+    "installButton": {
+      "disabled": true,
+      "hasAvailableClass": false,
+      "visibility": "hidden",
+      "pointerEvents": "none",
+      "text": "Install"
+    },
+    "screenshot": "install-http-insecure.png"
+  },
+  "https": {
+    "origin": "https://airhorn.test:37449/",
+    "label": "https-selfsigned",
+    "href": "https://airhorn.test:37449/",
+    "installCollectorType": "object",
+    "secureContext": true,
+    "serviceWorkerRegistration": {
+      "scope": "https://airhorn.test:37449/",
+      "state": "activated"
+    },
+    "serviceWorker": {
+      "scriptURL": "https://airhorn.test:37449/sw.js",
+      "state": "activated"
+    },
+    "manifest": {
+      "name": "The Air Horner",
+      "start_url": "/?homescreen=1",
+      "scope": "/",
+      "display": "standalone",
+      "icons_192_512": [
+        "192x192",
+        "512x512",
+        "192x192",
+        "512x512"
+      ]
+    },
+    "startUrlInScope": false,
+    "installPrompt": {
+      "fired": true,
+      "at": 1792440684701,
+      "platforms": [
+        "web"
+      ],
+      "promptError": "NotAllowedError: Failed to execute 'prompt' on 'BeforeInstallPromptEvent': The prompt() method must be called with a user gesture",
+      "choice": null
+    },
+    "installButton": {
+      "disabled": false,
+      "hasAvailableClass": true,
+      "visibility": "visible",
+      "pointerEvents": "auto",
+      "text": "Install"
+    },
+    "screenshot": "install-https-selfsigned.png"
+  }
+}

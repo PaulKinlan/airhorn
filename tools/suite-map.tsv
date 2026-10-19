@@ -72,6 +72,9 @@ tests/resilience-ui.test.mjs	tests/resilience-ui.test.mjs
 !.gitignore
 !public/**
 # Generated preview-evidence artifacts (screenshots, captured JSON) carry no
+# behaviour; no suite covers them (airhorn-8uu, airhorn-c4n).
+!preview/**
+# Generated preview-evidence artifacts (screenshots, captured JSON) carry no
 # behaviour; no suite covers them (airhorn-8uu).
 !preview/**
 # The whole-product acceptance pass (npm run test:acceptance) launches its own browser and
