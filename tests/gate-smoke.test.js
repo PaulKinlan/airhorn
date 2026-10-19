@@ -70,14 +70,27 @@ test('every tools script parses - recognised extensions at any depth (airhorn-7l
     '.sh': (f) => execFileSync('bash', ['-n', f]),
   };
   const DATA_EXTS = new Set(['.conf', '.tsv', '.json', '.md', '.txt']);
-  const entries = fs.readdirSync(path.join(root, 'tools'), { recursive: true });
+  const entries = fs.readdirSync(path.join(root, 'tools'), { recursive: true, withFileTypes: true });
   let parsed = 0;
-  for (const s of entries) {
-    const ext = path.extname(s);
+  for (const ent of entries) {
+    // Directories are containers, not parseable units - the FILES inside are
+    // visited by the recursive walk itself (airhorn-mo4, airhorn-al7).
+    if (!ent.isFile()) continue;
+    const rel = path.join(ent.parentPath || ent.path, ent.name)
+      .replace(`${root}${path.sep}`, '');
+    const ext = path.extname(rel);
     if (DATA_EXTS.has(ext)) continue;
     const parse = PARSERS[ext];
-    assert.ok(parse, `no parser for tools/${s} - add one to gate-smoke or its extension to the data list (airhorn-h19)`);
-    parse(path.join(root, 'tools', s));
+    if (!parse) {
+      // Keep h19's guarantee while saying precisely what to do: an
+      // extensionless file must become a parseable script or gain an
+      // extension this suite can classify.
+      const hint = ext === ''
+        ? 'add a script extension (.mjs/.js/.cjs/.ts/.sh) so gate-smoke can parse it, or move it - extensionless tools files are assumed to be scripts'
+        : 'add a parser for its extension to gate-smoke, or move it to the data list';
+      assert.fail(`no parser for ${rel}: ${hint} (airhorn-h19, airhorn-mo4)`);
+    }
+    parse(path.join(root, rel));
     parsed += 1;
   }
   assert.ok(parsed >= 3, `expected the tools scripts to be present, got ${parsed}`);
