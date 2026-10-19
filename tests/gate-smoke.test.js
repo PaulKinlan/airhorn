@@ -57,19 +57,30 @@ test('the gate script parses (bash -n)', () => {
   execFileSync('bash', ['-n', gate]);
 });
 
-test('every tools script parses - any extension, any depth (airhorn-7lm, airhorn-7z5)', () => {
-  // Glob, not names (airhorn-v1n), and EVERY script extension, not just .mjs:
-  // the tools/* placement must be real for any script in the tree, present or
-  // future - a NEW tools script with a syntax error must fail this suite, not
-  // report coverage KNOWN.
+test('every tools script parses - recognised extensions at any depth (airhorn-7lm, airhorn-7z5, airhorn-h19)', () => {
+  // Glob, not names (airhorn-v1n), and every RECOGNISED script extension,
+  // not just .mjs (airhorn-h19: .cjs and .ts were unparseable, extensionless
+  // files invisible). A tools file with no parser is a failure, not a skip:
+  // teach the checker or list the extension as data here.
+  const PARSERS = {
+    '.mjs': (f) => execFileSync(process.execPath, ['--check', f]),
+    '.js': (f) => execFileSync(process.execPath, ['--check', f]),
+    '.cjs': (f) => execFileSync(process.execPath, ['--check', f]),
+    '.ts': (f) => execFileSync(path.join(root, 'node_modules', '.bin', 'esbuild'), [f]),
+    '.sh': (f) => execFileSync('bash', ['-n', f]),
+  };
+  const DATA_EXTS = new Set(['.conf', '.tsv', '.json', '.md', '.txt']);
   const entries = fs.readdirSync(path.join(root, 'tools'), { recursive: true });
-  const scripts = entries.filter((f) => /\.(mjs|js|sh)$/.test(f));
-  assert.ok(scripts.length >= 3, `expected the tools scripts to be present, got ${JSON.stringify(scripts)}`);
-  for (const s of scripts) {
-    const full = path.join(root, 'tools', s);
-    if (/\.sh$/.test(s)) execFileSync('bash', ['-n', full]);
-    else execFileSync(process.execPath, ['--check', full]);
+  let parsed = 0;
+  for (const s of entries) {
+    const ext = path.extname(s);
+    if (DATA_EXTS.has(ext)) continue;
+    const parse = PARSERS[ext];
+    assert.ok(parse, `no parser for tools/${s} - add one to gate-smoke or its extension to the data list (airhorn-h19)`);
+    parse(path.join(root, 'tools', s));
+    parsed += 1;
   }
+  assert.ok(parsed >= 3, `expected the tools scripts to be present, got ${parsed}`);
 });
 
 test('every script-tier suite is gated by a tests/support change (airhorn-dco)', () => {
@@ -80,12 +91,15 @@ test('every script-tier suite is gated by a tests/support change (airhorn-dco)',
   // fail loudly instead of living in a comment (airhorn-10q, airhorn-n00,
   // airhorn-5t8 were three recurrences of the same drift).
   const supportChange = 'tests/support/report-hook.mjs';
-  const selected = new Set(listFor(supportChange));
+  const selected = listFor(supportChange).sort();
   const scriptTier = fs.readdirSync(path.join(root, 'tests'))
     .filter((f) => /\.test\.mjs$/.test(f) && f !== 'acceptance.mjs')
-    .map((f) => `tests/${f}`);
+    .map((f) => `tests/${f}`).sort();
   assert.ok(scriptTier.length >= 6, `expected the script-tier suites to be present, got ${JSON.stringify(scriptTier)}`);
-  for (const s of scriptTier) {
-    assert.ok(selected.has(s), `a support-file change must select ${s} (the hook runs under it), got ${JSON.stringify([...selected])}`);
-  }
+  // EXACT set, not subset (airhorn-cae): over-naming matters as much as
+  // under-naming - tests/acceptance.mjs in this row would put a full
+  // browser acceptance pass on every support change, and subset-only
+  // checking would call that correct.
+  assert.deepEqual(selected, scriptTier,
+    `the support row must select exactly the script-tier suites:\n  row: ${JSON.stringify(selected)}\n  expected: ${JSON.stringify(scriptTier)}`);
 });
