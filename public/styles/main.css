@@ -119,6 +119,27 @@
 }
 
 @layer components {
+  /* A failure the user cannot otherwise see - the upgrade that was dropped.
+     Empty until it has something to say, so it adds no layout and no
+     announcement in the normal case (airhorn-nv9). */
+  .status {
+    position: fixed;
+    inset-block-end: 1rem;
+    inset-inline: 1rem;
+    margin: 0 auto;
+    max-inline-size: 34rem;
+    padding: 0.75rem 1rem;
+    border-radius: 0.75rem;
+    background-color: var(--install-bg);
+    color: var(--install-ink);
+    font: inherit;
+    text-align: center;
+
+    &:empty {
+      display: none;
+    }
+  }
+
   #airhorn {
     /* Size container: the horn below scales from the space it is given, so it
        behaves the same in a 320px window, a split pane or a desktop window. */
