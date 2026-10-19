@@ -216,7 +216,7 @@ test('the tools parse fails on a symlinked broken script and passes a valid one 
     fs.rmSync(link, { force: true });
     fs.symlinkSync(path.join(tmp, 'valid.mjs'), link);
     const validRun = runSelf();
-    assert.equal(validRun.status, 0, `a symlinked VALID tools script must pass the suite: ${validRun.tail}`);
+    assert.equal(validRun.status, 0, `with a VALID symlink the whole child suite must stay green - this leg also asserts the child self-skipped, so any other failing test reports here too: ${validRun.tail}`);
     assert.ok(!validRun.out.includes('tools/tools/'), `valid leg must not contain doubled prefix: ${validRun.out.slice(0, 300)}`);
 
     // Dangling: the resolution must fail LOUDLY, not silently skip - a
@@ -285,20 +285,25 @@ test('ambient GSM_TOOLS_ROOT redirection is impossible without the minted guard 
 });
 
 // The audit's render instrument as a decision TABLE (airhorn-0w9, -cpi, -9py,
-// -7s3, -4jw). Every fact below is what Chrome 155 MEASURED for that
-// arrangement - checkVisibility, computed display/content-visibility and
-// innerText - so this table is the browser's behaviour in Node form. The
-// audit injects this module's SOURCE into the page, so the model tested here
-// is the model Chromium runs: no second copy, no drift.
+// -7s3, -4jw, -s52). Every fact below is what Chrome 155 MEASURED for that
+// arrangement - checkVisibility without visibilityProperty ('boxChain'), the
+// computed display/content-visibility/visibility/opacity, innerText - so this
+// table is the browser's behaviour in Node form. The audit injects this
+// module's SOURCE into the page, so the model tested here is the model
+// Chromium runs: no second copy, no drift.
 //
 // The class this replaces: 'shown' was checkVisibility(el) and 'text' came
 // from a separate walk, so every disagreement WAS a finding (a c-v:auto
 // skipped region read shown:true over innerText '', a display:contents region
-// with visible text read shown:false). Here one walk decides both.
-test('the render model: shown IS visible text; a skipped node contributes nothing (airhorn-0w9, -cpi, -9py)', () => {
+// with visible text read shown:false). Here one walk decides both, and the
+// verdict is three-state: 'none' prunes a subtree, 'own' drops only this
+// node's own text (so a visibility override below it survives), 'text'
+// collects.
+test('the render model: shown IS visible text; a skipped node contributes nothing (airhorn-0w9, -cpi, -9py, -s52)', () => {
   const model = makeRenderModel();
+  const base = { boxChain: true, visibility: 'visible', opacity: 1 };
   const el = (facts = {}, ownText = '', elements = [], shadow = null) => ({
-    facts: { type: 'element', checkVisibility: true, display: 'block', contentVisibility: 'visible', ...facts },
+    facts: { type: 'element', display: 'block', contentVisibility: 'visible', ...base, ...facts },
     ownText, elements, shadow,
   });
   const shadowRoot = (...elements) => ({ facts: { type: 'shadow' }, ownText: '', elements, shadow: null });
@@ -311,26 +316,27 @@ test('the render model: shown IS visible text; a skipped node contributes nothin
     { name: 'its own content-visibility:auto, skipped off-screen', tree: el({ contentVisibility: 'auto', hasTextContent: true, renderedText: '' }, 'auto skipped status'), text: '' },
     { name: 'its own content-visibility:auto, rendered', tree: el({ contentVisibility: 'auto', hasTextContent: true, renderedText: 'auto visible' }, 'auto visible'), text: 'auto visible' },
     { name: 'a skipped element inside a rendered region', tree: el({}, '', [el({ contentVisibility: 'hidden', hasTextContent: true, renderedText: '' }, 'invisible kid')]), text: '' },
-    // Chrome: display:contents reports checkVisibility FALSE (no box) while its
-    // text is on screen (innerText non-empty, one range rect) - so a boxless
-    // element is decided by its children, not by its own checkVisibility.
-    // A contents element has no box, so its own text is gated by the box chain
-    // above it plus its own computed visibility/opacity - measured in Chrome
-    // 155: without that, own text read shown:true from display:none,
-    // visibility:hidden and opacity:0 alike.
-    { name: 'display:contents region with its own text', tree: el({ display: 'contents', checkVisibility: false, visibility: 'visible', opacity: 1, boxChain: true }, 'contents region text'), text: 'contents region text' },
-    { name: 'display:contents region with its own text, visibility:hidden', tree: el({ display: 'contents', checkVisibility: false, visibility: 'hidden', opacity: 1, boxChain: true }, 'hidden contents own text'), text: '' },
-    { name: 'display:contents region with its own text, opacity:0', tree: el({ display: 'contents', checkVisibility: false, visibility: 'visible', opacity: 0, boxChain: true }, 'contents opacity zero'), text: '' },
-    { name: 'display:contents region with its own text under a display:none ancestor', tree: el({ display: 'contents', checkVisibility: false, visibility: 'visible', opacity: 1, boxChain: false }, 'contents own text under display none'), text: '' },
-    { name: 'display:contents region with its own text and a visibility:visible override', tree: el({ display: 'contents', checkVisibility: false, visibility: 'visible', opacity: 1, boxChain: true }, 'contents visible override'), text: 'contents visible override' },
-    { name: 'display:contents region with text in a visible child', tree: el({ display: 'contents', checkVisibility: false, visibility: 'visible', opacity: 1, boxChain: true }, '', [el({}, 'contents visible child')]), text: 'contents visible child' },
-    { name: 'display:contents region whose only child is hidden', tree: el({ display: 'contents', checkVisibility: false, visibility: 'visible', opacity: 1, boxChain: true }, '', [el({ checkVisibility: false }, 'gone')]), text: '' },
-    { name: 'a region inside a display:none ancestor', tree: el({ checkVisibility: false }, 'hidden ancestor status'), text: '' },
-    // The inheritable-override case (airhorn-od1): a visibility:visible region
-    // inside a visibility:hidden ancestor IS shown, and checkVisibility says so.
+    // A display:contents element has no box, so it is decided by its own
+    // computed visibility/opacity plus the box chain of its nearest boxed
+    // ancestor - Chrome reports no box chain for a contents element even while
+    // it is plainly painted. Without that, its own text read shown:true from
+    // visibility:hidden, opacity:0 and display:none (airhorn-s52).
+    { name: 'display:contents region with its own text', tree: el({ display: 'contents' }, 'contents region text'), text: 'contents region text' },
+    { name: 'display:contents region with its own text, visibility:hidden', tree: el({ display: 'contents', visibility: 'hidden' }, 'hidden contents own text'), text: '' },
+    { name: 'display:contents region with its own text, opacity:0', tree: el({ display: 'contents', opacity: 0 }, 'contents opacity zero'), text: '' },
+    { name: 'display:contents region with its own text under a display:none ancestor', tree: el({ display: 'contents', boxChain: false }, 'contents own text under display none'), text: '' },
+    { name: 'display:contents region with a visibility:visible override under a hidden ancestor', tree: el({ display: 'contents' }, 'contents visible override'), text: 'contents visible override' },
+    { name: 'display:contents region with text in a visible child', tree: el({ display: 'contents' }, '', [el({}, 'contents visible child')]), text: 'contents visible child' },
+    { name: 'display:contents region whose only child is unrendered', tree: el({ display: 'contents' }, '', [el({ boxChain: false }, 'gone')]), text: '' },
+    // THE od1 MIRROR (airhorn-s52): a visibility:hidden element still has a
+    // box, so its subtree must NOT be pruned - a visibility:visible descendant
+    // is painted and its text belongs in the walk. Only the hidden element's
+    // OWN text is dropped.
+    { name: 'a hidden element with a visible descendant', tree: el({ visibility: 'hidden' }, 'hidden own text', [el({}, 'kept child text')]), text: 'kept child text' },
+    { name: 'a region inside a display:none ancestor', tree: el({ boxChain: false }, 'hidden ancestor status'), text: '' },
     { name: 'a visibility:visible region inside a visibility:hidden ancestor', tree: el({}, 'visible override region'), text: 'visible override region' },
-    { name: 'an opacity:0 region', tree: el({ checkVisibility: false }, 'echo opacity zero'), text: '' },
-    { name: 'a region in closed <details>', tree: el({ checkVisibility: false }, 'closed details alert'), text: '' },
+    { name: 'an opacity:0 region', tree: el({ boxChain: false, opacity: 0 }, 'echo opacity zero'), text: '' },
+    { name: 'a region in closed <details>', tree: el({ boxChain: false }, 'closed details alert'), text: '' },
     { name: 'a message only in an open shadow root', tree: el({}, '', [], shadowRoot(el({}, 'shadow alert text'))), text: 'shadow alert text' },
     { name: 'a message in a nested shadow root', tree: el({}, '', [el({}, '', [], shadowRoot(el({}, 'nested shadow text')))]), text: 'nested shadow text' },
   ];
@@ -346,12 +352,12 @@ test('the render model: shown IS visible text; a skipped node contributes nothin
 });
 
 // The instrument the audit actually runs - READ_STATE, the page code - driven
-// here against a fake DOM (airhorn-0w9, -cpi, -9py). The model test above
+// here against a fake DOM (airhorn-0w9, -cpi, -9py, -s52). The model test
 // pins the decisions; this pins the ADAPTER, the only bridge between them and
 // browser facts. A dropped `contentVisibility` or a misspelled fact here would
-// restore the c-v bug in the browser with every other test green, and would
+// restore a verdict bug in the browser with every other test green, and would
 // have been invisible: nothing used to test READ_STATE at all.
-test('the page instrument turns DOM facts into the model verdict (airhorn-0w9, -cpi, -9py)', () => {
+test('the page instrument turns DOM facts into the model verdict (airhorn-0w9, -cpi, -9py, -s52)', () => {
   const descendants = (node) => node.children.flatMap((c) => [c, ...descendants(c)]);
   const wire = (node) => {
     node.querySelectorAll = (sel) => descendants(node).filter((d) => (sel === '*' ? true : !!d.role));
@@ -366,51 +372,54 @@ test('the page instrument turns DOM facts into the model verdict (airhorn-0w9, -
     node.ownText = ownText;
     node.textContent = textOf(node);
     for (const c of children) c.parentElement = node;
-    // Chrome 155 facts: display:none/[hidden]/closed details/opacity:0/
-    // visibility resolve through checkVisibility; the element's OWN c-v skip
-    // does not (measured) and shows up as empty innerText instead. The
-    // box-chain question (no visibilityProperty) is a different answer: it is
-    // 'is there a box above me at all', and a contents element asks its
-    // nearest boxed ancestor for it.
-    node.checkVisibility = (opts) => (opts && opts.visibilityProperty === undefined
-      ? facts.boxChain !== false
-      : facts.checkVisibility !== false);
-    Object.defineProperty(node, 'innerText', { get: () => (facts.innerText !== undefined ? facts.innerText : node.textContent) });
+    // Chrome 155 facts: the box chain (asked without visibilityProperty) is
+    // FALSE for display:none, opacity:0, closed <details> and c-v skips and
+    // for any descendant of them, but TRUE for a visibility:hidden element -
+    // its visibility is a separate fact, so its visible descendants survive.
+    node.checkVisibility = (opts) => (facts.boxChain !== false);
+    Object.defineProperty(node, 'innerText', { get: () => (facts.renderedText !== undefined ? facts.renderedText : node.textContent) });
     node.getAttribute = (k) => (k === 'role' ? node.role : null);
     return wire(node);
   };
-  const shadowOf = (host, ...children) => wire({ nodeType: 11, host, children, shadowRoot: null });
+  const shadowOf = (host, ...children) => wire({ nodeType: 11, host, children, shadowRoot: null, childNodes: [] });
   const styleOf = (n) => ({
     display: n.facts ? n.facts.display || 'block' : 'block',
     contentVisibility: n.facts ? n.facts.contentVisibility || 'visible' : 'visible',
     visibility: n.facts && n.facts.visibility ? n.facts.visibility : 'visible',
     opacity: n.facts && n.facts.opacity !== undefined ? String(n.facts.opacity) : '1',
   });
-  const instrument = (regions) => {
-    const body = mk({}, '', regions);
-    const document = wire({ nodeType: 9, children: [body], shadowRoot: null, querySelector: () => null, title: 'fixture', readyState: 'complete' });
+  const instrument = (regions, extraBody = []) => {
+    const body = mk({}, '', [...extraBody, ...regions]);
+    const document = wire({ nodeType: 9, children: [body], shadowRoot: null, childNodes: [], querySelector: () => null, title: 'fixture', readyState: 'complete' });
     // Inject the real page code with the browser globals it reads.
     const run = new Function('document', 'getComputedStyle', 'performance', 'navigator', 'location', 'window',
       `return ${READ_STATE}`);
     return run(document, styleOf, { getEntriesByType: () => [] }, { onLine: true }, { href: 'about:blank' }, {});
   };
   const plain = mk({}, 'plain visible status', [], { role: 'status' });
-  const skippedAuto = mk({ contentVisibility: 'auto', innerText: '' }, 'auto skipped status', [], { role: 'status' });
-  const contents = mk({ display: 'contents', checkVisibility: false, opacity: 1 }, 'contents region text', [], { role: 'status' });
-  const contentsHidden = mk({ display: 'contents', checkVisibility: false, visibility: 'hidden', opacity: 1 }, 'hidden contents own text', [], { role: 'status' });
+  const skippedAuto = mk({ contentVisibility: 'auto', renderedText: '' }, 'auto skipped status', [], { role: 'status' });
+  const contents = mk({ display: 'contents' }, 'contents region text', [], { role: 'status' });
+  const contentsHidden = mk({ display: 'contents', visibility: 'hidden' }, 'hidden contents own text', [], { role: 'status' });
   const host = mk({}, '', [], { role: 'status' });
   host.shadowRoot = shadowOf(host, mk({}, 'shadow alert text'));
-  const state = instrument([plain, skippedAuto, contents, contentsHidden, host]);
-  assert.deepEqual(state.live.map((l) => l.shown), [true, false, true, false, true],
+  // A visibility:hidden wrapper with a visible status region inside it: the
+  // wrapper's own text must not count, the region inside must (airhorn-s52).
+  const wrapper = mk({ visibility: 'hidden' }, 'hidden wrapper text', [mk({}, 'kept region text', [], { role: 'status' })]);
+  const state = instrument([plain, skippedAuto, contents, contentsHidden, host], [wrapper]);
+  // DOM order: the wrapper's region comes first.
+  assert.deepEqual(state.live.map((l) => l.shown), [true, true, false, true, false, true],
     `shown must follow visible text: ${JSON.stringify(state.live)}`);
   assert.deepEqual(state.live.map((l) => l.text),
-    ['plain visible status', '', 'contents region text', '', 'shadow alert text'],
+    ['kept region text', 'plain visible status', '', 'contents region text', '', 'shadow alert text'],
     `text must be the rendered text only: ${JSON.stringify(state.live)}`);
   for (const l of state.live) {
     assert.equal(l.shown, l.text !== '', `shown must BE "has visible text": ${JSON.stringify(l)}`);
   }
-  // The body read is the same instrument: the skipped region's text is not in
-  // it (it used to be, and earned 'explains itself' for nothing).
+  // The body read is the same instrument: skipped text is not in it (it used
+  // to be, and earned 'explains itself' for nothing), and a visibility
+  // override below a hidden wrapper is not lost (airhorn-s52).
   assert.ok(!state.bodyText.includes('auto skipped status'), `bodyText leaked skipped text: ${state.bodyText}`);
+  assert.ok(!state.bodyText.includes('hidden wrapper text'), `bodyText leaked hidden own text: ${state.bodyText}`);
   assert.ok(state.bodyText.includes('contents region text'), `bodyText lost rendered text: ${state.bodyText}`);
+  assert.ok(state.bodyText.includes('kept region text'), `bodyText lost a visibility override: ${state.bodyText}`);
 });

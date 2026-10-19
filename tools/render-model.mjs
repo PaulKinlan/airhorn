@@ -30,8 +30,7 @@ export function makeRenderModel() {
   // visibility:hidden ancestor IS shown - airhorn-od1).
   const OPTIONS = { visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true };
 
-  // facts: { type, checkVisibility, display, contentVisibility,
-  //          visibility, opacity, boxChain,
+  // facts: { type, display, contentVisibility, boxChain, visibility, opacity,
   //          hasTextContent, renderedText }
   // The adapter supplies facts only; every decision is here.
   // Returns 'none' (skip this node AND its subtree), 'own' (descend, but this
@@ -47,25 +46,22 @@ export function makeRenderModel() {
     // layout query, and only c-v elements pay for it).
     if (facts.contentVisibility === 'hidden') return 'none';
     if (facts.contentVisibility === 'auto' && facts.hasTextContent && facts.renderedText === '') return 'none';
-    if (facts.display === 'contents') {
-      // No box of its own, and checkVisibility is FALSE for it while its
-      // children are still painted (measured in Chrome 155: display:contents
-      // element, checkVisibility false, innerText non-empty, one range rect).
-      // So the subtree is never pruned on this element's verdict - a child
-      // carries the ancestor facts itself and may override visibility
-      // (airhorn-od1's cleared case). Its OWN text nodes still need a verdict,
-      // and they are painted only if BOTH the box chain above it is rendered
-      // (asked without visibilityProperty, so an ancestor's visibility cannot
-      // override the element's own) and its own computed visibility/opacity
-      // allow it. Without this, a display:contents region reading its own text
-      // claimed shown:true from display:none, visibility:hidden and opacity:0
-      // (measured with the browser fixture; the 13-case matrix missed it).
-      if (facts.visibility === 'hidden') return 'own';
-      if (!(facts.opacity > 0.05)) return 'own';
-      if (facts.boxChain === false) return 'own';
-      return 'text';
-    }
-    if (facts.checkVisibility === false) return 'none';
+    // THE BOX CHAIN - display:none, [hidden], closed <details>, an ancestor's
+    // opacity:0, a c-v skip - removes the whole subtree: nothing inside it is
+    // painted. Deliberately asked WITHOUT visibilityProperty: visibility does
+    // not take a box away, so a visibility:visible descendant of a hidden
+    // ancestor IS painted, and pruning on a visibility verdict dropped it from
+    // every walk starting above that ancestor (the od1 mirror, airhorn-s52).
+    // For a display:contents element the adapter asks its nearest BOXED
+    // ancestor, because a contents element reports no box chain of its own
+    // (measured: false even while plainly painted).
+    if (facts.boxChain === false) return 'none';
+    // This element's OWN text is painted only if its own used visibility and
+    // opacity allow it - a display:contents region had no verdict at all, so
+    // its own text read shown:true from visibility:hidden and opacity:0
+    // (airhorn-s52). Descend either way: children may override visibility.
+    if (facts.visibility === 'hidden') return 'own';
+    if (!(facts.opacity > 0.05)) return 'own';
     return 'text';
   };
 

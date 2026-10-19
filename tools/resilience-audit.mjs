@@ -304,19 +304,25 @@ export const READ_STATE = `(() => {
   };
   // The adapter supplies FACTS only, never verdicts, so there is exactly one
   // place a decision can be wrong - the tested model above.
-  // A display:contents element has no box, so 'is the box chain above me
-  // painted?' has to be asked of the nearest ancestor that HAS one. Without
-  // visibilityProperty: a visibility:visible override belongs to the element
-  // itself (airhorn-od1), so an ancestor's visibility must not answer it.
-  const boxChainVisible = (el) => {
+  // Is the box chain (display, [hidden], closed <details>, opacity, c-v)
+  // painted? Asked WITHOUT visibilityProperty: visibility does not take a box
+  // away, and a visibility:visible descendant of a hidden ancestor must keep
+  // its text in every walk, including the body read (airhorn-od1, -s52).
+  // A boxed element answers for itself (checkVisibility includes its
+  // ancestors); a display:contents element has no box at all (measured:
+  // false even while plainly painted), so its nearest BOXED ancestor answers.
+  const boxOptions = { opacityProperty: true, contentVisibilityAuto: true };
+  const boxChainOf = (el, style) => {
+    const answers = (n) => {
+      if (typeof n.checkVisibility === 'function') return n.checkVisibility(boxOptions);
+      const s = getComputedStyle(n);
+      return s.display !== 'none' && Number(s.opacity) > 0.05;
+    };
+    if (style.display !== 'contents') return answers(el);
     const up = (n) => n.parentElement || (n.getRootNode ? n.getRootNode().host : null);
     let n = up(el);
     while (n && getComputedStyle(n).display === 'contents') n = up(n);
-    if (!n) return true; // nothing above to ask (we are the root)
-    const boxOptions = { opacityProperty: true, contentVisibilityAuto: true };
-    if (typeof n.checkVisibility === 'function') return n.checkVisibility(boxOptions);
-    const s = getComputedStyle(n);
-    return s.display !== 'none' && Number(s.opacity) > 0.05;
+    return n ? answers(n) : true; // nothing above to ask: we are the root
   };
   const ownTextOf = (n) => [...(n.childNodes || [])].filter((c) => c.nodeType === 3)
     .map((c) => c.textContent).join(' ').replace(/\\s+/g, ' ').trim();
@@ -328,21 +334,18 @@ export const READ_STATE = `(() => {
       const style = getComputedStyle(host);
       facts = {
         type: 'element',
-        checkVisibility: typeof host.checkVisibility === 'function'
-          ? host.checkVisibility(model.OPTIONS)
-          : style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0.05,
         display: style.display,
         contentVisibility: style.contentVisibility,
+        boxChain: boxChainOf(host, style),
+        // Used values: visibility inherits (with an override allowed at any
+        // level), opacity does not.
+        visibility: style.visibility,
+        opacity: Number(style.opacity),
       };
-      // Every getter below is read by exactly one rare branch, so an ordinary
-      // element pays for none of them: innerText and the ancestor walk are
-      // layout queries, and a normal page has no content-visibility and no
-      // display:contents.
+      // The two layout queries are read only by the c-v branch, so an ordinary
+      // element never pays for them.
       Object.defineProperty(facts, 'hasTextContent', { get: () => (host.textContent || '').trim() !== '' });
       Object.defineProperty(facts, 'renderedText', { get: () => (host.innerText || '').trim() });
-      Object.defineProperty(facts, 'visibility', { get: () => style.visibility });
-      Object.defineProperty(facts, 'opacity', { get: () => Number(style.opacity) });
-      Object.defineProperty(facts, 'boxChain', { get: () => boxChainVisible(host) });
     }
     return {
       facts,
