@@ -74,10 +74,21 @@ server (`node tools/preview-evidence.mjs` after `npm run build`):
   light/dark screenshots).
 - **Performance**: `preview/CWV-report.txt` (repo tool, CDP): cold load 92 KB
   transferred, FP ~104 ms, CLS 0.0000, INP p98 ~16 ms; repeat load 0 bytes over
-  the network, everything SW-served, FP ~52 ms. `preview/lighthouse-summary.json`
-  holds the Lighthouse category scores and key audits (run per its own output).
-  The headless CDP tool does not report LCP; Lighthouse's synthetic LCP is the
-  number to read there.
+  the network, everything SW-served, FP ~52 ms. The headless CDP tool does not
+  report LCP.
+- **Lighthouse: attempted, environment-incompatible — recorded, not hidden.**
+  Nine full-page runs of Lighthouse 13.5.0 against the local server all failed
+  with `NO_FCP`. This is not the page failing to paint: Lighthouse's own trace
+  for the failing runs contains Paint events ~80 ms after navigation start, the
+  captured screenshots show real renders, and the repo's CDP tool records FCP
+  ~104 ms from `PerformanceObserver`. What never arrives is the
+  `Page.lifecycleEvent: firstContentfulPaint` CDP event Lighthouse 13.5.0 waits
+  on — a plain CDP session *does* receive it for the same markup, and a
+  trivial page scores a full 100 under the same Lighthouse. Nine-plus runs
+  (headless, and headed under Xvfb) never scored the full page, so **no
+  Lighthouse score is claimed**; re-run Lighthouse on a desktop machine for
+  the synthetic score (`npx lighthouse <deployed-url>`), and treat
+  `preview/CWV-report.txt` as the perf evidence of record for this decision.
 
 ## What stays unverified without a real HTTPS deployment
 
