@@ -270,60 +270,65 @@ async function run() {
     }
 
     // WCAG 1.4.11 Non-text Contrast: the horn's boundary ring must clear 3:1
-    // against the page background (red on blue alone is 1.18:1).
-    const relLum = (rgb) => {
-      const [cr, cg, cb] = rgb.match(/[\d.]+/g).map(Number).map((v) => {
-        const s = v / 255;
-        return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
-      });
-      return 0.2126 * cr + 0.7152 * cg + 0.0722 * cb;
+    // against the page background (red on blue alone is 1.18:1). Shared function
+    // used for both the clean pass and negative controls (airhorn-8e5).
+    const checkHornBoundaryContrast = ({ hornOutlineStyle, hornOutlineWidth, hornOutlineColor, bodyBackground }) => {
+      // Width alone proves nothing: Chrome reports the outline's INITIAL values when
+      // nothing is painted, so a removed ring still measures 3px ("medium") and its
+      // colour reads as currentColor, which happens to clear 3:1 on this background
+      // (airhorn-29y). Assert the outline is actually painted, with a visible colour.
+      if (!hornOutlineStyle || hornOutlineStyle === 'none' || hornOutlineStyle === 'hidden') {
+        throw new Error(
+          `Expected the horn boundary ring to be painted, got outline-style '${hornOutlineStyle}' ` +
+          `(width '${hornOutlineWidth}' is the initial value, not a drawn ring)`
+        );
+      }
+      if (parseFloat(hornOutlineWidth) < 1) {
+        throw new Error(`Expected horn outline width >= 1px, got ${hornOutlineWidth}`);
+      }
+      // An opaque `rgb(r, g, b)` carries no alpha: its last component is the blue
+      // channel, so reading it as alpha falsely rejected a valid black ring
+      // (airhorn-gg8 - black on this page is 6.72:1, which the contrast check above
+      // already accepts). Only a 4-component rgba(), or a slash-separated alpha in
+      // the modern notation, actually expresses transparency.
+      const alphaOf = (color) => {
+        const text = String(color).trim();
+        const comma = /^rgba?\(([^)]*)\)$/i.exec(text);
+        // Space-separated modern notation also matches the `rgb(...)` shape, so only
+        // treat it as the legacy form when it really is comma-separated.
+        if (comma && comma[1].includes(',')) {
+          const parts = comma[1].split(',').map((v) => parseFloat(v));
+          return parts.length === 4 && Number.isFinite(parts[3]) ? parts[3] : 1;
+        }
+        const slash = /\(\s*[^)]*\/\s*([\d.]+)(%?)\s*\)$/.exec(text);
+        if (slash) {
+          const value = parseFloat(slash[1]);
+          return slash[2] === '%' ? value / 100 : value;
+        }
+        return 1; // unknown notation: never invent transparency
+      };
+      if (alphaOf(hornOutlineColor) === 0) {
+        throw new Error(
+          `Expected a visible horn boundary ring, got a fully transparent outline colour ${hornOutlineColor}`
+        );
+      }
+      const relLum = (rgb) => {
+        const [cr, cg, cb] = rgb.match(/[\d.]+/g).map(Number).map((v) => {
+          const s = v / 255;
+          return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+        });
+        return 0.2126 * cr + 0.7152 * cg + 0.0722 * cb;
+      };
+      const outlineLum = relLum(hornOutlineColor);
+      const pageLum = relLum(bodyBackground);
+      const boundaryRatio = (Math.max(outlineLum, pageLum) + 0.05) / (Math.min(outlineLum, pageLum) + 0.05);
+      if (boundaryRatio < 3) {
+        throw new Error(`Expected horn boundary contrast >= 3:1, got ${boundaryRatio.toFixed(2)}:1 (${hornOutlineColor} on ${bodyBackground})`);
+      }
+      return boundaryRatio;
     };
-    const outlineLum = relLum(r.hornOutlineColor);
-    const pageLum = relLum(r.bodyBackground);
-    const boundaryRatio = (Math.max(outlineLum, pageLum) + 0.05) / (Math.min(outlineLum, pageLum) + 0.05);
+    const boundaryRatio = checkHornBoundaryContrast(r);
     console.log(`Horn boundary contrast: ${r.hornOutlineColor} on ${r.bodyBackground} = ${boundaryRatio.toFixed(2)}:1`);
-    // Width alone proves nothing: Chrome reports the outline's INITIAL values when
-    // nothing is painted, so a removed ring still measures 3px ("medium") and its
-    // colour reads as currentColor, which happens to clear 3:1 on this background
-    // (airhorn-29y). Assert the outline is actually painted, with a visible colour.
-    if (!r.hornOutlineStyle || r.hornOutlineStyle === 'none' || r.hornOutlineStyle === 'hidden') {
-      throw new Error(
-        `Expected the horn boundary ring to be painted, got outline-style '${r.hornOutlineStyle}' ` +
-        `(width '${r.hornOutlineWidth}' is the initial value, not a drawn ring)`
-      );
-    }
-    if (parseFloat(r.hornOutlineWidth) < 1) {
-      throw new Error(`Expected horn outline width >= 1px, got ${r.hornOutlineWidth}`);
-    }
-    // An opaque `rgb(r, g, b)` carries no alpha: its last component is the blue
-    // channel, so reading it as alpha falsely rejected a valid black ring
-    // (airhorn-gg8 - black on this page is 6.72:1, which the contrast check above
-    // already accepts). Only a 4-component rgba(), or a slash-separated alpha in
-    // the modern notation, actually expresses transparency.
-    const alphaOf = (color) => {
-      const text = String(color).trim();
-      const comma = /^rgba?\(([^)]*)\)$/i.exec(text);
-      // Space-separated modern notation also matches the `rgb(...)` shape, so only
-      // treat it as the legacy form when it really is comma-separated.
-      if (comma && comma[1].includes(',')) {
-        const parts = comma[1].split(',').map((v) => parseFloat(v));
-        return parts.length === 4 && Number.isFinite(parts[3]) ? parts[3] : 1;
-      }
-      const slash = /\(\s*[^)]*\/\s*([\d.]+)(%?)\s*\)$/.exec(text);
-      if (slash) {
-        const value = parseFloat(slash[1]);
-        return slash[2] === '%' ? value / 100 : value;
-      }
-      return 1; // unknown notation: never invent transparency
-    };
-    if (alphaOf(r.hornOutlineColor) === 0) {
-      throw new Error(
-        `Expected a visible horn boundary ring, got a fully transparent outline colour ${r.hornOutlineColor}`
-      );
-    }
-    if (boundaryRatio < 3) {
-      throw new Error(`Expected horn boundary contrast >= 3:1, got ${boundaryRatio.toFixed(2)}:1 (${r.hornOutlineColor} on ${r.bodyBackground})`);
-    }
 
     // Test Accessibility Tree for the button
     const axTree = await send('Accessibility.getFullAXTree');
@@ -571,6 +576,240 @@ async function run() {
     if (!ftr.focusedHorn) {
       throw new Error(`Expected focus on .horn after install button was hidden, got: ${ftr.activeElementTag}.${ftr.activeElementClass}`);
     }
+
+    // WCAG 2.2 AA Audit and Falsifiable Negative Controls (airhorn-2hl, airhorn-8e5, airhorn-557)
+    console.log('Running WCAG 2.2 AA audit and falsifiability verification...');
+    const axePath = path.join(__dirname, 'support/axe.min.js');
+    if (!fs.existsSync(axePath)) {
+      throw new Error(`axe-core bundle missing at ${axePath}`);
+    }
+    const axeSource = fs.readFileSync(axePath, 'utf8');
+    await send('Runtime.evaluate', { expression: axeSource });
+
+    // Shared target size predicate expression (WCAG 2.2 SC 2.5.8 Level AA, >= 24x24 CSS px)
+    const findUndersizedTargetsExpr = `(() => {
+      const interactive = Array.from(document.querySelectorAll('button, [role="button"], a[href]')).filter(el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return !el.disabled && !el.closest('[hidden]') && style.display !== 'none' && style.visibility !== 'hidden' && (rect.width > 0 || rect.height > 0);
+      });
+      return interactive.filter(el => {
+        const rect = el.getBoundingClientRect();
+        return rect.width < 24 || rect.height < 24;
+      }).map(el => ({
+        id: el.id,
+        selector: el.id ? '#' + el.id : (el.className ? '.' + el.className.split(' ').join('.') : el.tagName),
+        width: el.getBoundingClientRect().width,
+        height: el.getBoundingClientRect().height
+      }));
+    })()`;
+
+    // Shared live region announcement assertion (WCAG SC 4.1.3 Level AA)
+    const assertLiveRegionAnnouncement = (axTree, expectedText) => {
+      const statusRoleNode = axTree.nodes.find(n => n.role?.value === 'status');
+      if (!statusRoleNode) {
+        throw new Error('Element with role="status" not found in AXTree');
+      }
+      if (statusRoleNode.ignored) {
+        throw new Error('Element with role="status" is ignored in AXTree');
+      }
+      const liveProp = statusRoleNode.properties?.find(p => p.name === 'live')?.value?.value;
+      if (liveProp !== 'polite') {
+        throw new Error(`Expected live="polite", got "${liveProp}"`);
+      }
+      const textNode = axTree.nodes.find(n => n.name?.value === expectedText);
+      if (!textNode) {
+        throw new Error(`Text "${expectedText}" not found in AXTree`);
+      }
+      if (textNode.ignored) {
+        throw new Error(`Text "${expectedText}" is ignored in AXTree`);
+      }
+      return { statusRoleNode, textNode };
+    };
+
+    // 1. Audit clean build with axe-core (WCAG 2.0 / 2.1 / 2.2 AA)
+    const cleanAxe = await send('Runtime.evaluate', {
+      expression: `(async () => {
+        const results = await axe.run(document, {
+          runOnly: {
+            type: 'tag',
+            values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']
+          }
+        });
+        return results.violations;
+      })()`,
+      awaitPromise: true,
+      returnByValue: true
+    });
+    if (cleanAxe.result.value.length > 0) {
+      throw new Error(`Clean build failed WCAG audit: ${JSON.stringify(cleanAxe.result.value)}`);
+    }
+    console.log('Clean build axe-core violations: 0');
+
+    // 2. Manual check: Target Size Minimum (WCAG 2.2 SC 2.5.8 Level AA, >= 24x24 CSS px)
+    const cleanUndersized = await send('Runtime.evaluate', {
+      expression: findUndersizedTargetsExpr,
+      returnByValue: true
+    });
+    if (cleanUndersized.result.value.length > 0) {
+      throw new Error(`Undersized targets found on clean build: ${JSON.stringify(cleanUndersized.result.value)}`);
+    }
+    console.log(`Clean build target size: 0 undersized targets (< 24x24px) found`);
+
+    // 3. Status Messages (WCAG 2.1/2.2 SC 4.1.3 Level AA): verify live region actually announces in AXTree
+    const liveAnnounceText = 'Accessibility status announcement verified';
+    await send('Runtime.evaluate', {
+      expression: `window.__airhornAnnounce(${JSON.stringify(liveAnnounceText)})`
+    });
+    const axTreeLive = await send('Accessibility.getFullAXTree');
+    const liveVerified = assertLiveRegionAnnouncement(axTreeLive, liveAnnounceText);
+    console.log(`Polite live region announcement verified in AXTree: "${liveVerified.textNode.name.value}" (nodeId: ${liveVerified.textNode.nodeId})`);
+    // Clear live region
+    await send('Runtime.evaluate', { expression: `window.__airhornAnnounce('')` });
+
+    // 4. Falsifiable Negative Controls: inject known defects and assert exact rule IDs and shared assertions catch them
+    console.log('Testing falsifiability negative controls...');
+
+    // Control 1: Missing accessible name -> caught by axe rule 'button-name'
+    await send('Runtime.evaluate', {
+      expression: `(() => {
+        const horn = document.querySelector('.horn');
+        horn.removeAttribute('aria-label');
+        const label = horn.querySelector('.horn-label');
+        if (label) {
+          label.dataset.origDisplay = label.style.display;
+          label.style.display = 'none';
+        }
+      })()`
+    });
+    const neg1 = await send('Runtime.evaluate', {
+      expression: `(async () => {
+        const r = await axe.run(document, { runOnly: ['button-name'] });
+        return r.violations.map(v => ({ id: v.id, nodes: v.nodes.map(n => n.target) }));
+      })()`,
+      awaitPromise: true,
+      returnByValue: true
+    });
+    await send('Runtime.evaluate', {
+      expression: `(() => {
+        const horn = document.querySelector('.horn');
+        horn.setAttribute('aria-label', 'Air horn');
+        const label = horn.querySelector('.horn-label');
+        if (label) label.style.display = label.dataset.origDisplay || '';
+      })()`
+    });
+    const caughtButtonName = neg1.result.value.find(v => v.id === 'button-name' && v.nodes.some(targets => targets.some(t => t.includes('.horn'))));
+    if (!caughtButtonName) {
+      throw new Error(`Falsification FAILED: Missing accessible name was not caught by rule 'button-name': ${JSON.stringify(neg1.result.value)}`);
+    }
+    console.log(`  [PASS] Defect 1 (missing accessible name) caught by rule: ${caughtButtonName.id}`);
+
+    // Control 2: Low-contrast boundary ring (1.2:1) -> caught by shared checkHornBoundaryContrast (airhorn-8e5)
+    await send('Runtime.evaluate', { expression: `document.querySelector('.horn').style.outlineColor = 'rgb(244, 67, 54)'` });
+    const neg2Styles = await send('Runtime.evaluate', {
+      expression: `(() => {
+        const horn = document.querySelector('.horn');
+        const cs = window.getComputedStyle(horn);
+        return {
+          hornOutlineColor: cs.outlineColor,
+          hornOutlineWidth: cs.outlineWidth,
+          hornOutlineStyle: cs.outlineStyle,
+          bodyBackground: window.getComputedStyle(document.body).backgroundColor
+        };
+      })()`,
+      returnByValue: true
+    });
+    await send('Runtime.evaluate', { expression: `document.querySelector('.horn').style.outlineColor = ''` });
+    let neg2Threw = false;
+    let neg2Error = '';
+    try {
+      checkHornBoundaryContrast(neg2Styles.result.value);
+    } catch (e) {
+      neg2Threw = true;
+      neg2Error = e.message;
+    }
+    if (!neg2Threw || !neg2Error.includes('Expected horn boundary contrast >= 3:1')) {
+      throw new Error(`Falsification FAILED: Low-contrast boundary ring was not rejected by checkHornBoundaryContrast: ${neg2Error}`);
+    }
+    console.log(`  [PASS] Defect 2 (1.2:1 boundary ring) caught by shared checkHornBoundaryContrast: "${neg2Error}"`);
+
+    // Control 2b: Missing outline entirely (outline-style: none) -> caught by shared checkHornBoundaryContrast (airhorn-8e5)
+    await send('Runtime.evaluate', { expression: `document.querySelector('.horn').style.outlineStyle = 'none'` });
+    const neg2bStyles = await send('Runtime.evaluate', {
+      expression: `(() => {
+        const horn = document.querySelector('.horn');
+        const cs = window.getComputedStyle(horn);
+        return {
+          hornOutlineColor: cs.outlineColor,
+          hornOutlineWidth: cs.outlineWidth,
+          hornOutlineStyle: cs.outlineStyle,
+          bodyBackground: window.getComputedStyle(document.body).backgroundColor
+        };
+      })()`,
+      returnByValue: true
+    });
+    await send('Runtime.evaluate', { expression: `document.querySelector('.horn').style.outlineStyle = ''` });
+    let neg2bThrew = false;
+    try {
+      checkHornBoundaryContrast(neg2bStyles.result.value);
+    } catch (e) {
+      neg2bThrew = true;
+    }
+    if (!neg2bThrew) {
+      throw new Error('Falsification FAILED: Removed outline was not rejected by checkHornBoundaryContrast');
+    }
+    console.log(`  [PASS] Defect 2b (removed boundary ring) caught by shared checkHornBoundaryContrast assertion`);
+
+    // Control 3: Undersized 20x20px interactive target -> caught by shared findUndersizedTargetsExpr (airhorn-557)
+    await send('Runtime.evaluate', {
+      expression: `(() => {
+        const btn = document.createElement('button');
+        btn.id = 'falsify-tiny-control';
+        btn.textContent = 'x';
+        btn.style.cssText = 'position:fixed;top:0;left:0;width:20px;height:20px;padding:0;margin:0;border:none;';
+        document.body.appendChild(btn);
+      })()`
+    });
+    const neg3Undersized = await send('Runtime.evaluate', {
+      expression: findUndersizedTargetsExpr,
+      returnByValue: true
+    });
+    await send('Runtime.evaluate', { expression: `document.getElementById('falsify-tiny-control')?.remove()` });
+    const caughtTiny = neg3Undersized.result.value.find(t => t.id === 'falsify-tiny-control');
+    if (!caughtTiny || caughtTiny.width !== 20 || caughtTiny.height !== 20) {
+      throw new Error(`Falsification FAILED: Undersized 20x20px target was not caught by shared findUndersizedTargets: ${JSON.stringify(neg3Undersized.result.value)}`);
+    }
+    console.log(`  [PASS] Defect 3 (20x20px interactive target) caught by shared findUndersizedTargets: ${caughtTiny.selector} (${caughtTiny.width}x${caughtTiny.height}px)`);
+
+    // Control 4: Status message marked aria-hidden='true' -> caught by shared assertLiveRegionAnnouncement (airhorn-557)
+    await send('Runtime.evaluate', {
+      expression: `(() => {
+        const status = document.getElementById('app-status');
+        status.setAttribute('aria-hidden', 'true');
+        window.__airhornAnnounce('Hidden status defect');
+      })()`
+    });
+    const axTreeNeg4 = await send('Accessibility.getFullAXTree');
+    await send('Runtime.evaluate', {
+      expression: `(() => {
+        const status = document.getElementById('app-status');
+        status.removeAttribute('aria-hidden');
+        window.__airhornAnnounce('');
+      })()`
+    });
+    let neg4Threw = false;
+    let neg4Error = '';
+    try {
+      assertLiveRegionAnnouncement(axTreeNeg4, 'Hidden status defect');
+    } catch (e) {
+      neg4Threw = true;
+      neg4Error = e.message;
+    }
+    if (!neg4Threw) {
+      throw new Error(`Falsification FAILED: Status message marked aria-hidden was not rejected by assertLiveRegionAnnouncement`);
+    }
+    console.log(`  [PASS] Defect 4 (aria-hidden status message) caught by shared assertLiveRegionAnnouncement: "${neg4Error}"`);
+    console.log('All falsification negative controls verified!');
 
     // Take screenshot evidence
     const screenshot = await send('Page.captureScreenshot', { format: 'png' });
