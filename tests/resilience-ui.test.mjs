@@ -54,6 +54,18 @@ async function testBootWatchdog() {
   const swV2 = swV1.replace('v1', 'v2');
   let swBody = swV1;
 
+  // The suite times its healthy-boot assertion off the page's own watchdog
+  // grace (arm on load, reveal after this many ms). Read it from the built
+  // page so the suite follows the page instead of carrying a stale copy of
+  // the constant; if the watchdog's shape changes and the constant can no
+  // longer be found, this suite fails loudly rather than guessing.
+  const graceMatch = fs.readFileSync(path.join(distDir, 'index.html'), 'utf8')
+    .match(/setTimeout\(show,\s*(\d+)\)/);
+  if (!graceMatch) {
+    throw new Error('boot watchdog grace not found in dist/index.html; the healthy-boot case times itself off it');
+  }
+  const WATCHDOG_GRACE_MS = Number(graceMatch[1]);
+
   const server = http.createServer((req, res) => {
     const reqUrl = req.url.split('?')[0];
     // The page registers /sw.js unconditionally; serve a no-op stub that
@@ -272,8 +284,15 @@ async function testBootWatchdog() {
     if (!status.empty || !status.visuallyHidden) {
       throw new Error(`status region not silent on a healthy boot: ${JSON.stringify(status)}`);
     }
-    // The watchdog arms on load + 2s grace; wait past the grace and re-check.
-    await new Promise(r => setTimeout(r, 3500));
+    // The watchdog arms on load and reveals after its grace; wait until the
+    // page's own timeline says the grace has fully elapsed, measured from the
+    // page's load event (not a fudge sleep), then assert silence. Same
+    // assertion, same lower bound on page time - just no arbitrary margin.
+    await waitUntil(`(() => {
+      const nav = performance.getEntriesByType('navigation')[0];
+      return !!nav && nav.loadEventEnd > 0 &&
+        performance.now() - nav.loadEventEnd >= ${WATCHDOG_GRACE_MS} + 250;
+    })()`, WATCHDOG_GRACE_MS + 8000, 'watchdog grace to elapse past the page\'s load event');
     if ((await evaluate(bannerHiddenExpr)) !== true) {
       throw new Error('Boot-failure banner appeared after the grace period on a healthy boot');
     }
@@ -333,7 +352,12 @@ async function testBootWatchdog() {
     console.log('--- Case 4: JavaScript disabled, noscript notice');
     await send('Emulation.setScriptExecutionDisabled', { value: true });
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await new Promise(r => setTimeout(r, 1500));
+    // The notice is static HTML: wait for it to actually render instead of
+    // sleeping a fixed margin past it.
+    await waitUntil(`(() => {
+      const el = document.querySelector('noscript .boot-alert');
+      return !!el && el.getClientRects().length > 0;
+    })()`, 5000, 'noscript notice to render');
     const noscript = await evaluate(`(() => {
       const el = document.querySelector('noscript .boot-alert');
       const banner = document.getElementById('boot-failure');
