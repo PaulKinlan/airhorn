@@ -215,6 +215,31 @@ async function testSwAndManifest() {
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  // Bounded condition wait (airhorn-iwf): a fixed sleep made every run pay the
+  // WORST case. Polling to the SAME deadline pays only the time actually needed
+  // and keeps the failure window identical, so no assertion gets a shorter
+  // deadline. Returns the truthy value (or the last falsy one) so callers keep
+  // their existing assertions.
+  const waitUntil = async (predicate, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    let value;
+    for (;;) {
+      try { value = await predicate(); } catch { value = undefined; }
+      if (value) return value;
+      if (Date.now() >= deadline) return value;
+      await sleep(100);
+    }
+  };
+  const pageReady = () => evaluate(`document.readyState === 'complete' && !!document.querySelector('.horn')`);
+  const readAsset = (url) => evaluate(`fetch(${JSON.stringify(url)})
+    .then(async (r) => ({ status: r.status, body: await r.text() }))
+    .catch((e) => ({ status: 0, body: '', error: String(e && e.message || e) }))`);
+  const healedOk = (r) => r.status === 200 && r.body.length > 1000 && !r.body.includes(GARBAGE);
+  const waitHealed = (url, timeoutMs) => waitUntil(async () => {
+    const r = await readAsset(url);
+    return healedOk(r) ? r : null;
+  }, timeoutMs);
+
   try {
     await send('Page.enable');
     await send('Runtime.enable');
@@ -441,7 +466,7 @@ async function testSwAndManifest() {
         `could not corrupt the cached ${shellPath}`);
     }
     await send('Page.reload');
-    await sleep(1200);
+    await waitUntil(pageReady, 1200);
 
     const afterHeal = await evaluate(`(() => ({
       horn: !!document.querySelector('.horn'),
@@ -465,9 +490,8 @@ async function testSwAndManifest() {
       `could not corrupt the cached asset ${assetUrl}`);
     originState.down = true;
     await send('Page.reload');
-    await sleep(1000);
 
-    const offlineShell = await evaluate('!!document.querySelector(\'.horn\')');
+    const offlineShell = await waitUntil(pageReady, 1000);
     assert(offlineShell, 'the shell should still render offline (only the asset entry was corrupted)');
 
     const offlineAsset = await evaluate(`fetch(${JSON.stringify(assetUrl)})
@@ -489,11 +513,8 @@ async function testSwAndManifest() {
     console.log('\n--- C. back online, the entry heals and stays healable ---');
     originState.down = false;
     await send('Page.reload');
-    await sleep(1200);
 
-    const healed = await evaluate(`fetch(${JSON.stringify(assetUrl)})
-      .then(async (r) => ({ status: r.status, body: await r.text() }))
-      .catch((e) => ({ status: 0, error: String(e && e.message || e) }))`);
+    const healed = (await waitHealed(assetUrl, 1200)) || await readAsset(assetUrl);
     assert(healed.status === 200, `the asset did not come back after healing: ${JSON.stringify(healed)}`);
     assert(healed.body.length > 1000 && !healed.body.includes(GARBAGE),
       'the "healed" asset is still not the real bundle');
@@ -503,10 +524,7 @@ async function testSwAndManifest() {
     assert(await corrupt(assetUrl, GARBAGE, 'application/javascript') === 'corrupted',
       'could not re-corrupt the asset');
     await send('Page.reload');
-    await sleep(1200);
-    const secondHeal = await evaluate(`fetch(${JSON.stringify(assetUrl)})
-      .then(async (r) => ({ status: r.status, body: await r.text() }))
-      .catch((e) => ({ status: 0, body: '' }))`);
+    const secondHeal = (await waitHealed(assetUrl, 1200)) || await readAsset(assetUrl);
     assert(secondHeal.status === 200 && secondHeal.body.length > 1000
       && !secondHeal.body.includes(GARBAGE),
       `healing is not repeatable: ${JSON.stringify(secondHeal)}`);

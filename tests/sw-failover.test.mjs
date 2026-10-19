@@ -143,6 +143,19 @@ async function run() {
   const origin = `http://127.0.0.1:${port}`;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  // Bounded condition wait (airhorn-iwf): same deadline, but it returns as soon
+  // as the condition holds instead of always paying the worst case.
+  const waitUntil = async (predicate, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    let value;
+    for (;;) {
+      try { value = await predicate(); } catch { value = undefined; }
+      if (value) return value;
+      if (Date.now() >= deadline) return value;
+      await sleep(100);
+    }
+  };
+
   const chrome = spawn(process.env.CHROME_BIN || 'google-chrome', [
     '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
     '--remote-debugging-port=0', `--user-data-dir=${fs.mkdtempSync('/tmp/airhorn-failover-')}`,
@@ -274,17 +287,21 @@ async function run() {
       new DOMException('The quota has been exceeded.', 'QuotaExceededError'));`;
     await evaluate(`navigator.serviceWorker.getRegistration()
       .then((reg) => reg && reg.update()).then(() => true).catch(() => false)`);
-    await sleep(3000);
-
-    const report = await evaluate(`(() => {
+    const readReport = () => evaluate(`(() => {
       const live = [...document.querySelectorAll('[role="status"], [role="alert"], [aria-live]')];
       const text = live.map((el) => (el.textContent || '').trim()).join(' | ');
       return { regions: live.length, text };
     })()`);
+    const REPORT_RE = /update|could not|failed|latest|previous version/i;
+    // Same 3s window, but it stops as soon as the report lands (airhorn-iwf).
+    const report = (await waitUntil(async () => {
+      const r = await readReport();
+      return REPORT_RE.test(r.text) ? r : null;
+    }, 3000)) || await readReport();
     const after = await evaluate(`caches.keys()`);
     state.swShim = null;
 
-    assert(report.text && /update|could not|failed|latest|previous version/i.test(report.text),
+    assert(report.text && REPORT_RE.test(report.text),
       `a failed upgrade was never reported to the user: ${JSON.stringify(report)}`);
     assert(after.length === before.length,
       `a failed upgrade left caches behind: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`);
