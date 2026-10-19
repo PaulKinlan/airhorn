@@ -1,0 +1,45 @@
+{
+  "index.html": [
+    "tests/horn.test.js",
+    "tests/a11y.test.mjs",
+    "tests/webmcp-browser.test.mjs",
+    "tests/sw-failover.test.mjs",
+    "tests/resilience-ui.test.mjs"
+  ],
+  "src/horn.js": [
+    "tests/horn.test.js",
+    "tests/a11y.test.mjs"
+  ],
+  "src/main.js": [
+    "tests/horn.test.js",
+    "tests/a11y.test.mjs",
+    "tests/webmcp-browser.test.mjs",
+    "tests/resilience-ui.test.mjs"
+  ],
+  "src/webmcp.js": [
+    "tests/webmcp.test.mjs",
+    "tests/webmcp-browser.test.mjs"
+  ],
+  "vite.config.js": [
+    "tests/horn.test.js",
+    "tests/a11y.test.mjs",
+    "tests/sw-offline.test.mjs",
+    "tests/webmcp-browser.test.mjs"
+  ],
+  "public/sw.js": [
+    "tests/sw-offline.test.mjs",
+    "tests/sw-failover.test.mjs"
+  ],
+  "public/manifest.json": [
+    "tests/sw-offline.test.mjs"
+  ],
+  "public/sounds/*": [
+    "tests/sw-offline.test.mjs"
+  ],
+  "public/scripts/*": [
+    "tests/a11y.test.mjs"
+  ],
+  "tools/*": [
+    "tests/horn.test.js"
+  ]
+}
