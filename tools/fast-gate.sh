@@ -130,6 +130,18 @@ map_reaches() { # $1 = suite path ; true iff a NON-exemption row names it (plain
 
 UNMAPPED=(); EXEMPT_COUNT=0; SELECTED=()
 for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
+  # A deleted SUITE selects nothing: there is no file left to run, and the
+  # reverse check below keeps the map honest for every suite that DOES exist.
+  # Without this skip, a suite deleted in the same commit that updates the map
+  # is selected by the changed-suite rule (the file maps to itself) and then
+  # fails as a "missing" suite - a correct map punished for being correct
+  # (airhorn-iwf). Deleted NON-suite paths keep mapping normally: a dynamic
+  # import can survive the build, so the suites a deleted source file covered
+  # must still run and fail.
+  case $f in
+    tests/*.test.js|tests/*.test.mjs|tests/*.test.ts|test/*.test.js|test/*.test.mjs|test/*.test.ts)
+      [ -f "$ROOT/$f" ] || continue ;;
+  esac
   got=$(suites_for "$f")
   if [ -n "$got" ]; then
     while IFS= read -r s; do [ -n "$s" ] && SELECTED+=("$s"); done <<<"$got"

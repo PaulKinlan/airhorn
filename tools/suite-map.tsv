@@ -16,12 +16,13 @@ package.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-
 package-lock.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
 server.ts	tests/horn.test.js
 tools/*	tests/horn.test.js
-# The SW/offline suite covers the PWA surface (it verifies sw caching + manifest contents in dist).
-# sw-integrity drives the worker's cache-integrity behaviour directly (a corrupt entry must be
-# evicted and healed, never served), so it is gated on the worker itself - not on index.html,
-# whose markup the a11y suite already covers, because that would double the gate on the most
-# frequently edited file for no extra signal (airhorn-un5).
-public/sw.js	tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/sw-integrity.test.mjs tests/sw-failover.test.mjs
+# The SW/offline suite covers the PWA surface (it verifies sw caching + manifest contents in dist)
+# AND the worker's cache-integrity behaviour (a corrupt entry must be evicted and healed, never
+# served - airhorn-un5; merged into it in airhorn-iwf so one worker change pays one Chromium launch,
+# not two). It is gated on the worker itself - not on index.html, whose markup the a11y suite
+# already covers, because that would double the gate on the most frequently edited file for no
+# extra signal.
+public/sw.js	tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/sw-failover.test.mjs
 public/manifest.json	tests/sw-offline.test.mjs test/sw-offline.test.mjs
 public/sounds/**	tests/sw-offline.test.mjs test/sw-offline.test.mjs
 # The install-compat shim affects the page the a11y suite drives.
@@ -31,7 +32,6 @@ public/scripts/**	tests/a11y.test.mjs test/a11y.test.mjs
 tests/horn.test.js	tests/horn.test.js
 tests/a11y.test.mjs	tests/a11y.test.mjs
 tests/sw-offline.test.mjs	tests/sw-offline.test.mjs
-tests/sw-integrity.test.mjs	tests/sw-integrity.test.mjs
 tests/sw-failover.test.mjs	tests/sw-failover.test.mjs
 tests/webmcp.test.mjs	tests/webmcp.test.mjs
 tests/webmcp-browser.test.mjs	tests/webmcp-browser.test.mjs
