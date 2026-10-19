@@ -16,6 +16,8 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { makeRenderModel } from '../tools/render-model.mjs';
+import { READ_STATE } from '../tools/resilience-audit.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const gate = path.join(root, 'tools', 'fast-gate.sh');
@@ -216,4 +218,120 @@ test('the tools parse fails on a symlinked broken script and passes a valid one 
     fs.rmSync(link, { force: true });
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// The audit's render instrument as a decision TABLE (airhorn-0w9, -cpi, -9py,
+// -7s3, -4jw). Every fact below is what Chrome 155 MEASURED for that
+// arrangement - checkVisibility, computed display/content-visibility and
+// innerText - so this table is the browser's behaviour in Node form. The
+// audit injects this module's SOURCE into the page, so the model tested here
+// is the model Chromium runs: no second copy, no drift.
+//
+// The class this replaces: 'shown' was checkVisibility(el) and 'text' came
+// from a separate walk, so every disagreement WAS a finding (a c-v:auto
+// skipped region read shown:true over innerText '', a display:contents region
+// with visible text read shown:false). Here one walk decides both.
+test('the render model: shown IS visible text; a skipped node contributes nothing (airhorn-0w9, -cpi, -9py)', () => {
+  const model = makeRenderModel();
+  const el = (facts = {}, ownText = '', elements = [], shadow = null) => ({
+    facts: { type: 'element', checkVisibility: true, display: 'block', contentVisibility: 'visible', ...facts },
+    ownText, elements, shadow,
+  });
+  const shadowRoot = (...elements) => ({ facts: { type: 'shadow' }, ownText: '', elements, shadow: null });
+  const cases = [
+    { name: 'a plain visible region', tree: el({}, 'plain visible status'), text: 'plain visible status' },
+    // Chrome: a c-v:hidden element reports checkVisibility TRUE and innerText
+    // '' - the skip is invisible to checkVisibility, so innerText is the
+    // evidence. Its subtree is pruned whole.
+    { name: 'its own content-visibility:hidden', tree: el({ contentVisibility: 'hidden', hasTextContent: true, renderedText: '' }, 'alpha', [el({}, 'kid')]), text: '' },
+    { name: 'its own content-visibility:auto, skipped off-screen', tree: el({ contentVisibility: 'auto', hasTextContent: true, renderedText: '' }, 'auto skipped status'), text: '' },
+    { name: 'its own content-visibility:auto, rendered', tree: el({ contentVisibility: 'auto', hasTextContent: true, renderedText: 'auto visible' }, 'auto visible'), text: 'auto visible' },
+    { name: 'a skipped element inside a rendered region', tree: el({}, '', [el({ contentVisibility: 'hidden', hasTextContent: true, renderedText: '' }, 'invisible kid')]), text: '' },
+    // Chrome: display:contents reports checkVisibility FALSE (no box) while its
+    // text is on screen (innerText non-empty, one range rect) - so a boxless
+    // element is decided by its children, not by its own checkVisibility.
+    { name: 'display:contents region with its own text', tree: el({ display: 'contents', checkVisibility: false }, 'contents region text'), text: 'contents region text' },
+    { name: 'display:contents region with text in a visible child', tree: el({ display: 'contents', checkVisibility: false }, '', [el({}, 'contents visible child')]), text: 'contents visible child' },
+    { name: 'display:contents region whose only child is hidden', tree: el({ display: 'contents', checkVisibility: false }, '', [el({ checkVisibility: false }, 'gone')]), text: '' },
+    { name: 'a region inside a display:none ancestor', tree: el({ checkVisibility: false }, 'hidden ancestor status'), text: '' },
+    // The inheritable-override case (airhorn-od1): a visibility:visible region
+    // inside a visibility:hidden ancestor IS shown, and checkVisibility says so.
+    { name: 'a visibility:visible region inside a visibility:hidden ancestor', tree: el({}, 'visible override region'), text: 'visible override region' },
+    { name: 'an opacity:0 region', tree: el({ checkVisibility: false }, 'echo opacity zero'), text: '' },
+    { name: 'a region in closed <details>', tree: el({ checkVisibility: false }, 'closed details alert'), text: '' },
+    { name: 'a message only in an open shadow root', tree: el({}, '', [], shadowRoot(el({}, 'shadow alert text'))), text: 'shadow alert text' },
+    { name: 'a message in a nested shadow root', tree: el({}, '', [el({}, '', [], shadowRoot(el({}, 'nested shadow text')))]), text: 'nested shadow text' },
+  ];
+  for (const c of cases) {
+    const adapt = (n) => n; // the fixture nodes already have the adapter's shape
+    const text = model.renderedText(c.tree, adapt);
+    assert.equal(text, c.text, `${c.name}: expected ${JSON.stringify(c.text)}, got ${JSON.stringify(text)}`);
+    // One decision (airhorn-0w9): 'shown' is not a second answer that can
+    // disagree with the text it reports.
+    assert.equal(model.isShown(c.tree, adapt), text !== '',
+      `${c.name}: shown must BE "has visible text" - a second visibility path is the bug`);
+  }
+});
+
+// The instrument the audit actually runs - READ_STATE, the page code - driven
+// here against a fake DOM (airhorn-0w9, -cpi, -9py). The model test above
+// pins the decisions; this pins the ADAPTER, the only bridge between them and
+// browser facts. A dropped `contentVisibility` or a misspelled fact here would
+// restore the c-v bug in the browser with every other test green, and would
+// have been invisible: nothing used to test READ_STATE at all.
+test('the page instrument turns DOM facts into the model verdict (airhorn-0w9, -cpi, -9py)', () => {
+  const descendants = (node) => node.children.flatMap((c) => [c, ...descendants(c)]);
+  const wire = (node) => {
+    node.querySelectorAll = (sel) => descendants(node).filter((d) => (sel === '*' ? true : !!d.role));
+    return node;
+  };
+  const textOf = (node) => [node.ownText, ...node.children.map(textOf)].filter(Boolean).join(' ');
+  const mk = (facts = {}, ownText = '', children = [], extra = {}) => {
+    const node = {
+      nodeType: 1, facts, children, shadowRoot: extra.shadow || null, role: extra.role || null,
+      childNodes: ownText ? [{ nodeType: 3, textContent: ownText }] : [],
+    };
+    node.ownText = ownText;
+    node.textContent = textOf(node);
+    // Chrome 155 facts: display:none/[hidden]/closed details/opacity:0/
+    // visibility resolve through checkVisibility; the element's OWN c-v skip
+    // does not (measured) and shows up as empty innerText instead.
+    node.checkVisibility = () => facts.checkVisibility !== false;
+    Object.defineProperty(node, 'innerText', { get: () => (facts.innerText !== undefined ? facts.innerText : node.textContent) });
+    node.getAttribute = (k) => (k === 'role' ? node.role : null);
+    return wire(node);
+  };
+  const shadowOf = (host, ...children) => wire({ nodeType: 11, host, children, shadowRoot: null });
+  const styleOf = (n) => ({
+    display: n.facts ? n.facts.display || 'block' : 'block',
+    contentVisibility: n.facts ? n.facts.contentVisibility || 'visible' : 'visible',
+    visibility: 'visible',
+    opacity: '1',
+  });
+  const instrument = (regions) => {
+    const body = mk({}, '', regions);
+    const document = wire({ nodeType: 9, children: [body], shadowRoot: null, querySelector: () => null, title: 'fixture', readyState: 'complete' });
+    // Inject the real page code with the browser globals it reads.
+    const run = new Function('document', 'getComputedStyle', 'performance', 'navigator', 'location', 'window',
+      `return ${READ_STATE}`);
+    return run(document, styleOf, { getEntriesByType: () => [] }, { onLine: true }, { href: 'about:blank' }, {});
+  };
+  const plain = mk({}, 'plain visible status', [], { role: 'status' });
+  const skippedAuto = mk({ contentVisibility: 'auto', innerText: '' }, 'auto skipped status', [], { role: 'status' });
+  const contents = mk({ display: 'contents', checkVisibility: false }, 'contents region text', [], { role: 'status' });
+  const host = mk({}, '', [], { role: 'status' });
+  host.shadowRoot = shadowOf(host, mk({}, 'shadow alert text'));
+  const state = instrument([plain, skippedAuto, contents, host]);
+  assert.deepEqual(state.live.map((l) => l.shown), [true, false, true, true],
+    `shown must follow visible text: ${JSON.stringify(state.live)}`);
+  assert.deepEqual(state.live.map((l) => l.text),
+    ['plain visible status', '', 'contents region text', 'shadow alert text'],
+    `text must be the rendered text only: ${JSON.stringify(state.live)}`);
+  for (const l of state.live) {
+    assert.equal(l.shown, l.text !== '', `shown must BE "has visible text": ${JSON.stringify(l)}`);
+  }
+  // The body read is the same instrument: the skipped region's text is not in
+  // it (it used to be, and earned 'explains itself' for nothing).
+  assert.ok(!state.bodyText.includes('auto skipped status'), `bodyText leaked skipped text: ${state.bodyText}`);
+  assert.ok(state.bodyText.includes('contents region text'), `bodyText lost rendered text: ${state.bodyText}`);
 });
