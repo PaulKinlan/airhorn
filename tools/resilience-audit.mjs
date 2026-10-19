@@ -555,6 +555,13 @@ async function runAudit() {
       const uncachedMs = Date.now() - uncachedStart;
       const uncachedState = await readState(cdp, sessionId).catch(() => null);
       const shotFile = await shot(cdp, sessionId, '2-liefi-uncached-nav');
+      // Headline usability is MEASURED on the post-navigation state (airhorn-dse,
+      // the airhorn-0aq instrument): the literal `false` here called the horn
+      // unusable while the same row's measured state showed it rendered and
+      // visible - a failed navigation leaves the previous (cached, working)
+      // document on screen, and that is the truth to report. No document at
+      // all (uncachedState null) earns false without a press.
+      const hornAfterUncached = uncachedState ? await pressHorn(cdp, sessionId) : null;
       return {
         swActive,
         cachedNavigation: { completed: cachedLoaded, ms: cachedMs,
@@ -563,7 +570,8 @@ async function runAudit() {
         uncachedNavigation: { completed: uncachedLoaded, ms: uncachedMs },
         ...(uncachedState ? summarise(uncachedState) : { renders: false, hornVisible: false,
           explainsItself: false, explanationEvidence: 'no document at all' }),
-        hornUsable: false,
+        hornUsable: hornAfterUncached ? hornAfterUncached.sounded : false,
+        hornCheck: hornAfterUncached || { sounded: false, reason: 'no document after the uncached navigation' },
         cachedShellWasAvailable: cachedLoaded,
         screenshot: shotFile,
         console: collectors(sessionId).console,
