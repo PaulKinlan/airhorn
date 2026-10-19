@@ -60,6 +60,77 @@ const listFor = (changed) =>
   execFileSync('bash', [gate, '--changed', changed, '--list'], { cwd: root, encoding: 'utf8' })
     .split('\n').map((s) => s.trim()).filter(Boolean);
 
+// --- the fleet coverage contract vs the map (airhorn-ona) --------------------
+// tools/suite-map.tsv is THE map the gate runs; .fleet/coverage-contract.json
+// restates it for ~/fleet/remote/check-coverage.py, the independent oracle that
+// cannot read a TSV. Two hand-maintained copies of one opinion drift - they did
+// (airhorn-ona: index.html still named the failover suite, src/main.js was
+// missing it) - so the drift is now a test instead of a comment asking politely.
+const parseSuiteMap = (text = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8')) => {
+  const rows = [];
+  for (const raw of text.split('\n')) {
+    if (!raw.trim() || raw.trimStart().startsWith('#')) continue;
+    const [pattern, suites = ''] = raw.split('\t');
+    rows.push({ pattern: pattern.trim(), suites: suites.trim().split(/\s+/).filter(Boolean) });
+  }
+  return rows;
+};
+
+const contractPath = path.join(root, '.fleet', 'coverage-contract.json');
+const readContract = () => JSON.parse(fs.readFileSync(contractPath, 'utf8'));
+
+// `**` and `*` are the same opinion spelled differently by the two files; the
+// oracle treats both as "everything under this directory".
+const normPattern = (p) => p.replace(/\/\*\*$/, '/*');
+const isPendingSpelling = (suite) => suite.startsWith('test/');
+
+// The rows the contract restates: every path the map places, exemptions (`!`)
+// and pending suites (`~`) aside. A row that names only itself
+// (`tests/x.test.mjs -> tests/x.test.mjs`) is the gate's reverse check, not a
+// coverage opinion about source, so it is not an oracle mapping.
+const CONTRACT_EXEMPT_EXT = new Set(['.json', '.md', '.txt', '.lock', '.png', '.svg', '.jpg']);
+const isSelfRow = (pattern, suites) => suites.length > 0 && suites.every((s) => s === pattern);
+const mapOpinion = (rows) => {
+  const out = new Map();
+  for (const { pattern, suites } of rows) {
+    if (pattern.startsWith('!') || pattern.startsWith('~') || isSelfRow(pattern, suites)) continue;
+    out.set(normPattern(pattern), new Set(suites.filter((s) => !isPendingSpelling(s))));
+  }
+  return out;
+};
+
+// Every disagreement, in both directions: a suite the contract over-names makes
+// the oracle report a truthful PARTIAL as a false one, and a suite it UNDER-names
+// is a blind spot the oracle cannot see (it reports KNOWN while a covering suite
+// never ran). Prose/data paths (package.json, *.md) are compared when the
+// contract names them, but not required: the oracle exempts those extensions
+// itself, so a missing entry costs nothing there.
+const contractDrift = (contract, rows) => {
+  const want = mapOpinion(rows);
+  const problems = [];
+  const seen = new Set();
+  for (const [pattern, suites] of Object.entries(contract)) {
+    const key = normPattern(pattern);
+    seen.add(key);
+    const row = want.get(key);
+    if (!row) {
+      problems.push(`${pattern}: the contract names it, the map places nothing there`);
+      continue;
+    }
+    const got = new Set((Array.isArray(suites) ? suites : [suites]).filter((s) => !isPendingSpelling(s)));
+    const missing = [...row].filter((s) => !got.has(s));
+    const extra = [...got].filter((s) => !row.has(s));
+    if (missing.length) problems.push(`${pattern}: the map runs ${missing.join(', ')}, the contract omits it`);
+    if (extra.length) problems.push(`${pattern}: the contract names ${extra.join(', ')}, the map does not run it`);
+  }
+  for (const [key, suites] of want) {
+    if (seen.has(key)) continue;
+    if (CONTRACT_EXEMPT_EXT.has(path.extname(key))) continue;
+    problems.push(`${key}: the map places it (${[...suites].join(', ')}), the contract has no entry`);
+  }
+  return problems;
+};
+
 test('a worker change selects the offline + failover suites', () => {
   const suites = listFor('public/sw.js');
   // Subset, not equality: the map may legitimately add suites (the pending
@@ -77,6 +148,71 @@ test('a page change selects the page suites', () => {
   for (const s of ['tests/a11y.test.mjs', 'tests/webmcp-browser.test.mjs', 'tests/resilience-ui.test.mjs']) {
     assert.ok(suites.includes(s), `src/main.js must select ${s}, got ${JSON.stringify(suites)}`);
   }
+});
+
+test('the page row keeps the failover suite off it - and the branch it lost is covered anyway (airhorn-906)', () => {
+  // Two halves of one decision, pinned together so neither can drift alone.
+  // (a) the cost decision: the 14s SW-update suite stays off the most-edited
+  // file (airhorn-iwf).
+  const pageRow = listFor('index.html');
+  assert.ok(!pageRow.includes('tests/sw-failover.test.mjs'),
+    `index.html must not select the SW-update suite, got ${JSON.stringify(pageRow)}`);
+  assert.ok(pageRow.includes('tests/resilience-ui.test.mjs'),
+    `index.html must select resilience-ui, got ${JSON.stringify(pageRow)}`);
+  // (b) the coverage it must not have lost with it: the lost-upgrade
+  // announcement is authored in index.html, and the suite that runs on this row
+  // has to assert that copy. Read both files: the page's copy and the suite's
+  // assertion cannot silently diverge into a suite that checks nothing real.
+  const page = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+  const suite = fs.readFileSync(path.join(root, 'tests', 'resilience-ui.test.mjs'), 'utf8');
+  for (const copy of ['The app could not update', 'previous version']) {
+    assert.ok(page.includes(copy), `index.html must author the lost-upgrade copy "${copy}"`);
+    assert.ok(suite.includes(copy), `resilience-ui must assert the page's lost-upgrade copy "${copy}"`);
+  }
+  // The worker's own upgrade story is still the failover suite's job.
+  assert.ok(listFor('src/main.js').includes('tests/sw-failover.test.mjs'),
+    'src/main.js must still select the failover suite');
+  assert.ok(listFor('public/sw.js').includes('tests/sw-failover.test.mjs'),
+    'public/sw.js must still select the failover suite');
+});
+
+test('the fleet coverage contract restates the map, not a stale opinion (airhorn-ona)', () => {
+  const problems = contractDrift(readContract(), parseSuiteMap());
+  assert.deepEqual(problems, [],
+    `the coverage contract and tools/suite-map.tsv disagree:\n  ${problems.join('\n  ')}`);
+});
+
+test('the drift check fails when the two files disagree (airhorn-ona)', () => {
+  // A comparator nobody has seen fail is a comparator nobody can trust: pin the
+  // EXACT drift airhorn-ona reported, and the under-naming direction, without
+  // touching either file.
+  const rows = parseSuiteMap();
+  const contract = readContract();
+  const stale = structuredClone(contract);
+  stale['index.html'] = [...stale['index.html'], 'tests/sw-failover.test.mjs'];
+  stale['src/main.js'] = stale['src/main.js'].filter((s) => s !== 'tests/sw-failover.test.mjs');
+  const problems = contractDrift(stale, rows);
+  assert.ok(problems.some((p) => p.startsWith('index.html:') && /sw-failover/.test(p) && /does not run it/.test(p)),
+    `an over-named suite must be reported: ${JSON.stringify(problems)}`);
+  assert.ok(problems.some((p) => p.startsWith('src/main.js:') && /sw-failover/.test(p) && /omits it/.test(p)),
+    `an under-named suite must be reported: ${JSON.stringify(problems)}`);
+  delete stale['server.ts'];
+  assert.ok(contractDrift(stale, rows).some((p) => p.startsWith('server.ts:') && /no entry/.test(p)),
+    'a map-placed path missing from the contract must be reported');
+});
+
+test('every suite the contract names exists (airhorn-ona)', () => {
+  // A stale contract naming a deleted suite would ask the oracle for evidence
+  // that can never arrive - it fails closed (unmapped) but it also fails for
+  // the wrong reason. The map's own reverse check never looked at this file.
+  const missing = [];
+  for (const [pattern, suites] of Object.entries(readContract())) {
+    for (const suite of Array.isArray(suites) ? suites : [suites]) {
+      if (isPendingSpelling(suite)) continue;
+      if (!fs.existsSync(path.join(root, suite))) missing.push(`${pattern} -> ${suite}`);
+    }
+  }
+  assert.deepEqual(missing, [], `the contract names suites that are not in the tree: ${missing.join(', ')}`);
 });
 
 test('an audit-tool change selects this suite (the tools/* row is real)', () => {

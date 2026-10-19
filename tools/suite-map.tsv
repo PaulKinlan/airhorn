@@ -10,11 +10,20 @@
 src/horn.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs
 src/main.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-failover.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs
 src/webmcp.js	tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
-# sw-failover is NOT on the index.html row (airhorn-iwf): its assertions are the
-# update/failover MESSAGING (src/main.js) and worker versioning (public/sw.js) -
-# the page's markup is already asserted by horn, a11y and resilience-ui, and
-# putting the 14s SW-update suite on the most frequently edited file left a
-# worst-case fast gate at ~60s with no headroom.
+# sw-failover is NOT on the index.html row (airhorn-iwf): it is the worker's
+# end-to-end upgrade story (public/sw.js + src/main.js messaging), the page's
+# markup is already asserted by horn, a11y and resilience-ui, and putting the
+# 14s SW-update suite on the most frequently edited file left a worst-case fast
+# gate at ~60s with no headroom.
+#
+# The page DOES author one thing sw-failover asserted - the lost-upgrade
+# announcement, in the inline registration handler next to #app-status - so
+# leaving it to sw-failover made a one-line edit to that branch green on this
+# row and red only in a suite the row no longer selected (airhorn-906).
+# resilience-ui, which runs here, now asserts that branch itself (case 11), so
+# dropping sw-failover from this row does not drop its coverage. Keep it that
+# way: move the branch, or add a suite - never a comment claiming a suite you
+# stopped running covers it.
 index.html	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs
 vite.config.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
 package.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
@@ -39,8 +48,11 @@ public/scripts/**	tests/a11y.test.mjs test/a11y.test.mjs
 # Suite self-rows: the reverse check (every tree suite reachable from the map) reads these.
 # Plural-spelling suites exist on master; the singular test/ spellings are declared pending.
 # .fleet/coverage-contract.json restates the source-path mapping for the fleet's independent
-# coverage oracle, which cannot read this tsv (airhorn-pwe) - keep the two in step.
-!.fleet/**
+# coverage oracle, which cannot read this tsv (airhorn-pwe). The two are kept in step by
+# tests/gate-smoke.test.js ('the coverage contract restates the map'), so a hand-edit to the
+# contract is gated rather than trusted - and the directory is no longer blanket-exempt: a
+# behavioural file dropped into .fleet/ would have escaped the gate (airhorn-ona).
+.fleet/coverage-contract.json	tests/gate-smoke.test.js
 tests/horn.test.js	tests/horn.test.js
 tests/a11y.test.mjs	tests/a11y.test.mjs
 tests/sw-offline.test.mjs	tests/sw-offline.test.mjs

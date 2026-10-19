@@ -35,7 +35,10 @@ const mimeTypes = {
 //      the prompt is available (5yv);
 //   8. a bundle that arrives late retires a shown banner (duj);
 //   9. a bundle that executes and then throws during setup still gets the
-//      banner (21k: the boot marker only fires when the app is usable).
+//      banner (21k: the boot marker only fires when the app is usable);
+//  10. a successful update never announces a failure, and
+//  11. a dropped upgrade IS announced - the lost-upgrade copy the page owns
+//      rather than the worker (airhorn-swq, airhorn-906).
 // Screenshots land in /tmp/airhorn-boot-watchdog/ as evidence.
 async function testBootWatchdog() {
   const distDir = path.join(__dirname, '../dist');
@@ -547,6 +550,58 @@ async function testBootWatchdog() {
     swBody = swV1;
     await shot('successful-update-no-failure');
     console.log('  swq: successful update announced progress only - no failure copy');
+
+    // --- Case 11: a lost upgrade is announced by the page itself (airhorn-906) --
+    console.log('--- Case 11: a dropped upgrade announces itself');
+    // The lost-upgrade copy is AUTHORED on this page: #app-status plus the
+    // inline registration handler next to it. The only suite asserting it used
+    // to be sw-failover stage D, which airhorn-iwf took off the index.html row
+    // for cost - so a one-line edit to this branch was green on the page's own
+    // fast-gate row and red only in a suite that row no longer selected
+    // (airhorn-906). This case lives in a suite the page row DOES select, so
+    // the branch is covered where it is authored. The real worker's own
+    // quota-denied upgrade stays sw-failover's job (public/sw.js row).
+    await waitUntil('!!navigator.serviceWorker.controller', 10000, 'a controller to update over');
+    const controllerBefore = await evaluate(`navigator.serviceWorker.controller && navigator.serviceWorker.controller.scriptURL`);
+    // An install that is denied, the way a failed precache write denies one.
+    // A byte-different body is enough for reg.update() to start a new worker;
+    // the failing install is what drives it to 'redundant' without ever
+    // reaching 'installed'.
+    swBody = '// resilience-ui suite: an upgrade whose install is denied (quota)\n' +
+      'self.addEventListener("install", (e) => {\n' +
+      '  e.waitUntil(Promise.reject(new DOMException("The quota has been exceeded.", "QuotaExceededError")));\n' +
+      '});\n' +
+      'self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));\n';
+    await evaluate(`navigator.serviceWorker.getRegistration()
+      .then((reg) => reg.update()).then(() => true).catch(() => false)`);
+    await waitUntil(`window.__statusLog.some((m) => /app could not update/i.test(m))`,
+      10000, 'the lost-upgrade announcement');
+    const lost = await evaluate(`(() => {
+      const region = document.getElementById('app-status');
+      return {
+        text: (region && region.textContent || '').trim(),
+        controlled: !!navigator.serviceWorker.controller,
+        controller: navigator.serviceWorker.controller && navigator.serviceWorker.controller.scriptURL,
+      };
+    })()`);
+    swBody = swV1;
+    await shot('lost-upgrade-announced');
+    // The page owns this copy (index.html, inline registration handler); assert
+    // it literally, so a reworded notice is a red test rather than a quietly
+    // still-passing regex. gate-smoke reads both strings and pins them to the
+    // page (airhorn-906).
+    for (const copy of ['The app could not update', 'previous version']) {
+      if (!lost.text.includes(copy)) {
+        throw new Error(`the lost-upgrade notice is missing "${copy}": ${JSON.stringify(lost.text)}`);
+      }
+    }
+    if (/new version is ready/i.test(lost.text)) {
+      throw new Error(`a dropped upgrade announced a successful update: ${JSON.stringify(lost.text)}`);
+    }
+    if (!lost.controlled || lost.controller !== controllerBefore) {
+      throw new Error(`a dropped upgrade replaced the worker: ${JSON.stringify({ lost, controllerBefore })}`);
+    }
+    console.log(`  lost upgrade reported: "${lost.text}" (still on the previous worker)`);
 
     console.log('ALL RESILIENCE-UI CHECKS PASSED!');
   } finally {
