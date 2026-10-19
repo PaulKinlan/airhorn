@@ -11,6 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,6 +19,20 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const gate = path.join(root, 'tools', 'fast-gate.sh');
+
+// Sentinel cleanup (airhorn-ey1): a bound kill during the symlink pin can
+// leave its probe link behind, which would redden the tools parse of the
+// NEXT run before the pin gets a chance to clean up. Remove stale probes
+// before any test runs - but spare the link THIS run's pin is about to
+// create/own (named in GSM_PROBE_NAME), or a pin child would delete its
+// parent's live probe and read a false green.
+const probeLinkName = (suffix) => `zz-symlink-probe-${suffix}.mjs`;
+const keepProbe = process.env.GSM_PROBE_NAME;
+for (const f of fs.readdirSync(path.join(root, 'tools'))) {
+  if (/^zz-symlink-probe-.+\.mjs$/.test(f) && f !== keepProbe) {
+    fs.rmSync(path.join(root, 'tools', f), { force: true });
+  }
+}
 
 const listFor = (changed) =>
   execFileSync('bash', [gate, '--changed', changed, '--list'], { cwd: root, encoding: 'utf8' })
@@ -85,7 +100,7 @@ test('every tools script parses - recognised extensions at any depth (airhorn-7l
     if (!isFile && !ent.isDirectory()) {
       let st = null;
       try { st = fs.statSync(full); } catch { st = null; }
-      if (!st) assert.fail(`tools/${ent.name} is a dangling symlink - remove it or point it at a real file (airhorn-0ct)`);
+      if (!st) assert.fail(`tools/${path.relative(root, full)} is a dangling symlink - remove it or point it at a real file (airhorn-0ct, airhorn-pww)`);
       isFile = st.isFile();
     }
     if (!isFile) continue;
@@ -128,20 +143,26 @@ test('every script-tier suite is gated by a tests/support change (airhorn-dco)',
   assert.deepEqual(selected, scriptTier,
     `the support row must select exactly the script-tier suites:\n  row: ${JSON.stringify(selected)}\n  expected: ${JSON.stringify(scriptTier)}`);
 });
+// Self-invocation guard with an unguessable key (airhorn-j60): the child
+// re-runs this suite; without the guard it would create the probe symlink
+// again and recurse forever. The key carries a random suffix so a stray
+// GATE_SMOKE_SELF=1 in the environment cannot silently disable the pin.
+const guardKey = `GATE_SMOKE_SELF_${crypto.randomBytes(4).toString('hex')}`;
+const guardActive = () => Object.keys(process.env).some((k) => /^GATE_SMOKE_SELF_[0-9a-f]{8}$/.test(k));
+
 test('the tools parse fails on a symlinked broken script and passes a valid one (airhorn-0ct)', {
-  // Self-invocation guard: the child re-runs this suite; without the flag it
-  // would create the probe symlink again and recurse forever.
-  skip: process.env.GATE_SMOKE_SELF ? 'self-invocation guard' : false,
+  skip: guardActive() ? 'self-invocation guard' : false,
 }, () => {
   // A regression pin that invokes the REAL suite: with a symlinked broken
   // script in tools/, the tools parse must fail; with a valid target, pass.
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-smoke-symlink-'));
-  const link = path.join(root, 'tools', 'zz-symlink-probe.mjs');
+  const probeName = probeLinkName(crypto.randomBytes(4).toString('hex'));
+  const link = path.join(root, 'tools', probeName);
   const runSelf = () => {
     // Strip the runner's NODE_TEST_CONTEXT: a child node --test that inherits
     // it believes it is a managed test child, writes nothing and exits 0 -
     // the silent green that made this pin read as a false pass.
-    const childEnv = { ...process.env, GATE_SMOKE_SELF: '1' };
+    const childEnv = { ...process.env, [guardKey]: '1', GSM_PROBE_NAME: probeName };
     delete childEnv.NODE_TEST_CONTEXT;
     const r = spawnSync(process.execPath, ['--test', path.join(root, 'tests', 'gate-smoke.test.js')], {
       cwd: root, encoding: 'utf8',
