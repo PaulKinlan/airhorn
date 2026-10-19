@@ -53,20 +53,30 @@ function trackEvent(eventName, params) {
 
 class Installer {
   #promptEvent = null;
+  #button;
   #root;
 
   constructor(root) {
     this.#root = root;
+    // Structurally inert until an install is actually offered (airhorn-fld):
+    // the attribute lives on the button, not in CSS, so even the blocked-CSS
+    // fallback shows an honest control - nothing exposed that clicking does
+    // nothing. beforeinstallprompt enables it.
+    this.#button = root.querySelector('button');
+    if (this.#button) this.#button.disabled = true;
 
     window.addEventListener('beforeinstallprompt', (e) => {
       this.#promptEvent = e;
       e.preventDefault();
+      if (this.#button) this.#button.disabled = false;
       root.classList.add('available');
       trackEvent('install_available');
     });
 
     window.addEventListener('appinstalled', () => {
       this.#promptEvent = null;
+      // An installed app is not offered another prompt; stay honest.
+      if (this.#button) this.#button.disabled = true;
       this.#restoreFocus();
       root.classList.remove('available');
       trackEvent('app_installed');
@@ -90,13 +100,14 @@ class Installer {
     const result = await this.#promptEvent.userChoice;
     trackEvent('install_prompt_result', { outcome: result.outcome });
     this.#promptEvent = null;
+    if (this.#button) this.#button.disabled = true;
     this.#restoreFocus();
     this.#root.classList.remove('available');
 
-    const status = document.getElementById('install-status');
-    if (status) {
-      status.textContent = result?.outcome === 'accepted' ? 'App installed' : 'Installation cancelled';
-    }
+    // The outcome goes through the one polite voice (airhorn-fld). The old
+    // code wrote it to #install-status, an element that does not exist, so
+    // accepting or dismissing the prompt was silent.
+    window.__airhornAnnounce?.(result?.outcome === 'accepted' ? 'App installed' : 'Installation cancelled');
   }
 }
 

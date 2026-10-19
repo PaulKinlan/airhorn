@@ -91,7 +91,10 @@
       </div>
     </main>
     <div id='installer'>
-      <button type='button' class='button'>Install</button>
+      <!-- disabled at parse (airhorn-fld): the attribute is structural, so
+           even with CSS blocked the exposed button reads as inert instead of
+           silently doing nothing; beforeinstallprompt enables it. -->
+      <button type='button' class='button' disabled>Install</button>
     </div>
     <!-- One polite live region for status while the app runs: offline and
          back-online, a service worker update. Filled by the announcer in the
