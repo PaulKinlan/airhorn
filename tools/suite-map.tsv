@@ -28,6 +28,9 @@ public/sounds/**	tests/sw-offline.test.mjs test/sw-offline.test.mjs
 public/scripts/**	tests/a11y.test.mjs test/a11y.test.mjs
 # Suite self-rows: the reverse check (every tree suite reachable from the map) reads these.
 # Plural-spelling suites exist on master; the singular test/ spellings are declared pending.
+# .fleet/coverage-contract.json restates the source-path mapping for the fleet's independent
+# coverage oracle, which cannot read this tsv (airhorn-pwe) - keep the two in step.
+!.fleet/**
 tests/horn.test.js	tests/horn.test.js
 tests/a11y.test.mjs	tests/a11y.test.mjs
 tests/sw-offline.test.mjs	tests/sw-offline.test.mjs
