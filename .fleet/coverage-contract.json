@@ -3,7 +3,6 @@
     "tests/horn.test.js",
     "tests/a11y.test.mjs",
     "tests/webmcp-browser.test.mjs",
-    "tests/sw-failover.test.mjs",
     "tests/resilience-ui.test.mjs"
   ],
   "src/horn.js": [
@@ -13,6 +12,7 @@
   "src/main.js": [
     "tests/horn.test.js",
     "tests/a11y.test.mjs",
+    "tests/sw-failover.test.mjs",
     "tests/webmcp-browser.test.mjs",
     "tests/resilience-ui.test.mjs"
   ],
@@ -36,16 +36,19 @@
   "public/manifest.json": [
     "tests/sw-offline.test.mjs"
   ],
-  "public/sounds/*": [
+  "public/sounds/**": [
     "tests/sw-offline.test.mjs"
   ],
-  "public/scripts/*": [
+  "public/scripts/**": [
     "tests/a11y.test.mjs"
   ],
   "tools/*": [
     "tests/gate-smoke.test.js"
   ],
-  "tests/support/*": [
+  ".fleet/coverage-contract.json": [
+    "tests/gate-smoke.test.js"
+  ],
+  "tests/support/**": [
     "tests/a11y.test.mjs",
     "tests/sw-offline.test.mjs",
     "tests/sw-failover.test.mjs",
