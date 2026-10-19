@@ -36,6 +36,25 @@ _ENV_FAST=${FAST_GATE_RUNNER-}
 [ -n "$_ENV_FAST" ] && FAST_GATE_RUNNER=$_ENV_FAST
 FAST_GATE_RUNNER=${FAST_GATE_RUNNER:-node --test}
 JOBS=${FAST_GATE_JOBS:-4}
+# Suites report in two tiers (airhorn-n00). node:test suites already give per-case
+# names through TAP; the assert-script suites narrate and exit, so they are run
+# directly with a preload hook that records their narration as timed cases and
+# writes a machine-readable result. No suite is rewritten for this: the hook reads
+# what the suite already prints, and `##case## <name>` is an optional convention.
+HOOK="$HERE/../tests/support/report-hook.mjs"
+RESULTS_DIR=${AIRHORN_RESULTS_DIR:-/tmp/airhorn-test-results}
+tier_of() {
+  case $1 in
+    *.test.js|*.test.ts) echo node-test ;;
+    *)                   echo script ;;
+  esac
+}
+runner_for() {
+  case $(tier_of "$1") in
+    node-test) echo "$FAST_GATE_RUNNER" ;;
+    script)    echo "node --import $HOOK" ;;
+  esac
+}
 
 LIST=0; BASE="${FAST_GATE_BASE:-}"; EXPLICIT=()
 while [ $# -gt 0 ]; do
@@ -190,6 +209,7 @@ if [ "${#RUN[@]}" -eq 0 ]; then
 fi
 
 # --- build once: browser suites serve dist/ (a11y, sw-offline); the build is ~0.3s --------------------
+mkdir -p "$RESULTS_DIR"
 echo "fast-gate: building dist (browser suites serve it)"
 if ! (cd "$ROOT" && npm run build --silent) >"$TMP/build.log" 2>&1; then
   echo "fast-gate: failed: build"
@@ -202,17 +222,61 @@ printf 'fast-gate: running: %s\n' "${RUN[@]}"
 n=0
 for s in "${RUN[@]}"; do
   key=$(printf '%s' "$s" | tr '/.' '__')
-  ( cd "$ROOT" && $FAST_GATE_RUNNER "$s" >"$TMP/$key.log" 2>&1; echo $? >"$TMP/$key.rc" ) &
+  ( cd "$ROOT" && AIRHORN_RESULTS_DIR="$RESULTS_DIR" $(runner_for "$s") "$s" >"$TMP/$key.log" 2>&1; echo $? >"$TMP/$key.rc" ) &
   n=$((n + 1))
   if [ "$n" -ge "$JOBS" ]; then wait -n; n=$((n - 1)); fi
 done
 wait
 
+# Report what each suite actually did, not just that it exited: for node:test the
+# TAP summary, for script-tier suites the hook's own line (which names the step a
+# failure was attributed to). "no result" is reported as such - a suite that dies
+# before reporting must never read as a pass.
+# Returns non-zero when the suite produced no valid result, so the caller can fail
+# the gate. A missing result is a reporting regression, not a pass (airhorn-yy1): a
+# suite that exits 0 without saying what it ran proves nothing.
+report_cases() { # $1 = suite, $2 = log
+  case $(tier_of "$1") in
+    node-test)
+      pass=$(sed -nE 's/^# pass ([0-9]+).*/\1/p' "$2" | tail -1)
+      fail=$(sed -nE 's/^# fail ([0-9]+).*/\1/p' "$2" | tail -1)
+      if [ -n "$pass" ]; then
+        echo "fast-gate: cases: $1 :: node:test pass=${pass} fail=${fail:-0}"
+        if [ "${fail:-0}" != 0 ]; then
+          sed -nE 's/^not ok [0-9]+ - (.*)$/fast-gate:   failing: \1/p' "$2" | head -5
+        fi
+        return 0
+      fi
+      echo "fast-gate: cases: $1 :: no TAP summary (suite exited without reporting)"
+      return 1
+      ;;
+    script)
+      line=$(grep -m1 '^##CASES## ' "$2" 2>/dev/null | sed 's/^##CASES## //')
+      if [ -n "$line" ]; then
+        echo "fast-gate: cases: $1 :: $line"
+        return 0
+      fi
+      echo "fast-gate: cases: $1 :: no result (suite exited without reporting)"
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 rc=0
 for s in "${RUN[@]}"; do
   key=$(printf '%s' "$s" | tr '/.' '__')
-  if [ "$(cat "$TMP/$key.rc" 2>/dev/null)" = 0 ]; then
+  suite_rc=$(cat "$TMP/$key.rc" 2>/dev/null)
+  cases_out=$(report_cases "$s" "$TMP/$key.log")
+  cases_rc=$?
+  printf '%s\n' "$cases_out" | tee -a "$RESULTS_DIR/summary.txt"
+  if [ "$suite_rc" = 0 ] && [ "$cases_rc" = 0 ]; then
     echo "fast-gate: passed: $s"
+  elif [ "$suite_rc" = 0 ]; then
+    # exit 0 but nothing reported: the suite cannot prove what it ran.
+    echo "fast-gate: failed: $s (exit 0 but no result; reporting is broken)"
+    echo "fast-gate: a selected suite must report its cases; silence is not a pass" >&2
+    rc=1
   else
     echo "fast-gate: failed: $s"
     sed 's/^/    /' "$TMP/$key.log" 2>/dev/null | tail -40

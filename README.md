@@ -113,6 +113,24 @@ than the focused suites.
 Both commands launch the browser found via `CHROME_BIN`, falling back to
 `google-chrome`, `chromium` or `chromium-browser`.
 
+### How suites report to the gate
+
+`tools/fast-gate.sh` runs two tiers, and both put *per-case* results in its summary:
+
+- **node:test tier** (`tests/*.test.js`) runs under `node --test --test-reporter=tap`, so
+the gate prints `node:test pass=N fail=M` and names any `not ok` case.
+- **script tier** (`tests/*.test.mjs`) runs directly under a preload,
+`tests/support/report-hook.mjs`, which records the suite's own narration as timed steps
+and writes `$AIRHORN_RESULTS_DIR/<suite>.json` (default `/tmp/airhorn-test-results/`).
+The gate then prints `status`, event count, duration and, on failure, the last step the
+suite reached plus the cause — so a red suite says *where* it went red, not just *that*
+it did.
+
+No suite has to change for that: the hook reads what it already prints. To name cases
+explicitly, a suite can emit a marker line (`console.log('##case## <name>')`), which is
+counted as a named case; `ok - <name>` / `not ok - <name>` lines are recognised the same
+way. A suite that dies before reporting is shown as `no result` and still fails the gate.
+
 ## Known gaps
 
 - In the light scheme the red horn on the blue background is 1.18:1, below the 3:1
