@@ -8,9 +8,14 @@
 # and fails the gate. Every suite in the tree must be reachable from a row (`~` counts) or exempted
 # with `!`, or the gate fails loudly (reverse check).
 src/horn.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs
-src/main.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs
+src/main.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-failover.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs
 src/webmcp.js	tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
-index.html	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/sw-failover.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs
+# sw-failover is NOT on the index.html row (airhorn-iwf): its assertions are the
+# update/failover MESSAGING (src/main.js) and worker versioning (public/sw.js) -
+# the page's markup is already asserted by horn, a11y and resilience-ui, and
+# putting the 14s SW-update suite on the most frequently edited file left a
+# worst-case fast gate at ~60s with no headroom.
+index.html	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs
 vite.config.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
 package.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
 package-lock.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
