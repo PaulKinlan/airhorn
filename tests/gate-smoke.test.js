@@ -73,11 +73,22 @@ test('every tools script parses - recognised extensions at any depth (airhorn-7l
   const entries = fs.readdirSync(path.join(root, 'tools'), { recursive: true, withFileTypes: true });
   let parsed = 0;
   for (const ent of entries) {
-    // Directories are containers, not parseable units - the FILES inside are
-    // visited by the recursive walk itself (airhorn-mo4, airhorn-al7).
-    if (!ent.isFile()) continue;
-    const rel = path.join(ent.parentPath || ent.path, ent.name)
-      .replace(`${root}${path.sep}`, '');
+    // A symlink can point at a real script: Dirents are lstat-based, so a
+    // symlink reports neither file nor directory - resolve it before
+    // classifying, or a mirror of a broken script reads as covered
+    // (airhorn-0ct). Directories remain containers (airhorn-mo4).
+    let isFile = ent.isFile();
+    // resolve (not join): parentPath is spelled with the readdir base, which
+    // is absolute here - join would double it and read a nonexistent path.
+    const full = path.resolve(root, ent.parentPath || ent.path, ent.name);
+    if (!isFile && !ent.isDirectory()) {
+      let st = null;
+      try { st = fs.statSync(full); } catch { st = null; }
+      if (!st) assert.fail(`tools/${ent.name} is a dangling symlink - remove it or point it at a real file (airhorn-0ct)`);
+      isFile = st.isFile();
+    }
+    if (!isFile) continue;
+    const rel = path.relative(root, full);
     const ext = path.extname(rel);
     if (DATA_EXTS.has(ext)) continue;
     const parse = PARSERS[ext];
