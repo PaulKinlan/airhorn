@@ -282,27 +282,27 @@ const READ_STATE = `(() => {
     horn && rect && rect.width > 4 && rect.height > 4 &&
     cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0.05
   );
-  // Rendered means no ancestor hides it either: Chrome returns an element's
-  // OWN display for nodes under a display:none ancestor, so an element-level
-  // check passes for a region nothing can show (airhorn-4jw). Walk the
-  // ancestor chain. A visually-hidden-but-rendered region - the app-status
-  // pattern - still counts: that is the announcement channel, and what
-  // matters is whether it HAS something to say, which summarise() checks
-  // via the text.
-  const rendered = (el) => {
-    for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
-      if (n.hidden) return false;
-      const cs = getComputedStyle(n);
-      if (cs.display === 'none' || cs.visibility === 'hidden') return false;
-    }
-    return true;
-  };
+  // What the platform says is rendered AND readable (airhorn-od1):
+  // checkVisibility covers display:none, the hidden attribute, closed
+  // <details>, opacity:0, and visibility with its inheritable-override
+  // semantics - a visibility:visible region inside a hidden ancestor IS
+  // shown, which an ancestor walk gets wrong in the opposite direction
+  // (airhorn-4jw). But content-visibility:hidden keeps the element's box
+  // (checkVisibility says true) while skipping its contents - innerText is
+  // empty there - so a region with text is only 'shown' if its text survives
+  // into innerText. A visually-hidden-but-rendered region - the app-status
+  // pattern - still counts: innerText is non-empty for it, and what matters
+  // is whether the region HAS something to say.
   const live = [...document.querySelectorAll('[role="status"],[role="alert"],[aria-live]')]    .map((el) => {
+      const text = (el.textContent || '').trim().slice(0, 200);
+      const vis = typeof el.checkVisibility === 'function'
+        ? el.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })
+        : !el.hidden && getComputedStyle(el).display !== 'none';
       return {
         role: el.getAttribute('role'),
         live: el.getAttribute('aria-live'),
-        shown: rendered(el),
-        text: (el.textContent || '').trim().slice(0, 200),
+        shown: vis && (text === '' || (el.innerText || '').trim().length > 0),
+        text,
       };
     });
   const bodyText = ((document.body && document.body.innerText) || '')
