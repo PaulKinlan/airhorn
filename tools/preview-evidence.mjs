@@ -261,17 +261,29 @@ async function captureMain(cdp, origin) {
   })()`);
 
   // Screenshots: light, dark, 320px.
+  // Dark-mode check must be able to FAIL: record the same computed value in
+  // light, then require it to change under dark. The negative control re-runs
+  // the detector while light is still forced — it must detect nothing —
+  // otherwise a detector that cannot go false is a false green (airhorn-a6u).
   ev.captures.push(await cdp.screenshot('horn-light.png'));
+  ev.checks.darkBaselineBg = await cdp.evaluate(
+    `getComputedStyle(document.body).backgroundColor`);
   await cdp.send('Emulation.setEmulatedMedia', {
     features: [{ name: 'prefers-color-scheme', value: 'dark' }],
   });
   await new Promise(r => setTimeout(r, 400));
-  ev.checks.darkApplied = await cdp.evaluate(
-    `getComputedStyle(document.body).color !== getComputedStyle(document.querySelector('button.horn')).backgroundColor`);
+  ev.checks.darkBg = await cdp.evaluate(
+    `getComputedStyle(document.body).backgroundColor`);
+  ev.checks.darkApplied = ev.checks.darkBg !== ev.checks.darkBaselineBg;
   ev.captures.push(await cdp.screenshot('horn-dark.png'));
+  // Negative control: back to light, the detector must read "not applied".
   await cdp.send('Emulation.setEmulatedMedia', {
     features: [{ name: 'prefers-color-scheme', value: 'light' }],
   });
+  await new Promise(r => setTimeout(r, 400));
+  ev.checks.lightControlBg = await cdp.evaluate(
+    `getComputedStyle(document.body).backgroundColor`);
+  ev.checks.darkDetectorCanFail = ev.checks.lightControlBg === ev.checks.darkBaselineBg;
   await cdp.send('Emulation.setDeviceMetricsOverride', {
     width: 320, height: 640, deviceScaleFactor: 2, mobile: true,
   });
@@ -390,6 +402,7 @@ async function main() {
   const ok = [];
   ok.push(`screenshots: ${evidence.captures.join(', ')}`);
   ok.push(`desktop horn width: ${Math.round(evidence.checks.cssAppliedDesktop)}px; offline: ${Math.round(evidence.checks.offlineHornWidth)}px`);
+  ok.push(`dark applied: ${evidence.checks.darkApplied} (bg ${evidence.checks.darkBaselineBg} -> ${evidence.checks.darkBg}; negative control detects false: ${evidence.checks.darkDetectorCanFail})`);
   ok.push(`offline renders: ${evidence.checks.offlineRenders}; boot-failure shown: ${evidence.checks.offlineBootFailureShown}`);
   ok.push(`offline play: ${JSON.stringify(evidence.checks.offlinePlay)}`);
   ok.push(`installable: manifest=${!!evidence.installability.manifest} (192:${evidence.installability.has192Icon} 512:${evidence.installability.has512Icon} maskable:${evidence.installability.hasMaskable}), sw=${!!evidence.installability.serviceWorker}, fetch-handler=${evidence.installability.swHasFetchHandler}, beforeinstallprompt fired=${evidence.installability.beforeinstallpromptFired}`);
@@ -404,6 +417,8 @@ async function main() {
   const missing = required.filter(f => !fs.existsSync(path.join(outDir, f)));
   if (missing.length) throw new Error('missing captures: ' + missing.join(', '));
   if (!evidence.checks.offlineRenders) throw new Error('offline reload did not render the horn');
+  if (!evidence.checks.darkApplied) throw new Error('dark scheme did not change the page (detector says not applied)');
+  if (!evidence.checks.darkDetectorCanFail) throw new Error('dark detector negative control failed: forced-light was read as applied');
   if (!evidence.checks.offlinePlay || evidence.checks.offlinePlay.pressedWhileHeld !== 'true') {
     throw new Error('offline press did not sound the horn (aria-pressed not true)');
   }

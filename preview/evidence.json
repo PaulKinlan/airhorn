@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-10-19T16:56:05.537Z",
-  "url": "http://127.0.0.1:38639/",
+  "generatedAt": "2026-10-19T18:01:15.012Z",
+  "url": "http://127.0.0.1:33451/",
   "chrome": "/usr/bin/google-chrome",
   "publishedFiles": [
     {
@@ -117,7 +117,11 @@
   "checks": {
     "cssAppliedDesktop": 218.5,
     "swControllerOnFirstLoad": true,
+    "darkBaselineBg": "rgb(33, 150, 243)",
+    "darkBg": "rgb(7, 19, 31)",
     "darkApplied": true,
+    "lightControlBg": "rgb(33, 150, 243)",
+    "darkDetectorCanFail": true,
     "offlineHornWidth": 218.5,
     "offlineRenders": true,
     "offlineTitle": "The Air Horner",
@@ -129,7 +133,7 @@
   },
   "installability": {
     "secureContext": true,
-    "manifestLink": "http://127.0.0.1:38639/manifest.json",
+    "manifestLink": "http://127.0.0.1:33451/manifest.json",
     "manifest": {
       "name": "The Air Horner",
       "short_name": "Airhorner",
@@ -213,7 +217,7 @@
     "has512Icon": true,
     "hasMaskable": true,
     "serviceWorker": {
-      "scriptURL": "http://127.0.0.1:38639/sw.js",
+      "scriptURL": "http://127.0.0.1:33451/sw.js",
       "state": "activated"
     },
     "swHasFetchHandler": true,

@@ -7,7 +7,8 @@ cannot prove.
 
 ## What would be published
 
-The entire contents of `dist/` (304 KB, ~2 MB uncompressed), uploaded **to the
+The entire contents of `dist/` — 26 files, 232,215 B (~232 KB) uncompressed,
+~179 KB gzipped, measured from `preview/evidence.json` — uploaded **to the
 root of an origin** — the service worker's scope is `/`, so it cannot be served
 from a subdirectory without changing `public/sw.js` and the manifest scope.
 
