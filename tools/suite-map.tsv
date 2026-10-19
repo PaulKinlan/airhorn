@@ -17,7 +17,11 @@ package-lock.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs test
 server.ts	tests/horn.test.js
 tools/*	tests/horn.test.js
 # The SW/offline suite covers the PWA surface (it verifies sw caching + manifest contents in dist).
-public/sw.js	tests/sw-offline.test.mjs test/sw-offline.test.mjs
+# sw-integrity drives the worker's cache-integrity behaviour directly (a corrupt entry must be
+# evicted and healed, never served), so it is gated on the worker itself - not on index.html,
+# whose markup the a11y suite already covers, because that would double the gate on the most
+# frequently edited file for no extra signal (airhorn-un5).
+public/sw.js	tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/sw-integrity.test.mjs
 public/manifest.json	tests/sw-offline.test.mjs test/sw-offline.test.mjs
 public/sounds/**	tests/sw-offline.test.mjs test/sw-offline.test.mjs
 # The install-compat shim affects the page the a11y suite drives.
@@ -27,6 +31,7 @@ public/scripts/**	tests/a11y.test.mjs test/a11y.test.mjs
 tests/horn.test.js	tests/horn.test.js
 tests/a11y.test.mjs	tests/a11y.test.mjs
 tests/sw-offline.test.mjs	tests/sw-offline.test.mjs
+tests/sw-integrity.test.mjs	tests/sw-integrity.test.mjs
 tests/webmcp.test.mjs	tests/webmcp.test.mjs
 tests/webmcp-browser.test.mjs	tests/webmcp-browser.test.mjs
 ~test/a11y.test.mjs	test/a11y.test.mjs
