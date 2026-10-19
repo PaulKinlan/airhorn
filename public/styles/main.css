@@ -49,6 +49,11 @@
     --install-bg: var(--blue-700);
     --install-ink: #fff;
     --install-edge: #fff;
+    /* Boot-failure banner and noscript notice: a dark card in both schemes,
+       so it reads as a message about the app, not part of the toy. */
+    --alert-bg: var(--navy-900);
+    --alert-ink: var(--ink-100);
+    --alert-edge: transparent;
 
     /* Browsers with color-scheme but no light-dark(): swap the tokens here. */
     @media (prefers-color-scheme: dark) {
@@ -60,6 +65,8 @@
       --focus-ring: #fff;
       --install-bg: #1a4f8f;
       --install-ink: var(--ink-100);
+      --alert-bg: var(--navy-800);
+      --alert-edge: #1b3a57;
     }
 
     /* Modern path: one declaration per token, resolved from color-scheme. */
@@ -73,6 +80,8 @@
       --focus-ring: light-dark(var(--navy-800), #fff);
       --install-bg: light-dark(var(--blue-700), #1a4f8f);
       --install-ink: light-dark(#fff, var(--ink-100));
+      --alert-bg: light-dark(var(--navy-900), var(--navy-800));
+      --alert-edge: light-dark(transparent, #1b3a57);
     }
 
     /* Tells the UA (scrollbars, form controls, canvas) which schemes we paint,
@@ -311,6 +320,59 @@
       & .button {
         transition: none;
       }
+    }
+  }
+}
+
+/* Boot failure banner and the noscript notice share one card: fixed to the
+   foot of the viewport so its appearance never shifts the horn. Ink on the
+   card is --alert-ink in both schemes, so the focus ring stays visible. */
+.boot-alert {
+  position: fixed;
+  inset-inline: 1rem;
+  inset-block-end: 1rem;
+  margin-inline: auto;
+  max-inline-size: 26rem;
+  padding: 0.875rem 1rem;
+  display: grid;
+  gap: 0.75rem;
+  justify-items: start;
+  background-color: var(--alert-bg);
+  color: var(--alert-ink);
+  border: 1px solid var(--alert-edge);
+  border-radius: 0.5rem;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 35%);
+  font-size: 0.95rem;
+  z-index: 10;
+
+  /* This card sets display itself, so the UA's [hidden] rule would lose the
+     cascade without this: the banner must actually disappear when hidden. */
+  &[hidden] {
+    display: none;
+  }
+
+  & p {
+    margin: 0;
+  }
+
+  & .alert-button {
+    padding: 0.5rem 1rem;
+    border: 1px solid var(--install-edge);
+    border-radius: 0.5rem;
+    background-color: var(--install-bg);
+    color: var(--install-ink);
+    font: inherit;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: background-color 0.2s ease-out;
+
+    &:hover {
+      background-color: color-mix(in oklab, var(--install-bg), #fff 12%);
+    }
+
+    &:focus-visible {
+      outline: 3px solid var(--alert-ink);
+      outline-offset: 3px;
     }
   }
 }

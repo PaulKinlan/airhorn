@@ -8,9 +8,9 @@
 # and fails the gate. Every suite in the tree must be reachable from a row (`~` counts) or exempted
 # with `!`, or the gate fails loudly (reverse check).
 src/horn.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs
-src/main.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
+src/main.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/boot-watchdog.test.mjs test/boot-watchdog.test.mjs
 src/webmcp.js	tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
-index.html	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/sw-failover.test.mjs
+index.html	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/sw-failover.test.mjs tests/boot-watchdog.test.mjs test/boot-watchdog.test.mjs
 vite.config.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
 package.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
 package-lock.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
@@ -35,10 +35,12 @@ tests/sw-integrity.test.mjs	tests/sw-integrity.test.mjs
 tests/sw-failover.test.mjs	tests/sw-failover.test.mjs
 tests/webmcp.test.mjs	tests/webmcp.test.mjs
 tests/webmcp-browser.test.mjs	tests/webmcp-browser.test.mjs
+tests/boot-watchdog.test.mjs	tests/boot-watchdog.test.mjs
 ~test/a11y.test.mjs	test/a11y.test.mjs
 ~test/sw-offline.test.mjs	test/sw-offline.test.mjs
 ~test/webmcp.test.mjs	test/webmcp.test.mjs
 ~test/webmcp-browser.test.mjs	test/webmcp-browser.test.mjs
+~test/boot-watchdog.test.mjs	test/boot-watchdog.test.mjs
 # Static assets and prose carry no behaviour; no suite covers them.
 !*.md
 !LICENSE

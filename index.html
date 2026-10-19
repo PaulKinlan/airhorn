@@ -52,7 +52,67 @@
     <div id='installer'>
       <button type='button' class='button'>Install</button>
     </div>
+    <!-- Revealed by the boot watchdog below when the module bundle never runs
+         (blocked by a filter or proxy, or a corrupt body from the cache): the
+         static HTML paints a complete horn either way, so without this the
+         page looks alive but is inert and says nothing. -->
+    <div id='boot-failure' class='boot-alert' role='alert' hidden>
+      <p>The Air Horner couldn&rsquo;t start, so the horn is silent. Check your connection, then try again.</p>
+      <button type='button' id='boot-retry' class='alert-button'>Try again</button>
+    </div>
+    <noscript>
+      <div class='boot-alert' role='alert'>
+        <p>The Air Horner needs JavaScript to make a sound. Enable JavaScript and reload the page.</p>
+      </div>
+    </noscript>
     <script type='module' src='/src/main.js'></script>
+    <script>
+      // Boot watchdog. The static HTML paints a complete horn, so when the
+      // module bundle never executes the page looks alive but is inert and
+      // silent. This notices, and says so. src/main.js calls
+      // window.__airhornBooted() as its first statement, so 'booted' means
+      // the app's code actually ran.
+      (function () {
+        var booted = false;
+        var banner = document.getElementById('boot-failure');
+        var retry = document.getElementById('boot-retry');
+
+        function show() {
+          if (booted || !banner || !banner.hidden) return;
+          banner.hidden = false;
+          if (retry) retry.focus();
+        }
+
+        // Booting cancels every pending watchdog timer, so a healthy page is
+        // left with none: a permanently pending timer would keep the page
+        // from ever reading as quiescent (a11y and sw-offline suites wait
+        // for observed quiescence).
+        var backstop = 0;
+        window.__airhornBooted = function () {
+          booted = true;
+          clearTimeout(backstop);
+        };
+
+        // Fast path: the module element fires `error` when its fetch fails
+        // (blocked) or its source fails to compile (corrupt cache body).
+        var moduleScript = document.querySelector('script[type=module]');
+        if (moduleScript) moduleScript.addEventListener('error', show);
+
+        // Slow path, for a hung fetch that fires neither `error` nor `load`:
+        // arm on load - the module always boots before load when it runs -
+        // with a short grace, plus a hard backstop measured from parse.
+        var armed = false;
+        function arm() {
+          if (armed || booted) return;
+          armed = true;
+          setTimeout(show, 2000);
+        }
+        window.addEventListener('load', arm);
+        backstop = setTimeout(arm, 12000);
+
+        if (retry) retry.addEventListener('click', function () { window.location.reload(); });
+      })();
+    </script>
     <script>
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(reg => {

@@ -20,6 +20,11 @@
 import { registerHornTools } from './webmcp.js';
 import { Horn } from './horn.js';
 
+// First statement of the app: tells the inline boot watchdog in index.html
+// that the module bundle actually executed. Anything that fails after this
+// line is the horn's problem; anything before it is the watchdog's.
+window.__airhornBooted?.();
+
 function trackEvent(eventName, params) {
   if (typeof gtag === 'function') {
     gtag('event', eventName, params);
