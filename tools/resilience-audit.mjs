@@ -314,6 +314,23 @@ const READ_STATE = `(() => {
   // are descended instead of stopping at one level.
   const renderedFragments = (root) => {
     const out = [];
+    // A shadow root renders through its host; elements render through
+    // checkVisibility (ancestors included); documents are always read.
+    const rendered = (n) => {
+      if (n.nodeType === 11 && n.host) n = n.host;
+      if (n.nodeType !== 1) return true;
+      // Walk ancestors: a descendant's own checkVisibility does not see an
+      // ANCESTOR's content-visibility skip (airhorn-v3t); c-v:hidden is a
+      // definite skip, c-v:auto skips when the ancestor itself is not
+      // rendered (which checkVisibility reports for that ancestor).
+      for (let a = n; a; a = a.parentElement) {
+        if (a.checkVisibility && !a.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })) return false;
+        if (getComputedStyle(a).contentVisibility === 'hidden') return false;
+      }
+      return true;
+    };
+    const ownText = (n) => [...n.childNodes].filter((c) => c.nodeType === 3)
+      .map((c) => c.textContent).join(' ').replace(/\\s+/g, ' ').trim();
     const visit = (node) => {
       // The node's OWN shadow root first: a shadow child is not in the
       // light traversal, so without this its subtree - and its shadow -
@@ -324,13 +341,13 @@ const READ_STATE = `(() => {
       // its own text node would read empty and flip 'explains itself'
       // to NO (airhorn-q8j). Each element's own text is collected exactly
       // once - as its parent-traversal's 'own', or here for the root.
-      const rootOwn = [...node.childNodes].filter((n) => n.nodeType === 3)
-        .map((n) => n.textContent).join(' ').replace(/\\s+/g, ' ').trim();
-      if (rootOwn) out.push(rootOwn);
+      if (rendered(node)) {
+        const rootOwn = ownText(node);
+        if (rootOwn) out.push(rootOwn);
+      }
       for (const child of node.querySelectorAll('*')) {
-        if (child.checkVisibility && !child.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })) continue;
-        const own = [...child.childNodes].filter((n) => n.nodeType === 3)
-          .map((n) => n.textContent).join(' ').replace(/\\s+/g, ' ').trim();
+        if (!rendered(child)) continue;
+        const own = ownText(child);
         if (own) out.push(own);
         if (child.shadowRoot) visit(child.shadowRoot);
       }
