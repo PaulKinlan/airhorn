@@ -10,7 +10,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -126,4 +127,44 @@ test('every script-tier suite is gated by a tests/support change (airhorn-dco)',
   // checking would call that correct.
   assert.deepEqual(selected, scriptTier,
     `the support row must select exactly the script-tier suites:\n  row: ${JSON.stringify(selected)}\n  expected: ${JSON.stringify(scriptTier)}`);
+});
+test('the tools parse fails on a symlinked broken script and passes a valid one (airhorn-0ct)', {
+  // Self-invocation guard: the child re-runs this suite; without the flag it
+  // would create the probe symlink again and recurse forever.
+  skip: process.env.GATE_SMOKE_SELF ? 'self-invocation guard' : false,
+}, () => {
+  // A regression pin that invokes the REAL suite: with a symlinked broken
+  // script in tools/, the tools parse must fail; with a valid target, pass.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-smoke-symlink-'));
+  const link = path.join(root, 'tools', 'zz-symlink-probe.mjs');
+  const runSelf = () => {
+    // Strip the runner's NODE_TEST_CONTEXT: a child node --test that inherits
+    // it believes it is a managed test child, writes nothing and exits 0 -
+    // the silent green that made this pin read as a false pass.
+    const childEnv = { ...process.env, GATE_SMOKE_SELF: '1' };
+    delete childEnv.NODE_TEST_CONTEXT;
+    const r = spawnSync(process.execPath, ['--test', path.join(root, 'tests', 'gate-smoke.test.js')], {
+      cwd: root, encoding: 'utf8',
+      env: childEnv,
+    });
+    const out = `${r.stdout || ''}${r.stderr || ''}`;
+    const lines = out.split('\n').filter((l) => /not ok|pass |fail |SyntaxError|Error/.test(l)).slice(0, 6).join(' || ');
+    return { status: r.status, tail: `err=${r.error ? r.error.code : 'none'} ${lines}` };
+  };
+  try {
+    fs.writeFileSync(path.join(tmp, 'broken.mjs'), 'const x = {');
+    fs.rmSync(link, { force: true });
+    fs.symlinkSync(path.join(tmp, 'broken.mjs'), link);
+    const brokenRun = runSelf();
+    assert.notEqual(brokenRun.status, 0, `a symlinked BROKEN tools script must fail the suite: ${brokenRun.tail}`);
+
+    fs.writeFileSync(path.join(tmp, 'valid.mjs'), 'export const ok = 1;');
+    fs.rmSync(link, { force: true });
+    fs.symlinkSync(path.join(tmp, 'valid.mjs'), link);
+    const validRun = runSelf();
+    assert.equal(validRun.status, 0, `a symlinked VALID tools script must pass the suite: ${validRun.tail}`);
+  } finally {
+    fs.rmSync(link, { force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
