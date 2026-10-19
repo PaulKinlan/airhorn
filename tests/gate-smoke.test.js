@@ -22,16 +22,20 @@ const gate = path.join(root, 'tools', 'fast-gate.sh');
 
 // Sentinel cleanup (airhorn-ey1): a bound kill during the symlink pin can
 // leave its probe link behind, which would redden the tools parse of the
-// NEXT run before the pin gets a chance to clean up. Remove stale probes
-// before any test runs - but spare the link THIS run's pin is about to
-// create/own (named in GSM_PROBE_NAME), or a pin child would delete its
-// parent's live probe and read a false green.
-const probeLinkName = (suffix) => `zz-symlink-probe-${suffix}.mjs`;
-const keepProbe = process.env.GSM_PROBE_NAME;
+// NEXT run before the pin gets a chance to clean up. Probe names carry the
+// OWNING PID: the sentinel removes only probes whose owner is gone, so a
+// CONCURRENT run's live probe survives (airhorn-je9) - deleting it made
+// two overlapping runs read false greens.
+const probeLinkName = () => `zz-symlink-probe-${process.pid}-${crypto.randomBytes(4).toString('hex')}.mjs`;
+const PROBE_RE = /^zz-symlink-probe-(\d+)-[0-9a-f]+\.mjs$/;
 for (const f of fs.readdirSync(path.join(root, 'tools'))) {
-  if (/^zz-symlink-probe-.+\.mjs$/.test(f) && f !== keepProbe) {
-    fs.rmSync(path.join(root, 'tools', f), { force: true });
-  }
+  const m = PROBE_RE.exec(f);
+  if (!m) continue;
+  const owner = Number(m[1]);
+  if (owner === process.pid) continue; // our own run's probe
+  let alive = true;
+  try { process.kill(owner, 0); } catch (e) { alive = e.code === 'EPERM'; }
+  if (!alive) fs.rmSync(path.join(root, 'tools', f), { force: true });
 }
 
 const listFor = (changed) =>
@@ -100,7 +104,7 @@ test('every tools script parses - recognised extensions at any depth (airhorn-7l
     if (!isFile && !ent.isDirectory()) {
       let st = null;
       try { st = fs.statSync(full); } catch { st = null; }
-      if (!st) assert.fail(`tools/${path.relative(root, full)} is a dangling symlink - remove it or point it at a real file (airhorn-0ct, airhorn-pww)`);
+      if (!st) assert.fail(`${path.relative(root, full)} is a dangling symlink - remove it or point it at a real file (airhorn-0ct, airhorn-pww)`);
       isFile = st.isFile();
     }
     if (!isFile) continue;
@@ -143,12 +147,25 @@ test('every script-tier suite is gated by a tests/support change (airhorn-dco)',
   assert.deepEqual(selected, scriptTier,
     `the support row must select exactly the script-tier suites:\n  row: ${JSON.stringify(selected)}\n  expected: ${JSON.stringify(scriptTier)}`);
 });
-// Self-invocation guard with an unguessable key (airhorn-j60): the child
-// re-runs this suite; without the guard it would create the probe symlink
-// again and recurse forever. The key carries a random suffix so a stray
-// GATE_SMOKE_SELF=1 in the environment cannot silently disable the pin.
+// Self-invocation guard with an unguessable key AND a per-run token
+// (airhorn-j60, airhorn-5os): the child re-runs this suite; without the
+// guard it would create the probe symlink again and recurse forever. The
+// skip fires only when the key's VALUE matches the token THIS pin minted -
+// an inherited key (any value) cannot satisfy it, so a stray can neither
+// disable the pin nor make it skip silently: a top-level run without the
+// exact token always RUNS the pin.
 const guardKey = `GATE_SMOKE_SELF_${crypto.randomBytes(4).toString('hex')}`;
-const guardActive = () => Object.keys(process.env).some((k) => /^GATE_SMOKE_SELF_[0-9a-f]{8}$/.test(k));
+const guardToken = crypto.randomBytes(8).toString('hex');
+// GATE_SMOKE_SELF carries "key:token" - BOTH minted by the pin process.
+// A child re-checks env[key] === token against the INHERITED names, so the
+// pairing survives process boundaries; a stray value (no colon, wrong
+// name, wrong token) fails the parse or the lookup and the pin RUNS.
+const guardActive = () => {
+  const spec = process.env.GATE_SMOKE_SELF || '';
+  const i = spec.indexOf(':');
+  if (i < 0) return false;
+  return process.env[spec.slice(0, i)] === spec.slice(i + 1);
+};
 
 test('the tools parse fails on a symlinked broken script and passes a valid one (airhorn-0ct)', {
   skip: guardActive() ? 'self-invocation guard' : false,
@@ -156,19 +173,23 @@ test('the tools parse fails on a symlinked broken script and passes a valid one 
   // A regression pin that invokes the REAL suite: with a symlinked broken
   // script in tools/, the tools parse must fail; with a valid target, pass.
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-smoke-symlink-'));
-  const probeName = probeLinkName(crypto.randomBytes(4).toString('hex'));
+  const probeName = probeLinkName();
   const link = path.join(root, 'tools', probeName);
   const runSelf = () => {
     // Strip the runner's NODE_TEST_CONTEXT: a child node --test that inherits
     // it believes it is a managed test child, writes nothing and exits 0 -
     // the silent green that made this pin read as a false pass.
-    const childEnv = { ...process.env, [guardKey]: '1', GSM_PROBE_NAME: probeName };
+    const childEnv = { ...process.env, [guardKey]: guardToken, GATE_SMOKE_SELF: `${guardKey}:${guardToken}`, GSM_PROBE_NAME: probeName };
     delete childEnv.NODE_TEST_CONTEXT;
-    const r = spawnSync(process.execPath, ['--test', path.join(root, 'tests', 'gate-smoke.test.js')], {
+    const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', path.join(root, 'tests', 'gate-smoke.test.js')], {
       cwd: root, encoding: 'utf8',
       env: childEnv,
     });
     const out = `${r.stdout || ''}${r.stderr || ''}`;
+    // The child MUST have skipped this pin via the guard pairing
+    // (airhorn-5os): a green child that RAN its own pin would be
+    // recursion, and a guard that never engages is invisible.
+    assert.ok(/# SKIP[-\s]*self-invocation guard/.test(out), `the pin child must report the guard skip: ${out.slice(0, 200)}`);
     const lines = out.split('\n').filter((l) => /not ok|pass |fail |SyntaxError|Error/.test(l)).slice(0, 6).join(' || ');
     return { status: r.status, tail: `err=${r.error ? r.error.code : 'none'} ${lines}` };
   };
