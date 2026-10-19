@@ -124,11 +124,12 @@ async function main() {
 
     const observerScript = `
       window.__perfMetrics = {
-        fp: 0,
-        fcp: 0,
-        lcp: 0,
+        fp: null,
+        fcp: null,
+        lcp: null,
+        lcpEntriesCount: 0,
         cls: 0,
-        inp: 0
+        rawEvents: []
       };
 
       try {
@@ -146,6 +147,7 @@ async function main() {
       try {
         new PerformanceObserver((entryList) => {
           const entries = entryList.getEntries();
+          window.__perfMetrics.lcpEntriesCount += entries.length;
           if (entries.length > 0) {
             window.__perfMetrics.lcp = entries[entries.length - 1].startTime;
           }
@@ -165,9 +167,12 @@ async function main() {
       try {
         new PerformanceObserver((entryList) => {
           for (const entry of entryList.getEntries()) {
-            if (entry.duration > window.__perfMetrics.inp) {
-              window.__perfMetrics.inp = entry.duration;
-            }
+            window.__perfMetrics.rawEvents.push({
+              name: entry.name,
+              duration: entry.duration,
+              interactionId: entry.interactionId || 0,
+              startTime: entry.startTime
+            });
           }
         }).observe({ type: 'event', durationThreshold: 0, buffered: true });
       } catch (e) {}
@@ -238,6 +243,7 @@ async function main() {
     let coldTransferred = 0;
     for (const b of requestTransferred.values()) coldTransferred += b;
     if (coldTransferred === 0) coldTransferred = networkTransferred;
+    const coldResponses = [...responses];
 
     // --- REPEAT LOAD ---
     networkTransferred = 0;
@@ -276,23 +282,58 @@ async function main() {
     let repeatTransferred = 0;
     for (const b of requestTransferred.values()) repeatTransferred += b;
     if (repeatTransferred === 0) repeatTransferred = networkTransferred;
+    const repeatResponses = [...responses];
+
+    function formatLcp(m) {
+      if (m.lcp !== null && m.lcp > 0) {
+        return `${Math.round(m.lcp)} ms`;
+      }
+      return `None (${m.lcpEntriesCount} entries recorded)`;
+    }
+
+    function computeInp(m) {
+      const events = m.rawEvents || [];
+      if (events.length === 0) {
+        return 'None (0 events >=16ms)';
+      }
+      const interactions = new Map();
+      for (const ev of events) {
+        const key = ev.interactionId ? String(ev.interactionId) : `${Math.round(ev.startTime / 100)}`;
+        const cur = interactions.get(key) || 0;
+        if (ev.duration > cur) interactions.set(key, ev.duration);
+      }
+      const durations = Array.from(interactions.values()).sort((a, b) => a - b);
+      const p98Index = Math.min(durations.length - 1, Math.floor(durations.length * 0.98));
+      const inp = durations[p98Index];
+      const maxEvent = Math.max(...events.map(e => e.duration));
+      return `${Math.round(inp)} ms (max: ${Math.round(maxEvent)} ms, ${events.length} evts >=16ms)`;
+    }
+
+    function summarizeResponses(resps) {
+      const sw = resps.filter(r => r.fromServiceWorker).length;
+      const disk = resps.filter(r => r.fromDiskCache).length;
+      const net = resps.filter(r => !r.fromServiceWorker && !r.fromDiskCache).length;
+      return `${sw} SW / ${disk} Disk / ${net} Net (${resps.length} total)`;
+    }
 
     console.log('=== Performance Measurement Report ===');
     console.log(`Tooling: Google Chrome Headless (${chromeBin}) via CDP WebSocket`);
-    console.log(`SW Active: ${swActive}`);
+    console.log(`SW Controller Present: ${swActive}`);
     console.table({
       'Cold Load': {
         'Transferred Bytes': `${coldTransferred} B`,
-        'First Paint (FP)': `${Math.round(coldMetrics.fp)} ms`,
-        'LCP': coldMetrics.lcp ? `${Math.round(coldMetrics.lcp)} ms` : 'N/A (CSS button)',
-        'INP': `${Math.round(coldMetrics.inp)} ms`,
+        'Request Provenance': summarizeResponses(coldResponses),
+        'First Paint (FP)': coldMetrics.fp !== null ? `${Math.round(coldMetrics.fp)} ms` : 'None',
+        'LCP': formatLcp(coldMetrics),
+        'INP (p98)': computeInp(coldMetrics),
         'CLS': coldMetrics.cls.toFixed(4)
       },
       'Repeat (SW-cached) Load': {
         'Transferred Bytes': `${repeatTransferred} B`,
-        'First Paint (FP)': `${Math.round(repeatMetrics.fp)} ms`,
-        'LCP': repeatMetrics.lcp ? `${Math.round(repeatMetrics.lcp)} ms` : 'N/A (CSS button)',
-        'INP': `${Math.round(repeatMetrics.inp)} ms`,
+        'Request Provenance': summarizeResponses(repeatResponses),
+        'First Paint (FP)': repeatMetrics.fp !== null ? `${Math.round(repeatMetrics.fp)} ms` : 'None',
+        'LCP': formatLcp(repeatMetrics),
+        'INP (p98)': computeInp(repeatMetrics),
         'CLS': repeatMetrics.cls.toFixed(4)
       }
     });
