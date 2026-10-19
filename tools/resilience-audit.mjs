@@ -282,11 +282,40 @@ const READ_STATE = `(() => {
     horn && rect && rect.width > 4 && rect.height > 4 &&
     cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0.05
   );
-  const live = [...document.querySelectorAll('[role="status"],[role="alert"],[aria-live]')]    .map((el) => ({
-      role: el.getAttribute('role'),
-      live: el.getAttribute('aria-live'),
-      text: (el.textContent || '').trim().slice(0, 200),
-    }));
+  // What the platform says is rendered AND readable (airhorn-od1):
+  // checkVisibility covers display:none, the hidden attribute, closed
+  // <details>, opacity:0, and visibility with its inheritable-override
+  // semantics - a visibility:visible region inside a hidden ancestor IS
+  // shown, which an ancestor walk gets wrong in the opposite direction
+  // (airhorn-4jw). But content-visibility:hidden keeps the element's box
+  // (checkVisibility says true) while skipping its contents - innerText is
+  // empty there - so a region with text is only 'shown' if its text survives
+  // into innerText. A visually-hidden-but-rendered region - the app-status
+  // pattern - still counts: innerText is non-empty for it, and what matters
+  // is whether the region HAS something to say.
+  // Open shadow roots are invisible to querySelectorAll, so a page whose
+  // alert lives in one was reported 'explains itself: NO' while the user
+  // saw it plainly (airhorn-70o): recurse through them. Closed roots are
+  // unreachable from script - a noted limit, not worked around.
+  const collectRegions = (root) => {
+    const found = [...root.querySelectorAll('[role="status"],[role="alert"],[aria-live]')];
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) found.push(...collectRegions(el.shadowRoot));
+    }
+    return found;
+  };
+  const live = collectRegions(document).map((el) => {
+      const text = (el.textContent || '').trim().slice(0, 200);
+      const vis = typeof el.checkVisibility === 'function'
+        ? el.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })
+        : !el.hidden && getComputedStyle(el).display !== 'none';
+      return {
+        role: el.getAttribute('role'),
+        live: el.getAttribute('aria-live'),
+        shown: vis && (text === '' || (el.innerText || '').trim().length > 0),
+        text,
+      };
+    });
   const bodyText = ((document.body && document.body.innerText) || '')
     .replace(/\\s+/g, ' ').trim().slice(0, 600);
   let navType = null;
@@ -436,7 +465,10 @@ async function shot(cdp, sessionId, name) {
 const EXPLAINS_RE = /offline|no connection|can.?t (?:reach|load|connect)|failed to load|unable to|retry|reconnect|try again|update available|new version|something went wrong|error/i;
 
 function summarise(state) {
-  const liveText = (state.live || []).map((l) => l.text).filter(Boolean).join(' | ');
+  // Evidence is what the page actually says somewhere rendered (airhorn-01e):
+  // a region with no text, or a hidden one, explains nothing.
+  const liveEvidence = (state.live || []).filter((l) => l.shown && l.text);
+  const liveText = liveEvidence.map((l) => l.text).join(' | ');
   const mentions = state.bodyText.match(EXPLAINS_RE);
   return {
     renders: state.horn.present,
@@ -445,8 +477,9 @@ function summarise(state) {
     title: state.title,
     navType: state.navType ?? null,
     liveRegions: state.live.length,
+    shownLiveRegions: liveEvidence.length,
     liveText,
-    explainsItself: state.live.length > 0 || !!mentions,
+    explainsItself: liveEvidence.length > 0 || !!mentions,
     explanationEvidence: liveText || (mentions ? `body text mentions "${mentions[0]}"` : 'none'),
     controller: state.controller,
     controllerChanges: state.controllerChanges,
