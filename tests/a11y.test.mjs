@@ -458,6 +458,71 @@ async function run() {
       throw new Error('Horn did not enter horning state on synthetic click');
     }
 
+    // Test install outcome feedback through the one polite voice (airhorn-fld):
+    // the old code wrote it to #install-status, an element that does not exist,
+    // so accepting or dismissing the prompt was silent. The button is also
+    // structurally disabled until the prompt is offered - no exposed-but-inert
+    // control, even with CSS blocked.
+    console.log('Testing install outcome feedback (airhorn-fld)...');
+    // The structural guard ships in the document itself: with CSS blocked the
+    // exposed button must already be inert. Assert the attribute on the BUILT
+    // shell - a late DOM read would race the real beforeinstallprompt, which
+    // enables the button.
+    const builtShell = fs.readFileSync(path.join(distDir, 'index.html'), 'utf8');
+    if (!/<button type='button' class='button' disabled>Install<\/button>/.test(builtShell)) {
+      throw new Error('installer button does not ship structurally disabled in dist/index.html');
+    }
+    const installFeedback = await send('Runtime.evaluate', {
+      expression: `(async () => {
+        const installer = document.getElementById('installer');
+        const button = installer.querySelector('button');
+        const status = document.getElementById('app-status');
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        status.textContent = '';
+
+        let promptCalls = 0;
+        const fire = (outcome) => window.dispatchEvent(Object.assign(
+          new Event('beforeinstallprompt'),
+          { prompt: () => { promptCalls += 1; },
+            userChoice: Promise.resolve({ outcome }) }));
+
+        fire('accepted');
+        const enabledOnPrompt = button.disabled === false && installer.classList.contains('available');
+
+        button.click();
+        let said = '';
+        for (let i = 0; i < 40 && !said; i++) { await sleep(50); said = status.textContent || ''; }
+        const acceptedAnnounce = said;
+        const disabledAfterChoice = button.disabled === true;
+        const availableRemoved = !installer.classList.contains('available');
+
+        status.textContent = '';
+        fire('dismissed');
+        const reenabledOnSecondPrompt = button.disabled === false;
+        button.click();
+        said = '';
+        for (let i = 0; i < 40 && !said; i++) { await sleep(50); said = status.textContent || ''; }
+        return { enabledOnPrompt, promptCalls, acceptedAnnounce, disabledAfterChoice,
+                 availableRemoved, reenabledOnSecondPrompt, dismissedAnnounce: said };
+      })()`,
+      awaitPromise: true,
+      returnByValue: true
+    });
+    const ifr = installFeedback.result.value;
+    if (!ifr.enabledOnPrompt) throw new Error('install button not enabled when beforeinstallprompt fired');
+    if (ifr.promptCalls !== 2) throw new Error(`expected one prompt() call per click (2), got ${ifr.promptCalls}`);
+    if (ifr.acceptedAnnounce !== 'App installed') {
+      throw new Error(`accepted install was silent or wrong: ${JSON.stringify(ifr.acceptedAnnounce)}`);
+    }
+    if (!ifr.disabledAfterChoice || !ifr.availableRemoved) {
+      throw new Error(`installer not retired after the choice: ${JSON.stringify(ifr)}`);
+    }
+    if (!ifr.reenabledOnSecondPrompt) throw new Error('a new install offer did not re-enable the button');
+    if (ifr.dismissedAnnounce !== 'Installation cancelled') {
+      throw new Error(`dismissed install was silent or wrong: ${JSON.stringify(ifr.dismissedAnnounce)}`);
+    }
+    console.log('Install outcome feedback verified:', JSON.stringify(ifr));
+
     // Test installer focus restoration (WCAG 2.4.3): focus must move to .horn, not drop to <body>
     console.log('Testing installer focus restoration when hidden...');
     const focusTestResult = await send('Runtime.evaluate', {
@@ -466,8 +531,14 @@ async function run() {
         const installBtn = installer.querySelector('button');
         const horn = document.querySelector('.horn');
 
-        // Simulate install prompt available and focused
-        installer.classList.add('available');
+        // Simulate install prompt available and focused - via the real
+        // beforeinstallprompt path, which is what ENABLES the button
+        // (airhorn-fld); the button is disabled at parse and a bare
+        // classList.add would leave it unfocusable.
+        window.dispatchEvent(Object.assign(new Event('beforeinstallprompt'), {
+          prompt() {},
+          userChoice: Promise.resolve({ outcome: 'accepted' }),
+        }));
         installBtn.focus();
         const initialFocused = document.activeElement === installBtn;
 

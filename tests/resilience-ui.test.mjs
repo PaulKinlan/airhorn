@@ -450,7 +450,12 @@ async function testBootWatchdog() {
     const installReachable = await evaluate(`(() => {
       const installer = document.getElementById('installer');
       const button = installer.querySelector('button');
-      installer.classList.add('available');
+      // Enable via the real beforeinstallprompt path (airhorn-fld): the
+      // button is disabled at parse, and a bare classList.add would leave it
+      // unfocusable - the check below asserts focusability.
+      window.dispatchEvent(Object.assign(new Event('beforeinstallprompt'), {
+        prompt() {}, userChoice: Promise.resolve({ outcome: 'accepted' }),
+      }));
       const cs = getComputedStyle(installer);
       button.focus();
       return {
