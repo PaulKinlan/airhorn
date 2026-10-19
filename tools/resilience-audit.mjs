@@ -29,6 +29,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { makeRenderModel } from './render-model.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, '../dist');
@@ -274,7 +275,9 @@ const PROBE = `
 })();
 `;
 
-const READ_STATE = `(() => {
+// Exported so a diagnostic can drive the SAME instrument the audit runs
+// (there is no second copy of the page code - airhorn-0w9).
+export const READ_STATE = `(() => {
   const horn = document.querySelector('.horn');
   const rect = horn ? horn.getBoundingClientRect() : null;
   const cs = horn ? getComputedStyle(horn) : null;
@@ -282,17 +285,12 @@ const READ_STATE = `(() => {
     horn && rect && rect.width > 4 && rect.height > 4 &&
     cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0.05
   );
-  // What the platform says is rendered AND readable (airhorn-od1):
-  // checkVisibility covers display:none, the hidden attribute, closed
-  // <details>, opacity:0, and visibility with its inheritable-override
-  // semantics - a visibility:visible region inside a hidden ancestor IS
-  // shown, which an ancestor walk gets wrong in the opposite direction
-  // (airhorn-4jw). But content-visibility:hidden keeps the element's box
-  // (checkVisibility says true) while skipping its contents - innerText is
-  // empty there - so a region with text is only 'shown' if its text survives
-  // into innerText. A visually-hidden-but-rendered region - the app-status
-  // pattern - still counts: innerText is non-empty for it, and what matters
-  // is whether the region HAS something to say.
+  // The decision itself is NOT here (airhorn-0w9, -cpi, -9py): it lives in
+  // tools/render-model.mjs and is injected BY SOURCE, so the instrument
+  // Chromium runs is byte-identical to the one tests/gate-smoke.test.js pins
+  // in Node. 'shown' used to be checkVisibility(el) while 'text' came from
+  // this walk, and every finding in that lineage was the two disagreeing.
+  const model = (${makeRenderModel.toString()})();
   // Open shadow roots are invisible to querySelectorAll, so a page whose
   // alert lives in one was reported 'explains itself: NO' while the user
   // saw it plainly (airhorn-70o): recurse through them. Closed roots are
@@ -304,72 +302,72 @@ const READ_STATE = `(() => {
     }
     return found;
   };
-  // ONE instrument for everything the audit reads as text (airhorn-w4k,
-  // airhorn-ami): walk the composed tree - light DOM plus open shadow roots,
-  // any depth - and collect each rendered element's own direct text nodes.
-  // A node the platform does not render (display:none, [hidden], closed
-  // <details>, content-visibility, opacity:0; checkVisibility knows all of
-  // them, including ancestors) contributes nothing, so a hidden shadow
-  // message can neither earn nor fake 'explains itself', and nested shadows
-  // are descended instead of stopping at one level.
-  const renderedFragments = (root) => {
-    const out = [];
-    // A shadow root renders through its host; documents are always read.
-    // One checkVisibility per element with the full option set is ENOUGH:
-    // measured in Chrome, it already reports an ancestor's c-v:hidden or
-    // settled auto-skip (the descendant has no box), and visibility is
-    // per-element so a visibility:visible child of a visibility:hidden
-    // ancestor stays rendered (od1's cleared case). The one gap is the
-    // element's OWN c-v:hidden, which checkVisibility reports as visible -
-    // read computed content-visibility for that directly. No ancestor walk:
-    // it over-suppressed visibility overrides and display:contents
-    // ancestors (airhorn-6xu) at O(depth) per element (airhorn-8rz).
-    const rendered = (n) => {
-      if (n.nodeType === 11 && n.host) n = n.host;
-      if (n.nodeType !== 1) return true;
-      if (n.checkVisibility && !n.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })) return false;
-      return getComputedStyle(n).contentVisibility !== 'hidden';
+  // The adapter supplies FACTS only, never verdicts, so there is exactly one
+  // place a decision can be wrong - the tested model above.
+  // Is the box chain (display, [hidden], closed <details>, opacity, c-v)
+  // painted? Asked WITHOUT visibilityProperty: visibility does not take a box
+  // away, and a visibility:visible descendant of a hidden ancestor must keep
+  // its text in every walk, including the body read (airhorn-od1, -s52).
+  // A boxed element answers for itself (checkVisibility includes its
+  // ancestors); a display:contents element has no box at all (measured:
+  // false even while plainly painted), so its nearest BOXED ancestor answers.
+  const boxOptions = { opacityProperty: true, contentVisibilityAuto: true };
+  const boxChainOf = (el, style) => {
+    const answers = (n) => {
+      if (typeof n.checkVisibility === 'function') return n.checkVisibility(boxOptions);
+      const s = getComputedStyle(n);
+      return s.display !== 'none' && Number(s.opacity) > 0.05;
     };
-    const ownText = (n) => [...n.childNodes].filter((c) => c.nodeType === 3)
-      .map((c) => c.textContent).join(' ').replace(/\\s+/g, ' ').trim();
-    const visit = (node) => {
-      // The node's OWN shadow root first: a shadow child is not in the
-      // light traversal, so without this its subtree - and its shadow -
-      // is never seen (airhorn-ami).
-      if (node.shadowRoot) visit(node.shadowRoot);
-      // The visited ROOT's own direct text nodes: querySelectorAll('*')
-      // returns descendants only, so a light-DOM region whose message is
-      // its own text node would read empty and flip 'explains itself'
-      // to NO (airhorn-q8j). Each element's own text is collected exactly
-      // once - as its parent-traversal's 'own', or here for the root.
-      if (rendered(node)) {
-        const rootOwn = ownText(node);
-        if (rootOwn) out.push(rootOwn);
-      }
-      for (const child of node.querySelectorAll('*')) {
-        if (!rendered(child)) continue;
-        const own = ownText(child);
-        if (own) out.push(own);
-        if (child.shadowRoot) visit(child.shadowRoot);
-      }
+    if (style.display !== 'contents') return answers(el);
+    const up = (n) => n.parentElement || (n.getRootNode ? n.getRootNode().host : null);
+    let n = up(el);
+    while (n && getComputedStyle(n).display === 'contents') n = up(n);
+    return n ? answers(n) : true; // nothing above to ask: we are the root
+  };
+  const ownTextOf = (n) => [...(n.childNodes || [])].filter((c) => c.nodeType === 3)
+    .map((c) => c.textContent).join(' ').replace(/\\s+/g, ' ').trim();
+  const adapter = (node) => {
+    // A shadow root renders through its host, so the host carries its facts.
+    const host = node.nodeType === 11 && node.host ? node.host : node;
+    let facts = { type: 'other' };
+    if (host.nodeType === 1) {
+      const style = getComputedStyle(host);
+      facts = {
+        type: 'element',
+        display: style.display,
+        contentVisibility: style.contentVisibility,
+        boxChain: boxChainOf(host, style),
+        // Used values: visibility inherits (with an override allowed at any
+        // level), opacity does not.
+        visibility: style.visibility,
+        opacity: Number(style.opacity),
+      };
+      // The two layout queries are read only by the c-v branch, so an ordinary
+      // element never pays for them.
+      Object.defineProperty(facts, 'hasTextContent', { get: () => (host.textContent || '').trim() !== '' });
+      Object.defineProperty(facts, 'renderedText', { get: () => (host.innerText || '').trim() });
+    }
+    return {
+      facts,
+      ownText: ownTextOf(node),
+      // DIRECT element children: each node is visited exactly once, and its
+      // own text nodes with it (airhorn-q8j, airhorn-ami).
+      elements: [...(node.children || [])],
+      shadow: node.shadowRoot || null,
     };
-    visit(root);
-    return out;
   };
   const live = collectRegions(document).map((el) => {
-      const vis = typeof el.checkVisibility === 'function'
-        ? el.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })
-        : !el.hidden && getComputedStyle(el).display !== 'none';
-      const text = renderedFragments(el).join(' ').replace(/\\s+/g, ' ').trim().slice(0, 200);
-      return {
-        role: el.getAttribute('role'),
-        live: el.getAttribute('aria-live'),
-        shown: vis && text.length > 0,
-        text,
-      };
-    });
-  const bodyText = renderedFragments(document).join(' ')
-    .replace(/\\s+/g, ' ').trim().slice(0, 600);
+    // shown IS 'the composed rendered text is non-empty': one decision, so the
+    // verdict and its evidence cannot disagree (airhorn-0w9).
+    const text = model.renderedText(el, adapter).slice(0, 200);
+    return {
+      role: el.getAttribute('role'),
+      live: el.getAttribute('aria-live'),
+      shown: text.length > 0,
+      text,
+    };
+  });
+  const bodyText = model.renderedText(document, adapter).slice(0, 600);
   let navType = null;
   try {
     const entry = performance.getEntriesByType('navigation')[0];
@@ -1003,7 +1001,15 @@ async function runAudit() {
   console.log('\nThis is an audit: exit 0 whatever it found. File findings against the bead, do not gate on it.');
 }
 
-runAudit().catch((err) => {
-  console.error('audit harness failed:', err);
-  process.exit(1);
-});
+// Only drive the audit when this file is the entry point: importing it (to
+// read READ_STATE, above) must not launch six Chromiums. import.meta.main is
+// the reliable test (Node 24+); the argv fallback keeps older runtimes - where
+// import.meta.main is undefined - from turning a real audit run into a silent
+// no-op that exits 0.
+const isMain = import.meta.main ?? (!!process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url));
+if (isMain) {
+  runAudit().catch((err) => {
+    console.error('audit harness failed:', err);
+    process.exit(1);
+  });
+}
