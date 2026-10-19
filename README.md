@@ -165,11 +165,12 @@ npm run build && node tools/cache-growth.mjs      # 10 deploys, ~25 s
 ```
 
 It asserts that each deploy leaves exactly the current version's two caches (the
-precache and its integrity records), that the precache keeps the same entry count,
-that stored bytes and origin usage stay flat rather than stepping up by one build per
-deploy, that nothing from the previous deploy — or two deploys ago — survives, that an
-old hashed asset is neither readable from cache nor still served by the origin, and
-that the horn still plays under each new worker. `--mutant keep-old-caches` serves a
+precache and its integrity records), that both caches hold exactly the paths the worker
+declares (compared as sets, not counts — `--self-check` proves a same-count substitution
+is rejected), that stored bytes and origin usage stay flat rather than stepping up by
+one build per deploy, that nothing from the previous deploy — or two deploys ago —
+survives, that an old hashed asset is neither readable from cache nor still served by
+the origin, and that the horn still plays under each new worker. `--mutant keep-old-caches` serves a
 worker whose activate handler deletes nothing, and those growth checks must go red.
 
 ### How suites report to the gate
