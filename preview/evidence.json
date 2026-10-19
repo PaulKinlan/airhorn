@@ -1,0 +1,241 @@
+{
+  "generatedAt": "2026-10-19T16:56:05.537Z",
+  "url": "http://127.0.0.1:38639/",
+  "chrome": "/usr/bin/google-chrome",
+  "publishedFiles": [
+    {
+      "path": "/.well-known/assetlinks.json",
+      "bytes": 300
+    },
+    {
+      "path": "/assets/index-tVe8U205.js",
+      "bytes": 9850
+    },
+    {
+      "path": "/favicon.ico",
+      "bytes": 3143
+    },
+    {
+      "path": "/humans.txt",
+      "bytes": 219
+    },
+    {
+      "path": "/images/airhorn.svg",
+      "bytes": 353
+    },
+    {
+      "path": "/images/screenshot-narrow.png",
+      "bytes": 24467
+    },
+    {
+      "path": "/images/screenshot-wide.png",
+      "bytes": 23230
+    },
+    {
+      "path": "/images/touch/Airhorner-maskable.svg",
+      "bytes": 494
+    },
+    {
+      "path": "/images/touch/android-launchericon-144-144.png",
+      "bytes": 5675
+    },
+    {
+      "path": "/images/touch/android-launchericon-192-192.png",
+      "bytes": 7578
+    },
+    {
+      "path": "/images/touch/android-launchericon-48-48.png",
+      "bytes": 1769
+    },
+    {
+      "path": "/images/touch/android-launchericon-512-512.png",
+      "bytes": 25755
+    },
+    {
+      "path": "/images/touch/android-launchericon-72-72.png",
+      "bytes": 2826
+    },
+    {
+      "path": "/images/touch/android-launchericon-96-96.png",
+      "bytes": 3737
+    },
+    {
+      "path": "/images/touch/android-maskableicon-144-144.png",
+      "bytes": 6706
+    },
+    {
+      "path": "/images/touch/android-maskableicon-192-192.png",
+      "bytes": 8701
+    },
+    {
+      "path": "/images/touch/android-maskableicon-48-48.png",
+      "bytes": 3183
+    },
+    {
+      "path": "/images/touch/android-maskableicon-512-512.png",
+      "bytes": 18464
+    },
+    {
+      "path": "/images/touch/android-maskableicon-72-72.png",
+      "bytes": 4090
+    },
+    {
+      "path": "/images/touch/android-maskableicon-96-96.png",
+      "bytes": 4988
+    },
+    {
+      "path": "/index.html",
+      "bytes": 11965
+    },
+    {
+      "path": "/manifest.json",
+      "bytes": 2980
+    },
+    {
+      "path": "/robots.txt",
+      "bytes": 78
+    },
+    {
+      "path": "/sounds/airhorn.mp3",
+      "bytes": 40858
+    },
+    {
+      "path": "/styles/main.css",
+      "bytes": 11879
+    },
+    {
+      "path": "/sw.js",
+      "bytes": 8927
+    }
+  ],
+  "captures": [
+    "horn-light.png",
+    "horn-dark.png",
+    "horn-320.png",
+    "horn-offline.png"
+  ],
+  "checks": {
+    "cssAppliedDesktop": 218.5,
+    "swControllerOnFirstLoad": true,
+    "darkApplied": true,
+    "offlineHornWidth": 218.5,
+    "offlineRenders": true,
+    "offlineTitle": "The Air Horner",
+    "offlineBootFailureShown": false,
+    "offlinePlay": {
+      "pressedWhileHeld": "true",
+      "released": "false"
+    }
+  },
+  "installability": {
+    "secureContext": true,
+    "manifestLink": "http://127.0.0.1:38639/manifest.json",
+    "manifest": {
+      "name": "The Air Horner",
+      "short_name": "Airhorner",
+      "start_url": "/?homescreen=1",
+      "display": "standalone",
+      "theme_color": "#2196F3",
+      "background_color": "#2196F3",
+      "icons": [
+        {
+          "sizes": "48x48",
+          "type": "image/png",
+          "src": "/images/touch/android-launchericon-48-48.png"
+        },
+        {
+          "sizes": "72x72",
+          "type": "image/png",
+          "src": "/images/touch/android-launchericon-72-72.png"
+        },
+        {
+          "sizes": "96x96",
+          "type": "image/png",
+          "src": "/images/touch/android-launchericon-96-96.png"
+        },
+        {
+          "sizes": "144x144",
+          "type": "image/png",
+          "src": "/images/touch/android-launchericon-144-144.png"
+        },
+        {
+          "sizes": "192x192",
+          "type": "image/png",
+          "src": "/images/touch/android-launchericon-192-192.png"
+        },
+        {
+          "sizes": "512x512",
+          "type": "image/png",
+          "src": "/images/touch/android-launchericon-512-512.png"
+        },
+        {
+          "sizes": "48x48",
+          "type": "image/png",
+          "purpose": "maskable",
+          "src": "/images/touch/android-maskableicon-48-48.png"
+        },
+        {
+          "sizes": "72x72",
+          "type": "image/png",
+          "purpose": "maskable",
+          "src": "/images/touch/android-maskableicon-72-72.png"
+        },
+        {
+          "sizes": "96x96",
+          "type": "image/png",
+          "purpose": "maskable",
+          "src": "/images/touch/android-maskableicon-96-96.png"
+        },
+        {
+          "sizes": "144x144",
+          "type": "image/png",
+          "purpose": "maskable",
+          "src": "/images/touch/android-maskableicon-144-144.png"
+        },
+        {
+          "sizes": "192x192",
+          "type": "image/png",
+          "purpose": "maskable",
+          "src": "/images/touch/android-maskableicon-192-192.png"
+        },
+        {
+          "sizes": "512x512",
+          "type": "image/png",
+          "purpose": "maskable",
+          "src": "/images/touch/android-maskableicon-512-512.png"
+        }
+      ],
+      "shortcuts": [
+        "Instant Blast"
+      ]
+    },
+    "has192Icon": true,
+    "has512Icon": true,
+    "hasMaskable": true,
+    "serviceWorker": {
+      "scriptURL": "http://127.0.0.1:38639/sw.js",
+      "state": "activated"
+    },
+    "swHasFetchHandler": true,
+    "swPrecaches": true,
+    "beforeinstallpromptFired": true
+  },
+  "webmcp": {
+    "hasModelContext": true,
+    "tools": [
+      {
+        "name": "get_horn_state",
+        "description": "Reports whether the Air Horner is sounding right now, whether it is looping, and whether audio is available in this browser."
+      },
+      {
+        "name": "play_horn",
+        "description": "Sound the Air Horner. Starts audio playback, pressed state and app badge, exactly like pressing the on-screen horn button."
+      },
+      {
+        "name": "stop_horn",
+        "description": "Silence the Air Horner immediately."
+      }
+    ],
+    "expectedToolsPresent": true
+  }
+}
