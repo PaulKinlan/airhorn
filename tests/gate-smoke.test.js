@@ -11,12 +11,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const gate = path.join(root, 'tools', 'fast-gate.sh');
-const audit = path.join(root, 'tools', 'resilience-audit.mjs');
 
 const listFor = (changed) =>
   execFileSync('bash', [gate, '--changed', changed, '--list'], { cwd: root, encoding: 'utf8' })
@@ -57,12 +57,11 @@ test('the gate script parses (bash -n)', () => {
   execFileSync('bash', ['-n', gate]);
 });
 
-test('the audit script parses (node --check)', () => {
-  execFileSync(process.execPath, ['--check', audit]);
-});
-
-test('the perf-measurement script parses (node --check)', () => {
-  // Same instrument as the audit check: a tools/* script this suite places
-  // must at least parse, or the row's KNOWN verdict lies (airhorn-e0y).
-  execFileSync(process.execPath, ['--check', path.join(root, 'tools', 'measure-perf.mjs')]);
+test('every tools/*.mjs script parses (node --check)', () => {
+  // Glob, not names (airhorn-v1n): the tools/* placement must be real for any
+  // script in the directory, present or future - a NEW tools script with a
+  // syntax error must fail this suite, not report coverage KNOWN.
+  const scripts = fs.readdirSync(path.join(root, 'tools')).filter((f) => /\.mjs$/.test(f));
+  assert.ok(scripts.length >= 2, `expected the tools scripts to be present, got ${JSON.stringify(scripts)}`);
+  for (const s of scripts) execFileSync(process.execPath, ['--check', path.join(root, 'tools', s)]);
 });

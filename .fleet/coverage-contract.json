@@ -48,7 +48,9 @@
   "tests/support/*": [
     "tests/a11y.test.mjs",
     "tests/sw-offline.test.mjs",
+    "tests/sw-failover.test.mjs",
     "tests/webmcp.test.mjs",
-    "tests/webmcp-browser.test.mjs"
+    "tests/webmcp-browser.test.mjs",
+    "tests/resilience-ui.test.mjs"
   ]
 }
