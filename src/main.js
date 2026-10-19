@@ -20,10 +20,10 @@
 import { registerHornTools } from './webmcp.js';
 import { Horn } from './horn.js';
 
-// First statement of the app: tells the inline boot watchdog in index.html
-// that the module bundle actually executed. Anything that fails after this
-// line is the horn's problem; anything before it is the watchdog's.
-window.__airhornBooted?.();
+// The boot marker is NOT here: the watchdog's 'booted' means the horn is
+// actually usable (airhorn-21k), so src/main.js signals it from the load
+// handler once the AirHorn is constructed and bound - a bundle that runs but
+// fails during setup stays unbooted and the watchdog speaks.
 
 // Status awareness (airhorn-8nz): say when the connection drops or returns.
 // The horn itself keeps working offline (cached shell plus the synth
@@ -210,6 +210,10 @@ window.addEventListener('load', () => {
   const airhorn = new AirHorn(document.getElementById('airhorn'));
   window.__airhorn = airhorn;
   new Installer(document.getElementById('installer'));
+
+  // The app is usable: retire the boot watchdog (airhorn-21k). This runs
+  // synchronously inside load, always ahead of the watchdog's load+grace arm.
+  window.__airhornBooted?.();
 
   registerHornTools(airhorn).catch(() => {
     // WebMCP is an enhancement: never let a registration failure break the horn.

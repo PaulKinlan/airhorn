@@ -68,7 +68,7 @@
           white-space: nowrap;
         }
 
-        #installer {
+        #installer:not(.available) {
           visibility: hidden;
           pointer-events: none;
         }
@@ -116,10 +116,10 @@
     <script type='module' src='/src/main.js'></script>
     <script>
       // Boot watchdog. The static HTML paints a complete horn, so when the
-      // module bundle never executes the page looks alive but is inert and
-      // silent. This notices, and says so. src/main.js calls
-      // window.__airhornBooted() as its first statement, so 'booted' means
-      // the app's code actually ran.
+      // module bundle never executes - or executes and then fails during
+      // setup - the page looks alive but is inert and silent. This notices,
+      // and says so. src/main.js calls window.__airhornBooted() only once the
+      // app is actually usable, so 'booted' means the horn works.
       (function () {
         var booted = false;
         var banner = document.getElementById('boot-failure');
@@ -139,6 +139,12 @@
         window.__airhornBooted = function () {
           booted = true;
           clearTimeout(backstop);
+          // A late bundle retires the notice: the page was wrong to claim the
+          // horn was dead, so take it back (airhorn-duj).
+          if (banner && !banner.hidden) {
+            banner.hidden = true;
+            if (retry) retry.blur();
+          }
         };
 
         // Fast path: the module element fires `error` when its fetch fails
@@ -148,7 +154,9 @@
 
         // Slow path, for a hung fetch that fires neither `error` nor `load`:
         // arm on load - the module always boots before load when it runs -
-        // with a short grace, plus a hard backstop measured from parse.
+        // with a short grace, plus a hard backstop measured from parse. The
+        // backstop is effectively ~14s: the timer calls arm() at 12s and arm
+        // schedules the reveal 2s later.
         var armed = false;
         function arm() {
           if (armed || booted) return;
@@ -175,15 +183,20 @@
           reg.addEventListener('updatefound', () => {
             const newWorker = reg.installing;
             if (newWorker) {
+              // At updatefound the worker is already 'installing', so that
+              // state never reaches the statechange listener below (airhorn-
+              // d5q): announce the update now, not from a branch that cannot
+              // run.
+              if (navigator.serviceWorker.controller) {
+                window.__airhornAnnounce?.('Updating the Air Horner to a new version...');
+              }
               newWorker.addEventListener('statechange', () => {
                 // Update notices (airhorn-8nz): only when an update arrives
                 // over an existing controller - a first install is silent.
                 // The message is transient by design: with a controller the
                 // page reloads itself via controllerchange right after;
                 // mechanics (skipWaiting + reload) are unchanged.
-                if (newWorker.state === 'installing' && navigator.serviceWorker.controller) {
-                  window.__airhornAnnounce?.('Updating the Air Horner to a new version...');
-                } else if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
                   window.__airhornAnnounce?.('A new version is ready - reloading...');
                   newWorker.postMessage('skipWaiting');
                 } else if (newWorker.state === 'redundant' && navigator.serviceWorker.controller) {

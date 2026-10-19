@@ -19,7 +19,8 @@ const mimeTypes = {
 };
 
 // Drives the built app (dist/) in headless Chrome over raw CDP and verifies
-// the failure-state messaging surfaces from airhorn-quk and airhorn-8nz:
+// the failure-state messaging surfaces from airhorn-quk and airhorn-8nz, plus
+// the review findings airhorn-d5q, airhorn-duj, airhorn-21k and airhorn-5yv:
 //   1. healthy boot never shows the boot-failure banner, and the status
 //      region stays empty (no false positive, silence in the normal case);
 //   2. a blocked module bundle (filter/proxy) reveals the banner + retry;
@@ -27,7 +28,14 @@ const mimeTypes = {
 //   4. with scripting disabled the <noscript> notice is visible;
 //   5. dropping the connection announces it, restoring announces that;
 //   6. a service worker update over an existing controller announces
-//      itself, then the page updates (existing mechanics, unchanged).
+//      itself - including the installing phase (d5q) - then the page
+//      updates (existing mechanics, unchanged);
+//   7. with the stylesheet blocked the horn stays a labelled, full-size
+//      button, honest about the installer, and install is reachable once
+//      the prompt is available (5yv);
+//   8. a bundle that arrives late retires a shown banner (duj);
+//   9. a bundle that executes and then throws during setup still gets the
+//      banner (21k: the boot marker only fires when the app is usable).
 // Screenshots land in /tmp/airhorn-boot-watchdog/ as evidence.
 async function testBootWatchdog() {
   const distDir = path.join(__dirname, '../dist');
@@ -110,21 +118,29 @@ async function testBootWatchdog() {
 
   let msgId = 1;
   const pending = new Map();
+  let fetchHold = false; // when set, paused requests are held until released
+  const heldRequests = [];
+  const fulfillBody = (requestId, bodyText) => {
+    ws.send(JSON.stringify({
+      id: msgId++,
+      method: 'Fetch.fulfillRequest',
+      params: {
+        requestId,
+        responseCode: 200,
+        responseHeaders: [{ name: 'Content-Type', value: 'application/javascript' }],
+        body: Buffer.from(bodyText).toString('base64'),
+      },
+    }));
+  };
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.method === 'Fetch.requestPaused') {
       const { requestId } = msg.params;
-      const body = Buffer.from('this is not javascript %%').toString('base64');
-      ws.send(JSON.stringify({
-        id: msgId++,
-        method: 'Fetch.fulfillRequest',
-        params: {
-          requestId,
-          responseCode: 200,
-          responseHeaders: [{ name: 'Content-Type', value: 'application/javascript' }],
-          body,
-        },
-      }));
+      if (fetchHold) {
+        heldRequests.push(requestId);
+        return;
+      }
+      fulfillBody(requestId, 'this is not javascript %%');
       return;
     }
     if (msg.id && pending.has(msg.id)) {
@@ -346,6 +362,10 @@ async function testBootWatchdog() {
     // Fire and forget: reg.update() is polled below, not awaited here.
     await evaluate(`navigator.serviceWorker.getRegistration().then(reg => reg.update())`);
     await waitUntil(`window.__statusLog.some(m => /new version|updating/i.test(m))`, 10000, 'update notice');
+    // airhorn-d5q: the 'Updating...' notice must actually fire - at
+    // updatefound the worker is already 'installing', so the announcement
+    // happens outside the statechange listener.
+    await waitUntil(`window.__statusLog.some(m => /updating/i.test(m))`, 5000, 'installing-phase notice');
     const updateMsgs = await evaluate(`window.__statusLog.filter(m => /new version|updating/i.test(m))`);
     console.log('  update notice(s):', JSON.stringify(updateMsgs));
     await shot('update-notice');
@@ -378,11 +398,18 @@ async function testBootWatchdog() {
         labelText: label ? label.textContent.trim() : null,
         labelVisible: !!label && label.getClientRects().length > 0,
         installerGone: !!installer && installer.getClientRects().length === 0,
-        // The critical fallback hides the installer the way main.css does -
-        // visibility, not display - so a visibility:hidden element still has
-        // client rects; assert the computed styles instead.
-        installerHidden: !!installer && getComputedStyle(installer).visibility === 'hidden'
-          && getComputedStyle(installer).pointerEvents === 'none',
+        // The critical fallback hides the installer only while the prompt is
+        // unavailable (airhorn-5yv): once beforeinstallprompt has fired (it
+        // does fire in headless Chrome - this page has a manifest) and
+        // main.js adds .available, the button must be reachable. Either way
+        // the page must be honest about which state it is in.
+        installerHonest: (() => {
+          const i = document.getElementById('installer');
+          const cs = getComputedStyle(i);
+          return i.classList.contains('available')
+            ? (cs.visibility === 'visible' && cs.pointerEvents !== 'none')
+            : (cs.visibility === 'hidden' && cs.pointerEvents === 'none');
+        })(),
         h1Hidden: !!h1 && getComputedStyle(h1).clipPath === 'inset(50%)',
       };
     })()`);
@@ -392,15 +419,75 @@ async function testBootWatchdog() {
     if (!unstyled.labelVisible || !/air horn/i.test(unstyled.labelText || '')) {
       throw new Error(`horn label not visible without CSS: ${JSON.stringify(unstyled)}`);
     }
-    if (!unstyled.installerHidden) throw new Error('install button visible and inert without CSS');
+    if (!unstyled.installerHonest) throw new Error('install button neither honestly hidden nor reachable without CSS');
     if (!unstyled.h1Hidden) throw new Error('visually-hidden heading showed as prose without CSS');
     // And the unstyled horn still sounds: the failure this replaces was a
     // page that looked broken but passed a naive usability check.
     await evaluate(`document.querySelector('.horn').click()`);
     await waitUntil(`document.querySelector('.horn').getAttribute('aria-pressed') === 'true'`, 3000, 'unstyled horn to sound');
+    // airhorn-5yv: the critical fallback hides the installer, but must not
+    // lock install away in the very mode it protects - once the prompt is
+    // available the button is reachable even unstyled.
+    const installReachable = await evaluate(`(() => {
+      const installer = document.getElementById('installer');
+      const button = installer.querySelector('button');
+      installer.classList.add('available');
+      const cs = getComputedStyle(installer);
+      button.focus();
+      return {
+        visible: cs.visibility === 'visible',
+        clickable: cs.pointerEvents !== 'none',
+        focusable: document.activeElement === button,
+      };
+    })()`);
+    if (!installReachable.visible || !installReachable.clickable || !installReachable.focusable) {
+      throw new Error(`install unreachable unstyled even with .available: ${JSON.stringify(installReachable)}`);
+    }
     await shot('blocked-css');
-    console.log(`  blocked CSS: horn ${unstyled.w}x${unstyled.h}, labelled, installer hidden, still sounds`);
+    console.log(`  blocked CSS: horn ${unstyled.w}x${unstyled.h}, labelled, installer hidden until .available, still sounds`);
     await send('Network.setBlockedURLs', { urls: [] });
+
+    // --- Case 8: a slow bundle arriving late retires the banner (airhorn-duj) ---
+    console.log('--- Case 8: slow bundle arrives after the banner');
+    await send('Fetch.enable', { patterns: [{ urlPattern: '*assets/*.js', requestStage: 'Request' }] });
+    fetchHold = true;
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+    for (let i = 0; i < 30 && heldRequests.length === 0; i++) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (heldRequests.length === 0) throw new Error('module request was never held; cannot test the late bundle');
+    // Force the watchdog's arm without sitting out the ~14s backstop: the
+    // synthetic load event runs the same arm -> grace -> show chain.
+    await evaluate(`window.dispatchEvent(new Event('load'))`);
+    await waitUntil(`!document.getElementById('boot-failure').hidden`, 8000, 'banner while the bundle stalls');
+    // The late bundle executes and the app becomes usable - the page must
+    // take back its claim that the horn could not start.
+    for (const id of heldRequests.splice(0)) fulfillBody(id, 'window.__airhornBooted && window.__airhornBooted();');
+    fetchHold = false;
+    await waitUntil(`document.getElementById('boot-failure').hidden === true
+      && document.getElementById('boot-failure').getClientRects().length === 0`, 5000, 'banner to retire on the late boot');
+    await send('Fetch.disable');
+    await shot('late-bundle-retires-banner');
+    console.log('  slow bundle: banner revealed while stalled, retired when the app booted');
+
+    // --- Case 9: the bundle executes but fails during setup (airhorn-21k) -------
+    console.log('--- Case 9: bundle executes then throws during setup');
+    await send('Fetch.enable', { patterns: [{ urlPattern: '*assets/*.js', requestStage: 'Request' }] });
+    fetchHold = true;
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+    for (let i = 0; i < 30 && heldRequests.length === 0; i++) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    // Valid JS that throws: an execution failure fires no `error` event on
+    // the module element, and post-21k the boot marker only fires once the
+    // app is usable - so only the watchdog's arm+grace can speak.
+    for (const id of heldRequests.splice(0)) fulfillBody(id, 'const x = 1; throw new Error("setup boom");');
+    fetchHold = false;
+    await waitUntil(`!document.getElementById('boot-failure').hidden`, 12000, 'banner for a bundle that ran and failed');
+    const stillDead = await evaluate(`typeof window.__airhorn === 'undefined'`);
+    if (!stillDead) throw new Error('app booted although the bundle threw during setup');
+    await send('Fetch.disable');
+    console.log('  setup throw: banner shown, app unbooted (marker only fires when usable)');
 
     console.log('ALL RESILIENCE-UI CHECKS PASSED!');
   } finally {
