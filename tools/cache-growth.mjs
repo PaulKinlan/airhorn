@@ -1,0 +1,688 @@
+#!/usr/bin/env node
+/*
+ * tools/cache-growth.mjs — does a returning user's CacheStorage stay bounded
+ * across deploys? (airhorn-qij)
+ *
+ * Every deploy ships new content-hashed assets, and this worker precaches them
+ * under a cache name stamped with the build. That is exactly the shape that
+ * grows without bound on a device that comes back after a few releases: one
+ * precache (plus its integrity record cache) per version, each holding a shell,
+ * a stylesheet, the sample and a *new* hashed JS bundle that nothing else can
+ * use. The worker's activate handler is supposed to delete every previous
+ * version — this tool measures whether it actually does, in one browser
+ * profile, over ten successive builds.
+ *
+ * Per version it records:
+ *   - the cache names that exist, so a leftover is named rather than inferred;
+ *   - entries and stored bytes per cache (read back with cache.match() and
+ *     arrayBuffer(), so the number is what the device is holding, not what the
+ *     build produced);
+ *   - navigator.storage.estimate() usage (and its `usageDetails`, when Chrome
+ *     reports them), the number a real device runs out of;
+ *   - whether the previous versions' hashed assets are still readable from
+ *     cache, and whether the origin still serves them (it must not: the build
+ *     that named them is gone).
+ *
+ * The builds are simulated by copying dist/ per version and renaming the hashed
+ * bundle (appending a marker byte, as a real rebuild would), rewriting the
+ * references in index.html and the worker's precache list, and stamping a new
+ * worker version. So each version has a distinct hashed asset, a distinct cache
+ * name and new bytes — the conditions under which caches accumulate.
+ *
+ * Asserted: every deploy leaves exactly the current version's two caches, the
+ * precache keeps the same entry count, stored bytes do not grow, nothing from
+ * one or two versions ago survives (in cache or from the network), origin usage
+ * stays bounded, and the horn still plays under each new worker.
+ *
+ * --mutant keep-old-caches serves a worker whose activate handler deletes
+ * nothing, and the growth checks must then go red — a storage check that cannot
+ * fail is a false green (airhorn-a6u).
+ *
+ * Explicit-only, like the soak and the acceptance pass: it installs ten builds
+ * and reloads the page ten times, so it has no business in the fast gate.
+ *
+ * Usage:
+ *   npm run build && node tools/cache-growth.mjs [--versions 10] [--mutant none|keep-old-caches]
+ *
+ * Exits 0 only when every check passes; report.json + a screenshot are the evidence.
+ */
+
+import { spawn, execSync } from 'node:child_process';
+import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { quiescenceProbe, waitForQuiescence } from '../tests/support/quiescence.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const root = path.join(__dirname, '..');
+const distDir = path.join(root, 'dist');
+
+const mimeTypes = {
+  '.html': 'text/html',
+  '.js': 'application/javascript',
+  '.css': 'text/css',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.mp3': 'audio/mpeg',
+  '.ico': 'image/x-icon',
+  '.txt': 'text/plain',
+  '.webmanifest': 'application/manifest+json',
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const HELP = `
+Usage: node tools/cache-growth.mjs [options]     (run "npm run build" first)
+
+  --versions <n>   successive builds installed into one browser profile (default 10)
+  --out <dir>      evidence directory (default /tmp/airhorn-cache-growth/<sha>-<stamp>)
+  --mutant <name>  inject a known regression to prove the checks can fail:
+                   none | keep-old-caches
+  --help           this text
+
+Each version gets its own hashed asset, cache name and worker version, as a real
+deploy does. Exits 0 only when every check passes.
+`;
+
+const MUTANTS = new Set(['none', 'keep-old-caches']);
+
+function parseArgs(argv) {
+  const options = { versions: 10, out: null, mutant: 'none' };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    const value = () => {
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) throw new Error(`${arg} needs a value`);
+      i += 1;
+      return next;
+    };
+    switch (arg) {
+      case '--versions': options.versions = Number(value()); break;
+      case '--out': options.out = value(); break;
+      case '--mutant': options.mutant = value(); break;
+      case '--help': case '-h':
+        console.log(HELP);
+        process.exit(0);
+        break;
+      default:
+        throw new Error(`unknown option ${arg} (try --help)`);
+    }
+  }
+  if (!Number.isFinite(options.versions) || options.versions < 2) {
+    throw new Error('--versions must be at least 2 (a single version cannot show a leftover)');
+  }
+  if (!MUTANTS.has(options.mutant)) {
+    throw new Error(`unknown mutant ${options.mutant} (one of ${[...MUTANTS].join(', ')})`);
+  }
+  return options;
+}
+
+function makeEvidenceDir(explicit) {
+  if (explicit) return path.resolve(explicit);
+  if (process.env.CACHE_GROWTH_OUT) return process.env.CACHE_GROWTH_OUT;
+  let sha = 'worktree';
+  try {
+    sha = execSync('git rev-parse --short HEAD', { cwd: root }).toString().trim();
+  } catch {
+    // not a git checkout: keep the default name
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return path.join('/tmp/airhorn-cache-growth', `${sha}-${stamp}`);
+}
+
+/* --------------------------------- checks --------------------------------- */
+
+const checks = [];
+function check(name, pass, detail) {
+  checks.push({ name, pass: Boolean(pass), detail });
+  console.log(`  ${pass ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
+  return Boolean(pass);
+}
+
+const median = (values) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+};
+
+function growsMonotonically(values, tolerance) {
+  if (values.length < 3) return false;
+  return values.slice(1).every((value, index) => value - values[index] > tolerance);
+}
+
+const kb = (bytes) => (bytes / 1024).toFixed(1);
+
+/* ------------------------------ build variants ---------------------------- */
+
+const versionTag = (index) => `2.0.0-cgv${String(index).padStart(2, '0')}`;
+const assetPathFor = (index) => `/assets/index-cgv${String(index).padStart(2, '0')}.js`;
+
+/**
+ * Ten "deploys" of the same source: each gets a distinct hashed bundle name and
+ * content, references rewritten in index.html and in the worker's precache list,
+ * and a distinct worker version. This is what makes the growth question real —
+ * an identical cache name across versions would be overwritten, not accumulated.
+ */
+function buildVariants({ count, workRoot, mutant }) {
+  if (!fs.existsSync(distDir)) {
+    throw new Error(`dist/ is missing: run "npm run build" first (looked in ${distDir})`);
+  }
+  const builtWorker = fs.readFileSync(path.join(distDir, 'sw.js'), 'utf-8');
+  const builtAsset = builtWorker.match(/\/assets\/index-[A-Za-z0-9_-]+\.js/)?.[0];
+  if (!builtAsset) {
+    throw new Error('could not find a hashed /assets/index-*.js in dist/sw.js (run "npm run build")');
+  }
+
+  const variants = [];
+  for (let index = 1; index <= count; index += 1) {
+    const tag = versionTag(index);
+    const assetPath = assetPathFor(index);
+    const dir = path.join(workRoot, `v${index}`);
+    fs.cpSync(distDir, dir, { recursive: true });
+
+    // Rename the bundle and give it new bytes: a rebuild that produces the same
+    // name would be reused by the browser's HTTP cache and prove nothing.
+    fs.renameSync(path.join(dir, builtAsset), path.join(dir, assetPath));
+    fs.appendFileSync(path.join(dir, assetPath), `\n// cache-growth build ${index}\n`);
+
+    for (const file of ['index.html', 'sw.js']) {
+      const abs = path.join(dir, file);
+      const text = fs.readFileSync(abs, 'utf-8');
+      if (!text.includes(builtAsset)) {
+        throw new Error(`${file} does not reference ${builtAsset}: the build changed shape and this tool needs updating`);
+      }
+      fs.writeFileSync(abs, text.split(builtAsset).join(assetPath));
+    }
+
+    let worker = fs.readFileSync(path.join(dir, 'sw.js'), 'utf-8');
+    worker = worker.replace(/const version = "[^"]+";/, `const version = "${tag}";`);
+    if (!worker.includes(`const version = "${tag}";`)) {
+      throw new Error('could not stamp the worker version: the build changed shape and this tool needs updating');
+    }
+    if (mutant === 'keep-old-caches') {
+      const cleanup = '.map(name => caches.delete(name))';
+      if (!worker.includes(cleanup)) {
+        throw new Error('could not disable the activate cleanup: the worker changed shape and this tool needs updating');
+      }
+      worker = worker.replace(cleanup, '.map(name => Promise.resolve(false))');
+    }
+    fs.writeFileSync(path.join(dir, 'sw.js'), worker);
+
+    const precached = ['/index.html', '/index.html', '/styles/main.css', '/sounds/airhorn.mp3', assetPath];
+    const expectedBytes = precached.reduce((total, relative) => {
+      const file = path.join(dir, relative === '/' ? 'index.html' : relative);
+      return total + (fs.existsSync(file) ? fs.statSync(file).size : 0);
+    }, 0);
+
+    variants.push({ index, tag, dir, assetPath, expectedBytes, worker });
+  }
+  return { variants, builtAsset };
+}
+
+/* ---------------------------------- main ---------------------------------- */
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  const evidenceDir = makeEvidenceDir(options.out);
+  fs.rmSync(evidenceDir, { recursive: true, force: true });
+  fs.mkdirSync(evidenceDir, { recursive: true });
+
+  const workRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'airhorn-builds-'));
+  const { variants, builtAsset } = buildVariants({
+    count: options.versions, workRoot, mutant: options.mutant,
+  });
+
+  // The origin serves one build at a time - the newest - so a previous version's
+  // hashed asset must come back 404, exactly as it would from the real CDN.
+  const origin = { current: variants[0] };
+  const server = http.createServer((req, res) => {
+    const requestPath = decodeURIComponent((req.url || '/').split('?')[0]);
+    const variant = origin.current;
+    if (requestPath === '/sw.js') {
+      res.writeHead(200, {
+        'Content-Type': 'application/javascript',
+        'Service-Worker-Allowed': '/',
+        'Cache-Control': 'no-store',
+      });
+      res.end(variant.worker);
+      return;
+    }
+    let filePath = path.join(variant.dir, requestPath === '/' ? 'index.html' : requestPath);
+    if (!path.resolve(filePath).startsWith(path.resolve(variant.dir)) || !fs.existsSync(filePath)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found');
+      return;
+    }
+    if (fs.statSync(filePath).isDirectory()) filePath = path.join(filePath, 'index.html');
+    res.writeHead(200, {
+      'Content-Type': mimeTypes[path.extname(filePath)] || 'application/octet-stream',
+      'Service-Worker-Allowed': '/',
+      'Cache-Control': 'no-store',
+    });
+    fs.createReadStream(filePath).pipe(res);
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const url = `http://127.0.0.1:${port}`;
+
+  const chromeBin = process.env.CHROME_BIN ||
+    (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
+    fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' :
+    fs.existsSync('/usr/bin/chromium-browser') ? '/usr/bin/chromium-browser' : 'google-chrome');
+
+  const profileDir = `/tmp/chrome-cache-growth-profile-${Date.now()}`;
+  let chrome = null;
+  let ws = null;
+
+  try {
+    chrome = spawn(chromeBin, [
+      '--headless=new',
+      '--no-sandbox',
+      '--disable-gpu',
+      '--autoplay-policy=no-user-gesture-required',
+      '--remote-debugging-port=0',
+      `--user-data-dir=${profileDir}`,
+      'about:blank',
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let wsUrl = null;
+    const stderrLines = [];
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error(`Chrome start timeout: ${stderrLines.join('\n')}`)), 20000,
+      );
+      chrome.stderr.on('data', (data) => {
+        const text = data.toString();
+        stderrLines.push(text);
+        const match = text.match(/ws:\/\/[^\s]+/);
+        if (match) {
+          wsUrl = match[0];
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+      chrome.on('error', (err) => { clearTimeout(timeout); reject(err); });
+      chrome.on('exit', (code) => {
+        clearTimeout(timeout);
+        reject(new Error(`Chrome exited early (${code}): ${stderrLines.join('\n')}`));
+      });
+    });
+
+    const chromePort = new URL(wsUrl).port;
+    const targets = await (await fetch(`http://127.0.0.1:${chromePort}/json/list`)).json();
+    const pageTarget = targets.find((target) => target.type === 'page');
+    ws = new WebSocket(pageTarget.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
+
+    let msgId = 1;
+    const pending = new Map();
+    const pageErrors = [];
+    const navigations = [];
+
+    ws.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.method === 'Runtime.exceptionThrown') {
+        const details = message.params.exceptionDetails;
+        pageErrors.push(details?.exception?.description || details?.text || 'Uncaught exception');
+      } else if (message.method === 'Log.entryAdded' && message.params.entry.level === 'error' &&
+        message.params.entry.source !== 'network') {
+        // `source: network` entries are resource-load failures. This tool asks
+        // the origin for previous deploys' hashed assets on purpose, and a 404
+        // is the correct answer there - it is a check, not an error.
+        pageErrors.push(message.params.entry.text);
+      } else if (message.method === 'Page.frameNavigated' && !message.params.frame.parentId) {
+        navigations.push(message.params.frame.url);
+      }
+      if (message.id && pending.has(message.id)) {
+        const { resolve, reject } = pending.get(message.id);
+        pending.delete(message.id);
+        if (message.error) reject(new Error(message.error.message));
+        else resolve(message.result);
+      }
+    };
+
+    const send = (method, params = {}) => {
+      const id = msgId++;
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        ws.send(JSON.stringify({ id, method, params }));
+      });
+    };
+
+    const evaluate = async (expression) => {
+      const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+      if (result.exceptionDetails) {
+        throw new Error('Page evaluation failed: ' +
+          (result.exceptionDetails.exception?.description || result.exceptionDetails.text));
+      }
+      return result.result.value;
+    };
+
+    const waitFor = async (expression, timeoutMs = 15000, label = expression) => {
+      const deadline = Date.now() + timeoutMs;
+      let lastError = null;
+      while (Date.now() < deadline) {
+        try {
+          if (await evaluate(expression)) return true;
+        } catch (err) {
+          lastError = err;
+        }
+        await sleep(25);
+      }
+      throw new Error(`Timed out waiting for ${label}${lastError ? ` (${lastError.message})` : ''}`);
+    };
+
+    const waitUntil = async (predicate, timeoutMs, label) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (predicate()) return true;
+        await sleep(50);
+      }
+      throw new Error(`Timed out waiting for ${label}`);
+    };
+
+    await send('Page.enable');
+    await send('Runtime.enable');
+    await send('Log.enable');
+    await send('Network.enable');
+    await send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `
+        window.__pageErrors = [];
+        window.addEventListener('error', (e) => {
+          window.__pageErrors.push(e.message || (e.error ? String(e.error) : String(e)));
+        });
+        window.addEventListener('unhandledrejection', (e) => {
+          window.__pageErrors.push((e.reason && e.reason.message) || String(e.reason));
+        });
+        ${quiescenceProbe}
+      `,
+    });
+
+    /**
+     * What the device holds, read from the device: the cache names, then every
+     * entry's stored bytes, then the origin's own storage estimate.
+     */
+    const measureStorage = async (variant, previousVariants) => {
+      await waitForQuiescence(send, {
+        quietExpression: '!window.__airhorn?.isPlaying?.()',
+        timeoutMs: 10000,
+        stableSamples: 2,
+        pollMs: 25,
+      });
+
+      const storage = await evaluate(`(async () => {
+        const keys = await caches.keys();
+        const cachesInfo = [];
+        for (const name of keys) {
+          const cache = await caches.open(name);
+          const requests = await cache.keys();
+          let bytes = 0;
+          const entries = [];
+          for (const request of requests) {
+            const response = await cache.match(request);
+            const body = response ? await response.arrayBuffer() : new ArrayBuffer(0);
+            bytes += body.byteLength;
+            entries.push({
+              path: new URL(request.url).pathname,
+              bytes: body.byteLength,
+              status: response ? response.status : null,
+            });
+          }
+          cachesInfo.push({ name, entries: entries.length, bytes, detail: entries });
+        }
+        let estimate = null;
+        try {
+          estimate = await navigator.storage.estimate();
+        } catch {}
+        return {
+          keys,
+          caches: cachesInfo,
+          totalBytes: cachesInfo.reduce((sum, cache) => sum + cache.bytes, 0),
+          estimate,
+        };
+      })()`);
+
+      // Is a previous deploy's hashed asset still readable from the cache, and
+      // does the origin still serve it? Both must be no.
+      const previous = [];
+      for (const earlier of previousVariants) {
+        const cachedStatus = await evaluate(
+          `caches.match(${JSON.stringify(earlier.assetPath)}).then((response) => response ? response.status : null)`,
+        );
+        const networkStatus = await evaluate(
+          `fetch(${JSON.stringify(earlier.assetPath)}, { cache: 'no-store' })
+             .then((response) => response.status)
+             .catch(() => 0)`,
+        );
+        previous.push({ version: earlier.tag, assetPath: earlier.assetPath, cachedStatus, networkStatus });
+      }
+
+      return {
+        version: variant.tag,
+        assetPath: variant.assetPath,
+        keys: storage.keys,
+        caches: storage.caches,
+        totalBytes: storage.totalBytes,
+        usage: storage.estimate?.usage ?? null,
+        quota: storage.estimate?.quota ?? null,
+        usageDetails: storage.estimate?.usageDetails ?? null,
+        previous,
+      };
+    };
+
+    const playHorn = async (label) => {
+      const started = await evaluate(`window.__airhorn.start({ loop: true }).then(() => window.__airhorn.isPlaying())`);
+      if (!started) throw new Error(`the horn did not start under ${label}`);
+      const playing = await waitFor('window.__airhorn.isPlaying()', 5000, `the horn to sound under ${label}`);
+      await evaluate(`window.__airhorn.stop({ immediate: true })`);
+      await waitFor('!window.__airhorn.isPlaying()', 8000, `the horn to stop under ${label}`);
+      return playing;
+    };
+
+    if (options.mutant !== 'none') {
+      console.log(`cache-growth: MUTANT ${options.mutant} — the growth checks are EXPECTED to fail`);
+    }
+    console.log(`cache-growth: ${options.versions} simulated deploys in one profile ` +
+      `(${variants[0].tag} .. ${variants[options.versions - 1].tag})`);
+
+    const records = [];
+
+    /* ------------------------------ version 1 ------------------------------ */
+    console.log('\n--- v1: a first visit installs the worker ---');
+    await send('Page.navigate', { url: `${url}/` });
+    await waitFor(`document.readyState === 'complete' && !!window.__airhorn`, 20000, 'the app to boot');
+    await waitFor(`navigator.serviceWorker.ready.then((reg) => reg.active ? reg.active.state === 'activated' : false)`,
+      20000, 'the worker to activate');
+    // A returning user is controlled before the page parses, which is the only
+    // case the page reloads itself on controllerchange; reload once so every
+    // later update exercises that path.
+    await send('Page.reload');
+    await waitFor(`document.readyState === 'complete' && !!window.__airhorn`, 20000, 'the app to boot under the worker');
+    await waitFor('!!navigator.serviceWorker.controller', 10000, 'the document to be worker-controlled');
+    await playHorn('v1');
+    records.push(await measureStorage(variants[0], []));
+    console.log(`  ${records[0].version}: caches ${records[0].caches.length}, ` +
+      `${records[0].caches.map((cache) => `${cache.name}=${cache.entries}/${kb(cache.bytes)} KB`).join(', ')}, ` +
+      `storage ${kb(records[0].usage ?? 0)} KB`);
+
+    /* ----------------------- versions 2..N over the top --------------------- */
+    for (let index = 2; index <= options.versions; index += 1) {
+      const variant = variants[index - 1];
+      origin.current = variant;
+      const reloadsBefore = navigations.length;
+
+      await evaluate(`(async () => {
+        const registration = await navigator.serviceWorker.getRegistration();
+        await registration.update();
+        return true;
+      })()`);
+
+      // A cache carrying the new version's name is proof the new worker
+      // precached; the activate sweep and the controllerchange reload follow.
+      await waitFor(
+        `caches.keys().then((keys) => keys.some((key) => key.includes(${JSON.stringify(variant.tag)})))`,
+        25000, `worker ${variant.tag} to precache`);
+      await waitUntil(() => navigations.length > reloadsBefore, 25000, `the page to reload for ${variant.tag}`);
+      await sleep(300);
+      await waitFor(`document.readyState === 'complete' && !!window.__airhorn`,
+        20000, `the app to boot under ${variant.tag}`);
+      await waitFor('!!navigator.serviceWorker.controller', 10000, `a controller under ${variant.tag}`);
+
+      const reloads = navigations.length - reloadsBefore;
+      const played = await playHorn(variant.tag);
+      const record = await measureStorage(variant, variants.slice(0, index - 1));
+      record.reloads = reloads;
+      record.played = played;
+      record.builtBytes = variant.expectedBytes;
+      records.push(record);
+      console.log(`  ${record.version}: caches ${record.caches.length}` +
+        `${record.reloads === 1 ? '' : ` (reloads ${record.reloads})`}, ` +
+        `${record.caches.map((cache) => `${cache.name}=${cache.entries}/${kb(cache.bytes)} KB`).join(', ')}, ` +
+        `total ${kb(record.totalBytes)} KB, storage ${kb(record.usage ?? 0)} KB, ` +
+        `old caches [${record.previous.filter((entry) => record.keys.some((key) => key.includes(entry.version))).map((entry) => entry.version).join(', ') || 'none'}]`);
+    }
+
+    /* -------------------------------- checks ------------------------------- */
+    console.log('\n--- checks ---');
+    const last = records[records.length - 1];
+    const finalVariant = variants[variants.length - 1];
+
+    const onlyCurrentCheck = check(
+      'every deploy leaves exactly the current version\'s two caches',
+      records.every((record) => record.caches.length === 2 &&
+        record.keys.every((key) => key.includes(record.version))),
+      records.map((record) => `${record.version}: ${record.keys.join('+')}`).join('; '),
+    );
+
+    const appCaches = records.map((record) => record.caches.find((cache) => cache.name.startsWith('airhorner-')));
+    const entriesCheck = check(
+      'the precache keeps the same entry count every version',
+      appCaches.every((cache) => cache && cache.entries === 5),
+      appCaches.map((cache) => `${cache ? cache.entries : 'missing'}`).join(' / ') + ' entries',
+    );
+
+    const bytesSeries = records.map((record) => record.totalBytes);
+    const byteGrowth = (median(bytesSeries.slice(-2)) - median(bytesSeries.slice(0, 2)));
+    const bytesCheck = check(
+      'stored bytes stay flat across deploys (one version, not one per deploy)',
+      Math.abs(byteGrowth) < 8 * 1024 && !growsMonotonically(bytesSeries, 4 * 1024),
+      `${bytesSeries.map((bytes) => kb(bytes)).join(' -> ')} KB, drift ${kb(byteGrowth)} KB ` +
+      `(one version is ~${kb(bytesSeries[0])} KB)`,
+    );
+
+    const staleCacheVersions = last.keys.filter(
+      (key) => !key.includes(finalVariant.tag),
+    );
+    const twoBack = variants[variants.length - 3];
+    const previousVersion = variants[variants.length - 2];
+    const staleCheck = check(
+      'nothing from the previous deploy — or two deploys ago — survives',
+      staleCacheVersions.length === 0 &&
+      !last.keys.some((key) => key.includes(previousVersion.tag)) &&
+      !(twoBack && last.keys.some((key) => key.includes(twoBack.tag))),
+      staleCacheVersions.length
+        ? `leftover caches: ${staleCacheVersions.join(', ')}`
+        : `after ${last.version}: [${last.keys.join(', ')}]` +
+          (twoBack ? `; ${previousVersion.tag} and ${twoBack.tag} gone` : `; ${previousVersion.tag} gone`),
+    );
+
+    const staleAssets = last.previous.filter((entry) => entry.cachedStatus !== null || entry.networkStatus !== 404);
+    const assetCheck = check(
+      'previous deploys\' hashed assets are neither cached nor still served',
+      staleAssets.length === 0,
+      staleAssets.length
+        ? staleAssets.map((entry) => `${entry.assetPath}: cached=${entry.cachedStatus} network=${entry.networkStatus}`).join('; ')
+        : `${last.previous.length} earlier assets: cache miss, 404 from the origin ` +
+          `(e.g. ${last.previous[last.previous.length - 1]?.assetPath})`,
+    );
+
+    const usageSeries = records.map((record) => record.usage ?? 0);
+    const usageGrowth = median(usageSeries.slice(-2)) - median(usageSeries.slice(0, 2));
+    const usageCheck = check(
+      'the origin\'s storage estimate stays bounded',
+      usageGrowth < 512 * 1024 && !growsMonotonically(usageSeries, 64 * 1024),
+      `${usageSeries.map((bytes) => kb(bytes)).join(' -> ')} KB, growth ${kb(usageGrowth)} KB ` +
+      `(usageDetails ${JSON.stringify(records[records.length - 1].usageDetails)})`,
+    );
+
+    const reloadCheck = check(
+      'each update reloads the page exactly once',
+      records.slice(1).every((record) => record.reloads === 1),
+      records.slice(1).map((record) => `${record.version}:${record.reloads}`).join(' '),
+    );
+
+    const playCheck = check(
+      'the horn still plays under every new worker',
+      records.every((record) => record.played !== false),
+      records.map((record) => `${record.version}:${record.played === false ? 'silent' : 'played'}`).join(' '),
+    );
+
+    const errors = await evaluate('window.__pageErrors.slice(0, 10)');
+    const { data } = await send('Page.captureScreenshot', { format: 'png' });
+    fs.writeFileSync(path.join(evidenceDir, 'cache-growth-final.png'), Buffer.from(data, 'base64'));
+
+    const errorCheck = check(
+      'no page errors during the deploys',
+      pageErrors.length === 0 && errors.length === 0,
+      [...pageErrors, ...errors].slice(0, 5).join(' | ') || 'none',
+    );
+
+    const failures = checks.filter((entry) => !entry.pass);
+    const summary = {
+      pass: failures.length === 0,
+      failures: failures.map((entry) => `${entry.name}: ${entry.detail}`),
+    };
+
+    const report = {
+      airhorn: {
+        sha: (() => {
+          try { return execSync('git rev-parse HEAD', { cwd: root }).toString().trim(); } catch { return 'unknown'; }
+        })(),
+        origin: url,
+        builtAsset,
+        mutant: options.mutant,
+      },
+      plan: { versions: options.versions },
+      records,
+      checks,
+      summary,
+    };
+    fs.writeFileSync(path.join(evidenceDir, 'report.json'), JSON.stringify(report, null, 2) + '\n');
+
+    console.log(`\ncache-growth: ${summary.pass ? 'PASS' : 'FAIL'} — ${options.versions} deploys in one profile`);
+    console.log(`  per-version stored bytes: ${bytesSeries.map((bytes) => kb(bytes)).join(' -> ')} KB`);
+    console.log(`  per-version origin usage: ${usageSeries.map((bytes) => kb(bytes)).join(' -> ')} KB`);
+    console.log(`  final caches: ${last.keys.join(', ')}`);
+    console.log(`  evidence: ${evidenceDir}`);
+    if (!summary.pass) {
+      console.log('  failures:');
+      for (const failure of summary.failures) console.log(`   - ${failure}`);
+    }
+
+    void [onlyCurrentCheck, entriesCheck, bytesCheck, staleCheck, assetCheck, usageCheck, reloadCheck,
+      playCheck, errorCheck];
+
+    return summary.pass ? 0 : 1;
+  } finally {
+    try { if (ws) ws.close(); } catch {}
+    try { if (chrome) chrome.kill('SIGTERM'); } catch {}
+    await sleep(300);
+    try { if (chrome && chrome.exitCode === null) chrome.kill('SIGKILL'); } catch {}
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(profileDir, { recursive: true, force: true });
+    fs.rmSync(workRoot, { recursive: true, force: true });
+  }
+}
+
+main().then((code) => {
+  process.exitCode = code;
+}).catch((err) => {
+  console.error(`cache-growth: FAIL — ${err.message}`);
+  process.exitCode = 1;
+});
