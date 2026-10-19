@@ -60,3 +60,9 @@ test('the gate script parses (bash -n)', () => {
 test('the audit script parses (node --check)', () => {
   execFileSync(process.execPath, ['--check', audit]);
 });
+
+test('the perf-measurement script parses (node --check)', () => {
+  // Same instrument as the audit check: a tools/* script this suite places
+  // must at least parse, or the row's KNOWN verdict lies (airhorn-e0y).
+  execFileSync(process.execPath, ['--check', path.join(root, 'tools', 'measure-perf.mjs')]);
+});
