@@ -90,7 +90,6 @@
         <p id='horn-help' class='visually-hidden'>Press and hold to sound the air horn. Release to stop.</p>
       </div>
     </main>
-    <p id='app-status' class='status' role='status'></p>
     <div id='installer'>
       <button type='button' class='button'>Install</button>
     </div>
@@ -190,11 +189,9 @@
                 } else if (newWorker.state === 'redundant' && navigator.serviceWorker.controller) {
                   // The upgrade was dropped - a denied cache write during precache is the
                   // common cause. Say so: silently staying on the previous build is the
-                  // failure the user cannot see (airhorn-nv9).
-                  const status = document.getElementById('app-status');
-                  if (status) {
-                    status.textContent = 'The app could not update - you are still on the previous version.';
-                  }
+                  // failure the user cannot see (airhorn-nv9). Through the one polite
+                  // voice (airhorn-8nz), not a second channel.
+                  window.__airhornAnnounce?.('The app could not update - you are still on the previous version.');
                 }
               });
             }
