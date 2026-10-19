@@ -50,7 +50,19 @@ async function precache() {
 }
 
 self.addEventListener('install', event => {
-  event.waitUntil(precache().then(() => self.skipWaiting()));
+  event.waitUntil(
+    precache()
+      .catch(async (err) => {
+        // A denied write (QuotaExceededError) rejects the install, and the half-built
+        // cache that caches.open() already created would be left behind for good: the
+        // cleanup in the activate handler lives in the worker that never activated
+        // (airhorn-nv9). The install still fails - a partial precache must not be
+        // treated as complete - but it no longer leaks an empty cache.
+        await caches.delete(cacheName).catch(() => {});
+        throw err;
+      })
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', event => {
@@ -80,7 +92,9 @@ self.addEventListener('fetch', event => {
         cache.match(event.request).then(cached => {
           if (cached) return cached;
           return fetch(event.request).then(response => {
-            cache.put(event.request, response.clone());
+            // A denied cache write must not surface as an unhandled rejection in the
+            // worker; the response itself is still perfectly usable (airhorn-nv9).
+            cache.put(event.request, response.clone()).catch(() => {});
             return response;
           });
         })
