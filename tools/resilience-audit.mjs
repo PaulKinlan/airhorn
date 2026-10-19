@@ -555,6 +555,13 @@ async function runAudit() {
       const uncachedMs = Date.now() - uncachedStart;
       const uncachedState = await readState(cdp, sessionId).catch(() => null);
       const shotFile = await shot(cdp, sessionId, '2-liefi-uncached-nav');
+      // Headline usability is MEASURED on the post-navigation state (airhorn-dse,
+      // the airhorn-0aq instrument): the literal `false` here called the horn
+      // unusable while the same row's measured state showed it rendered and
+      // visible - a failed navigation leaves the previous (cached, working)
+      // document on screen, and that is the truth to report. No document at
+      // all (uncachedState null) earns false without a press.
+      const hornAfterUncached = uncachedState ? await pressHorn(cdp, sessionId) : null;
       return {
         swActive,
         cachedNavigation: { completed: cachedLoaded, ms: cachedMs,
@@ -563,7 +570,8 @@ async function runAudit() {
         uncachedNavigation: { completed: uncachedLoaded, ms: uncachedMs },
         ...(uncachedState ? summarise(uncachedState) : { renders: false, hornVisible: false,
           explainsItself: false, explanationEvidence: 'no document at all' }),
-        hornUsable: false,
+        hornUsable: hornAfterUncached ? hornAfterUncached.sounded : false,
+        hornCheck: hornAfterUncached || { sounded: false, reason: 'no document after the uncached navigation' },
         cachedShellWasAvailable: cachedLoaded,
         screenshot: shotFile,
         console: collectors(sessionId).console,
@@ -814,6 +822,7 @@ async function runAudit() {
       const shellLoaded = await reload(cdp, sessionId);
       const afterShellCorruption = await readState(cdp, sessionId);
       const shellShot = await shot(cdp, sessionId, '6-corrupt-shell-offline');
+      const hornAfterShell = await pressHorn(cdp, sessionId);
 
       // Back online: does the app recover by itself, or is the poison sticky?
       await cdp.send('Network.emulateNetworkConditions', {
@@ -841,11 +850,16 @@ async function runAudit() {
         corruptedShellEntries: shellCorrupted,
         shellNavigationCompleted: shellLoaded,
         rendersAfterShellCorruption: afterShellCorruption.horn.present,
-        // the headline row: after both corruptions the app is a garbage page
+        hornUsableAfterShellCorruption: hornAfterShell.sounded,
+        // the headline row: the state after both corruptions, with every
+        // headline field MEASURED (airhorn-0aq). The literal `hornUsable:
+        // false` here outlived the bug it described - once the worker healed
+        // corrupt entries again (airhorn-un5), the row still claimed the app
+        // was unusable while the per-stage measurement said otherwise.
         renders: afterShellCorruption.horn.present,
         hornVisible: afterShellCorruption.horn.visible,
         ...summarise(afterShellCorruption),
-        hornUsable: false,
+        hornUsable: hornAfterShell.sounded,
         recoveredOnline: !!onlineAgain && onlineAgain.horn.present,
         recoveredAfterSecondLoad: !!onlineSecond && onlineSecond.horn.present,
         recoveredAfterSwUpdate: !!(afterUpdate && afterUpdate.horn.present),
