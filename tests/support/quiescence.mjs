@@ -145,6 +145,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {number} [options.pollMs] gap between samples
  * @param {string} [options.quietExpression] extra in-page boolean expression
  *   that must also hold (e.g. the horn is not sounding)
+ * @param {number} [options.stateTimeoutMs] how long the quiet condition may stay
+ *   false after the page's own work has drained before the wait fails with a
+ *   diagnosis. Pending work is observable; app state is not always (an audio
+ *   pipeline whose 'ended' event never fires cannot be waited out), so this is
+ *   a separate, short bound: it turns an unwinnable wait into a fast, specific
+ *   failure instead of a slow generic timeout (airhorn-10q).
  * @returns {Promise<{waitedMs: number, samples: number, pending: object}>}
  */
 export async function waitForQuiescence(send, {
@@ -152,11 +158,13 @@ export async function waitForQuiescence(send, {
   stableSamples = 4,
   pollMs = 50,
   quietExpression = 'true',
+  stateTimeoutMs = 5000,
 } = {}) {
   const started = Date.now();
   let stable = 0;
   let samples = 0;
   let last = null;
+  let drainedAt = null;
 
   while (Date.now() - started < timeoutMs) {
     const result = await send('Runtime.evaluate', {
@@ -189,10 +197,41 @@ export async function waitForQuiescence(send, {
       );
     }
 
-    const quiet = last.pendingTimers === 0 &&
+    const workDrained = last.pendingTimers === 0 &&
       last.pendingIntervals === 0 &&
-      last.pendingFetches === 0 &&
-      last.quietCondition;
+      last.pendingFetches === 0;
+    const quiet = workDrained && last.quietCondition;
+
+    if (workDrained && !last.quietCondition) {
+      // Nothing is pending, so waiting longer cannot change the outcome on its
+      // own: the state this wait depends on is app state that never reached its
+      // end condition. Give it a short grace period (it may be one frame away),
+      // then fail with the cause rather than burning the whole timeout.
+      if (drainedAt === null) drainedAt = Date.now();
+      if (stateTimeoutMs > 0 && Date.now() - drainedAt >= stateTimeoutMs) {
+        let appState = null;
+        try {
+          const probe = await send('Runtime.evaluate', {
+            expression: `(() => ({
+              isPlaying: typeof window.__airhorn?.isPlaying === 'function' ? window.__airhorn.isPlaying() : null,
+              horning: Boolean(document.querySelector('.horn')?.classList.contains('horning')),
+            }))()`,
+            returnByValue: true,
+          });
+          appState = probe.result?.value ?? null;
+        } catch {}
+        throw new Error(
+          `Page work drained, but the state this wait depends on stayed false for ` +
+          `${stateTimeoutMs}ms (${Date.now() - started}ms waited in total) ` +
+          `(condition \`${quietExpression}\`, ${JSON.stringify(last)}, app state ${JSON.stringify(appState)}). ` +
+          `Nothing is pending, so this is app state that never reached its end condition - ` +
+          `typically an audio pipeline whose 'ended' event does not fire on this machine ` +
+          `(headless audio that never progresses), not a page that is still working.`,
+        );
+      }
+    } else {
+      drainedAt = null;
+    }
 
     stable = quiet ? stable + 1 : 0;
     if (stable >= stableSamples) {

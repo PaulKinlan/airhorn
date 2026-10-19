@@ -491,7 +491,14 @@ async function run() {
     const settled = await waitForQuiescence(send, {
       // The blast from the synthetic click is still ringing out; wait for the
       // page's own state to finish rather than for a constant.
-      quietExpression: `!document.querySelector('.horn.horning')`
+      quietExpression: `!document.querySelector('.horn.horning')`,
+      // That state clears on the audio source's 'ended' event, which cannot fire
+      // when a machine's headless audio never progresses. Pending work is still
+      // observable, so bound the overall wait and the state-only wait separately:
+      // a stuck pipeline then fails in seconds, naming the cause, instead of
+      // wedging for 20s and reporting that unspecified work is still pending.
+      timeoutMs: 10000,
+      stateTimeoutMs: 4000,
     });
     console.log(
       `Page quiescent after ${settled.waitedMs}ms: ${settled.pending.scheduled} async task(s) ` +
