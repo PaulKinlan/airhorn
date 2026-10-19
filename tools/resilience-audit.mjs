@@ -282,11 +282,22 @@ const READ_STATE = `(() => {
     horn && rect && rect.width > 4 && rect.height > 4 &&
     cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0.05
   );
-  const live = [...document.querySelectorAll('[role="status"],[role="alert"],[aria-live]')]    .map((el) => ({
-      role: el.getAttribute('role'),
-      live: el.getAttribute('aria-live'),
-      text: (el.textContent || '').trim().slice(0, 200),
-    }));
+  const live = [...document.querySelectorAll('[role="status"],[role="alert"],[aria-live]')]    .map((el) => {
+      const cs = getComputedStyle(el);
+      return {
+        role: el.getAttribute('role'),
+        live: el.getAttribute('aria-live'),
+        // Rendered, not display:none/hidden: a statically-present hidden
+        // alert (index.html's #boot-failure ships hidden) is in the DOM but
+        // in nothing's ears, so it must not count as the page explaining
+        // itself (airhorn-01e). A visually-hidden-but-rendered region - the
+        // app-status pattern - still counts: that is the announcement
+        // channel, and what matters is whether it HAS something to say,
+        // which summarise() checks via the text.
+        shown: !el.hidden && cs.display !== 'none' && cs.visibility !== 'hidden',
+        text: (el.textContent || '').trim().slice(0, 200),
+      };
+    });
   const bodyText = ((document.body && document.body.innerText) || '')
     .replace(/\\s+/g, ' ').trim().slice(0, 600);
   let navType = null;
@@ -436,7 +447,10 @@ async function shot(cdp, sessionId, name) {
 const EXPLAINS_RE = /offline|no connection|can.?t (?:reach|load|connect)|failed to load|unable to|retry|reconnect|try again|update available|new version|something went wrong|error/i;
 
 function summarise(state) {
-  const liveText = (state.live || []).map((l) => l.text).filter(Boolean).join(' | ');
+  // Evidence is what the page actually says somewhere rendered (airhorn-01e):
+  // a region with no text, or a hidden one, explains nothing.
+  const liveEvidence = (state.live || []).filter((l) => l.shown && l.text);
+  const liveText = liveEvidence.map((l) => l.text).join(' | ');
   const mentions = state.bodyText.match(EXPLAINS_RE);
   return {
     renders: state.horn.present,
@@ -445,8 +459,9 @@ function summarise(state) {
     title: state.title,
     navType: state.navType ?? null,
     liveRegions: state.live.length,
+    shownLiveRegions: liveEvidence.length,
     liveText,
-    explainsItself: state.live.length > 0 || !!mentions,
+    explainsItself: liveEvidence.length > 0 || !!mentions,
     explanationEvidence: liveText || (mentions ? `body text mentions "${mentions[0]}"` : 'none'),
     controller: state.controller,
     controllerChanges: state.controllerChanges,
