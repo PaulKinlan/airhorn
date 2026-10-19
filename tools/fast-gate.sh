@@ -128,27 +128,57 @@ map_reaches() { # $1 = suite path ; true iff a NON-exemption row names it (plain
   return 1
 }
 
+# --- map honesty (airhorn-o0u): a property of the MAP, not of selection. ---
+# Every PLAIN row's suite token must exist in the tree, unless a '~' row
+# declares that token pending; a '!' row that pins a suite-shaped path must
+# name a file that exists. Anything else is dead config that reads green
+# forever, whatever a change happened to select - including rows naming a
+# suite under the OTHER root spelling, which selection-driven checks can
+# never see. One pass over the map, before any selection logic: a stale map
+# fails even a change that touches none of its live paths.
+MISSING_MAP=()
+while IFS=$'\t' read -r pat rest; do
+  case $pat in ''|\#*) continue ;; esac
+  case $pat in
+    \!*)
+      # An exemption pinning a literal suite-shaped path is checked like a
+      # plain row: if the file is gone the row is dead (glob patterns - the
+      # normal use of ! rows - cannot resolve, so they are skipped).
+      _pin=${pat#!}
+      [ -n "$_pin" ] || continue
+      case $_pin in tests/*.test.js|tests/*.test.mjs|tests/*.test.ts|test/*.test.js|test/*.test.mjs|test/*.test.ts)
+        [ -f "$ROOT/$_pin" ] || MISSING_MAP+=("$_pin") ;;
+      esac
+      continue ;;
+  esac
+  for s in $rest; do
+    case $s in tests/*.test.js|tests/*.test.mjs|tests/*.test.ts|test/*.test.js|test/*.test.mjs|test/*.test.ts) ;; *) continue ;; esac
+    [ -f "$ROOT/$s" ] && continue
+    is_pending "$s" && continue
+    MISSING_MAP+=("$s")
+  done
+done < "$MAP"
+if [ "${#MISSING_MAP[@]}" -gt 0 ]; then
+  mapfile -t _mm < <(printf '%s\n' "${MISSING_MAP[@]}" | sort -u)
+  for s in "${_mm[@]}"; do [ -n "$s" ] && echo "fast-gate: missing: $s"; done
+  echo "fast-gate: FAIL - the map names ${#_mm[@]} suite(s) that are not in the tree; the" >&2
+  echo "fast-gate: map is stale (a renamed or deleted suite reads as green forever" >&2
+  echo "fast-gate: otherwise). Fix the map, or mark the suite as '~'-pending if it" >&2
+  echo "fast-gate: arrives with a sibling branch." >&2
+  exit 1
+fi
+
 UNMAPPED=(); EXEMPT_COUNT=0; SELECTED=()
 for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
-  # A deleted SUITE selects nothing - unless a PLAIN map row still names it.
-  # A row that survives its suite is a STALE MAP and must keep failing the
-  # gate right here ('missing: ...'), not silently later (airhorn-vpb): this
-  # skip exists so a suite deleted in the same commit that removes its row is
-  # not punished as 'missing', and nothing more. A '~'-pending declaration
-  # counts as the row being correctly absent (the MISSING check allows it).
+  # A deleted SUITE selects nothing: there is no file left to run. Staleness
+  # is owned by the map-honesty pass above - a row surviving its suite fails
+  # there under ANY spelling, so selection need not re-derive it (airhorn-o0u).
   # Deleted NON-suite paths keep mapping normally: a dynamic import can
   # survive the build, so the suites a deleted source file covered must still
   # run and fail.
   case $f in
     tests/*.test.js|tests/*.test.mjs|tests/*.test.ts|test/*.test.js|test/*.test.mjs|test/*.test.ts)
-      if [ ! -f "$ROOT/$f" ]; then
-        if map_reaches "$f" && ! is_pending "$f"; then
-          : # stale plain row: fall through, suites_for maps the path to
-            # itself and the MISSING check below fails the gate
-        else
-          continue
-        fi
-      fi ;;
+      [ -f "$ROOT/$f" ] || continue ;;
   esac
   got=$(suites_for "$f")
   if [ -n "$got" ]; then
