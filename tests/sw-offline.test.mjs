@@ -313,6 +313,18 @@ async function testSwAndManifest() {
     }
     console.log('Vite-built hashed asset verified in precache!');
 
+    // Both shell spellings are precached, and that is not redundancy to be tidied
+    // away (airhorn-btt): `/` is what a navigation matches, and storing the
+    // navigation response is how an emptied cache re-seeds itself from one online
+    // visit - tests/sw-failover.test.mjs stage D fails without it. `/index.html` is
+    // what an in-page fetch and the worker's navigation fallback ask for. A storage
+    // audit measured the pair at 11,962 B of a 86,537 B precache; dropping one
+    // half is a regression, not a saving.
+    for (const shellPath of ['/', '/index.html']) {
+      assert(cachedUrls.includes(shellPath),
+        `the precache must hold both shell spellings (${JSON.stringify(cachedUrls)})`);
+    }
+
     // Test offline navigation
     console.log('--- Emulating OFFLINE conditions ---');
     await send('Network.emulateNetworkConditions', {
@@ -460,7 +472,8 @@ async function testSwAndManifest() {
     /* --------------------------------------- A. online: detect and heal shell */
     console.log('\n--- A. a corrupted shell entry is healed online ---');
     // Both shell entries: '/' is what a navigation matches, '/index.html' is what
-    // the worker precaches and what an in-page fetch asks for.
+    // the worker precaches and what an in-page fetch asks for. Both are load
+    // bearing (airhorn-btt) - see the note where the precache is verified above.
     for (const shellPath of ['/', '/index.html']) {
       assert(await corrupt(shellPath, `<!doctype html><title>garbage</title>${GARBAGE}`, 'text/html') === 'corrupted',
         `could not corrupt the cached ${shellPath}`);

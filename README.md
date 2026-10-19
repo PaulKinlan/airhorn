@@ -47,10 +47,14 @@ deno run --allow-net --allow-read server.ts   # serves dist/ on port 8000
 ## Offline and updates
 
 `public/sw.js` precaches `/`, `/index.html`, `/styles/main.css` and
-`/sounds/airhorn.mp3`. At build time a Vite plugin appends every hashed
-`/assets/*.js` referenced by the built `index.html` to that list, and stamps the
-cache name with a hash of the whole build, so a new deployment gets a new cache and
-the previous one is deleted on activate.
+`/sounds/airhorn.mp3`. Both shell spellings are deliberate: `/` is what a
+navigation matches, and storing a navigation response is also how an emptied cache
+re-seeds itself from one online visit (a device whose caches were wiped recovers by
+loading the page — `tests/sw-failover.test.mjs` stage D pins that); `/index.html` is
+what an in-page fetch and the worker's navigation fallback ask for. At build time a
+Vite plugin appends every hashed `/assets/*.js` referenced by the built `index.html`
+to that list, and stamps the cache name with a hash of the whole build, so a new
+deployment gets a new cache and the previous one is deleted on activate.
 
 A new worker calls `skipWaiting()`. When the page already had a controller, the
 `controllerchange` handler reloads once so the tab is running the new build. After

@@ -213,13 +213,30 @@ function buildVariants({ count, workRoot, mutant }) {
     }
     fs.writeFileSync(path.join(dir, 'sw.js'), worker);
 
-    const precached = ['/index.html', '/index.html', '/styles/main.css', '/sounds/airhorn.mp3', assetPath];
-    const expectedBytes = precached.reduce((total, relative) => {
+    // What the worker says it precaches IS the expectation: reading it here means
+    // a precache change (e.g. dropping the duplicate `/` entry, airhorn-btt) does
+    // not silently need a matching edit in this tool, while the entry-count check
+    // still catches a worker that ends up storing something else.
+    const listLiteral = worker.match(/const precacheUrls = \[([\s\S]*?)\];/)?.[1]
+      // Strip comments before reading the list: the worker explains itself in
+      // backticks, and a comment mentioning `/index.html` must not become an
+      // entry the check then reports as missing.
+      ?.replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    if (!listLiteral) {
+      throw new Error('could not read precacheUrls from the worker: the build changed shape and this tool needs updating');
+    }
+    const precachedPaths = [...listLiteral.matchAll(/[`'"](\/[^`'"]*)[`'"]/g)].map((match) => match[1]);
+    if (!precachedPaths.length) throw new Error('the worker precaches nothing');
+    // `/` is served from index.html when it is in the list, so count its bytes thus.
+    const expectedBytes = precachedPaths.reduce((total, relative) => {
       const file = path.join(dir, relative === '/' ? 'index.html' : relative);
       return total + (fs.existsSync(file) ? fs.statSync(file).size : 0);
     }, 0);
 
-    variants.push({ index, tag, dir, assetPath, expectedBytes, worker });
+    variants.push({
+      index, tag, dir, assetPath, expectedBytes, expectedEntries: precachedPaths.length, precachedPaths, worker,
+    });
   }
   return { variants, builtAsset };
 }
@@ -562,9 +579,13 @@ async function main() {
 
     const appCaches = records.map((record) => record.caches.find((cache) => cache.name.startsWith('airhorner-')));
     const entriesCheck = check(
-      'the precache keeps the same entry count every version',
-      appCaches.every((cache) => cache && cache.entries === 5),
-      appCaches.map((cache) => `${cache ? cache.entries : 'missing'}`).join(' / ') + ' entries',
+      'the precache holds exactly the entries the worker declares, every version',
+      appCaches.every((cache, position) =>
+        cache && cache.entries === variants[position].expectedEntries &&
+        cache.detail.length === variants[position].expectedEntries),
+      appCaches.map((cache, position) =>
+        `${cache ? cache.entries : 'missing'}/${variants[position].expectedEntries}`).join(' ') +
+      ` entries (actual/declared; the worker lists ${variants[variants.length - 1].precachedPaths.join(', ')})`,
     );
 
     const bytesSeries = records.map((record) => record.totalBytes);
