@@ -304,19 +304,71 @@ const READ_STATE = `(() => {
     }
     return found;
   };
+  // ONE instrument for everything the audit reads as text (airhorn-w4k,
+  // airhorn-ami): walk the composed tree - light DOM plus open shadow roots,
+  // any depth - and collect each rendered element's own direct text nodes.
+  // A node the platform does not render (display:none, [hidden], closed
+  // <details>, content-visibility, opacity:0; checkVisibility knows all of
+  // them, including ancestors) contributes nothing, so a hidden shadow
+  // message can neither earn nor fake 'explains itself', and nested shadows
+  // are descended instead of stopping at one level.
+  const renderedFragments = (root) => {
+    const out = [];
+    // A shadow root renders through its host; documents are always read.
+    // One checkVisibility per element with the full option set is ENOUGH:
+    // measured in Chrome, it already reports an ancestor's c-v:hidden or
+    // settled auto-skip (the descendant has no box), and visibility is
+    // per-element so a visibility:visible child of a visibility:hidden
+    // ancestor stays rendered (od1's cleared case). The one gap is the
+    // element's OWN c-v:hidden, which checkVisibility reports as visible -
+    // read computed content-visibility for that directly. No ancestor walk:
+    // it over-suppressed visibility overrides and display:contents
+    // ancestors (airhorn-6xu) at O(depth) per element (airhorn-8rz).
+    const rendered = (n) => {
+      if (n.nodeType === 11 && n.host) n = n.host;
+      if (n.nodeType !== 1) return true;
+      if (n.checkVisibility && !n.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })) return false;
+      return getComputedStyle(n).contentVisibility !== 'hidden';
+    };
+    const ownText = (n) => [...n.childNodes].filter((c) => c.nodeType === 3)
+      .map((c) => c.textContent).join(' ').replace(/\\s+/g, ' ').trim();
+    const visit = (node) => {
+      // The node's OWN shadow root first: a shadow child is not in the
+      // light traversal, so without this its subtree - and its shadow -
+      // is never seen (airhorn-ami).
+      if (node.shadowRoot) visit(node.shadowRoot);
+      // The visited ROOT's own direct text nodes: querySelectorAll('*')
+      // returns descendants only, so a light-DOM region whose message is
+      // its own text node would read empty and flip 'explains itself'
+      // to NO (airhorn-q8j). Each element's own text is collected exactly
+      // once - as its parent-traversal's 'own', or here for the root.
+      if (rendered(node)) {
+        const rootOwn = ownText(node);
+        if (rootOwn) out.push(rootOwn);
+      }
+      for (const child of node.querySelectorAll('*')) {
+        if (!rendered(child)) continue;
+        const own = ownText(child);
+        if (own) out.push(own);
+        if (child.shadowRoot) visit(child.shadowRoot);
+      }
+    };
+    visit(root);
+    return out;
+  };
   const live = collectRegions(document).map((el) => {
-      const text = (el.textContent || '').trim().slice(0, 200);
       const vis = typeof el.checkVisibility === 'function'
         ? el.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })
         : !el.hidden && getComputedStyle(el).display !== 'none';
+      const text = renderedFragments(el).join(' ').replace(/\\s+/g, ' ').trim().slice(0, 200);
       return {
         role: el.getAttribute('role'),
         live: el.getAttribute('aria-live'),
-        shown: vis && (text === '' || (el.innerText || '').trim().length > 0),
+        shown: vis && text.length > 0,
         text,
       };
     });
-  const bodyText = ((document.body && document.body.innerText) || '')
+  const bodyText = renderedFragments(document).join(' ')
     .replace(/\\s+/g, ' ').trim().slice(0, 600);
   let navType = null;
   try {
