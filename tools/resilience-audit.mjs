@@ -293,7 +293,18 @@ const READ_STATE = `(() => {
   // into innerText. A visually-hidden-but-rendered region - the app-status
   // pattern - still counts: innerText is non-empty for it, and what matters
   // is whether the region HAS something to say.
-  const live = [...document.querySelectorAll('[role="status"],[role="alert"],[aria-live]')]    .map((el) => {
+  // Open shadow roots are invisible to querySelectorAll, so a page whose
+  // alert lives in one was reported 'explains itself: NO' while the user
+  // saw it plainly (airhorn-70o): recurse through them. Closed roots are
+  // unreachable from script - a noted limit, not worked around.
+  const collectRegions = (root) => {
+    const found = [...root.querySelectorAll('[role="status"],[role="alert"],[aria-live]')];
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) found.push(...collectRegions(el.shadowRoot));
+    }
+    return found;
+  };
+  const live = collectRegions(document).map((el) => {
       const text = (el.textContent || '').trim().slice(0, 200);
       const vis = typeof el.checkVisibility === 'function'
         ? el.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })
