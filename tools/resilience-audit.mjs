@@ -304,31 +304,45 @@ const READ_STATE = `(() => {
     }
     return found;
   };
-  // textContent/innerText do not pierce a shadow root either (airhorn-thn):
-  // a custom element whose MESSAGE is rendered in its own shadow root would
-  // be collected with empty text and earn 'explains itself: NO'. Compose
-  // light text with the region's own shadow root's text, for both the
-  // evidence text and the innerText side of the shown check.
-  // ShadowRoot is a DocumentFragment: it has textContent but NO innerText,
-  // so the composed read goes through the root's rendered children.
-  const composed = (el, prop) => {
-    let t = el[prop] || '';
-    if (el.shadowRoot) for (const c of el.shadowRoot.children) t += ' ' + (c[prop] || '');
-    return t;
+  // ONE instrument for everything the audit reads as text (airhorn-w4k,
+  // airhorn-ami): walk the composed tree - light DOM plus open shadow roots,
+  // any depth - and collect each rendered element's own direct text nodes.
+  // A node the platform does not render (display:none, [hidden], closed
+  // <details>, content-visibility, opacity:0; checkVisibility knows all of
+  // them, including ancestors) contributes nothing, so a hidden shadow
+  // message can neither earn nor fake 'explains itself', and nested shadows
+  // are descended instead of stopping at one level.
+  const renderedFragments = (root) => {
+    const out = [];
+    const visit = (node) => {
+      // The node's OWN shadow root first: a shadow child is not in the
+      // light traversal, so without this its subtree - and its shadow -
+      // is never seen (airhorn-ami).
+      if (node.shadowRoot) visit(node.shadowRoot);
+      for (const child of node.querySelectorAll('*')) {
+        if (child.checkVisibility && !child.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })) continue;
+        const own = [...child.childNodes].filter((n) => n.nodeType === 3)
+          .map((n) => n.textContent).join(' ').replace(/\\s+/g, ' ').trim();
+        if (own) out.push(own);
+        if (child.shadowRoot) visit(child.shadowRoot);
+      }
+    };
+    visit(root);
+    return out;
   };
   const live = collectRegions(document).map((el) => {
-      const text = composed(el, 'textContent').replace(/\s+/g, ' ').trim().slice(0, 200);
       const vis = typeof el.checkVisibility === 'function'
         ? el.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })
         : !el.hidden && getComputedStyle(el).display !== 'none';
+      const text = renderedFragments(el).join(' ').replace(/\\s+/g, ' ').trim().slice(0, 200);
       return {
         role: el.getAttribute('role'),
         live: el.getAttribute('aria-live'),
-        shown: vis && (text === '' || composed(el, 'innerText').trim().length > 0),
+        shown: vis && text.length > 0,
         text,
       };
     });
-  const bodyText = ((document.body && document.body.innerText) || '')
+  const bodyText = renderedFragments(document).join(' ')
     .replace(/\\s+/g, ' ').trim().slice(0, 600);
   let navType = null;
   try {
