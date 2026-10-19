@@ -304,6 +304,20 @@ export const READ_STATE = `(() => {
   };
   // The adapter supplies FACTS only, never verdicts, so there is exactly one
   // place a decision can be wrong - the tested model above.
+  // A display:contents element has no box, so 'is the box chain above me
+  // painted?' has to be asked of the nearest ancestor that HAS one. Without
+  // visibilityProperty: a visibility:visible override belongs to the element
+  // itself (airhorn-od1), so an ancestor's visibility must not answer it.
+  const boxChainVisible = (el) => {
+    const up = (n) => n.parentElement || (n.getRootNode ? n.getRootNode().host : null);
+    let n = up(el);
+    while (n && getComputedStyle(n).display === 'contents') n = up(n);
+    if (!n) return true; // nothing above to ask (we are the root)
+    const boxOptions = { opacityProperty: true, contentVisibilityAuto: true };
+    if (typeof n.checkVisibility === 'function') return n.checkVisibility(boxOptions);
+    const s = getComputedStyle(n);
+    return s.display !== 'none' && Number(s.opacity) > 0.05;
+  };
   const ownTextOf = (n) => [...(n.childNodes || [])].filter((c) => c.nodeType === 3)
     .map((c) => c.textContent).join(' ').replace(/\\s+/g, ' ').trim();
   const adapter = (node) => {
@@ -320,10 +334,15 @@ export const READ_STATE = `(() => {
         display: style.display,
         contentVisibility: style.contentVisibility,
       };
-      // The c-v branch is the only reader, and innerText is a layout query:
-      // an ordinary element never pays for it.
+      // Every getter below is read by exactly one rare branch, so an ordinary
+      // element pays for none of them: innerText and the ancestor walk are
+      // layout queries, and a normal page has no content-visibility and no
+      // display:contents.
       Object.defineProperty(facts, 'hasTextContent', { get: () => (host.textContent || '').trim() !== '' });
       Object.defineProperty(facts, 'renderedText', { get: () => (host.innerText || '').trim() });
+      Object.defineProperty(facts, 'visibility', { get: () => style.visibility });
+      Object.defineProperty(facts, 'opacity', { get: () => Number(style.opacity) });
+      Object.defineProperty(facts, 'boxChain', { get: () => boxChainVisible(host) });
     }
     return {
       facts,

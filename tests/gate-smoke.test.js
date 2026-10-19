@@ -314,9 +314,17 @@ test('the render model: shown IS visible text; a skipped node contributes nothin
     // Chrome: display:contents reports checkVisibility FALSE (no box) while its
     // text is on screen (innerText non-empty, one range rect) - so a boxless
     // element is decided by its children, not by its own checkVisibility.
-    { name: 'display:contents region with its own text', tree: el({ display: 'contents', checkVisibility: false }, 'contents region text'), text: 'contents region text' },
-    { name: 'display:contents region with text in a visible child', tree: el({ display: 'contents', checkVisibility: false }, '', [el({}, 'contents visible child')]), text: 'contents visible child' },
-    { name: 'display:contents region whose only child is hidden', tree: el({ display: 'contents', checkVisibility: false }, '', [el({ checkVisibility: false }, 'gone')]), text: '' },
+    // A contents element has no box, so its own text is gated by the box chain
+    // above it plus its own computed visibility/opacity - measured in Chrome
+    // 155: without that, own text read shown:true from display:none,
+    // visibility:hidden and opacity:0 alike.
+    { name: 'display:contents region with its own text', tree: el({ display: 'contents', checkVisibility: false, visibility: 'visible', opacity: 1, boxChain: true }, 'contents region text'), text: 'contents region text' },
+    { name: 'display:contents region with its own text, visibility:hidden', tree: el({ display: 'contents', checkVisibility: false, visibility: 'hidden', opacity: 1, boxChain: true }, 'hidden contents own text'), text: '' },
+    { name: 'display:contents region with its own text, opacity:0', tree: el({ display: 'contents', checkVisibility: false, visibility: 'visible', opacity: 0, boxChain: true }, 'contents opacity zero'), text: '' },
+    { name: 'display:contents region with its own text under a display:none ancestor', tree: el({ display: 'contents', checkVisibility: false, visibility: 'visible', opacity: 1, boxChain: false }, 'contents own text under display none'), text: '' },
+    { name: 'display:contents region with its own text and a visibility:visible override', tree: el({ display: 'contents', checkVisibility: false, visibility: 'visible', opacity: 1, boxChain: true }, 'contents visible override'), text: 'contents visible override' },
+    { name: 'display:contents region with text in a visible child', tree: el({ display: 'contents', checkVisibility: false, visibility: 'visible', opacity: 1, boxChain: true }, '', [el({}, 'contents visible child')]), text: 'contents visible child' },
+    { name: 'display:contents region whose only child is hidden', tree: el({ display: 'contents', checkVisibility: false, visibility: 'visible', opacity: 1, boxChain: true }, '', [el({ checkVisibility: false }, 'gone')]), text: '' },
     { name: 'a region inside a display:none ancestor', tree: el({ checkVisibility: false }, 'hidden ancestor status'), text: '' },
     // The inheritable-override case (airhorn-od1): a visibility:visible region
     // inside a visibility:hidden ancestor IS shown, and checkVisibility says so.
@@ -357,10 +365,16 @@ test('the page instrument turns DOM facts into the model verdict (airhorn-0w9, -
     };
     node.ownText = ownText;
     node.textContent = textOf(node);
+    for (const c of children) c.parentElement = node;
     // Chrome 155 facts: display:none/[hidden]/closed details/opacity:0/
     // visibility resolve through checkVisibility; the element's OWN c-v skip
-    // does not (measured) and shows up as empty innerText instead.
-    node.checkVisibility = () => facts.checkVisibility !== false;
+    // does not (measured) and shows up as empty innerText instead. The
+    // box-chain question (no visibilityProperty) is a different answer: it is
+    // 'is there a box above me at all', and a contents element asks its
+    // nearest boxed ancestor for it.
+    node.checkVisibility = (opts) => (opts && opts.visibilityProperty === undefined
+      ? facts.boxChain !== false
+      : facts.checkVisibility !== false);
     Object.defineProperty(node, 'innerText', { get: () => (facts.innerText !== undefined ? facts.innerText : node.textContent) });
     node.getAttribute = (k) => (k === 'role' ? node.role : null);
     return wire(node);
@@ -369,8 +383,8 @@ test('the page instrument turns DOM facts into the model verdict (airhorn-0w9, -
   const styleOf = (n) => ({
     display: n.facts ? n.facts.display || 'block' : 'block',
     contentVisibility: n.facts ? n.facts.contentVisibility || 'visible' : 'visible',
-    visibility: 'visible',
-    opacity: '1',
+    visibility: n.facts && n.facts.visibility ? n.facts.visibility : 'visible',
+    opacity: n.facts && n.facts.opacity !== undefined ? String(n.facts.opacity) : '1',
   });
   const instrument = (regions) => {
     const body = mk({}, '', regions);
@@ -382,14 +396,15 @@ test('the page instrument turns DOM facts into the model verdict (airhorn-0w9, -
   };
   const plain = mk({}, 'plain visible status', [], { role: 'status' });
   const skippedAuto = mk({ contentVisibility: 'auto', innerText: '' }, 'auto skipped status', [], { role: 'status' });
-  const contents = mk({ display: 'contents', checkVisibility: false }, 'contents region text', [], { role: 'status' });
+  const contents = mk({ display: 'contents', checkVisibility: false, opacity: 1 }, 'contents region text', [], { role: 'status' });
+  const contentsHidden = mk({ display: 'contents', checkVisibility: false, visibility: 'hidden', opacity: 1 }, 'hidden contents own text', [], { role: 'status' });
   const host = mk({}, '', [], { role: 'status' });
   host.shadowRoot = shadowOf(host, mk({}, 'shadow alert text'));
-  const state = instrument([plain, skippedAuto, contents, host]);
-  assert.deepEqual(state.live.map((l) => l.shown), [true, false, true, true],
+  const state = instrument([plain, skippedAuto, contents, contentsHidden, host]);
+  assert.deepEqual(state.live.map((l) => l.shown), [true, false, true, false, true],
     `shown must follow visible text: ${JSON.stringify(state.live)}`);
   assert.deepEqual(state.live.map((l) => l.text),
-    ['plain visible status', '', 'contents region text', 'shadow alert text'],
+    ['plain visible status', '', 'contents region text', '', 'shadow alert text'],
     `text must be the rendered text only: ${JSON.stringify(state.live)}`);
   for (const l of state.live) {
     assert.equal(l.shown, l.text !== '', `shown must BE "has visible text": ${JSON.stringify(l)}`);
