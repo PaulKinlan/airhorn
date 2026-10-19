@@ -282,19 +282,26 @@ const READ_STATE = `(() => {
     horn && rect && rect.width > 4 && rect.height > 4 &&
     cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0.05
   );
+  // Rendered means no ancestor hides it either: Chrome returns an element's
+  // OWN display for nodes under a display:none ancestor, so an element-level
+  // check passes for a region nothing can show (airhorn-4jw). Walk the
+  // ancestor chain. A visually-hidden-but-rendered region - the app-status
+  // pattern - still counts: that is the announcement channel, and what
+  // matters is whether it HAS something to say, which summarise() checks
+  // via the text.
+  const rendered = (el) => {
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+      if (n.hidden) return false;
+      const cs = getComputedStyle(n);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+    }
+    return true;
+  };
   const live = [...document.querySelectorAll('[role="status"],[role="alert"],[aria-live]')]    .map((el) => {
-      const cs = getComputedStyle(el);
       return {
         role: el.getAttribute('role'),
         live: el.getAttribute('aria-live'),
-        // Rendered, not display:none/hidden: a statically-present hidden
-        // alert (index.html's #boot-failure ships hidden) is in the DOM but
-        // in nothing's ears, so it must not count as the page explaining
-        // itself (airhorn-01e). A visually-hidden-but-rendered region - the
-        // app-status pattern - still counts: that is the announcement
-        // channel, and what matters is whether it HAS something to say,
-        // which summarise() checks via the text.
-        shown: !el.hidden && cs.display !== 'none' && cs.visibility !== 'hidden',
+        shown: rendered(el),
         text: (el.textContent || '').trim().slice(0, 200),
       };
     });
