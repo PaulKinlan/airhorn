@@ -142,10 +142,13 @@ while IFS=$'\t' read -r pat rest; do
   case $pat in
     \!*)
       # An exemption pinning a literal suite-shaped path is checked like a
-      # plain row: if the file is gone the row is dead (glob patterns - the
-      # normal use of ! rows - cannot resolve, so they are skipped).
+      # plain row: if the file is gone the row is dead. A GLOB pin is the
+      # normal use of ! rows and cannot resolve - skip it BEFORE the
+      # suite-shape check, whose patterns would otherwise match the glob
+      # STRING itself and report a nonexistent file 'missing' (airhorn-lex).
       _pin=${pat#!}
       [ -n "$_pin" ] || continue
+      case $_pin in *[\*\?\[]*) continue ;; esac
       case $_pin in tests/*.test.js|tests/*.test.mjs|tests/*.test.ts|test/*.test.js|test/*.test.mjs|test/*.test.ts)
         [ -f "$ROOT/$_pin" ] || MISSING_MAP+=("$_pin") ;;
       esac
