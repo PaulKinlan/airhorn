@@ -115,8 +115,11 @@ export class Horn {
           return false;
         }
         // If release occurred more than 1000ms ago (stale start on slow network/lie-fi),
-        // do not play a delayed blast long after the user let go.
-        if (startOp.stopRequested && startOp.stopTime && (Date.now() - startOp.stopTime > 1000)) {
+        // or one-shot start was initiated more than 1500ms ago, do not play a delayed blast.
+        if (startOp.stopRequested && (Date.now() - (startOp.stopTime || startOp.startTime) > 1000)) {
+          return false;
+        }
+        if (!startOp.loop && (Date.now() - startOp.startTime > 1500)) {
           return false;
         }
         if (!buffer) throw new Error('No audio buffer decoded');
@@ -128,8 +131,11 @@ export class Horn {
           return false;
         }
         // If release occurred more than 1000ms ago (stale start on slow network/lie-fi),
-        // do not play a delayed blast long after the user let go.
-        if (startOp.stopRequested && startOp.stopTime && (Date.now() - startOp.stopTime > 1000)) {
+        // or one-shot start was initiated more than 1500ms ago, do not play a delayed blast.
+        if (startOp.stopRequested && (Date.now() - (startOp.stopTime || startOp.startTime) > 1000)) {
+          return false;
+        }
+        if (!startOp.loop && (Date.now() - startOp.startTime > 1500)) {
           return false;
         }
         this.#usingFallback = true;

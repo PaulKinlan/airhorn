@@ -306,6 +306,60 @@ test('stale start resolving >1000ms after release is discarded without playing b
   }
 });
 
+test('stale one-shot start resolving >1500ms after gesture start is discarded without playing blast', async () => {
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  let fetchReject;
+  globalThis.fetch = () => new Promise((_, rej) => {
+    fetchReject = rej;
+  });
+
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    // One-shot start (loop: false, stop() is never called)
+    const pendingStart = horn.start({ loop: false });
+
+    // Simulate >1500ms delay on stalled network before fetch rejects
+    await new Promise(r => setTimeout(r, 1550));
+    fetchReject(new Error('HTTP 404 (slow lie-fi failure on one-shot)'));
+    const result = await pendingStart;
+
+    // Discarded as stale gesture (>1500ms since startOp.startTime); no blast started
+    assert.equal(result, false);
+    assert.equal(horn.isPlaying(), false);
+    assert.equal(ctx.oscillators.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('timely one-shot start resolving <1500ms after gesture start plays blast', async () => {
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  let fetchReject;
+  globalThis.fetch = () => new Promise((_, rej) => {
+    fetchReject = rej;
+  });
+
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    // One-shot start (loop: false)
+    const pendingStart = horn.start({ loop: false });
+
+    // Resolves promptly within 50ms (<1500ms threshold)
+    await new Promise(r => setTimeout(r, 50));
+    fetchReject(new Error('HTTP 404 (fast response)'));
+    const result = await pendingStart;
+
+    // Timely start succeeds and starts fallback synth blast
+    assert.equal(result, true);
+    assert.equal(horn.isPlaying(), true);
+    assert.equal(ctx.oscillators.length, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('immediate stop while fetch is pending cancels start completely', async () => {
   const originalFetch = globalThis.fetch;
   const ctx = new FakeAudioContext();
