@@ -130,17 +130,25 @@ map_reaches() { # $1 = suite path ; true iff a NON-exemption row names it (plain
 
 UNMAPPED=(); EXEMPT_COUNT=0; SELECTED=()
 for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
-  # A deleted SUITE selects nothing: there is no file left to run, and the
-  # reverse check below keeps the map honest for every suite that DOES exist.
-  # Without this skip, a suite deleted in the same commit that updates the map
-  # is selected by the changed-suite rule (the file maps to itself) and then
-  # fails as a "missing" suite - a correct map punished for being correct
-  # (airhorn-iwf). Deleted NON-suite paths keep mapping normally: a dynamic
-  # import can survive the build, so the suites a deleted source file covered
-  # must still run and fail.
+  # A deleted SUITE selects nothing - unless a PLAIN map row still names it.
+  # A row that survives its suite is a STALE MAP and must keep failing the
+  # gate right here ('missing: ...'), not silently later (airhorn-vpb): this
+  # skip exists so a suite deleted in the same commit that removes its row is
+  # not punished as 'missing', and nothing more. A '~'-pending declaration
+  # counts as the row being correctly absent (the MISSING check allows it).
+  # Deleted NON-suite paths keep mapping normally: a dynamic import can
+  # survive the build, so the suites a deleted source file covered must still
+  # run and fail.
   case $f in
     tests/*.test.js|tests/*.test.mjs|tests/*.test.ts|test/*.test.js|test/*.test.mjs|test/*.test.ts)
-      [ -f "$ROOT/$f" ] || continue ;;
+      if [ ! -f "$ROOT/$f" ]; then
+        if map_reaches "$f" && ! is_pending "$f"; then
+          : # stale plain row: fall through, suites_for maps the path to
+            # itself and the MISSING check below fails the gate
+        else
+          continue
+        fi
+      fi ;;
   esac
   got=$(suites_for "$f")
   if [ -n "$got" ]; then
