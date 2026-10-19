@@ -52,6 +52,13 @@
     <div id='installer'>
       <button type='button' class='button'>Install</button>
     </div>
+    <!-- One polite live region for status while the app runs: offline and
+         back-online, a service worker update. Filled by the announcer in the
+         inline script below (window.__airhornAnnounce) from both main.js and
+         the SW registration, so both surfaces share one voice. Empty it is
+         rendered but visually hidden, so nothing shows or is announced in
+         the normal case. -->
+    <div id='app-status' role='status'></div>
     <!-- Revealed by the boot watchdog below when the module bundle never runs
          (blocked by a filter or proxy, or a corrupt body from the cache): the
          static HTML paints a complete horn either way, so without this the
@@ -111,6 +118,14 @@
         backstop = setTimeout(arm, 12000);
 
         if (retry) retry.addEventListener('click', function () { window.location.reload(); });
+
+        // The one polite voice (see #app-status above). Intentionally no
+        // timers: a message stays until the next one replaces it, so a
+        // healthy page schedules nothing and reads as quiescent.
+        var statusRegion = document.getElementById('app-status');
+        window.__airhornAnnounce = function (message) {
+          if (statusRegion) statusRegion.textContent = message;
+        };
       })();
     </script>
     <script>
@@ -120,7 +135,15 @@
             const newWorker = reg.installing;
             if (newWorker) {
               newWorker.addEventListener('statechange', () => {
-                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                // Update notices (airhorn-8nz): only when an update arrives
+                // over an existing controller - a first install is silent.
+                // The message is transient by design: with a controller the
+                // page reloads itself via controllerchange right after;
+                // mechanics (skipWaiting + reload) are unchanged.
+                if (newWorker.state === 'installing' && navigator.serviceWorker.controller) {
+                  window.__airhornAnnounce?.('Updating the Air Horner to a new version...');
+                } else if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                  window.__airhornAnnounce?.('A new version is ready - reloading...');
                   newWorker.postMessage('skipWaiting');
                 } else if (newWorker.state === 'redundant' && navigator.serviceWorker.controller) {
                   // The upgrade was dropped - a denied cache write during precache is the

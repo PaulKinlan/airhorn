@@ -19,11 +19,15 @@ const mimeTypes = {
 };
 
 // Drives the built app (dist/) in headless Chrome over raw CDP and verifies
-// the boot surfaces from airhorn-quk:
-//   1. healthy boot never shows the boot-failure banner (no false positive);
+// the failure-state messaging surfaces from airhorn-quk and airhorn-8nz:
+//   1. healthy boot never shows the boot-failure banner, and the status
+//      region stays empty (no false positive, silence in the normal case);
 //   2. a blocked module bundle (filter/proxy) reveals the banner + retry;
 //   3. a corrupt module body (cache poisoning) reveals the banner;
-//   4. with scripting disabled the <noscript> notice is visible.
+//   4. with scripting disabled the <noscript> notice is visible;
+//   5. dropping the connection announces it, restoring announces that;
+//   6. a service worker update over an existing controller announces
+//      itself, then the page updates (existing mechanics, unchanged).
 // Screenshots land in /tmp/airhorn-boot-watchdog/ as evidence.
 async function testBootWatchdog() {
   const distDir = path.join(__dirname, '../dist');
@@ -33,14 +37,22 @@ async function testBootWatchdog() {
   fs.rmSync(EVIDENCE_DIR, { recursive: true, force: true });
   fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
 
+  const swV1 = '// resilience-ui suite: no-op service worker stub v1\n' +
+    'self.addEventListener("install", (e) => self.skipWaiting());\n' +
+    'self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));\n';
+  const swV2 = swV1.replace('v1', 'v2');
+  let swBody = swV1;
+
   const server = http.createServer((req, res) => {
     const reqUrl = req.url.split('?')[0];
-    // The page registers /sw.js unconditionally; serve a no-op stub so the
-    // registration succeeds without caching or intercepting anything. The
-    // cases below must hit the network (or CDP interception), not a cache.
+    // The page registers /sw.js unconditionally; serve a no-op stub that
+    // claims clients but caches and intercepts nothing, so the update case
+    // (case 6) has a controller to update over and every other case still
+    // hits the network (or CDP interception). The test mutates swBody to
+    // publish a byte-different v2 for reg.update() to find.
     if (reqUrl === '/sw.js') {
       res.writeHead(200, { 'Content-Type': 'application/javascript' });
-      res.end('// boot-watchdog suite: no-op service worker stub\n');
+      res.end(swBody);
       return;
     }
     let filePath = path.join(distDir, reqUrl === '/' ? 'index.html' : reqUrl);
@@ -174,6 +186,23 @@ async function testBootWatchdog() {
         window.addEventListener('error', (e) => {
           window.__pageErrors.push(e.message || (e.error ? e.error.message : String(e)));
         });
+        // Journal of everything the one polite live region has said, kept in
+        // sessionStorage so it survives the service-worker-update reload.
+        // This runs at document start, before the region exists, so attach
+        // the observer once the DOM has it.
+        window.__statusLog = JSON.parse(sessionStorage.getItem('__statusLog') || '[]');
+        const hookRegion = () => {
+          const region = document.getElementById('app-status');
+          if (!region) return;
+          new MutationObserver(() => {
+            if (!region.textContent) return;
+            window.__statusLog.push(region.textContent);
+            sessionStorage.setItem('__statusLog', JSON.stringify(window.__statusLog));
+          }).observe(region, { childList: true, characterData: true, subtree: true });
+        };
+        if (!hookRegion()) {
+          document.addEventListener('DOMContentLoaded', hookRegion);
+        }
       `
     });
 
@@ -191,6 +220,26 @@ async function testBootWatchdog() {
     })()`;
     if ((await evaluate(bannerHiddenExpr)) !== true) {
       throw new Error('Boot-failure banner visible on a healthy boot');
+    }
+    // The one polite live region must exist but say nothing on a healthy,
+    // connected boot: rendered (so changes are announced) yet visually
+    // hidden while empty.
+    const status = await evaluate(`(() => {
+      const el = document.getElementById('app-status');
+      return {
+        present: !!el,
+        role: el ? el.getAttribute('role') : null,
+        empty: !!el && el.textContent === '',
+        // The :empty rule applies the visually-hidden pattern; an empty
+        // region still yields a 1px client rect, so check the clip.
+        visuallyHidden: !!el && getComputedStyle(el).clipPath === 'inset(50%)',
+      };
+    })()`);
+    if (!status.present || status.role !== 'status') {
+      throw new Error(`status region missing or wrong role: ${JSON.stringify(status)}`);
+    }
+    if (!status.empty || !status.visuallyHidden) {
+      throw new Error(`status region not silent on a healthy boot: ${JSON.stringify(status)}`);
     }
     // The watchdog arms on load + 2s grace; wait past the grace and re-check.
     await new Promise(r => setTimeout(r, 3500));
@@ -273,7 +322,46 @@ async function testBootWatchdog() {
     console.log('  noscript: notice visible, explains JavaScript requirement');
     await send('Emulation.setScriptExecutionDisabled', { value: false });
 
-    console.log('ALL BOOT WATCHDOG CHECKS PASSED!');
+    // --- Case 5: offline and back online ---------------------------------------
+    console.log('--- Case 5: connection drops and returns');
+    // Fresh navigation so main.js (with its listeners) runs: the noscript
+    // page above never executed any script.
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+    await waitUntil('typeof window.__airhorn !== "undefined"', 8000, 'app to boot');
+    await send('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 });
+    await waitUntil(`window.__statusLog.some(m => /no connection/i.test(m))`, 5000, 'offline notice');
+    await shot('offline-notice');
+    await send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+    await waitUntil(`window.__statusLog.some(m => /back online/i.test(m))`, 5000, 'back-online notice');
+    console.log('  offline/online: both transitions announced');
+
+    // --- Case 6: service worker update over an existing controller -------------
+    console.log('--- Case 6: service worker update');
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+    await waitUntil('typeof window.__airhorn !== "undefined"', 8000, 'app to boot before update');
+    if ((await evaluate(`!!navigator.serviceWorker.controller`)) !== true) {
+      throw new Error('stub SW did not claim the page; the update case needs a controller');
+    }
+    swBody = swV2;
+    // Fire and forget: reg.update() is polled below, not awaited here.
+    await evaluate(`navigator.serviceWorker.getRegistration().then(reg => reg.update())`);
+    await waitUntil(`window.__statusLog.some(m => /new version|updating/i.test(m))`, 10000, 'update notice');
+    const updateMsgs = await evaluate(`window.__statusLog.filter(m => /new version|updating/i.test(m))`);
+    console.log('  update notice(s):', JSON.stringify(updateMsgs));
+    await shot('update-notice');
+    // The page updates itself via the existing controllerchange reload; wait
+    // for v2 to be the active controller, then confirm the fresh page boots
+    // and is silent again.
+    await waitUntil(`navigator.serviceWorker.controller
+      && navigator.serviceWorker.controller.state === 'activated'`, 15000, 'v2 to activate');
+    await waitUntil('typeof window.__airhorn !== "undefined"', 8000, 'app to boot after update');
+    if ((await evaluate(`document.getElementById('app-status').textContent`)) !== '') {
+      throw new Error('status region not empty on the freshly updated page');
+    }
+    swBody = swV1; // hygiene for any later navigation
+    console.log('  update: announced, v2 activated, page healthy and quiet again');
+
+    console.log('ALL RESILIENCE-UI CHECKS PASSED!');
   } finally {
     chrome.kill('SIGTERM');
     server.close();

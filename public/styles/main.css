@@ -324,19 +324,18 @@
   }
 }
 
-/* Boot failure banner and the noscript notice share one card: fixed to the
-   foot of the viewport so its appearance never shifts the horn. Ink on the
-   card is --alert-ink in both schemes, so the focus ring stays visible. */
-.boot-alert {
+/* Boot failure banner, noscript notice and the status region share one
+   card: fixed to the foot of the viewport so its appearance never shifts
+   the horn. Ink on the card is --alert-ink in both schemes, so the focus
+   ring stays visible. */
+.boot-alert,
+#app-status {
   position: fixed;
   inset-inline: 1rem;
   inset-block-end: 1rem;
   margin-inline: auto;
   max-inline-size: 26rem;
   padding: 0.875rem 1rem;
-  display: grid;
-  gap: 0.75rem;
-  justify-items: start;
   background-color: var(--alert-bg);
   color: var(--alert-ink);
   border: 1px solid var(--alert-edge);
@@ -344,6 +343,12 @@
   box-shadow: 0 4px 16px rgb(0 0 0 / 35%);
   font-size: 0.95rem;
   z-index: 10;
+}
+
+.boot-alert {
+  display: grid;
+  gap: 0.75rem;
+  justify-items: start;
 
   /* This card sets display itself, so the UA's [hidden] rule would lose the
      cascade without this: the banner must actually disappear when hidden. */
@@ -374,6 +379,28 @@
       outline: 3px solid var(--alert-ink);
       outline-offset: 3px;
     }
+  }
+}
+
+/* The status region is one polite live channel (offline/online, SW
+   updates). It must stay rendered even when empty, so assistive tech hears
+   its content change - but visually it is nothing until it has something
+   to say, so the normal case stays silent on screen too. */
+#app-status {
+  padding: 0.625rem 1rem;
+  font-size: 0.9rem;
+
+  &:empty {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: clip;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    box-shadow: none;
   }
 }
 
