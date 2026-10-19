@@ -57,11 +57,35 @@ test('the gate script parses (bash -n)', () => {
   execFileSync('bash', ['-n', gate]);
 });
 
-test('every tools/*.mjs script parses (node --check)', () => {
-  // Glob, not names (airhorn-v1n): the tools/* placement must be real for any
-  // script in the directory, present or future - a NEW tools script with a
-  // syntax error must fail this suite, not report coverage KNOWN.
-  const scripts = fs.readdirSync(path.join(root, 'tools')).filter((f) => /\.mjs$/.test(f));
-  assert.ok(scripts.length >= 2, `expected the tools scripts to be present, got ${JSON.stringify(scripts)}`);
-  for (const s of scripts) execFileSync(process.execPath, ['--check', path.join(root, 'tools', s)]);
+test('every tools script parses - any extension, any depth (airhorn-7lm, airhorn-7z5)', () => {
+  // Glob, not names (airhorn-v1n), and EVERY script extension, not just .mjs:
+  // the tools/* placement must be real for any script in the tree, present or
+  // future - a NEW tools script with a syntax error must fail this suite, not
+  // report coverage KNOWN.
+  const entries = fs.readdirSync(path.join(root, 'tools'), { recursive: true });
+  const scripts = entries.filter((f) => /\.(mjs|js|sh)$/.test(f));
+  assert.ok(scripts.length >= 3, `expected the tools scripts to be present, got ${JSON.stringify(scripts)}`);
+  for (const s of scripts) {
+    const full = path.join(root, 'tools', s);
+    if (/\.sh$/.test(s)) execFileSync('bash', ['-n', full]);
+    else execFileSync(process.execPath, ['--check', full]);
+  }
+});
+
+test('every script-tier suite is gated by a tests/support change (airhorn-dco)', () => {
+  // The report hook is runner-injected into EVERY script-tier (*.test.mjs)
+  // suite, so a hook edit can break any of them; the support row must name all
+  // of them minus the explicit-only acceptance pass (airhorn-i8i), and this
+  // assertion - derived from the tree, per run - is what makes that rule
+  // fail loudly instead of living in a comment (airhorn-10q, airhorn-n00,
+  // airhorn-5t8 were three recurrences of the same drift).
+  const supportChange = 'tests/support/report-hook.mjs';
+  const selected = new Set(listFor(supportChange));
+  const scriptTier = fs.readdirSync(path.join(root, 'tests'))
+    .filter((f) => /\.test\.mjs$/.test(f) && f !== 'acceptance.mjs')
+    .map((f) => `tests/${f}`);
+  assert.ok(scriptTier.length >= 6, `expected the script-tier suites to be present, got ${JSON.stringify(scriptTier)}`);
+  for (const s of scriptTier) {
+    assert.ok(selected.has(s), `a support-file change must select ${s} (the hook runs under it), got ${JSON.stringify([...selected])}`);
+  }
 });
