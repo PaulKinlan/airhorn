@@ -26,6 +26,9 @@
     "tests/sw-offline.test.mjs",
     "tests/webmcp-browser.test.mjs"
   ],
+  "server.ts": [
+    "tests/gate-smoke.test.js"
+  ],
   "public/sw.js": [
     "tests/sw-offline.test.mjs",
     "tests/sw-failover.test.mjs"
@@ -40,6 +43,14 @@
     "tests/a11y.test.mjs"
   ],
   "tools/*": [
-    "tests/horn.test.js"
+    "tests/gate-smoke.test.js"
+  ],
+  "tests/support/*": [
+    "tests/a11y.test.mjs",
+    "tests/sw-offline.test.mjs",
+    "tests/sw-failover.test.mjs",
+    "tests/webmcp.test.mjs",
+    "tests/webmcp-browser.test.mjs",
+    "tests/resilience-ui.test.mjs"
   ]
 }
