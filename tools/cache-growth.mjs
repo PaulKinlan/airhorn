@@ -82,6 +82,9 @@ Usage: node tools/cache-growth.mjs [options]     (run "npm run build" first)
   --out <dir>      evidence directory (default /tmp/airhorn-cache-growth/<sha>-<stamp>)
   --mutant <name>  inject a known regression to prove the checks can fail:
                    none | keep-old-caches
+  --self-check     browser-free proof that the exact-entry predicate rejects a
+                   same-count substitution, a missing entry, an extra entry and
+                   a duplicate standing in for a missing path (airhorn-3ub)
   --help           this text
 
 Each version gets its own hashed asset, cache name and worker version, as a real
@@ -91,7 +94,7 @@ deploy does. Exits 0 only when every check passes.
 const MUTANTS = new Set(['none', 'keep-old-caches']);
 
 function parseArgs(argv) {
-  const options = { versions: 10, out: null, mutant: 'none' };
+  const options = { versions: 10, out: null, mutant: 'none', selfCheck: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     const value = () => {
@@ -104,6 +107,7 @@ function parseArgs(argv) {
       case '--versions': options.versions = Number(value()); break;
       case '--out': options.out = value(); break;
       case '--mutant': options.mutant = value(); break;
+      case '--self-check': options.selfCheck = true; break;
       case '--help': case '-h':
         console.log(HELP);
         process.exit(0);
@@ -156,6 +160,32 @@ function growsMonotonically(values, tolerance) {
 }
 
 const kb = (bytes) => (bytes / 1024).toFixed(1);
+
+/**
+ * Does a cached entry list hold EXACTLY the paths the worker declares?
+ *
+ * Counts are not enough (airhorn-3ub): a cache holding `/` + `/unrelated.js`
+ * where the worker declared `/` + `/index.html` has the right size and the wrong
+ * contents, and that is the shape a drift bug takes - an entry silently dropped
+ * by addAll and another one left behind. Compare pathnames as sets; a query
+ * string is not part of the key the worker reasons about.
+ */
+function precacheMatches(declaredPaths, cachedPaths) {
+  const pathname = (value) => new URL(String(value), 'http://precache.invalid').pathname;
+  const expected = declaredPaths.map(pathname).sort();
+  const actual = cachedPaths.map(pathname).sort();
+  return expected.length === actual.length && expected.every((path, index) => path === actual[index]);
+}
+
+/** The first difference between what was declared and what the cache holds. */
+function precacheMismatch(declaredPaths, cachedPaths) {
+  const pathname = (value) => new URL(String(value), 'http://precache.invalid').pathname;
+  const expected = declaredPaths.map(pathname).sort();
+  const actual = cachedPaths.map(pathname).sort();
+  const missing = expected.filter((path) => !actual.includes(path));
+  const unexpected = actual.filter((path) => !expected.includes(path));
+  return { missing, unexpected, declared: expected.length, cached: actual.length };
+}
 
 /* ------------------------------ build variants ---------------------------- */
 
@@ -213,21 +243,86 @@ function buildVariants({ count, workRoot, mutant }) {
     }
     fs.writeFileSync(path.join(dir, 'sw.js'), worker);
 
-    const precached = ['/index.html', '/index.html', '/styles/main.css', '/sounds/airhorn.mp3', assetPath];
-    const expectedBytes = precached.reduce((total, relative) => {
+    // What the worker says it precaches IS the expectation: reading it here means
+    // a precache change (e.g. dropping the duplicate `/` entry, airhorn-btt) does
+    // not silently need a matching edit in this tool, while the entry-count check
+    // still catches a worker that ends up storing something else.
+    const listLiteral = worker.match(/const precacheUrls = \[([\s\S]*?)\];/)?.[1]
+      // Strip comments before reading the list: the worker explains itself in
+      // backticks, and a comment mentioning `/index.html` must not become an
+      // entry the check then reports as missing.
+      ?.replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    if (!listLiteral) {
+      throw new Error('could not read precacheUrls from the worker: the build changed shape and this tool needs updating');
+    }
+    const precachedPaths = [...listLiteral.matchAll(/[`'"](\/[^`'"]*)[`'"]/g)].map((match) => match[1]);
+    if (!precachedPaths.length) throw new Error('the worker precaches nothing');
+    // `/` is served from index.html when it is in the list, so count its bytes thus.
+    const expectedBytes = precachedPaths.reduce((total, relative) => {
       const file = path.join(dir, relative === '/' ? 'index.html' : relative);
       return total + (fs.existsSync(file) ? fs.statSync(file).size : 0);
     }, 0);
 
-    variants.push({ index, tag, dir, assetPath, expectedBytes, worker });
+    variants.push({
+      index, tag, dir, assetPath, expectedBytes, expectedEntries: precachedPaths.length, precachedPaths, worker,
+    });
   }
   return { variants, builtAsset };
+}
+
+/* ------------------------------- self-check ------------------------------- */
+
+/**
+ * A predicate that cannot fail is worse than no predicate (airhorn-a6u,
+ * airhorn-3ub), so the exact-entry rule is proven here against synthetic entry
+ * lists: the faithful set passes, and every way of keeping the same COUNT while
+ * changing the contents fails. No browser, no build, milliseconds.
+ */
+function runSelfCheck() {
+  const declared = ['/', '/index.html', '/styles/main.css', '/sounds/airhorn.mp3', '/assets/index-abc.js'];
+  const cases = [
+    { name: 'the declared set is accepted', cached: declared, expect: true },
+    {
+      name: 'a same-count substitution is rejected',
+      cached: ['/', '/unrelated.js', '/styles/main.css', '/sounds/airhorn.mp3', '/assets/index-abc.js'],
+      expect: false,
+    },
+    { name: 'a missing entry is rejected', cached: declared.slice(1), expect: false },
+    { name: 'an extra entry is rejected', cached: [...declared, '/extra.js'], expect: false },
+    {
+      name: 'a duplicate standing in for a missing path is rejected',
+      cached: [...declared.slice(0, 4), declared[0]],
+      expect: false,
+    },
+    { name: 'order does not matter', cached: [...declared].reverse(), expect: true },
+    { name: 'a query string is not part of the key', cached: declared.map((path) => `${path}?v=2`), expect: true },
+    { name: 'nothing cached is rejected', cached: [], expect: false },
+  ];
+
+  let failures = 0;
+  for (const testCase of cases) {
+    const result = precacheMatches(declared, testCase.cached);
+    const ok = result === testCase.expect;
+    if (!ok) failures += 1;
+    console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${testCase.name} (predicate ${result ? 'accepted' : 'rejected'}, expected ${testCase.expect ? 'accept' : 'reject'})`);
+    if (!ok) {
+      const diff = precacheMismatch(declared, testCase.cached);
+      console.log(`        missing [${diff.missing.join(', ')}] unexpected [${diff.unexpected.join(', ')}] ` +
+        `${diff.cached} cached / ${diff.declared} declared`);
+    }
+  }
+
+  console.log(`\ncache-growth --self-check: ${failures === 0 ? 'PASS' : 'FAIL'} — ` +
+    `${cases.length - failures}/${cases.length} exact-entry cases behave`);
+  return failures === 0 ? 0 : 1;
 }
 
 /* ---------------------------------- main ---------------------------------- */
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  if (options.selfCheck) return runSelfCheck();
   const evidenceDir = makeEvidenceDir(options.out);
   fs.rmSync(evidenceDir, { recursive: true, force: true });
   fs.mkdirSync(evidenceDir, { recursive: true });
@@ -560,11 +655,36 @@ async function main() {
       records.map((record) => `${record.version}: ${record.keys.join('+')}`).join('; '),
     );
 
-    const appCaches = records.map((record) => record.caches.find((cache) => cache.name.startsWith('airhorner-')));
+    // Look at THIS version's cache, not whichever airhornner-* happens to come
+    // first: with a leftover cache present (the keep-old-caches mutant) the old
+    // lookup compared the previous version's contents against this version's
+    // declaration and reported an entry mismatch that was really the leak.
+    const appCaches = records.map((record) => record.caches.find(
+      (cache) => cache.name.startsWith('airhorner-') && cache.name.includes(record.version)) ?? null);
+    const metaCaches = records.map((record) => record.caches.find(
+      (cache) => cache.name.startsWith('horn-integrity-') && cache.name.includes(record.version)) ?? null);
+    const cachedPaths = (cache) => (cache ? cache.detail.map((entry) => entry.path) : []);
+    // Sets, not counts (airhorn-3ub): the precache and its integrity records must
+    // both name exactly the paths the worker declares, or a same-sized
+    // substitution passes a check that claims to be exact.
     const entriesCheck = check(
-      'the precache keeps the same entry count every version',
-      appCaches.every((cache) => cache && cache.entries === 5),
-      appCaches.map((cache) => `${cache ? cache.entries : 'missing'}`).join(' / ') + ' entries',
+      'the precache holds exactly the entries the worker declares, every version',
+      records.every((_, position) =>
+        precacheMatches(variants[position].precachedPaths, cachedPaths(appCaches[position])) &&
+        precacheMatches(variants[position].precachedPaths, cachedPaths(metaCaches[position]))),
+      records.map((record, position) => {
+        const variant = variants[position];
+        const appDiff = precacheMismatch(variant.precachedPaths, cachedPaths(appCaches[position]));
+        const metaDiff = precacheMismatch(variant.precachedPaths, cachedPaths(metaCaches[position]));
+        const bad = [
+          appDiff.missing.length ? `precache missing ${appDiff.missing.join(',')}` : '',
+          appDiff.unexpected.length ? `precache unexpected ${appDiff.unexpected.join(',')}` : '',
+          metaDiff.missing.length ? `integrity missing ${metaDiff.missing.join(',')}` : '',
+          metaDiff.unexpected.length ? `integrity unexpected ${metaDiff.unexpected.join(',')}` : '',
+        ].filter(Boolean);
+        return `${record.version}: ${appDiff.cached}/${appDiff.declared}${bad.length ? ` (${bad.join('; ')})` : ''}`;
+      }).join('; ') +
+      ` — declared: ${variants[variants.length - 1].precachedPaths.join(', ')}`,
     );
 
     const bytesSeries = records.map((record) => record.totalBytes);

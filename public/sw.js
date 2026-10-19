@@ -25,6 +25,13 @@ const cacheName = `airhorner-${version}`;
 const metaCacheName = `horn-integrity-${version}`;
 
 const precacheUrls = [
+  // Both shell spellings, deliberately (airhorn-btt): `/` is what a navigation
+  // matches, and storing a navigation response is the only way an emptied cache
+  // re-seeds itself from one online visit (tests/sw-failover.test.mjs stage D
+  // depends on it); `/index.html` is what an in-page fetch and the navigation
+  // fallback below ask for. It looks like a 11,962 B duplicate of the same
+  // document - it is, byte for byte - and dropping it was measured to break
+  // offline recovery after a cache wipe.
   `/`,
   `/index.html`,
   `/styles/main.css`,

@@ -47,10 +47,14 @@ deno run --allow-net --allow-read server.ts   # serves dist/ on port 8000
 ## Offline and updates
 
 `public/sw.js` precaches `/`, `/index.html`, `/styles/main.css` and
-`/sounds/airhorn.mp3`. At build time a Vite plugin appends every hashed
-`/assets/*.js` referenced by the built `index.html` to that list, and stamps the
-cache name with a hash of the whole build, so a new deployment gets a new cache and
-the previous one is deleted on activate.
+`/sounds/airhorn.mp3`. Both shell spellings are deliberate: `/` is what a
+navigation matches, and storing a navigation response is also how an emptied cache
+re-seeds itself from one online visit (a device whose caches were wiped recovers by
+loading the page — `tests/sw-failover.test.mjs` stage D pins that); `/index.html` is
+what an in-page fetch and the worker's navigation fallback ask for. At build time a
+Vite plugin appends every hashed `/assets/*.js` referenced by the built `index.html`
+to that list, and stamps the cache name with a hash of the whole build, so a new
+deployment gets a new cache and the previous one is deleted on activate.
 
 A new worker calls `skipWaiting()`. When the page already had a controller, the
 `controllerchange` handler reloads once so the tab is running the new build. After
@@ -161,11 +165,12 @@ npm run build && node tools/cache-growth.mjs      # 10 deploys, ~25 s
 ```
 
 It asserts that each deploy leaves exactly the current version's two caches (the
-precache and its integrity records), that the precache keeps the same entry count,
-that stored bytes and origin usage stay flat rather than stepping up by one build per
-deploy, that nothing from the previous deploy — or two deploys ago — survives, that an
-old hashed asset is neither readable from cache nor still served by the origin, and
-that the horn still plays under each new worker. `--mutant keep-old-caches` serves a
+precache and its integrity records), that both caches hold exactly the paths the worker
+declares (compared as sets, not counts — `--self-check` proves a same-count substitution
+is rejected), that stored bytes and origin usage stay flat rather than stepping up by
+one build per deploy, that nothing from the previous deploy — or two deploys ago —
+survives, that an old hashed asset is neither readable from cache nor still served by
+the origin, and that the horn still plays under each new worker. `--mutant keep-old-caches` serves a
 worker whose activate handler deletes nothing, and those growth checks must go red.
 
 ### How suites report to the gate
