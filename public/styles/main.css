@@ -180,6 +180,13 @@
     border-radius: 50%;
     display: grid;
     place-items: center;
+
+    /* The fallback label exists for the unstyled experience (the critical
+       block in index.html); with the stylesheet the drawn horn speaks for
+       itself and the accessible name comes from aria-label. */
+    & .horn-label {
+      display: none;
+    }
     background-color: var(--horn-bg);
     box-shadow: 0 0.55rem 0.22rem 0 var(--horn-edge);
     /* The permanent boundary ring (WCAG 1.4.11, 3:1 non-text). An outline,

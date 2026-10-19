@@ -33,6 +33,47 @@
     <meta name='twitter:description' content='The best and easiest Air Horn web app there is. No install just use it right away in your browser!'>
     <meta name='twitter:image' content='https://airhorner.com/images/touch/android-launchericon-192-192.png'>
     <meta name='twitter:creator' content='@paul_kinlan'>
+    <!-- Critical fallback (airhorn-zb0): the horn's whole affordance is CSS,
+         so with the stylesheet unavailable the button collapsed to 16x6, the
+         installer became a visible inert button and the visually-hidden prose
+         showed as body text. The rules mirror main.css and live in a layer
+         declared before main.css's own, so every main.css rule beats them
+         once the stylesheet loads (unlayered styles would win the cascade
+         forever - they would have pinned the installer hidden). -->
+    <style>
+      @layer critical {
+        .horn {
+          inline-size: min(50vmin, 26rem);
+          aspect-ratio: 1;
+          appearance: none;
+          border: 0;
+          margin: 0;
+          padding: 0;
+          border-radius: 50%;
+        }
+
+        .horn-label {
+          font: inherit;
+        }
+
+        .visually-hidden {
+          position: absolute;
+          inline-size: 1px;
+          block-size: 1px;
+          margin: -1px;
+          padding: 0;
+          border: 0;
+          overflow: clip;
+          clip-path: inset(50%);
+          white-space: nowrap;
+        }
+
+        #installer {
+          visibility: hidden;
+          pointer-events: none;
+        }
+      }
+    </style>
     <link rel='stylesheet' href='/styles/main.css'>
     <link rel='preload' href='/sounds/airhorn.mp3' as='fetch' crossorigin>
   </head>
@@ -44,6 +85,7 @@
           <span class='inner' aria-hidden='true'>
             <span class='center'></span>
           </span>
+          <span class='horn-label'>Air horn</span>
         </button>
         <p id='horn-help' class='visually-hidden'>Press and hold to sound the air horn. Release to stop.</p>
       </div>

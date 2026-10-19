@@ -361,6 +361,47 @@ async function testBootWatchdog() {
     swBody = swV1; // hygiene for any later navigation
     console.log('  update: announced, v2 activated, page healthy and quiet again');
 
+    // --- Case 7: stylesheet blocked -> intrinsic, labelled, honest --------------
+    console.log('--- Case 7: stylesheet blocked');
+    await send('Network.setBlockedURLs', { urls: ['*styles/*.css', '*assets/*.css'] });
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+    await waitUntil('typeof window.__airhorn !== "undefined"', 8000, 'app to boot unstyled');
+    const unstyled = await evaluate(`(() => {
+      const horn = document.querySelector('.horn');
+      const r = horn.getBoundingClientRect();
+      const label = document.querySelector('.horn-label');
+      const installer = document.getElementById('installer');
+      const h1 = document.querySelector('h1');
+      return {
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+        labelText: label ? label.textContent.trim() : null,
+        labelVisible: !!label && label.getClientRects().length > 0,
+        installerGone: !!installer && installer.getClientRects().length === 0,
+        // The critical fallback hides the installer the way main.css does -
+        // visibility, not display - so a visibility:hidden element still has
+        // client rects; assert the computed styles instead.
+        installerHidden: !!installer && getComputedStyle(installer).visibility === 'hidden'
+          && getComputedStyle(installer).pointerEvents === 'none',
+        h1Hidden: !!h1 && getComputedStyle(h1).clipPath === 'inset(50%)',
+      };
+    })()`);
+    if (unstyled.w < 200 || unstyled.h < 200) {
+      throw new Error(`horn collapsed without CSS: ${unstyled.w}x${unstyled.h}`);
+    }
+    if (!unstyled.labelVisible || !/air horn/i.test(unstyled.labelText || '')) {
+      throw new Error(`horn label not visible without CSS: ${JSON.stringify(unstyled)}`);
+    }
+    if (!unstyled.installerHidden) throw new Error('install button visible and inert without CSS');
+    if (!unstyled.h1Hidden) throw new Error('visually-hidden heading showed as prose without CSS');
+    // And the unstyled horn still sounds: the failure this replaces was a
+    // page that looked broken but passed a naive usability check.
+    await evaluate(`document.querySelector('.horn').click()`);
+    await waitUntil(`document.querySelector('.horn').getAttribute('aria-pressed') === 'true'`, 3000, 'unstyled horn to sound');
+    await shot('blocked-css');
+    console.log(`  blocked CSS: horn ${unstyled.w}x${unstyled.h}, labelled, installer hidden, still sounds`);
+    await send('Network.setBlockedURLs', { urls: [] });
+
     console.log('ALL RESILIENCE-UI CHECKS PASSED!');
   } finally {
     chrome.kill('SIGTERM');
