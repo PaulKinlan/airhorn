@@ -341,6 +341,34 @@ async function run() {
       throw new Error(`Expected AX role 'button', got ${hornNode.role?.value}`);
     }
 
+    // Verify #horn-help provides the accessible description via aria-describedby
+    const expectedDesc = 'Press and hold to sound the air horn. Release to stop.';
+    if (hornNode.description?.value !== expectedDesc) {
+      throw new Error(`Expected horn AX description "${expectedDesc}", got "${hornNode.description?.value}"`);
+    }
+    const describedbyProp = hornNode.properties?.find(p => p.name === 'describedby')?.value?.value;
+    if (describedbyProp !== 'horn-help') {
+      throw new Error(`Expected horn AX describedby property to be "horn-help", got "${describedbyProp}"`);
+    }
+
+    const helpNode = axTree.nodes.find(n => n.name?.value?.includes(expectedDesc));
+    if (!helpNode || helpNode.ignored) {
+      throw new Error('#horn-help text must be present and not ignored in the AX tree');
+    }
+
+    // Verify .visually-hidden content is visually clipped with negligible rendered footprint
+    const hiddenBounds = await send('Runtime.evaluate', {
+      expression: `(() => {
+        const el = document.getElementById('horn-help');
+        const rect = el.getBoundingClientRect();
+        return { width: rect.width, height: rect.height };
+      })()`,
+      returnByValue: true
+    });
+    if (hiddenBounds.result.value.width > 1 || hiddenBounds.result.value.height > 1) {
+      throw new Error(`Expected .visually-hidden footprint <= 1px, got ${JSON.stringify(hiddenBounds.result.value)}`);
+    }
+
     // Test keyboard focus (Tab key)
     console.log('Testing Tab key navigation...');
     await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab' });
