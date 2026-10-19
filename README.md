@@ -147,6 +147,27 @@ keeps 1 MB per blast. Run one and the matching check goes red:
 node tools/soak.mjs --cycles 24 --updates 0 --offline 0 --mutant source-leak
 ```
 
+### Storage growth across deploys
+
+The worker precaches under a cache name stamped with the build, and every deploy ships
+a new hashed bundle — the shape that grows without bound on a device that comes back
+after a few releases. `tools/cache-growth.mjs` installs ten successive builds into one
+browser profile (each with its own hashed asset and content, rewritten in `index.html`
+and the worker's precache list) and, per version, reads back the cache names, the
+entries and stored bytes of every cache, and `navigator.storage.estimate()`:
+
+```bash
+npm run build && node tools/cache-growth.mjs      # 10 deploys, ~25 s
+```
+
+It asserts that each deploy leaves exactly the current version's two caches (the
+precache and its integrity records), that the precache keeps the same entry count,
+that stored bytes and origin usage stay flat rather than stepping up by one build per
+deploy, that nothing from the previous deploy — or two deploys ago — survives, that an
+old hashed asset is neither readable from cache nor still served by the origin, and
+that the horn still plays under each new worker. `--mutant keep-old-caches` serves a
+worker whose activate handler deletes nothing, and those growth checks must go red.
+
 ### How suites report to the gate
 
 `tools/fast-gate.sh` runs two tiers, and both put *per-case* results in its summary:
