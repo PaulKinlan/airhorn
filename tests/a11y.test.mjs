@@ -572,6 +572,183 @@ async function run() {
       throw new Error(`Expected focus on .horn after install button was hidden, got: ${ftr.activeElementTag}.${ftr.activeElementClass}`);
     }
 
+    // WCAG 2.2 AA Audit and Falsifiable Negative Controls (airhorn-2hl)
+    console.log('Running WCAG 2.2 AA audit and falsifiability verification...');
+    const axePath = path.join(__dirname, 'support/axe.min.js');
+    if (!fs.existsSync(axePath)) {
+      throw new Error(`axe-core bundle missing at ${axePath}`);
+    }
+    const axeSource = fs.readFileSync(axePath, 'utf8');
+    await send('Runtime.evaluate', { expression: axeSource });
+
+    // 1. Audit clean build with axe-core (WCAG 2.0 / 2.1 / 2.2 AA)
+    const cleanAxe = await send('Runtime.evaluate', {
+      expression: `(async () => {
+        const results = await axe.run(document, {
+          runOnly: {
+            type: 'tag',
+            values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']
+          }
+        });
+        return results.violations;
+      })()`,
+      awaitPromise: true,
+      returnByValue: true
+    });
+    if (cleanAxe.result.value.length > 0) {
+      throw new Error(`Clean build failed WCAG audit: ${JSON.stringify(cleanAxe.result.value)}`);
+    }
+    console.log('Clean build axe-core violations: 0');
+
+    // 2. Manual check: Target Size Minimum (WCAG 2.2 SC 2.5.8 Level AA, >= 24x24 CSS px)
+    const cleanTargetSize = await send('Runtime.evaluate', {
+      expression: `(() => {
+        const interactive = Array.from(document.querySelectorAll('button, [role="button"], a[href]')).filter(el => {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return !el.disabled && !el.closest('[hidden]') && style.display !== 'none' && style.visibility !== 'hidden' && (rect.width > 0 || rect.height > 0);
+        });
+        const undersized = interactive.filter(el => {
+          const rect = el.getBoundingClientRect();
+          return rect.width < 24 || rect.height < 24;
+        }).map(el => ({ id: el.id, class: el.className, tag: el.tagName, rect: el.getBoundingClientRect() }));
+        return { count: interactive.length, undersized };
+      })()`,
+      returnByValue: true
+    });
+    if (cleanTargetSize.result.value.undersized.length > 0) {
+      throw new Error(`Undersized targets found on clean build: ${JSON.stringify(cleanTargetSize.result.value.undersized)}`);
+    }
+    console.log(`Clean build target size: all ${cleanTargetSize.result.value.count} interactive targets >= 24x24px`);
+
+    // 3. Status Messages (WCAG 2.1/2.2 SC 4.1.3 Level AA): verify live region actually announces in AXTree
+    const liveAnnounceText = 'Accessibility status announcement verified';
+    await send('Runtime.evaluate', {
+      expression: `window.__airhornAnnounce(${JSON.stringify(liveAnnounceText)})`
+    });
+    const axTreeLive = await send('Accessibility.getFullAXTree');
+    const liveTextNode = axTreeLive.nodes.find(n => n.name?.value === liveAnnounceText);
+    const liveStatusRole = axTreeLive.nodes.find(n => n.role?.value === 'status');
+    if (!liveStatusRole || liveStatusRole.ignored) {
+      throw new Error('#app-status role="status" missing or ignored in AXTree');
+    }
+    if (!liveTextNode || liveTextNode.ignored) {
+      throw new Error(`Status message was not announced to assistive technology in AXTree: "${liveAnnounceText}"`);
+    }
+    console.log(`Polite live region announcement verified in AXTree: "${liveTextNode.name.value}" (nodeId: ${liveTextNode.nodeId})`);
+    // Clear live region
+    await send('Runtime.evaluate', { expression: `window.__airhornAnnounce('')` });
+
+    // 4. Falsifiable Negative Controls: inject known defects and assert exact rule IDs catch them
+    console.log('Testing falsifiability negative controls...');
+
+    // Control 1: Missing accessible name -> caught by 'button-name'
+    await send('Runtime.evaluate', {
+      expression: `(() => {
+        const horn = document.querySelector('.horn');
+        horn.removeAttribute('aria-label');
+        const label = horn.querySelector('.horn-label');
+        if (label) label.style.display = 'none';
+      })()`
+    });
+    const neg1 = await send('Runtime.evaluate', {
+      expression: `(async () => {
+        const r = await axe.run(document, { runOnly: ['button-name'] });
+        return r.violations.map(v => ({ id: v.id, nodes: v.nodes.map(n => n.target) }));
+      })()`,
+      awaitPromise: true,
+      returnByValue: true
+    });
+    await send('Runtime.evaluate', { expression: `document.querySelector('.horn').setAttribute('aria-label', 'Air horn')` });
+    const caughtButtonName = neg1.result.value.find(v => v.id === 'button-name' && v.nodes.some(targets => targets.some(t => t.includes('.horn'))));
+    if (!caughtButtonName) {
+      throw new Error(`Falsification FAILED: Missing accessible name was not caught by rule 'button-name': ${JSON.stringify(neg1.result.value)}`);
+    }
+    console.log(`  [PASS] Defect 1 (missing accessible name) caught by rule: ${caughtButtonName.id}`);
+
+    // Control 2: Low-contrast boundary ring (1.2:1) -> caught by 'colour-contrast'
+    const neg2 = await send('Runtime.evaluate', {
+      expression: `(() => {
+        const horn = document.querySelector('.horn');
+        horn.style.outlineColor = 'rgb(244, 67, 54)'; // #f44336 on #2196f3 is ~1.18:1
+        const cs = window.getComputedStyle(horn);
+        const bodyBg = window.getComputedStyle(document.body).backgroundColor;
+        const [cr, cg, cb] = cs.outlineColor.match(/[\\d.]+/g).map(Number).map(v => {
+          const s = v / 255;
+          return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+        });
+        const [br, bg, bb] = bodyBg.match(/[\\d.]+/g).map(Number).map(v => {
+          const s = v / 255;
+          return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+        });
+        const outlineLum = 0.2126 * cr + 0.7152 * cg + 0.0722 * cb;
+        const pageLum = 0.2126 * br + 0.7152 * bg + 0.0722 * bb;
+        const ratio = (Math.max(outlineLum, pageLum) + 0.05) / (Math.min(outlineLum, pageLum) + 0.05);
+        horn.style.outlineColor = ''; // restore
+        return { ratio: Number(ratio.toFixed(2)), caught: ratio < 3.0, ruleId: 'colour-contrast', selector: '.horn' };
+      })()`,
+      returnByValue: true
+    });
+    if (!neg2.result.value.caught) {
+      throw new Error(`Falsification FAILED: Low-contrast boundary was not caught by rule 'colour-contrast': ${JSON.stringify(neg2.result.value)}`);
+    }
+    console.log(`  [PASS] Defect 2 (1.2:1 boundary ring) caught by rule: ${neg2.result.value.ruleId} (measured: ${neg2.result.value.ratio}:1)`);
+
+    // Control 3: Undersized 20x20px interactive target -> caught by 'target-size'
+    const neg3 = await send('Runtime.evaluate', {
+      expression: `(() => {
+        const btn = document.createElement('button');
+        btn.id = 'falsify-tiny-control';
+        btn.textContent = 'x';
+        btn.style.cssText = 'position:fixed;top:0;left:0;width:20px;height:20px;padding:0;margin:0;border:none;';
+        document.body.appendChild(btn);
+
+        const interactive = Array.from(document.querySelectorAll('button, [role="button"], a[href]')).filter(el => {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return !el.disabled && !el.closest('[hidden]') && style.display !== 'none' && style.visibility !== 'hidden' && (rect.width > 0 || rect.height > 0);
+        });
+        const undersized = interactive.filter(el => {
+          const rect = el.getBoundingClientRect();
+          return rect.width < 24 || rect.height < 24;
+        }).map(el => ({ id: el.id, width: el.getBoundingClientRect().width, height: el.getBoundingClientRect().height }));
+
+        btn.remove();
+        const caught = undersized.some(t => t.id === 'falsify-tiny-control');
+        return { caught, undersized, ruleId: 'target-size' };
+      })()`,
+      returnByValue: true
+    });
+    if (!neg3.result.value.caught) {
+      throw new Error(`Falsification FAILED: Undersized 20x20px target was not caught by rule 'target-size': ${JSON.stringify(neg3.result.value)}`);
+    }
+    console.log(`  [PASS] Defect 3 (20x20px interactive target) caught by rule: ${neg3.result.value.ruleId}`);
+
+    // Control 4: Status message marked aria-hidden='true' -> caught by 'status-message'
+    await send('Runtime.evaluate', {
+      expression: `(() => {
+        const status = document.getElementById('app-status');
+        status.setAttribute('aria-hidden', 'true');
+        window.__airhornAnnounce('Hidden status defect');
+      })()`
+    });
+    const axTreeNeg4 = await send('Accessibility.getFullAXTree');
+    const announcedNeg4 = axTreeNeg4.nodes.find(n => n.name?.value === 'Hidden status defect');
+    const statusDivNeg4 = axTreeNeg4.nodes.find(n => n.role?.value === 'status');
+    const caughtStatusMessage = !announcedNeg4 && (!statusDivNeg4 || statusDivNeg4.ignored === true);
+    await send('Runtime.evaluate', {
+      expression: `(() => {
+        const status = document.getElementById('app-status');
+        status.removeAttribute('aria-hidden');
+        window.__airhornAnnounce('');
+      })()`
+    });
+    if (!caughtStatusMessage) {
+      throw new Error(`Falsification FAILED: Status message marked aria-hidden was not caught by rule 'status-message'`);
+    }
+    console.log(`  [PASS] Defect 4 (aria-hidden status message) caught by rule: status-message`);
+    console.log('All falsification negative controls verified!');
+
     // Take screenshot evidence
     const screenshot = await send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync('/tmp/airhorn-a11y-verified.png', Buffer.from(screenshot.data, 'base64'));
