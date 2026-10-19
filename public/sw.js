@@ -166,6 +166,38 @@ self.addEventListener('message', event => {
   }
 });
 
+// A connection that answers late and then dies must not cost the user the app:
+// both budgets are bounded, so the worker always answers (airhorn-46o).
+const NAVIGATION_TIMEOUT_MS = 4000;
+const FETCH_TIMEOUT_MS = 5000;
+
+// Shown only when there is no verified shell to serve and the network did not
+// answer: the one case where nothing on the device is worth showing.
+const offlineDocument = `<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>The Air Horner - no connection</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; min-height: 100svh; display: grid; place-items: center;
+         font: 1.125rem/1.5 system-ui, sans-serif; text-align: center; padding: 1.5rem; }
+  h1 { font-size: 1.5rem; margin-block: 0 0.75rem; }
+  a { display: inline-block; margin-top: 1.5rem; padding: 0.75rem 1.5rem;
+      border-radius: 999px; background: #2196f3; color: #fff; text-decoration: none; font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <h1>The Air Horner needs a connection</h1>
+  <p>This page is not stored on your device yet, and the network did not answer.</p>
+  <a href="/">Try again</a>
+</main>
+</body>
+</html>`;
+
 self.addEventListener('fetch', event => {
   const request = event.request;
   if (request.method !== 'GET') return;
@@ -175,19 +207,38 @@ self.addEventListener('fetch', event => {
   event.respondWith((async () => {
     const cache = await caches.open(cacheName);
     const meta = await caches.open(metaCacheName);
+    const isNavigation = request.mode === 'navigate';
 
+    // A verified copy is served without waiting for the connection. For a
+    // navigation that is the app shell: this app is one document and its
+    // freshness is governed by the worker version, so hanging on a connection
+    // that may never answer buys nothing (airhorn-46o).
     const verified = await verifiedFromCache(cache, meta, request);
     if (verified) return verified;
 
+    if (isNavigation) {
+      const shell = await verifiedFromCache(cache, meta, requestFor('/index.html'));
+      if (shell) return shell;
+    }
+
     try {
-      const response = await fetch(request);
+      const response = await fetch(request, {
+        signal: AbortSignal.timeout(isNavigation ? NAVIGATION_TIMEOUT_MS : FETCH_TIMEOUT_MS),
+      });
       // Storing is a side effect of serving, never a precondition for it.
       if (response && response.ok && precachePaths.has(url.pathname)) {
         await store(cache, meta, url.pathname, response.clone()).catch(() => {});
       }
       return response;
     } catch (err) {
-      // Better a visible failure than bytes nobody vouched for.
+      if (isNavigation) {
+        return new Response(offlineDocument, {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      // Better a visible failure than bytes nobody vouched for, or a request
+      // that never settles.
       return new Response('The Air Horner could not load this part of itself.', {
         status: 503,
         statusText: 'Service Unavailable',
