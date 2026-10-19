@@ -49,6 +49,11 @@
     --install-bg: var(--blue-700);
     --install-ink: #fff;
     --install-edge: #fff;
+    /* Boot-failure banner and noscript notice: a dark card in both schemes,
+       so it reads as a message about the app, not part of the toy. */
+    --alert-bg: var(--navy-900);
+    --alert-ink: var(--ink-100);
+    --alert-edge: transparent;
 
     /* Browsers with color-scheme but no light-dark(): swap the tokens here. */
     @media (prefers-color-scheme: dark) {
@@ -60,6 +65,8 @@
       --focus-ring: #fff;
       --install-bg: #1a4f8f;
       --install-ink: var(--ink-100);
+      --alert-bg: var(--navy-800);
+      --alert-edge: #1b3a57;
     }
 
     /* Modern path: one declaration per token, resolved from color-scheme. */
@@ -73,6 +80,8 @@
       --focus-ring: light-dark(var(--navy-800), #fff);
       --install-bg: light-dark(var(--blue-700), #1a4f8f);
       --install-ink: light-dark(#fff, var(--ink-100));
+      --alert-bg: light-dark(var(--navy-900), var(--navy-800));
+      --alert-edge: light-dark(transparent, #1b3a57);
     }
 
     /* Tells the UA (scrollbars, form controls, canvas) which schemes we paint,
@@ -119,27 +128,6 @@
 }
 
 @layer components {
-  /* A failure the user cannot otherwise see - the upgrade that was dropped.
-     Empty until it has something to say, so it adds no layout and no
-     announcement in the normal case (airhorn-nv9). */
-  .status {
-    position: fixed;
-    inset-block-end: 1rem;
-    inset-inline: 1rem;
-    margin: 0 auto;
-    max-inline-size: 34rem;
-    padding: 0.75rem 1rem;
-    border-radius: 0.75rem;
-    background-color: var(--install-bg);
-    color: var(--install-ink);
-    font: inherit;
-    text-align: center;
-
-    &:empty {
-      display: none;
-    }
-  }
-
   #airhorn {
     /* Size container: the horn below scales from the space it is given, so it
        behaves the same in a 320px window, a split pane or a desktop window. */
@@ -171,6 +159,13 @@
     border-radius: 50%;
     display: grid;
     place-items: center;
+
+    /* The fallback label exists for the unstyled experience (the critical
+       block in index.html); with the stylesheet the drawn horn speaks for
+       itself and the accessible name comes from aria-label. */
+    & .horn-label {
+      display: none;
+    }
     background-color: var(--horn-bg);
     box-shadow: 0 0.55rem 0.22rem 0 var(--horn-edge);
     /* The permanent boundary ring (WCAG 1.4.11, 3:1 non-text). An outline,
@@ -312,6 +307,86 @@
         transition: none;
       }
     }
+  }
+}
+
+/* Boot failure banner, noscript notice and the status region share one
+   card: fixed to the foot of the viewport so its appearance never shifts
+   the horn. Ink on the card is --alert-ink in both schemes, so the focus
+   ring stays visible. */
+.boot-alert,
+#app-status {
+  position: fixed;
+  inset-inline: 1rem;
+  inset-block-end: 1rem;
+  margin-inline: auto;
+  max-inline-size: 26rem;
+  padding: 0.875rem 1rem;
+  background-color: var(--alert-bg);
+  color: var(--alert-ink);
+  border: 1px solid var(--alert-edge);
+  border-radius: 0.5rem;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 35%);
+  font-size: 0.95rem;
+  z-index: 10;
+}
+
+.boot-alert {
+  display: grid;
+  gap: 0.75rem;
+  justify-items: start;
+
+  /* This card sets display itself, so the UA's [hidden] rule would lose the
+     cascade without this: the banner must actually disappear when hidden. */
+  &[hidden] {
+    display: none;
+  }
+
+  & p {
+    margin: 0;
+  }
+
+  & .alert-button {
+    padding: 0.5rem 1rem;
+    border: 1px solid var(--install-edge);
+    border-radius: 0.5rem;
+    background-color: var(--install-bg);
+    color: var(--install-ink);
+    font: inherit;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: background-color 0.2s ease-out;
+
+    &:hover {
+      background-color: color-mix(in oklab, var(--install-bg), #fff 12%);
+    }
+
+    &:focus-visible {
+      outline: 3px solid var(--alert-ink);
+      outline-offset: 3px;
+    }
+  }
+}
+
+/* The status region is one polite live channel (offline/online, SW
+   updates). It must stay rendered even when empty, so assistive tech hears
+   its content change - but visually it is nothing until it has something
+   to say, so the normal case stays silent on screen too. */
+#app-status {
+  padding: 0.625rem 1rem;
+  font-size: 0.9rem;
+
+  &:empty {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: clip;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    box-shadow: none;
   }
 }
 

@@ -20,6 +20,31 @@
 import { registerHornTools } from './webmcp.js';
 import { Horn } from './horn.js';
 
+// First statement of the app: tells the inline boot watchdog in index.html
+// that the module bundle actually executed. Anything that fails after this
+// line is the horn's problem; anything before it is the watchdog's.
+window.__airhornBooted?.();
+
+// Status awareness (airhorn-8nz): say when the connection drops or returns.
+// The horn itself keeps working offline (cached shell plus the synth
+// fallback), so the copy promises exactly that and nothing more. Announced
+// through the one polite live region defined by the inline boot script in
+// index.html. Only transitions speak: the normal, connected case stays
+// silent, and a page opened offline says so once at boot.
+function announceOffline() {
+  window.__airhornAnnounce?.('No connection - the Air Horner still works from the copy on your device.');
+}
+
+function announceOnline() {
+  window.__airhornAnnounce?.('Back online.');
+}
+
+if (!navigator.onLine) {
+  announceOffline();
+}
+window.addEventListener('offline', announceOffline);
+window.addEventListener('online', announceOnline);
+
 function trackEvent(eventName, params) {
   if (typeof gtag === 'function') {
     gtag('event', eventName, params);
