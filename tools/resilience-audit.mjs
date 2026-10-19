@@ -304,15 +304,27 @@ const READ_STATE = `(() => {
     }
     return found;
   };
+  // textContent/innerText do not pierce a shadow root either (airhorn-thn):
+  // a custom element whose MESSAGE is rendered in its own shadow root would
+  // be collected with empty text and earn 'explains itself: NO'. Compose
+  // light text with the region's own shadow root's text, for both the
+  // evidence text and the innerText side of the shown check.
+  // ShadowRoot is a DocumentFragment: it has textContent but NO innerText,
+  // so the composed read goes through the root's rendered children.
+  const composed = (el, prop) => {
+    let t = el[prop] || '';
+    if (el.shadowRoot) for (const c of el.shadowRoot.children) t += ' ' + (c[prop] || '');
+    return t;
+  };
   const live = collectRegions(document).map((el) => {
-      const text = (el.textContent || '').trim().slice(0, 200);
+      const text = composed(el, 'textContent').replace(/\s+/g, ' ').trim().slice(0, 200);
       const vis = typeof el.checkVisibility === 'function'
         ? el.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true, opacityProperty: true })
         : !el.hidden && getComputedStyle(el).display !== 'none';
       return {
         role: el.getAttribute('role'),
         live: el.getAttribute('aria-live'),
-        shown: vis && (text === '' || (el.innerText || '').trim().length > 0),
+        shown: vis && (text === '' || composed(el, 'innerText').trim().length > 0),
         text,
       };
     });
