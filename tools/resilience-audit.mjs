@@ -980,8 +980,12 @@ async function runAudit() {
 }
 
 // Only drive the audit when this file is the entry point: importing it (to
-// read READ_STATE, above) must not launch six Chromiums.
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// read READ_STATE, above) must not launch six Chromiums. import.meta.main is
+// the reliable test (Node 24+); the argv fallback keeps older runtimes - where
+// import.meta.main is undefined - from turning a real audit run into a silent
+// no-op that exits 0.
+const isMain = import.meta.main ?? (!!process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url));
+if (isMain) {
   runAudit().catch((err) => {
     console.error('audit harness failed:', err);
     process.exit(1);
