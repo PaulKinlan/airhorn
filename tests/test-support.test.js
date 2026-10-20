@@ -62,11 +62,15 @@ const discoveryPeer = () => new Promise((resolve) => {
 
 // A stand-in for the chrome binary: prints the ws:// line the helper scrapes,
 // then idles so the launch reaches discovery. Chrome's own args are ignored.
-function stubChrome(dir, port) {
+// trapsTerm: a stub that ignores SIGTERM, standing in for the real browser's
+// writeback window where a TERM does not end it - the shape that makes a
+// graceful-exit wait in close() cost its full length (airhorn-gau8).
+function stubChrome(dir, port, { trapsTerm = false } = {}) {
   const file = path.join(dir, `chrome-stub-${port}.sh`);
   fs.writeFileSync(file,
     '#!/bin/sh\n' +
     `echo "DevTools listening on ws://127.0.0.1:${port}/devtools/browser/stub" >&2\n` +
+    (trapsTerm ? "trap '' TERM\n" : '') +
     'while :; do sleep 5; done\n', { mode: 0o755 });
   return file;
 }
@@ -237,28 +241,42 @@ test('an ancestor group-kill reaches the browser: it is not detached into its ow
 test('a SIGTERM in the launch window leaves no profile for the OWNED browser either (airhorn-gau8)', async () => {
   // The half the earlier verification missed: 0 chrome PIDs reproduced, but
   // the OWNED browser's /tmp profile survived - close() paid a 1.5s graceful
-  // wait inside signal-exit's 2s grace and the rm never ran. Both browsers'
-  // processes AND profiles are asserted here. (The writeback-storm timing
-  // that made this fail against real chrome is proven by the bead's real-
-  // chrome repro; a stub's empty profile cannot carry that.)
+  // wait inside signal-exit's grace and the rm never ran. Both browsers'
+  // processes AND profiles are asserted here. The two shapes below are what
+  // make the test falsifiable against the pre-fix helper (which awaited its
+  // graceful exit BEFORE the rm - airhorn-x0eu); with the old shape (a stub
+  // that died on TERM, the handle assigned in a .then) the test passed on the
+  // pre-fix helper in ~0.3s:
+  // - the in-flight launch is held as the PENDING promise, so the cleanup's
+  //   inflight?.close() is the TypeError the fix commit named as the repro's
+  //   actual killer: signal-exit swallows it and its race resolves at ~0ms,
+  //   so the process exits while owned's rm is still scheduled behind the
+  //   graceful wait - and if close() ever grows an await before its rm again,
+  //   this shape leaks again.
+  // - the OWNED stub traps SIGTERM, so a graceful-exit wait costs its full
+  //   1500ms (real chrome's writeback window). The stand-in installs the
+  //   handler with graceMs 1200 < 1500: a wait-then-rm close() cannot fit the
+  //   wait inside the grace, so the wait-before-rm half fails deterministically
+  //   even if the sibling throw is ever guarded away. On the fixed helper the
+  //   rm is synchronous before the first await, so neither bound is reached.
   const dir = marker();
   const labelOwned = runLabel('gau8owned');
   const labelInflight = runLabel('gau8inflight');
   const peerOwned = await discoveryPeer();
   const peerInflight = await silentPeer();
-  const stubOwned = stubChrome(dir, peerOwned.port);
+  const stubOwned = stubChrome(dir, peerOwned.port, { trapsTerm: true });
   const stubInflight = stubChrome(dir, peerInflight.port);
   const realChromeBin = process.env.CHROME_BIN;
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
     const { launchBrowser } = await import(${JSON.stringify(SUPPORT)});
     const { installSignalExit } = await import(${JSON.stringify(SIGNAL_EXIT)});
     let owned = null, inflight = null;
-    installSignalExit(async () => { await Promise.all([owned?.close(), inflight?.close()]); });
+    installSignalExit(async () => { await Promise.all([owned?.close(), inflight?.close()]); }, { graceMs: 1200 });
     process.env.CHROME_BIN = ${JSON.stringify(stubOwned)};
     owned = await launchBrowser({ label: ${JSON.stringify(labelOwned)} });
     process.env.CHROME_BIN = ${JSON.stringify(stubInflight)};
-    launchBrowser({ label: ${JSON.stringify(labelInflight)}, discoveryMs: 60000, timeoutMs: 60000 })
-      .then((h) => { inflight = h; }).catch(() => {});
+    inflight = launchBrowser({ label: ${JSON.stringify(labelInflight)}, discoveryMs: 60000, timeoutMs: 60000 })
+      .catch(() => {});
     console.log('two-up');
     setTimeout(() => process.kill(process.pid, 'SIGTERM'), 150);
     await new Promise(() => {});
@@ -281,6 +299,13 @@ test('a SIGTERM in the launch window leaves no profile for the OWNED browser eit
       'the in-flight browser\'s /tmp profile survived the bound-kill');
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    // A failed run can leave the TERM-trapping stub alive (nothing below the
+    // failed assertion SIGKILLed it): kill it by its unique per-run path, or
+    // this test becomes the leak it asserts against. -KILL, not pkill's
+    // default TERM: the owned stub ignores TERM, that is its point.
+    for (const stub of [stubOwned, stubInflight]) {
+      try { execFileSync('pkill', ['-KILL', '-f', stub]); } catch { /* already gone */ }
+    }
     process.env.CHROME_BIN = realChromeBin;
     await peerOwned.close();
     await peerInflight.close();
