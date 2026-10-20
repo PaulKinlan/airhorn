@@ -172,7 +172,18 @@ async function main() {
   const send = (method, params = {}) => {
     const id = msgId++;
     return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
+      // The reply wait is bounded like every wait in this file (airhorn-nbh9,
+      // the class below airhorn-doek's ws-open bound): a peer that completes
+      // the upgrade and then never replies rejects labelled instead of
+      // parking the tool with its launch alive.
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`CDP reply timeout: ${method} got no reply within 30000ms`));
+      }, 30000);
+      pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
       ws.send(JSON.stringify({ id, method, params }));
     });
   };
