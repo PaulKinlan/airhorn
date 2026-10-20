@@ -26,7 +26,7 @@
  *     port,            // devtools HTTP port
  *     pageTargetId,    // the fresh page's target id
  *     pageWsUrl,       // ... and its WebSocket URL (suites connect their client here)
- *     close(),         // SIGTERM, then tree-SIGKILL after 1.5s; removes the profile
+ *     close(),         // SIGTERM, then profile-marker sweep after 1.5s; removes the profile
  *     killNow(),       // synchronous tree-kill, for signal handlers
  *   }
  */
@@ -81,6 +81,42 @@ export function killTree(pid) {
   try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
 }
 
+/*
+ * SIGKILL every process whose command line carries this launch's unique
+ * --user-data-dir: the browser itself and every child it forked all carry it,
+ * so one /proc read finds the whole tree and one pass kills it. The browser
+ * dies in the same pass as its children are found, so it cannot out-fork the
+ * cleanup - the measured failure of a snapshot tree-kill that leaves chrome
+ * alive while it works (airhorn-77ih: 11 processes survived a kill ~95ms into
+ * startup). A later pass runs only while the previous one found somebody, and
+ * it exists for the fork race: a child forked between the first read and its
+ * parent's death is visible to it. Synchronous by design so signal handlers
+ * can use it; on a /proc-less system it does nothing and killTree is the
+ * fallback.
+ */
+function sweepProfile(profileDir) {
+  const marker = `--user-data-dir=${profileDir}`;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const victims = [];
+    try {
+      for (const entry of fs.readdirSync('/proc')) {
+        if (!/^\d+$/.test(entry)) continue;
+        const pid = Number(entry);
+        if (pid === process.pid) continue;
+        let cmdline;
+        try { cmdline = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8'); } catch { continue; }
+        if (cmdline.includes(marker)) victims.push(pid);
+      }
+    } catch {
+      return; // no /proc (non-Linux)
+    }
+    if (victims.length === 0) return;
+    for (const pid of victims) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+  }
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /*
@@ -100,7 +136,14 @@ export async function launchBrowser({ autoplay = false, webmcp = false, label = 
     '--remote-debugging-port=0',
     `--user-data-dir=${profileDir}`,
     'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  // NOT detached: chrome must stay in the caller's process group. As its own
+  // group leader (detached: true) it sat outside every ancestor group-kill -
+  // fleet-gate's bound and any job-tree reaper kill the GROUP, and a SIGKILL
+  // runs no node handler, so the whole browser tree outlived the kill
+  // (airhorn-acex: 15 processes + the profile survived a group SIGKILL that
+  // the pre-77ih code cleaned). In the caller's group the same kill reaches
+  // every process of this launch instantaneously, handler or no handler.
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
   // One reap path for every way a launch can end without a handle: startup
   // failure, discovery failure, or the launch being cut short (airhorn-9nea,
@@ -109,13 +152,11 @@ export async function launchBrowser({ autoplay = false, webmcp = false, label = 
   const reap = () => {
     if (closed) return;
     closed = true;
-    // Group-kill FIRST (airhorn-77ih): a ps-snapshot tree-kill taken while
-    // chrome is still forking misses the children it spawns afterwards -
-    // measured: 11 processes survived a tree-kill ~95ms into startup. chrome
-    // is its own group leader (detached: true above), so one group SIGKILL
-    // catches every current and future member instantaneously; the tree-kill
-    // stays as belt and braces for anything the group somehow missed.
-    try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* already gone */ }
+    // The marker sweep first (airhorn-77ih): the browser is killed in the same
+    // pass that finds its children, so nothing can out-fork the cleanup, and
+    // anything that raced the read is visible to the sweep's second pass.
+    sweepProfile(profileDir);
+    // Belt and braces for anything the marker somehow missed.
     try { killTree(chrome.pid); } catch { /* already gone */ }
     // A SIGKILL'd child lands final writebacks during the rm walk, so this
     // needs the retries, not a bare rm (airhorn-jx9, airhorn-yfh8).
@@ -229,13 +270,13 @@ export async function launchBrowser({ autoplay = false, webmcp = false, label = 
       if (closed) return;
       closed = true;
       try { chrome.kill('SIGTERM'); } catch { /* already gone */ }
-      const gone = await Promise.race([exited.then(() => true), sleep(1500).then(() => false)]);
-      if (!gone) killTree(chrome.pid);
-      // End every group member before the rm: a dying renderer's writeback is
+      await Promise.race([exited.then(() => true), sleep(1500).then(() => false)]);
+      // End every member of the launch before the rm: after a graceful exit
+      // this costs one /proc read; if the TERM did not land, the sweep kills
+      // the browser and its tree in one pass. A dying renderer's writeback is
       // what makes the rm need retries at all, and under a signal handler's
-      // grace budget even retries can lose (measured, airhorn-77ih). Group is
-      // empty (ESRCH) once the leader is gone - caught below.
-      try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* already gone */ }
+      // grace budget even retries can lose (measured, airhorn-77ih).
+      sweepProfile(profileDir);
       // Retries for the writeback race, same as reap() (airhorn-jx9, airhorn-yfh8).
       try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* best effort */ }
     },
