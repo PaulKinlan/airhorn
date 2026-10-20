@@ -132,7 +132,11 @@ const contractDrift = (contract, rows) => {
 };
 
 test('a worker change selects the offline + failover suites', () => {
-  const suites = listFor('public/sw.js');
+  const input = 'public/sw.js';
+  // The selector's changed-file input must exist: a deleted input would make
+  // this check pass while selecting nothing real (airhorn-n0sd).
+  assert.ok(fs.existsSync(path.join(root, input)), `selector input ${input} is missing from the tree`);
+  const suites = listFor(input);
   // Subset, not equality: the map may legitimately add suites (the pending
   // test/ spellings, or suites arriving on other branches) and this contract
   // must survive that.
@@ -144,7 +148,9 @@ test('a worker change selects the offline + failover suites', () => {
 });
 
 test('a page change selects the page suites', () => {
-  const suites = listFor('src/main.js');
+  const input = 'src/main.js';
+  assert.ok(fs.existsSync(path.join(root, input)), `selector input ${input} is missing from the tree`);
+  const suites = listFor(input);
   for (const s of ['tests/a11y.test.mjs', 'tests/webmcp-browser.test.mjs', 'tests/resilience-ui.test.mjs']) {
     assert.ok(suites.includes(s), `src/main.js must select ${s}, got ${JSON.stringify(suites)}`);
   }
@@ -206,12 +212,23 @@ test('every suite the contract names exists (airhorn-ona)', () => {
   // that can never arrive - it fails closed (unmapped) but it also fails for
   // the wrong reason. The map's own reverse check never looked at this file.
   const missing = [];
+  const typos = [];
   for (const [pattern, suites] of Object.entries(readContract())) {
     for (const suite of Array.isArray(suites) ? suites : [suites]) {
-      if (isPendingSpelling(suite)) continue;
+      if (isPendingSpelling(suite)) {
+        // `test/x` is the pending-suite spelling - but only while `tests/x`
+        // does not exist. Once it does, the entry is a typo that the skip
+        // would hide forever: the check would pass with the real suite
+        // unnamed (airhorn-n0sd).
+        if (fs.existsSync(path.join(root, 'tests', suite.slice('test/'.length)))) {
+          typos.push(`${pattern} -> ${suite} (tests/${suite.slice('test/'.length)} exists)`);
+        }
+        continue;
+      }
       if (!fs.existsSync(path.join(root, suite))) missing.push(`${pattern} -> ${suite}`);
     }
   }
+  assert.deepEqual(typos, [], `contract entries spell test/ for suites that exist under tests/ - fix the spelling: ${typos.join(', ')}`);
   assert.deepEqual(missing, [], `the contract names suites that are not in the tree: ${missing.join(', ')}`);
 });
 
@@ -247,6 +264,7 @@ test('every tools script parses - recognised extensions at any depth (airhorn-7l
   const toolsDir = (guardActive() && process.env.GSM_TOOLS_ROOT) ? process.env.GSM_TOOLS_ROOT : path.join(root, 'tools');
   const entries = fs.readdirSync(toolsDir, { recursive: true, withFileTypes: true });
   let parsed = 0;
+  const seen = new Set();
   for (const ent of entries) {
     // A symlink can point at a real script: Dirents are lstat-based, so a
     // symlink reports neither file nor directory - resolve it before
@@ -278,8 +296,28 @@ test('every tools script parses - recognised extensions at any depth (airhorn-7l
     }
     parse(full);
     parsed += 1;
+    seen.add(path.basename(rel));
   }
   assert.ok(parsed >= 3, `expected the tools scripts to be present, got ${parsed}`);
+  // Silent-loss pin (airhorn-n0sd, from the airhorn-tuuq sweep): parsed >= 3
+  // stayed green while six of nine tools were deleted. These are named so a
+  // deletion or rename fails HERE, by name. A new tool needs no edit here -
+  // the glob above parses it - but removing a pinned one is loud. Superset,
+  // not exact set: the airhorn-0ct pin's redirected child run adds probe
+  // files to its throwaway copy, and an exact set would fail that valid leg.
+  const REQUIRED_TOOLS = [
+    'audio-parity.mjs',
+    'cache-growth.mjs',
+    'fast-gate.sh',
+    'install-https-proof.mjs',
+    'measure-perf.mjs',
+    'preview-evidence.mjs',
+    'render-model.mjs',
+    'resilience-audit.mjs',
+    'soak.mjs',
+  ];
+  const missingTools = REQUIRED_TOOLS.filter((name) => !seen.has(name));
+  assert.deepEqual(missingTools, [], `pinned tools scripts went missing from tools/: ${missingTools.join(', ')} - restore them or update this inventory deliberately`);
 });
 
 test('every script-tier suite is gated by a tests/support change (airhorn-dco)', () => {
@@ -290,6 +328,7 @@ test('every script-tier suite is gated by a tests/support change (airhorn-dco)',
   // fail loudly instead of living in a comment (airhorn-10q, airhorn-n00,
   // airhorn-5t8 were three recurrences of the same drift).
   const supportChange = 'tests/support/report-hook.mjs';
+  assert.ok(fs.existsSync(path.join(root, supportChange)), `selector input ${supportChange} is missing from the tree`);
   const selected = listFor(supportChange).sort();
   const scriptTier = fs.readdirSync(path.join(root, 'tests'))
     .filter((f) => /\.test\.mjs$/.test(f) && f !== 'acceptance.mjs')
