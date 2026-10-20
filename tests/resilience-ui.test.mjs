@@ -153,6 +153,7 @@ async function testBootWatchdog() {
       const { requestId } = msg.params;
       if (fetchHold) {
         heldRequests.push(requestId);
+        console.log('  held:', msg.params.request?.url);
         return;
       }
       fulfillBody(requestId, 'this is not javascript %%');
@@ -540,7 +541,17 @@ async function testBootWatchdog() {
     console.log('--- Case 8: slow bundle arrives after the banner');
     await send('Fetch.enable', { patterns: [{ urlPattern: '*assets/*.js', requestStage: 'Request' }] });
     fetchHold = true;
+    // Mark the outgoing document first: Page.navigate resolves when the
+    // browser ACCEPTS the navigation, not when the new document commits, so
+    // an evaluate sent right after it can still run in the PREVIOUS page -
+    // where dispatching 'load' is a no-op on an already-booted document,
+    // leaving the new page's watchdog unarmed forever (airhorn-ie0b). The
+    // marker surviving proves the old context; the watchdog existing proves
+    // the new one parsed its inline script.
+    await evaluate(`window.__case8Outgoing = true`);
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+    await waitUntil(`!window.__case8Outgoing && typeof window.__airhornBooted === 'function'`,
+      10000, 'case 8 navigation to commit a fresh document');
     for (let i = 0; i < 30 && heldRequests.length === 0; i++) {
       await new Promise(r => setTimeout(r, 100));
     }
@@ -548,7 +559,15 @@ async function testBootWatchdog() {
     // Force the watchdog's arm without sitting out the ~14s backstop: the
     // synthetic load event runs the same arm -> grace -> show chain.
     await evaluate(`window.dispatchEvent(new Event('load'))`);
-    await waitUntil(`!document.getElementById('boot-failure').hidden`, 8000, 'banner while the bundle stalls');
+    try {
+      await waitUntil(`!document.getElementById('boot-failure').hidden`, 8000, 'banner while the bundle stalls');
+    } catch (err) {
+      // On timeout, say WHICH invariant broke: the app booting early (a cache
+      // hit bypassing the interception) reads differently from the watchdog
+      // never arming, and the two have opposite fixes.
+      const state = await evaluate(`(() => ({ booted: typeof window.__airhorn !== 'undefined', bannerHidden: document.getElementById('boot-failure')?.hidden }))()`).catch((e) => String(e));
+      throw new Error(`${err.message} (post-timeout state: ${JSON.stringify(state)})`);
+    }
     // The late bundle executes and the app becomes usable - the page must
     // take back its claim that the horn could not start.
     for (const id of heldRequests.splice(0)) fulfillBody(id, 'window.__airhornBooted && window.__airhornBooted();');
