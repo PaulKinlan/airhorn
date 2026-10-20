@@ -127,6 +127,15 @@ export class Horn {
         } catch {}
       }
 
+      // A document that has not had a user gesture yet keeps its context
+      // suspended: the browser refuses to start audio, and scheduling a source
+      // into it would (a) report a horn nobody can hear and (b) fire a delayed
+      // blast whenever the context is later resumed by an unrelated click.
+      // Report "did not start" instead - the next real press starts normally.
+      if (this.#audioCtx.state === 'suspended') {
+        return false;
+      }
+
       if (startOp.cancelled || (startOp.stopRequested && startOp.immediateStop)) {
         return false;
       }
