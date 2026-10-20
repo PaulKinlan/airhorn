@@ -632,7 +632,7 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
     await new Promise(r => setTimeout(r, 600));
 
     // Part A: Tap test with real gesture (pointerdown, 60ms, pointerup)
-    // Verifies synth starts, sounds audibly, does NOT truncate early (~100ms), and rings out ~1.2s
+    // Verifies synth starts, sounds audibly, does NOT truncate early, and rings out
     await send('Runtime.evaluate', {
       expression: `(() => {
         const horn = document.querySelector('.horn');
@@ -643,23 +643,32 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
       })()`
     });
 
-    // Check at 150ms: horn is active
-    await new Promise(r => setTimeout(r, 150));
-    const activeAt150 = await send('Runtime.evaluate', {
-      expression: `(() => {
-        const horn = document.querySelector('.horn');
-        return {
-          horning: horn.classList.contains('horning'),
+    // Audibility: poll until the probe has heard the horn, bounded at 500 ms.
+    // It used to be a single check at 150 ms, which only worked because the
+    // fallback's attack was a hard 40 ms step; the voice now swells for 140 ms to
+    // match the recording (airhorn-u7s), so the check has to land after the
+    // attack rather than inside it - and polling keeps it honest under load
+    // instead of depending on one timer firing.
+    let audioPeak = 0;
+    let currentLevel = 0;
+    for (let i = 0; i < 10; i++) {
+      const probe = await send('Runtime.evaluate', {
+        expression: `(() => ({
+          horning: document.querySelector('.horn').classList.contains('horning'),
           audioPeak: window.__audioProbe?.peak || 0,
           currentLevel: window.__audioProbe?.currentLevel || 0
-        };
-      })()`,
-      returnByValue: true
-    });
-    assert.ok(activeAt150.result.value.audioPeak > 0.01, 'Horn must sound audibly');
+        }))()`,
+        returnByValue: true
+      });
+      audioPeak = probe.result.value.audioPeak;
+      currentLevel = probe.result.value.currentLevel;
+      if (audioPeak > 0.01) break;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    assert.ok(audioPeak > 0.01, `Horn must sound audibly within 500ms of the press; peak ${audioPeak}`);
 
     // Check at 500ms (far past the old 100ms truncation point): horn must still be ringing out!
-    await new Promise(r => setTimeout(r, 350));
+    await new Promise(r => setTimeout(r, 200));
     const activeAt500 = await send('Runtime.evaluate', {
       expression: `window.__audioProbe?.currentLevel || 0`,
       returnByValue: true
