@@ -67,6 +67,13 @@ tests/webmcp-browser.test.mjs	tests/webmcp-browser.test.mjs
 tests/webmcp-fuzz.test.mjs	tests/webmcp-fuzz.test.mjs
 tests/resilience-ui.test.mjs	tests/resilience-ui.test.mjs
 tests/shortcuts.test.mjs	tests/shortcuts.test.mjs
+# multitab (airhorn-dae) is deliberately NOT on the source rows: it is the
+# whole-app two-tab coherence story (two Chromium tabs + an SW update), ~10s,
+# and putting it on src/main.js or index.html would re-pay that on the
+# most-edited files for signal the per-file suites already carry - the same
+# cost decision as keeping sw-failover off index.html (airhorn-iwf). A change
+# to the suite runs the suite; the cross-tab assertions travel with it.
+tests/multitab.test.mjs	tests/multitab.test.mjs
 ~test/a11y.test.mjs	test/a11y.test.mjs
 ~test/sw-offline.test.mjs	test/sw-offline.test.mjs
 ~test/webmcp.test.mjs	test/webmcp.test.mjs
@@ -95,4 +102,4 @@ tests/acceptance.mjs	tests/acceptance.mjs
 # that runs through the hook - the runner injects it into every script-tier (.mjs) suite, so
 # the row must track that set, not a snapshot of it (airhorn-5t8: resilience-ui and
 # sw-failover were missing; airhorn-10q for quiescence.mjs, airhorn-n00 for the report hook).
-tests/support/**	tests/a11y.test.mjs tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs tests/shortcuts.test.mjs
+tests/support/**	tests/a11y.test.mjs tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs tests/shortcuts.test.mjs tests/multitab.test.mjs

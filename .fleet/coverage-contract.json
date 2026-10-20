@@ -59,6 +59,7 @@
     "tests/webmcp-fuzz.test.mjs",
     "tests/webmcp-browser.test.mjs",
     "tests/resilience-ui.test.mjs",
-    "tests/shortcuts.test.mjs"
+    "tests/shortcuts.test.mjs",
+    "tests/multitab.test.mjs"
   ]
 }
