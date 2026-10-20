@@ -106,7 +106,10 @@ npm run test:acceptance   # whole-product pass in one real browser
 - `tests/a11y.test.mjs` — accessibility tree, keyboard operation, focus ring;
 - `tests/sw-offline.test.mjs` — manifest, service worker activation and offline
   reload;
-- `tests/webmcp-browser.test.mjs` — the tools driven end to end in a browser.
+- `tests/webmcp-browser.test.mjs` — the tools driven end to end in a browser;
+- `tests/shortcuts.test.mjs` — the manifest's `/#instant` shortcut: it blasts, keeps a
+  shareable URL, survives offline, and an unknown hash or a navigation after it leaves
+  the horn at rest (also checks that a blocked-autoplay tab does not claim to play).
 
 The last three launch headless Chromium against the built `dist/`, and finish by
 waiting for the page to go quiet — no outstanding timers, intervals or fetches — before

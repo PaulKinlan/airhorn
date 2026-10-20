@@ -7,14 +7,16 @@
   ],
   "src/horn.js": [
     "tests/horn.test.js",
-    "tests/a11y.test.mjs"
+    "tests/a11y.test.mjs",
+    "tests/shortcuts.test.mjs"
   ],
   "src/main.js": [
     "tests/horn.test.js",
     "tests/a11y.test.mjs",
     "tests/sw-failover.test.mjs",
     "tests/webmcp-browser.test.mjs",
-    "tests/resilience-ui.test.mjs"
+    "tests/resilience-ui.test.mjs",
+    "tests/shortcuts.test.mjs"
   ],
   "src/webmcp.js": [
     "tests/webmcp.test.mjs",
@@ -56,6 +58,7 @@
     "tests/webmcp.test.mjs",
     "tests/webmcp-fuzz.test.mjs",
     "tests/webmcp-browser.test.mjs",
-    "tests/resilience-ui.test.mjs"
+    "tests/resilience-ui.test.mjs",
+    "tests/shortcuts.test.mjs"
   ]
 }

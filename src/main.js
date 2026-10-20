@@ -177,6 +177,17 @@ class AirHorn {
     // Resolves once the sample is actually playing (or failed to start).
     const started = this.#horn.start({ loop }).catch(() => false);
 
+    // The pressed state above is optimistic so a press feels instant. If the
+    // start did not happen - a browser that has not had a gesture yet keeps the
+    // audio graph suspended - take it back rather than claim a horn nobody can
+    // hear (airhorn-x4l).
+    started.then((ok) => {
+      if (ok === true || this.#horn.isPlaying()) return;
+      this.#loop = false;
+      this.#image.classList.remove('horning');
+      this.#image.setAttribute('aria-pressed', 'false');
+    });
+
     this.#horn.onstopped = () => {
       this.#loop = false;
       this.#image.classList.remove('horning');
