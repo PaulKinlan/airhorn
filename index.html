@@ -313,6 +313,10 @@
                   reachedInstalled = true;
                   if (navigator.serviceWorker.controller) {
                     window.__airhornAnnounce?.('A new version is ready - reloading...');
+                    // This tab has now said why it is about to reload; the
+                    // controllerchange handler below must not say it a
+                    // second time (airhorn-56j).
+                    announcedReady = true;
                     newWorker.postMessage('skipWaiting');
                   }
                 } else if (newWorker.state === 'redundant' && !reachedInstalled && navigator.serviceWorker.controller) {
@@ -328,10 +332,18 @@
         });
 
         const hadController = !!navigator.serviceWorker.controller;
+        let announcedReady = false;
         let refreshing = false;
         navigator.serviceWorker.addEventListener('controllerchange', () => {
           if (hadController && !refreshing) {
             refreshing = true;
+            // A tab that opened mid-install never saw updatefound, so nothing
+            // has told it why the page is about to reload on its own
+            // (airhorn-56j). The tab that reloads says why - and only once:
+            // a tab that announced the ready line above stays silent here.
+            if (!announcedReady) {
+              window.__airhornAnnounce?.('A new version is ready - reloading...');
+            }
             window.location.reload();
           }
         });

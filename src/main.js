@@ -115,6 +115,14 @@ class Installer {
 // the current message have to agree (airhorn-xsu).
 const TAP_HINT = 'The horn needs a tap to make a sound.';
 
+// The app badge is OS-wide - every tab of the origin shares one badge - so the
+// count it displays must be shared too. It lives in localStorage and is
+// DERIVED by every tab that needs it: a fresh tab reads and re-displays the
+// count instead of clearing what another tab just set (airhorn-70k), and a
+// blast anywhere increments the shared count so 4 blasts in two tabs read 4,
+// not 1 (airhorn-xkq).
+const BADGE_COUNT_KEY = 'airhorn:blast-count';
+
 class AirHorn {
   #horn;
   #image;
@@ -126,8 +134,13 @@ class AirHorn {
     this.#image = root.querySelector('.horn');
     this.#horn = new Horn();
 
-    if ('clearAppBadge' in navigator) {
-      navigator.clearAppBadge();
+    // The badge belongs to every tab of the origin, not to this instance
+    // (airhorn-70k): derive it from the shared count instead of clearing
+    // whatever another tab may have just set.
+    if ('setAppBadge' in navigator || 'clearAppBadge' in navigator) {
+      const shared = this.#readSharedBadgeCount();
+      if (shared > 0) navigator.setAppBadge?.(shared);
+      else navigator.clearAppBadge?.();
     }
 
     let handledByPointerOrKey = false;
@@ -223,8 +236,9 @@ class AirHorn {
     };
 
     if ('setAppBadge' in navigator) {
-      this.#counter = (this.#counter % 99) + 1;
-      navigator.setAppBadge(this.#counter);
+      // The count is shared across tabs (airhorn-xkq): the badge is app-wide,
+      // so 4 blasts in two tabs must read 4, not whichever tab wrote last.
+      navigator.setAppBadge(this.#bumpSharedBadgeCount());
     }
 
     trackEvent('horn_play');
@@ -246,6 +260,37 @@ class AirHorn {
 
   get usingFallback() {
     return this.#horn.usingFallback;
+  }
+
+  #readSharedBadgeCount() {
+    try {
+      const raw = window.localStorage.getItem(BADGE_COUNT_KEY);
+      const n = raw === null ? 0 : parseInt(raw, 10);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    } catch (err) {
+      // Storage unavailable (private mode, disabled): report that, and the
+      // badge falls back to per-tab behaviour below rather than breaking the
+      // horn over a cosmetic counter.
+      try { window.__badgeStorageError = String(err && err.message || err); } catch {}
+      return null;
+    }
+  }
+
+  #bumpSharedBadgeCount() {
+    const current = this.#readSharedBadgeCount();
+    if (current === null) {
+      // No shared storage: keep the old per-tab counter so the badge still
+      // means something in this tab.
+      this.#counter = (this.#counter % 99) + 1;
+      return this.#counter;
+    }
+    const next = (current % 99) + 1;
+    try {
+      window.localStorage.setItem(BADGE_COUNT_KEY, String(next));
+    } catch {
+      // Best effort: the blast still happens, the badge just may not move.
+    }
+    return next;
   }
 
   stop({ immediate = false } = {}) {
