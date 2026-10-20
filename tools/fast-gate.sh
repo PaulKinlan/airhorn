@@ -13,7 +13,8 @@
 # Do not reformat those lines. Additional loud lines that are NOT in the contract:
 #   fast-gate: pending: <suite>          (declared by a `~` row, file not landed yet; skipped, not counted)
 #   fast-gate: unmapped-suite: <suite>   (suite in the tree but not reachable from the map; exit 1)
-#   fast-gate: zero-suite: <path>        (changed file when 0 suites were selected; exit 1 unless
+#   fast-gate: zero-suite: <path>        (changed file that selected nothing when 0 suites ran,
+#                                         suffixed with why: exempt or deleted suite; exit 1 unless
 #                                         FAST_GATE_ALLOW_ZERO=1, which prints ZERO-SUITE PASS)
 # The gate builds dist/ before running (browser suites serve it); a build failure exits 1.
 #
@@ -23,11 +24,12 @@
 #   bash tools/fast-gate.sh --list              # print the suites it WOULD run, run nothing
 #   bash tools/fast-gate.sh --base <ref>        # compare against another base
 #   FAST_GATE_JOBS=2 bash tools/fast-gate.sh    # cap parallel suites
-#   FAST_GATE_ALLOW_ZERO=1 bash tools/fast-gate.sh  # bless a suite-free change (every file exempt)
+#   FAST_GATE_ALLOW_ZERO=1 bash tools/fast-gate.sh  # bless a suite-free change (every ignored file:
+#                                                #   an exemption row or a deleted suite)
 #
 # Exit codes: 0 = every selected suite passed (or nothing was affected, or a zero-execution verdict
-# was explicitly acknowledged with FAST_GATE_ALLOW_ZERO=1: every changed file exempt, or every
-# selected suite '~'-pending); 1 = a suite failed, a mapped suite is missing, a changed file is
+# was explicitly acknowledged with FAST_GATE_ALLOW_ZERO=1: every changed file exempt or a deleted
+# suite, or every selected suite '~'-pending); 1 = a suite failed, a mapped suite is missing, a changed file is
 # unmapped, a non-empty change selected ZERO suites without the acknowledgement, or every selected
 # suite is '~'-pending (nothing executed) without the acknowledgement.
 set -uo pipefail
@@ -180,7 +182,8 @@ if [ "${#MISSING_MAP[@]}" -gt 0 ]; then
   exit 1
 fi
 
-UNMAPPED=(); EXEMPT_COUNT=0; SELECTED=()
+UNMAPPED=(); EXEMPT_COUNT=0; DELETED_SUITE_COUNT=0; SELECTED=()
+EXEMPT_PATHS=(); DELETED_SUITE_PATHS=()
 for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
   # A deleted SUITE selects nothing: there is no file left to run. Staleness
   # is owned by the map-honesty pass above - a row surviving its suite fails
@@ -190,13 +193,20 @@ for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
   # run and fail.
   case $f in
     tests/*.test.js|tests/*.test.mjs|tests/*.test.ts|test/*.test.js|test/*.test.mjs|test/*.test.ts)
-      [ -f "$ROOT/$f" ] || continue ;;
+      # Kept in its own bucket, NOT folded into the exempt count: the zero-suite
+      # diagnosis below must stay true for every path into it (airhorn-wiq9).
+      if [ ! -f "$ROOT/$f" ]; then
+        DELETED_SUITE_COUNT=$((DELETED_SUITE_COUNT + 1))
+        DELETED_SUITE_PATHS+=("$f")
+        continue
+      fi ;;
   esac
   got=$(suites_for "$f")
   if [ -n "$got" ]; then
     while IFS= read -r s; do [ -n "$s" ] && SELECTED+=("$s"); done <<<"$got"
   elif is_exempt "$f"; then
     EXEMPT_COUNT=$((EXEMPT_COUNT + 1))
+    EXEMPT_PATHS+=("$f")
   else
     UNMAPPED+=("$f")
   fi
@@ -250,14 +260,26 @@ if [ "${#SELECTED[@]}" -eq 0 ]; then
   # run (airhorn-n0jd). The exemption rows exist for genuinely suite-free files (docs, assets),
   # so the honest case stays available - but as a deliberate, loud act, not a silent PASS.
   if [ "${FAST_GATE_ALLOW_ZERO:-0}" != "1" ]; then
-    for f in ${CHANGED[@]+"${CHANGED[@]}"}; do echo "fast-gate: zero-suite: $f"; done
-    echo "fast-gate: FAIL - ${#CHANGED[@]} changed file(s) selected 0 suite(s): every one matched an" >&2
-    echo "fast-gate: exemption row, so no suite ran and this verdict cannot be green. If the change" >&2
-    echo "fast-gate: truly has no suite to run (docs, assets), re-run with FAST_GATE_ALLOW_ZERO=1;" >&2
-    echo "fast-gate: otherwise add or fix the map rows these files need." >&2
+    # Name each ignored path with the reason it selected nothing. Exempt rows and
+    # deleted suites are the only two ways into this block (anything else failed
+    # the unmapped pass above); blaming a non-existent '! ' row sends the reader
+    # hunting for a map edit that is not there (airhorn-wiq9).
+    for f in ${EXEMPT_PATHS[@]+"${EXEMPT_PATHS[@]}"}; do echo "fast-gate: zero-suite: $f (exempt)"; done
+    for f in ${DELETED_SUITE_PATHS[@]+"${DELETED_SUITE_PATHS[@]}"}; do echo "fast-gate: zero-suite: $f (deleted suite; selects nothing by design)"; done
+    echo "fast-gate: FAIL - ${#CHANGED[@]} changed file(s) selected 0 suite(s): every one is exempt or a" >&2
+    echo "fast-gate: deleted suite (a deleted suite has no file left to run), so no suite ran and this" >&2
+    echo "fast-gate: verdict cannot be green. If the change truly has no suite to run (docs, assets," >&2
+    echo "fast-gate: deleted suites), re-run with FAST_GATE_ALLOW_ZERO=1; otherwise add or fix the map" >&2
+    echo "fast-gate: rows these files need." >&2
     exit 1
   fi
-  echo "fast-gate: ZERO-SUITE PASS (${#CHANGED[@]} changed file(s), all ${EXEMPT_COUNT} exempt; FAST_GATE_ALLOW_ZERO=1)"
+  if [ "$DELETED_SUITE_COUNT" -eq 0 ]; then
+    # Unchanged pinned line for the exempt-only case: tools/check.conf classifies
+    # this exact shape, and it was already true.
+    echo "fast-gate: ZERO-SUITE PASS (${#CHANGED[@]} changed file(s), all ${EXEMPT_COUNT} exempt; FAST_GATE_ALLOW_ZERO=1)"
+  else
+    echo "fast-gate: ZERO-SUITE PASS (${#CHANGED[@]} changed file(s): ${EXEMPT_COUNT} exempt, ${DELETED_SUITE_COUNT} deleted-suite; FAST_GATE_ALLOW_ZERO=1)"
+  fi
   exit 0
 fi
 
