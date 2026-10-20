@@ -9,9 +9,14 @@ import { Horn } from '../src/horn.js';
 
 class FakeAudioParam {
   value = 1;
-  setValueAtTime(val) { this.value = val; }
-  exponentialRampToValueAtTime(val) { this.value = val; }
+  // Every scheduled value, in order: the synth voice contract (level, length,
+  // pitch - airhorn-u7s) is asserted against these rather than against one
+  // final value, which release automation overwrites.
+  scheduled = [];
+  setValueAtTime(val) { this.value = val; this.scheduled.push(val); }
+  exponentialRampToValueAtTime(val) { this.value = val; this.scheduled.push(val); }
   cancelScheduledValues() {}
+  get peak() { return this.scheduled.length ? Math.max(...this.scheduled) : this.value; }
 }
 
 class FakeAudioNode {
@@ -28,8 +33,9 @@ class FakeOscillatorNode extends FakeAudioNode {
   frequency = new FakeAudioParam();
   started = false;
   stopped = false;
+  stopTime = null;
   start() { this.started = true; }
-  stop() { this.stopped = true; }
+  stop(time) { this.stopped = true; this.stopTime = time ?? null; }
 }
 
 class FakeBufferSourceNode extends EventTarget {
@@ -146,7 +152,7 @@ test('falls back to synth when fetch returns 404', async () => {
     assert.equal(horn.isPlaying(), true);
     assert.equal(ctx.sources.length, 0);
     assert.equal(ctx.oscillators.length, 3);
-    assert.ok(ctx.oscillators.every(o => o.type === 'sawtooth' && o.started));
+    assert.ok(ctx.oscillators.every(o => o.type === 'triangle' && o.started));
 
     let stoppedCalled = false;
     horn.onstopped = () => { stoppedCalled = true; };
@@ -568,7 +574,34 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
     // AnalyserNode tap to measure audibility (peak level > 0.01)
     await send('Page.addScriptToEvaluateOnNewDocument', {
       source: `
-        window.__audioProbe = { peak: 0, currentLevel: 0, samples: 0, oscStarts: 0 };
+        window.__audioProbe = { peak: 0, currentLevel: 0, samples: 0, oscStarts: 0, taps: [] };
+        // The level is read ON DEMAND, not accumulated by a timer. A 20 ms
+        // setInterval is fine on an idle machine and useless on a gate-under-load
+        // one, where a single timer sample of a 0.9 s blast can be starved past
+        // the whole blast and read as silence (airhorn-u7s: that is exactly how
+        // this check flaked). read() samples every tap right now, so the caller
+        // controls when it looks instead of hoping a timer fired.
+        window.__audioProbe.read = () => {
+          let level = 0;
+          for (const tap of window.__audioProbe.taps) {
+            try {
+              tap.analyser.getFloatTimeDomainData(tap.data);
+              for (let i = 0; i < tap.data.length; i++) {
+                const abs = Math.abs(tap.data[i]);
+                if (abs > level) level = abs;
+              }
+            } catch {}
+          }
+          window.__audioProbe.currentLevel = level;
+          if (level > window.__audioProbe.peak) window.__audioProbe.peak = level;
+          window.__audioProbe.samples++;
+          return {
+            peak: window.__audioProbe.peak,
+            currentLevel: level,
+            samples: window.__audioProbe.samples,
+            oscStarts: window.__audioProbe.oscStarts
+          };
+        };
         const AC = window.AudioContext || window.webkitAudioContext;
         if (AC) {
           const origConnect = AudioNode.prototype.connect;
@@ -588,20 +621,7 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
                 origConnect.call(this, analyser);
                 origConnect.call(analyser, silentSink);
                 origConnect.call(silentSink, ctx.destination);
-
-                setInterval(() => {
-                  try {
-                    analyser.getFloatTimeDomainData(data);
-                    let peak = 0;
-                    for (let i = 0; i < data.length; i++) {
-                      const abs = Math.abs(data[i]);
-                      if (abs > peak) peak = abs;
-                    }
-                    window.__audioProbe.currentLevel = peak;
-                    if (peak > window.__audioProbe.peak) window.__audioProbe.peak = peak;
-                    window.__audioProbe.samples++;
-                  } catch {}
-                }, 20);
+                window.__audioProbe.taps.push({ analyser, data });
               } catch (e) {
                 console.error('Probe hook error', e);
               }
@@ -626,7 +646,7 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
     await new Promise(r => setTimeout(r, 600));
 
     // Part A: Tap test with real gesture (pointerdown, 60ms, pointerup)
-    // Verifies synth starts, sounds audibly, does NOT truncate early (~100ms), and rings out ~1.2s
+    // Verifies synth starts, sounds audibly, does NOT truncate early, and rings out
     await send('Runtime.evaluate', {
       expression: `(() => {
         const horn = document.querySelector('.horn');
@@ -637,28 +657,43 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
       })()`
     });
 
-    // Check at 150ms: horn is active
-    await new Promise(r => setTimeout(r, 150));
-    const activeAt150 = await send('Runtime.evaluate', {
-      expression: `(() => {
-        const horn = document.querySelector('.horn');
-        return {
-          horning: horn.classList.contains('horning'),
-          audioPeak: window.__audioProbe?.peak || 0,
-          currentLevel: window.__audioProbe?.currentLevel || 0
-        };
-      })()`,
-      returnByValue: true
-    });
-    assert.ok(activeAt150.result.value.audioPeak > 0.01, 'Horn must sound audibly');
+    // Audibility: read the analyser on demand for up to 1.5 s, which covers the
+    // whole blast (0.9 s plus release) even on a loaded gate. A silent fallback
+    // still fails: nothing is ever above the floor.
+    const readProbe = async () => {
+      const probe = await send('Runtime.evaluate', {
+        expression: 'window.__audioProbe.read()',
+        returnByValue: true
+      });
+      return probe.result.value;
+    };
+    let audioPeak = 0;
+    for (let i = 0; i < 30; i++) {
+      const probe = await readProbe();
+      audioPeak = probe.peak;
+      if (audioPeak > 0.01) break;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    assert.ok(audioPeak > 0.01, `Horn must sound audibly within 1.5s of the press; peak ${audioPeak}`);
 
-    // Check at 500ms (far past the old 100ms truncation point): horn must still be ringing out!
-    await new Promise(r => setTimeout(r, 350));
+    // Far past the old 100ms truncation point, and past the 60ms tap: the horn
+    // must still be sounding, and still be playing.
+    await new Promise(r => setTimeout(r, 200));
     const activeAt500 = await send('Runtime.evaluate', {
-      expression: `window.__audioProbe?.currentLevel || 0`,
+      expression: `(() => ({
+        level: window.__audioProbe.read().currentLevel,
+        playing: !!(window.__airhorn && window.__airhorn.isPlaying())
+      }))()`,
       returnByValue: true
     });
-    assert.ok(activeAt500.result.value > 0.01, `Horn must still be ringing out at 500ms after a 60ms tap; got level ${activeAt500.result.value}`);
+    assert.ok(
+      activeAt500.result.value.level > 0.01,
+      `Horn must still be ringing out ~500ms after a 60ms tap; got level ${activeAt500.result.value.level}`,
+    );
+    assert.ok(
+      activeAt500.result.value.playing,
+      'Horn must still report playing ~500ms after a 60ms tap',
+    );
 
     // Wait for blast duration to complete and settle
     for (let i = 0; i < 30; i++) {
@@ -757,4 +792,47 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
   }
 });
 
+test('the fallback voice keeps the measured parity with the sample (airhorn-u7s)', async () => {
+  // These five values are not style: they are what makes the synthesised blast
+  // measure like the recording (pitch, loudness, length, attack, brightness).
+  // tools/audio-parity.mjs is the evidence; this pin is the regression guard, so
+  // a future tuning change cannot silently reopen the gap it closed.
+  //   pitch    715/1441/2156 Hz - the sample's own partials (was 233/349/466)
+  //   level    0.8 peak gain     - RMS -12.9 vs the sample's -14.0 dBFS (was 0.5)
+  //   length   0.9 s scheduled   - 0.80 s audible vs the sample's 0.84 (was 1.2)
+  //   attack   0.14 s            - the recording swells for ~180 ms (was 0.04)
+  //   waveform triangle          - a sawtooth here measures 3.3 kHz centroid, 2.7x
+  //                                the sample's 1.2 kHz; triangle lands at 1.5 kHz
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  globalThis.fetch = async () => ({ ok: false, status: 404 });
 
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    await horn.start({ loop: false });
+
+    assert.equal(ctx.oscillators.length, 3);
+    assert.deepEqual(
+      ctx.oscillators.map((osc) => osc.type),
+      ['triangle', 'triangle', 'triangle'],
+      'the fallback must use the triangle voice measured in parity with the sample',
+    );
+    assert.deepEqual(
+      ctx.oscillators.map((osc) => osc.frequency.scheduled[0]),
+      [715, 1441, 2156],
+      'the fallback must sound the sample\'s partials, not a 2.6-octave-lower chord',
+    );
+
+    const master = ctx.gains[0];
+    assert.equal(master.gain.peak, 0.8, 'the fallback level is matched to the sample (-14 dBFS RMS)');
+    assert.equal(master.gain.scheduled[1], 0.8, 'the attack ramp must reach the matched level');
+    // Attack: the envelope reaches full level 0.14 s in, not 0.04 s.
+    assert.ok(master.gain.scheduled.includes(0.8), 'the attack must not be a hard 40 ms step');
+
+    for (const osc of ctx.oscillators) {
+      assert.equal(osc.stopTime, 0.9, 'a single blast is scheduled for the sample\'s ~0.8 s length');
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

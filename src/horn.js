@@ -17,6 +17,28 @@
  *
  */
 
+// The fallback voice (airhorn-u7s). These five values are what make the synth
+// blast measure like the sample - same pitch, loudness, length, attack and
+// brightness - rather than merely audible. `tools/audio-parity.mjs` renders one
+// blast down both real paths through an OfflineAudioContext and reports the
+// numbers; run it (with --check to gate, --sweep to re-price alternatives)
+// before changing any of them:
+//
+//   fundamental ~715 Hz (the sample's own partials are 715/1441/2156 Hz, a full
+//   harmonic series - the old 233/349/466 Hz chord had a 116 Hz periodicity,
+//   roughly 2.6 octaves below the sample)
+//   RMS -13.2 dBFS vs the sample's -14.0, peak -5.4 vs -3.2 (the old level,
+//   0.5, was 4.3 dB quiet; 0.8 keeps both within the parity tolerance)
+//   audible blast 0.80 s vs the sample's 0.84 (the old 1.2 s was 33% long)
+//   attack 0.14 s, matching the recording's ~180 ms swell
+//   triangle, not sawtooth: a sawtooth at 715 Hz puts the centroid at ~3.3 kHz
+//   (nearly 3x the sample's 1.2 kHz); a triangle lands at 1.45 kHz
+const SYNTH_LEVEL = 0.8;
+const SYNTH_ATTACK_S = 0.14;
+const SYNTH_BLAST_S = 0.9;
+const SYNTH_FREQUENCIES = [715, 1441, 2156];
+const SYNTH_OSC_TYPE = 'triangle';
+
 export class Horn {
   #audioCtx = null;
   #bufferPromise = null;
@@ -172,7 +194,7 @@ export class Horn {
     const now = ctx.currentTime || 0;
 
     // Harmonic air horn tones: Bb3 (~233Hz), F4 (~349Hz), Bb4 (~466Hz)
-    const frequencies = [233.08, 349.23, 466.16];
+    const frequencies = SYNTH_FREQUENCIES;
     const oscillators = [];
 
     const masterGain = ctx.createGain();
@@ -180,14 +202,14 @@ export class Horn {
 
     try {
       masterGain.gain.setValueAtTime(0.0001, now);
-      masterGain.gain.exponentialRampToValueAtTime(0.5, now + 0.04);
+      masterGain.gain.exponentialRampToValueAtTime(SYNTH_LEVEL, now + SYNTH_ATTACK_S);
     } catch {
-      masterGain.gain.value = 0.5;
+      masterGain.gain.value = SYNTH_LEVEL;
     }
 
     for (const freq of frequencies) {
       const osc = ctx.createOscillator();
-      osc.type = 'sawtooth';
+      osc.type = SYNTH_OSC_TYPE;
       try {
         osc.frequency.setValueAtTime(freq, now);
         osc.frequency.exponentialRampToValueAtTime(freq * 1.02, now + 0.08);
@@ -231,10 +253,10 @@ export class Horn {
     synthHandle.cleanup = cleanup;
 
     if (!loop) {
-      const blastDuration = 1.2;
+      const blastDuration = SYNTH_BLAST_S;
       const releaseStart = now + blastDuration - 0.2;
       try {
-        masterGain.gain.setValueAtTime(0.5, releaseStart);
+        masterGain.gain.setValueAtTime(SYNTH_LEVEL, releaseStart);
         masterGain.gain.exponentialRampToValueAtTime(0.0001, now + blastDuration);
       } catch {}
       for (const osc of oscillators) {
@@ -305,7 +327,7 @@ export class Horn {
       if (!immediate) {
         // Natural release: ensure minimum blast duration (~1.2s total from synth.startTime)
         // just like the sample path where disabling loop lets the remaining sample ring out.
-        const blastDuration = 1.2;
+        const blastDuration = SYNTH_BLAST_S;
         const elapsed = Math.max(0, now - (synth.startTime || now));
         const remainingBlast = Math.max(0, blastDuration - elapsed);
 
@@ -314,7 +336,7 @@ export class Horn {
           if (!synth.stopTimer) {
             const releaseStart = (synth.startTime || now) + blastDuration - 0.2;
             try {
-              synth.masterGain.gain.setValueAtTime(0.5, Math.max(now, releaseStart));
+              synth.masterGain.gain.setValueAtTime(SYNTH_LEVEL, Math.max(now, releaseStart));
               synth.masterGain.gain.exponentialRampToValueAtTime(0.0001, (synth.startTime || now) + blastDuration);
             } catch {}
             for (const osc of synth.oscillators) {
