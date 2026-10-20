@@ -141,6 +141,17 @@ class AirHorn {
       const shared = this.#readSharedBadgeCount();
       if (shared > 0) navigator.setAppBadge?.(shared);
       else navigator.clearAppBadge?.();
+      // A badge means "activity since you last looked" (airhorn-7x7m): when
+      // this tab becomes visible again the user has looked, so the shared
+      // count is acknowledged - cleared from storage and from the OS badge.
+      // The boot-time derive above stays untouched: a boot is not a
+      // visibilitychange, so a fresh tab still displays the total another tab
+      // earned (airhorn-70k) without immediately wiping it. A focus listener
+      // would NOT be safe here: a fresh page fires focus at boot with a
+      // derived non-zero count, which would re-create the airhorn-70k wipe.
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') this.#acknowledgeSharedBadgeCount();
+      });
     }
 
     let handledByPointerOrKey = false;
@@ -274,6 +285,17 @@ class AirHorn {
       try { window.__badgeStorageError = String(err && err.message || err); } catch {}
       return null;
     }
+  }
+
+  // The "you looked at it again" acknowledgement (airhorn-7x7m): clear the
+  // shared count and the OS badge so the badge never shows a total from a
+  // session nobody is looking at. No-op when storage is unavailable (the
+  // badge is then this tab's own per-tab counter) or nothing is owed.
+  #acknowledgeSharedBadgeCount() {
+    const current = this.#readSharedBadgeCount();
+    if (current === null || current === 0) return;
+    try { window.localStorage.removeItem(BADGE_COUNT_KEY); } catch {}
+    navigator.clearAppBadge?.();
   }
 
   #bumpSharedBadgeCount() {

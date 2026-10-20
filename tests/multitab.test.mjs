@@ -25,16 +25,23 @@
  *      updatefound) still gets the new controller - and the tab that reloads
  *      must say why: exactly one 'A new version is ready' announcement
  *      (airhorn-56j).
+ *   F. coming back to the app acknowledges the shared badge (airhorn-7x7m):
+ *      the count means "activity since you last looked", so the tab that
+ *      becomes visible again clears the shared count and the OS badge (for
+ *      every tab - the badge is one), the tab that goes hidden does not
+ *      acknowledge, the next blast still works, and a fresh tab then boots
+ *      owing nothing.
  *
  * Sound is measured, not inferred: the shortcuts suite's probe (reroute every
  * connect() to ctx.destination through a pass-through analyser) is injected
  * at document start in every tab, together with a badge spy and an announcer
  * logger that mirrors into sessionStorage so logs survive the update reload.
  *
- * Cross-tab defects fail HERE with the bead ID in the message - the three
- * findings this suite surfaced (airhorn-xkq last-writer-wins badge,
- * airhorn-70k boot-time badge wipe, airhorn-56j silent mid-install reload)
- * are regressions this suite must catch, not observations it files.
+ * Cross-tab defects fail HERE with the bead ID in the message - the four
+ * tab-state regressions this suite must catch, not observations it files:
+ * airhorn-xkq last-writer-wins badge, airhorn-70k boot-time badge wipe,
+ * airhorn-56j silent mid-install reload, airhorn-7x7m badge count nothing
+ * ever acknowledges.
  *
  * Run with: npm test (the fast gate builds dist/ first)
  */
@@ -566,6 +573,72 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
     const bFinal = await B.hornState();
     assert(dFinal.booted && bFinal.booted, 'a tab did not recover after the final update');
     assert(dFinal.bootAlertHidden && bFinal.bootAlertHidden, 'the boot-failure alert showed after the final update');
+
+    /* --- F. coming back to the app acknowledges the badge (airhorn-7x7m) --- */
+    console.log('\n--- F. returning to a tab acknowledges the shared badge (airhorn-7x7m) ---');
+    // Deterministic foreground: B front, then A2 - so the settled end state is
+    // A2 foreground, B hidden, and every activation acknowledge (the tab that
+    // becomes visible clears the count) has ALREADY fired before anything is
+    // baselined below. Prove tab switching really drives visibility here too.
+    await send('Target.activateTarget', { targetId: B.targetId });
+    await waitUntil(async () => (await B.evaluate(`document.visibilityState`)) === 'visible', 5000);
+    await send('Target.activateTarget', { targetId: A2.targetId });
+    const bFronted = await waitUntil(async () => {
+      const a = await A2.evaluate(`document.visibilityState`).catch(() => null);
+      const b = await B.evaluate(`document.visibilityState`).catch(() => null);
+      return b === 'hidden' && a === 'visible' ? true : null;
+    }, 5000);
+    assert(bFronted, `activating a target does not move visibility in this browser ` +
+      `(A2=${await A2.evaluate(`document.visibilityState`)}, B=${await B.evaluate(`document.visibilityState`)}) - ` +
+      `sequence F cannot drive a real 'looked at it again' moment here`);
+    if (badgeApi) {
+      // A blast in the VISIBLE foreground tab A2: the shared count and the OS
+      // badge move. This look is live - there is nothing to acknowledge yet.
+      await A2.clickHorn();
+      await waitUntil(async () => (await A2.hornState()).playing === false, 6000);
+      const aCount = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      assert(aCount > 0, 'a foreground blast did not advance the shared badge count');
+      // The user switches to tab B: B is now the tab being looked at, so B
+      // acknowledges the count ("activity since you last looked"). The badge
+      // is one per origin, so the acknowledgement must clear it for A2 too -
+      // and A2, the tab that goes hidden, must not acknowledge anything.
+      const bLogBefore = (await B.badge()).length;
+      const aLogBefore = (await A2.badge()).length;
+      // The user's actual return: B, hidden since A2 came to the front, is
+      // activated and becomes the tab being looked at.
+      await send('Target.activateTarget', { targetId: B.targetId });
+      const acked = await waitUntil(async () => {
+        const bLog = await B.badge();
+        return bLog.length > bLogBefore && bLog.slice(bLogBefore).some((e) => e.fn === 'clearAppBadge') ? bLog : null;
+      }, 5000);
+      const aStorage = await A2.evaluate(`window.localStorage.getItem('airhorn:blast-count')`);
+      const bStorage = await B.evaluate(`window.localStorage.getItem('airhorn:blast-count')`);
+      const aLogAfter = await A2.badge();
+      assert(acked && aStorage === null && bStorage === null,
+        `returning to the app did not acknowledge the badge count: B's badge calls after activation ${JSON.stringify(acked)}, ` +
+        `storage A2=${JSON.stringify(aStorage)} B=${JSON.stringify(bStorage)} - the shared count is lifetime-cumulative, ` +
+        `once the first blast happened nothing ever clears it, so the OS badge shows yesterday's total on every launch (airhorn-7x7m)`);
+      assert(aLogAfter.length === aLogBefore,
+        `the tab that went HIDDEN acknowledged the count (${JSON.stringify(aLogAfter.slice(aLogBefore))}) - ` +
+        `only the tab being looked at acknowledges (airhorn-7x7m)`);
+      // And the acknowledged state holds for a brand-new tab: it boots
+      // deriving the count, the count is gone, so it must set nothing.
+      const ACK = await openTab('ACK', `${origin}/`);
+      await sleep(200);
+      const ackLog = await ACK.badge();
+      assert(!ackLog.some((e) => e.fn === 'setAppBadge'),
+        `a fresh tab re-displayed an acknowledged count: ${JSON.stringify(ackLog)} - ` +
+        `the count should have been cleared when the user came back to the app (airhorn-7x7m)`);
+      await closeTab(ACK);
+      // The badge still works after an acknowledgement: a foreground blast
+      // in B starts the shared count from one again.
+      await B.clickHorn();
+      await waitUntil(async () => (await B.hornState()).playing === false, 6000);
+      const afterBlast = await B.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      assert(afterBlast === 1,
+        `after an acknowledgement a fresh blast did not restart the shared count at 1 (got ${afterBlast}) (airhorn-7x7m)`);
+      console.log('  switching back to the app cleared the shared count for every tab, a fresh tab boots owing nothing, and a fresh blast restarts the count at 1.');
+    }
 
     console.log('\nALL MULTITAB COHERENCE CHECKS PASSED');
   } finally {
