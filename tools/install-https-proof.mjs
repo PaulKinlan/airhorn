@@ -116,34 +116,62 @@ async function launchChrome(extraFlags) {
     '--remote-debugging-port=0',
     `--user-data-dir=${profileDir}`,
     'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
   let wsUrl = null;
-  await new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('Chrome timeout')), 15000);
-    const onData = d => {
-      const m = d.toString().match(/ws:\/\/[^\s]+/);
-      if (m && !wsUrl) { wsUrl = m[0]; clearTimeout(t); resolve(); }
-    };
-    chrome.stderr.on('data', onData);
-    chrome.stdout.on('data', onData);
-    chrome.on('exit', code => reject(new Error('Chrome exited early: ' + code)));
-  });
-
-  const port = new URL(wsUrl).port;
-  // Discovery is bounded like the handshake above: a DevTools endpoint that
-  // accepts and never answers must reject into this tool's cleanup instead of
-  // parking it until undici's ~300s headers timeout (airhorn-9vg3).
-  let targets;
+  let ws = null;
+  // Hoisted so the early window (handshake, discovery, ws connect) can take
+  // the same teardown the happy path uses: a failure there used to escape
+  // with chrome and its profile alive, because cleanup only existed after
+  // everything had succeeded (airhorn-51lr).
+  const cleanup = () => {
+    try { ws?.close(); } catch {}
+    chrome.kill('SIGTERM');
+    setTimeout(() => { try { chrome.kill('SIGKILL'); } catch {} }, 2000);
+    // The profile flush races the kill; best-effort removal, retried once.
+    const rm = () => { try { fs.rmSync(profileDir, { recursive: true, force: true }); return true; } catch { return false; } };
+    setTimeout(() => { if (!rm()) setTimeout(rm, 1500); }, 300);
+  };
   try {
-    targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(15000) })).json();
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('Chrome timeout')), 15000);
+      const onData = d => {
+        const m = d.toString().match(/ws:\/\/[^\s]+/);
+        if (m && !wsUrl) { wsUrl = m[0]; clearTimeout(t); resolve(); }
+      };
+      chrome.stderr.on('data', onData);
+      chrome.stdout.on('data', onData);
+      chrome.on('exit', code => reject(new Error('Chrome exited early: ' + code)));
+    });
+
+    const port = new URL(wsUrl).port;
+    // Discovery is bounded like the handshake above: a DevTools endpoint that
+    // accepts and never answers must reject into this tool's cleanup instead of
+    // parking it until undici's ~300s headers timeout (airhorn-9vg3).
+    let targets;
+    try {
+      targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(15000) })).json();
+    } catch (err) {
+      if (err?.name === 'TimeoutError') throw new Error('DevTools discovery timeout: /json/list did not settle within 15000ms');
+      throw err;
+    }
+    const page = targets.find(t => t.type === 'page');
+    ws = new WebSocket(page.webSocketDebuggerUrl);
+    await new Promise(r => ws.onopen = r);
   } catch (err) {
-    if (err?.name === 'TimeoutError') throw new Error('DevTools discovery timeout: /json/list did not settle within 15000ms');
+    // Synchronous reap: cleanup()'s rm is timer-delayed and the process exits
+    // before those timers fire, so the error path must not rely on it
+    // (airhorn-51lr). Bounded retries absorb the dying child's writeback.
+    try { ws?.close(); } catch {}
+    try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* already gone */ }
+    try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try { fs.rmSync(profileDir, { recursive: true, force: true }); break; } catch { /* writeback race - retry */ }
+      const wait = Date.now() + 100;
+      while (Date.now() < wait) { /* spin: signal/error path, keep it sync */ }
+    }
     throw err;
   }
-  const page = targets.find(t => t.type === 'page');
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise(r => ws.onopen = r);
 
   let msgId = 1;
   const pending = new Map();
@@ -193,14 +221,6 @@ async function launchChrome(extraFlags) {
     const res = await send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(path.join(outDir, file), Buffer.from(res.data, 'base64'));
     return file;
-  };
-  const cleanup = () => {
-    try { ws.close(); } catch {}
-    chrome.kill('SIGTERM');
-    setTimeout(() => { try { chrome.kill('SIGKILL'); } catch {} }, 2000);
-    // The profile flush races the kill; best-effort removal, retried once.
-    const rm = () => { try { fs.rmSync(profileDir, { recursive: true, force: true }); return true; } catch { return false; } };
-    setTimeout(() => { if (!rm()) setTimeout(rm, 1500); }, 300);
   };
   return { send, evaluate, waitFor, navigate, screenshot, cleanup };
 }
