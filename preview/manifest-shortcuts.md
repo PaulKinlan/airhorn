@@ -9,9 +9,17 @@ Reproduce: `npm run build && node tests/shortcuts.test.mjs` — the suite is the
 executable form of this table (it fails if any row stops holding).
 
 Measured on 2026-10-20 in headless Chromium 155 on this VM, served from `dist/` by a
-local static server. Audio is measured, not inferred: an injected probe wraps
-`AudioBufferSourceNode.start` and taps an analyser, so **peak** is real signal that
-reached the destination and **ctx** is the browser's own `AudioContext.state`.
+local static server. Audio is measured, not inferred: an injected probe reroutes every
+`connect()` aimed at the `AudioContext` destination through a pass-through analyser
+(`node -> analyser -> destination`), so **peak** is the signal at the destination's
+input — after the app's own gain stage — and **ctx** is the browser's own
+`AudioContext.state`.
+
+That tap position is itself checked, both ways, before anything is trusted: a graph
+muted to zero at the output must measure `peak 0`, and the same graph at unity must
+measure `peak > 0.3` (`checkProbeIntegrity`). With the earlier tap on the *source's*
+output the muted control measured 0.7 and the check failed — an upstream tap cannot
+tell a blasting app from a muted one (review finding `airhorn-aos`).
 
 ## The promise, in the context it is made
 

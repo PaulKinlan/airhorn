@@ -22,9 +22,11 @@
  *      real press then plays - so a blocked deep link is a quiet page, not a
  *      lying one.
  *
- * Sound is measured, not inferred: an injected probe wraps
- * AudioBufferSourceNode.start and taps an analyser, so `peak` is real audio
- * that reached the destination and `ctxState` is the browser's own verdict.
+ * Sound is measured, not inferred: an injected probe reroutes every connect()
+ * aimed at the AudioContext destination through a pass-through analyser, so
+ * `peak` is the signal at the destination's input - after the app's own gain -
+ * and `ctxState` is the browser's own verdict. A control checks both directions
+ * before anything is trusted (checkProbeIntegrity).
  *
  * Run with: npm test (the fast gate builds dist/ first)
  */
@@ -54,52 +56,61 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-// Counts every source the app starts and taps its output, so "did it sound" is
-// answered by the graph rather than by the app's own bookkeeping.
+// "Did it sound" is answered at the AudioContext destination's INPUT, not at the
+// source: every connect() aimed at ctx.destination is rerouted through a
+// pass-through analyser (node -> analyser -> destination), so the measurement
+// sits AFTER whatever gain the app applied. A graph the app muted to zero
+// therefore measures zero - and checkProbeIntegrity proves that both ways
+// (muted -> 0, unmuted -> >0.3) before any shortcut is measured. An earlier
+// version tapped the source's output in parallel and reported sound from a muted
+// output (airhorn-aos).
 const instrumentation = `
   window.__probe = { starts: 0, level: 0, peak: 0, states: [], errors: [] };
+  window.__probe.reset = () => { window.__probe.level = 0; window.__probe.peak = 0; window.__probe.states.length = 0; };
   window.addEventListener('error', (e) => window.__probe.errors.push(e.message));
   window.addEventListener('unhandledrejection', (e) => window.__probe.errors.push(String(e.reason && e.reason.message || e.reason)));
   const AC = window.AudioContext || window.webkitAudioContext;
-  const ctxs = [];
-  if (AC) {
-    const Patched = function (...args) { const ctx = new AC(...args); ctxs.push(ctx); return ctx; };
-    Patched.prototype = AC.prototype;
-    window.AudioContext = Patched;
+  if (AC && window.AudioNode) {
+    const originalConnect = AudioNode.prototype.connect;
+    const taps = new WeakMap();
+    // One tap per context: node -> analyser -> (the real) destination.
+    const tapFor = (ctx) => {
+      let tap = taps.get(ctx);
+      if (tap) return tap;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      const data = new Float32Array(analyser.fftSize);
+      originalConnect.call(analyser, ctx.destination);
+      tap = { analyser, data };
+      taps.set(ctx, tap);
+      const timer = setInterval(() => {
+        analyser.getFloatTimeDomainData(data);
+        let peak = 0;
+        for (let i = 0; i < data.length; i += 1) {
+          const abs = Math.abs(data[i]);
+          if (abs > peak) peak = abs;
+        }
+        window.__probe.level = peak;
+        if (peak > window.__probe.peak) window.__probe.peak = peak;
+        window.__probe.states.push(ctx.state);
+      }, 25);
+      setTimeout(() => clearInterval(timer), 20000);
+      return tap;
+    };
+    AudioNode.prototype.connect = function (destination, ...rest) {
+      const ctx = this.context;
+      if (ctx && destination === ctx.destination) {
+        return originalConnect.call(this, tapFor(ctx).analyser, ...rest);
+      }
+      return originalConnect.call(this, destination, ...rest);
+    };
     const createBufferSource = AC.prototype.createBufferSource;
     AC.prototype.createBufferSource = function (...args) {
       const source = createBufferSource.apply(this, args);
-      const analyser = this.createAnalyser();
-      analyser.fftSize = 1024;
-      const data = new Float32Array(analyser.fftSize);
-      const sink = this.createGain();
-      sink.gain.value = 0;
-      sink.connect(this.destination);
-      analyser.connect(sink);
-      const connect = source.connect.bind(source);
-      source.connect = (destination, ...rest) => {
-        const result = connect(destination, ...rest);
-        if (destination !== analyser) connect(analyser);
-        return result;
-      };
       const start = source.start.bind(source);
       source.start = (...startArgs) => {
         window.__probe.starts += 1;
-        const result = start(...startArgs);
-        const timer = setInterval(() => {
-          analyser.getFloatTimeDomainData(data);
-          let peak = 0;
-          for (let i = 0; i < data.length; i += 1) {
-            const abs = Math.abs(data[i]);
-            if (abs > peak) peak = abs;
-          }
-          window.__probe.level = peak;
-          if (peak > window.__probe.peak) window.__probe.peak = peak;
-          const ctx = ctxs[ctxs.length - 1];
-          if (ctx) window.__probe.states.push(ctx.state);
-        }, 25);
-        setTimeout(() => clearInterval(timer), 15000);
-        return result;
+        return start(...startArgs);
       };
       return source;
     };
@@ -313,10 +324,50 @@ async function checkManifest() {
   console.log('  manifest shortcut contract: OK');
 }
 
+// The probe itself is checked both ways before it is trusted: a graph muted to
+// zero at the output must measure zero, and the same graph at unity must measure
+// sound. Without this, an upstream tap would happily "prove" audio for a muted
+// app (airhorn-aos - the reviewer's repro was exactly a zero gain before the
+// destination).
+async function checkProbeIntegrity(browser) {
+  console.log('--- 0. the probe measures the output, not the source ---');
+  await browser.navigate('about:blank', { wait: 100 });
+  const control = await browser.evaluate(`(async () => {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const measure = async (muteTheOutput) => {
+      const ctx = new AC();
+      await ctx.resume();
+      window.__probe.reset();
+      const buffer = ctx.createBuffer(1, 44100, 44100);
+      buffer.getChannelData(0).fill(0.7);
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      const gain = ctx.createGain();
+      gain.gain.value = muteTheOutput ? 0 : 1;
+      gain.connect(ctx.destination);
+      source.connect(gain);
+      source.start();
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      const peak = window.__probe.peak;
+      window.__probe.reset();
+      try { source.stop(); } catch {}
+      try { await ctx.close(); } catch {}
+      return peak;
+    };
+    return { muted: await measure(true), audible: await measure(false) };
+  })()`);
+  assert(control.muted === 0,
+    `the probe measured ${control.muted} through an output muted to zero: it is tapping upstream of the app's gain, so "it sounded" is not a claim it can support`);
+  assert(control.audible > 0.3,
+    `the probe measured only ${control.audible} from an audible graph, so a quiet reading cannot be trusted either`);
+  console.log(`  muted output -> peak ${control.muted}; audible output -> peak ${control.audible.toFixed(3)}`);
+}
+
 async function checkPromptAndShareable(base) {
   console.log('--- 2. a launch of /#instant loads the app, blasts, and keeps the URL ---');
   const browser = await launch({ autoplay: true, label: 'launch' });
   try {
+    await checkProbeIntegrity(browser);
     // A blank page first, so the next navigation is a real, cold document load -
     // exactly what an OS shortcut launch does in a fresh window.
     await browser.navigate('about:blank', { wait: 50 });
