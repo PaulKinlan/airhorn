@@ -36,6 +36,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { installSignalExit } from './support/signal-exit.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, '../dist');
@@ -171,15 +172,12 @@ function startServer() {
 // its renderers behind (the reaper found 13 processes, 47 minutes old, from one
 // such run). browser.mjs's killNow() tree-kills deepest-first, and browsers are
 // registered so SIGTERM/SIGINT (what a bound-kill sends first) does the same
-// thing.
+// thing (tests/support/signal-exit.mjs, airhorn-4vfn).
 const openBrowsers = new Set();
 
-for (const signal of ['SIGTERM', 'SIGINT']) {
-  process.on(signal, () => {
-    for (const browser of openBrowsers) browser.browser.killNow();
-    process.exit(143);
-  });
-}
+installSignalExit(() => {
+  for (const browser of openBrowsers) browser.browser.killNow();
+});
 
 async function launch({ autoplay, label }) {
   const browser = await launchBrowser({ autoplay, label, timeoutMs: 15000 });

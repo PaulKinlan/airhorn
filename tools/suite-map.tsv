@@ -102,10 +102,12 @@ tests/acceptance.mjs	tests/acceptance.mjs
 # that runs through the hook - the runner injects it into every script-tier (.mjs) suite, so
 # the row must track that set, not a snapshot of it (airhorn-5t8: resilience-ui and
 # sw-failover were missing; airhorn-10q for quiescence.mjs, airhorn-n00 for the report hook).
-# browser.mjs's own failure paths (startup, stalled discovery, a bound-kill mid-launch) are
-# unit-provable without a headless browser: a stub CHROME_BIN plus a real silent DevTools
-# peer. Mapped specifically so that a change to the launcher runs its own suite as well as
-# the nine suites that launch through it (airhorn-4yhb).
-tests/support/browser.mjs	tests/browser-support.test.js
-tests/browser-support.test.js	tests/browser-support.test.js
+# The support modules' own failure paths are unit-provable without a headless browser: a
+# stub CHROME_BIN plus a real silent DevTools peer for the launcher (airhorn-4yhb), and a
+# stand-in process for the shared bound-kill handler (airhorn-4vfn). Mapped specifically so
+# that a change to either module runs its own suite as well as the nine suites that launch
+# through them, and so the suite runs when it is the only thing that changed.
+tests/support/browser.mjs	tests/test-support.test.js
+tests/support/signal-exit.mjs	tests/test-support.test.js
+tests/test-support.test.js	tests/test-support.test.js
 tests/support/**	tests/a11y.test.mjs tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs tests/shortcuts.test.mjs tests/multitab.test.mjs

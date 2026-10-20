@@ -52,7 +52,10 @@
     "tests/gate-smoke.test.js"
   ],
   "tests/support/browser.mjs": [
-    "tests/browser-support.test.js"
+    "tests/test-support.test.js"
+  ],
+  "tests/support/signal-exit.mjs": [
+    "tests/test-support.test.js"
   ],
   "tests/support/**": [
     "tests/a11y.test.mjs",

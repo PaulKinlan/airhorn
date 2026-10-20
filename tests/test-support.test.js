@@ -1,17 +1,22 @@
 /*
- * tests/browser-support.test.js — the launch-failure paths of tests/support/browser.mjs.
+ * tests/test-support.test.js — the shared test support modules behave on their failure paths.
  *
- * launchBrowser must never leave a Chrome tree or a /tmp profile behind when it
- * fails to hand a handle back: the caller only registers its own signal handler
- * after it returns, so anything the helper leaves is unattributable until the
- * reaper's 45-minute rule finds it (airhorn-9nea, airhorn-4yhb).
+ * tests/support/browser.mjs: launchBrowser must never leave a Chrome tree or a
+ * /tmp profile behind when it fails to hand a handle back: the caller only
+ * registers its own signal handler after it returns, so anything the helper
+ * leaves is unattributable until the reaper's 45-minute rule finds it
+ * (airhorn-9nea, airhorn-4yhb).
  *
- * These tests drive the helper with a stub CHROME_BIN (a shell script that
+ * tests/support/signal-exit.mjs: a bound-kill must run the cleanup exactly once,
+ * must not outlive the grace bound, and must exit with the signal's own code
+ * (airhorn-4vfn).
+ *
+ * The browser tests drive the helper with a stub CHROME_BIN (a shell script that
  * announces a ws:// URL on stderr and stays alive, exactly as the real binary
  * does) and a real silent DevTools peer - an HTTP server that accepts the
  * connection and never answers - so the abort is exercised through real undici
  * rather than a stubbed fetch. No headless browser is started: the suite costs
- * ~1s and can run beside the browser suites.
+ * ~2s and can run beside the browser suites.
  *
  * Every test cleans up in a finally and uses a label unique to the run, so a
  * failing assertion cannot leak a server, a stub process or a profile dir - and
@@ -28,6 +33,7 @@ import { pathToFileURL } from 'node:url';
 
 const SUPPORT = pathToFileURL(path.join(import.meta.dirname, 'support', 'browser.mjs')).href;
 const { launchBrowser } = await import(SUPPORT);
+const SIGNAL_EXIT = pathToFileURL(path.join(import.meta.dirname, 'support', 'signal-exit.mjs')).href;
 
 const runLabel = (what) => `bsup-${what}-${process.pid}-${Date.now()}`;
 
@@ -175,4 +181,58 @@ test('a bound-kill during discovery reaps the browser before the process dies (a
     removeProfiles(label);
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/* -- the shared bound-kill handler (airhorn-4vfn) --------------------------- */
+
+// A stand-in suite: install the shared handler, then take the signal a bound
+// kill sends. Everything asserted here is real process behaviour - the exit
+// status, how many times the cleanup ran, and whether a wedged cleanup can hold
+// the process past the grace bound.
+const runStandIn = ({ signal, graceMs, cleanup }) => new Promise((resolve) => {
+  const dir = marker();
+  const seen = path.join(dir, 'cleanup.log');
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import fs from 'node:fs';
+    const { installSignalExit } = await import(${JSON.stringify(SIGNAL_EXIT)});
+    const seen = ${JSON.stringify(seen)};
+    installSignalExit(async () => {
+      fs.appendFileSync(seen, 'ran\\n');
+      ${cleanup}
+    }${graceMs ? `, { graceMs: ${graceMs} }` : ''});
+    console.log('ready');
+    // A real suite is busy when the bound-kill lands, so keep the loop alive:
+    // signal handles alone are unref'd, and an idle process would exit on its
+    // own (code 13, unsettled top-level await) before the signal is delivered.
+    setInterval(() => {}, 1000);
+    await new Promise((r) => setTimeout(r, 50));
+    process.kill(process.pid, ${JSON.stringify(signal)});
+    ${signal === 'SIGTERM' ? "process.kill(process.pid, 'SIGTERM');" : ''}
+  `], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  child.stdout.on('data', (d) => { out += d.toString(); });
+  const startedAt = Date.now();
+  child.on('exit', (code, sig) => {
+    const runs = fs.existsSync(seen) ? fs.readFileSync(seen, 'utf8').split('\n').filter(Boolean).length : 0;
+    fs.rmSync(dir, { recursive: true, force: true });
+    resolve({ code, signal: sig, runs, elapsed: Date.now() - startedAt, out });
+  });
+});
+
+test('a bound-kill exits with the signal code and runs the cleanup exactly once (airhorn-4vfn)', async () => {
+  // Two SIGTERMs: the second must not run the cleanup again.
+  const result = await runStandIn({ signal: 'SIGTERM', cleanup: '' });
+  assert.equal(result.code, 128 + 15, `SIGTERM must exit 143: ${JSON.stringify(result)}`);
+  assert.equal(result.runs, 1, `the cleanup ran ${result.runs} time(s), not once: ${JSON.stringify(result)}`);
+});
+
+test('SIGINT exits 130, not SIGTERM’s 143 (airhorn-4vfn)', async () => {
+  const result = await runStandIn({ signal: 'SIGINT', cleanup: '' });
+  assert.equal(result.code, 128 + 2, `SIGINT must exit 130: ${JSON.stringify(result)}`);
+});
+
+test('a wedged cleanup cannot hold the process past the grace bound (airhorn-4vfn)', async () => {
+  const result = await runStandIn({ signal: 'SIGTERM', graceMs: 250, cleanup: 'await new Promise(() => {});' });
+  assert.equal(result.code, 128 + 15, `the grace bound must still exit 143: ${JSON.stringify(result)}`);
+  assert.ok(result.elapsed < 3000, `a wedged cleanup held the process for ${result.elapsed}ms against a 250ms grace bound`);
 });
