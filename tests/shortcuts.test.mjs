@@ -453,8 +453,11 @@ async function checkPromptAndShareable(base) {
     await browser.evaluate(`window.__probe.reset(); window.__fireLaunch(${JSON.stringify(base + '/')}); 1`);
     await browser.sleep(700);
     const otherLaunch = await browser.snapshot();
-    assert(otherLaunch.peak === 0 && otherLaunch.starts === relaunched.starts,
-      `a launch of / sounded the horn (peak ${otherLaunch.peak.toFixed(4)}, starts ${otherLaunch.starts})`);
+    // Not "exactly 0": the previous blast's ring-out can leave a sliver in the
+    // analyser window. Anything below the blast threshold means nothing sounded.
+    assert(otherLaunch.peak < 0.05 && otherLaunch.starts === relaunched.starts,
+      `a launch of / sounded the horn (peak ${otherLaunch.peak.toFixed(6)}, starts ${relaunched.starts} -> ${otherLaunch.starts})`);
+    assert(otherLaunch.hash === '#instant', `a launch of / moved the URL to ${otherLaunch.href}`);
 
     console.log('--- 5. an unknown hash: nothing blasts, the horn still works ---');
     await browser.navigate('about:blank', { wait: 50 });
