@@ -574,7 +574,34 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
     // AnalyserNode tap to measure audibility (peak level > 0.01)
     await send('Page.addScriptToEvaluateOnNewDocument', {
       source: `
-        window.__audioProbe = { peak: 0, currentLevel: 0, samples: 0, oscStarts: 0 };
+        window.__audioProbe = { peak: 0, currentLevel: 0, samples: 0, oscStarts: 0, taps: [] };
+        // The level is read ON DEMAND, not accumulated by a timer. A 20 ms
+        // setInterval is fine on an idle machine and useless on a gate-under-load
+        // one, where a single timer sample of a 0.9 s blast can be starved past
+        // the whole blast and read as silence (airhorn-u7s: that is exactly how
+        // this check flaked). read() samples every tap right now, so the caller
+        // controls when it looks instead of hoping a timer fired.
+        window.__audioProbe.read = () => {
+          let level = 0;
+          for (const tap of window.__audioProbe.taps) {
+            try {
+              tap.analyser.getFloatTimeDomainData(tap.data);
+              for (let i = 0; i < tap.data.length; i++) {
+                const abs = Math.abs(tap.data[i]);
+                if (abs > level) level = abs;
+              }
+            } catch {}
+          }
+          window.__audioProbe.currentLevel = level;
+          if (level > window.__audioProbe.peak) window.__audioProbe.peak = level;
+          window.__audioProbe.samples++;
+          return {
+            peak: window.__audioProbe.peak,
+            currentLevel: level,
+            samples: window.__audioProbe.samples,
+            oscStarts: window.__audioProbe.oscStarts
+          };
+        };
         const AC = window.AudioContext || window.webkitAudioContext;
         if (AC) {
           const origConnect = AudioNode.prototype.connect;
@@ -594,20 +621,7 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
                 origConnect.call(this, analyser);
                 origConnect.call(analyser, silentSink);
                 origConnect.call(silentSink, ctx.destination);
-
-                setInterval(() => {
-                  try {
-                    analyser.getFloatTimeDomainData(data);
-                    let peak = 0;
-                    for (let i = 0; i < data.length; i++) {
-                      const abs = Math.abs(data[i]);
-                      if (abs > peak) peak = abs;
-                    }
-                    window.__audioProbe.currentLevel = peak;
-                    if (peak > window.__audioProbe.peak) window.__audioProbe.peak = peak;
-                    window.__audioProbe.samples++;
-                  } catch {}
-                }, 20);
+                window.__audioProbe.taps.push({ analyser, data });
               } catch (e) {
                 console.error('Probe hook error', e);
               }
@@ -643,37 +657,43 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
       })()`
     });
 
-    // Audibility: poll until the probe has heard the horn, bounded at 500 ms.
-    // It used to be a single check at 150 ms, which only worked because the
-    // fallback's attack was a hard 40 ms step; the voice now swells for 140 ms to
-    // match the recording (airhorn-u7s), so the check has to land after the
-    // attack rather than inside it - and polling keeps it honest under load
-    // instead of depending on one timer firing.
-    let audioPeak = 0;
-    let currentLevel = 0;
-    for (let i = 0; i < 10; i++) {
+    // Audibility: read the analyser on demand for up to 1.5 s, which covers the
+    // whole blast (0.9 s plus release) even on a loaded gate. A silent fallback
+    // still fails: nothing is ever above the floor.
+    const readProbe = async () => {
       const probe = await send('Runtime.evaluate', {
-        expression: `(() => ({
-          horning: document.querySelector('.horn').classList.contains('horning'),
-          audioPeak: window.__audioProbe?.peak || 0,
-          currentLevel: window.__audioProbe?.currentLevel || 0
-        }))()`,
+        expression: 'window.__audioProbe.read()',
         returnByValue: true
       });
-      audioPeak = probe.result.value.audioPeak;
-      currentLevel = probe.result.value.currentLevel;
+      return probe.result.value;
+    };
+    let audioPeak = 0;
+    for (let i = 0; i < 30; i++) {
+      const probe = await readProbe();
+      audioPeak = probe.peak;
       if (audioPeak > 0.01) break;
       await new Promise(r => setTimeout(r, 50));
     }
-    assert.ok(audioPeak > 0.01, `Horn must sound audibly within 500ms of the press; peak ${audioPeak}`);
+    assert.ok(audioPeak > 0.01, `Horn must sound audibly within 1.5s of the press; peak ${audioPeak}`);
 
-    // Check at 500ms (far past the old 100ms truncation point): horn must still be ringing out!
+    // Far past the old 100ms truncation point, and past the 60ms tap: the horn
+    // must still be sounding, and still be playing.
     await new Promise(r => setTimeout(r, 200));
     const activeAt500 = await send('Runtime.evaluate', {
-      expression: `window.__audioProbe?.currentLevel || 0`,
+      expression: `(() => ({
+        level: window.__audioProbe.read().currentLevel,
+        playing: !!(window.__airhorn && window.__airhorn.isPlaying())
+      }))()`,
       returnByValue: true
     });
-    assert.ok(activeAt500.result.value > 0.01, `Horn must still be ringing out at 500ms after a 60ms tap; got level ${activeAt500.result.value}`);
+    assert.ok(
+      activeAt500.result.value.level > 0.01,
+      `Horn must still be ringing out ~500ms after a 60ms tap; got level ${activeAt500.result.value.level}`,
+    );
+    assert.ok(
+      activeAt500.result.value.playing,
+      'Horn must still report playing ~500ms after a 60ms tap',
+    );
 
     // Wait for blast duration to complete and settle
     for (let i = 0; i < 30; i++) {
