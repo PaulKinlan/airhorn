@@ -398,8 +398,16 @@ async function run() {
     const blogB = await B.badge();
     if (badgeApi) {
       const lastB = blogB.filter((e) => e.fn === 'setAppBadge').slice(-1);
+      const storageState = await B.evaluate(`(() => {
+        try { return { shared: window.localStorage.getItem('airhorn:blast-count'), len: window.localStorage.length, ok: true }; }
+        catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+      })()`);
+      const storageStateA = await A.evaluate(`(() => {
+        try { return { shared: window.localStorage.getItem('airhorn:blast-count'), href: location.href }; }
+        catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+      })()`);
       assert(lastB.length === 1 && lastB[0].arg === 4,
-        `after 4 blasts across two tabs the badge was set to ${JSON.stringify(lastB)}, expected the shared total 4 - the badge is OS-wide but the counter is per-tab, so the last writer wins (airhorn-xkq)`);
+        `after 4 blasts across two tabs the badge was set to ${JSON.stringify(lastB)}, expected the shared total 4 - the badge is OS-wide but the counter is per-tab, so the last writer wins (airhorn-xkq); tab B storage: ${JSON.stringify(storageState)}, tab A storage: ${JSON.stringify(storageStateA)}, tab B badge log: ${JSON.stringify(blogB)}`);
       console.log(`  shared badge: A wrote 1,2,3 then B wrote ${lastB[0].arg} - the app-wide badge tracks total blasts.`);
     }
 
