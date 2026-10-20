@@ -9,7 +9,7 @@
 # with `!`, or the gate fails loudly (reverse check).
 src/horn.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs
 src/main.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-failover.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs
-src/webmcp.js	tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
+src/webmcp.js	tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
 # sw-failover is NOT on the index.html row (airhorn-iwf): it is the worker's
 # end-to-end upgrade story (public/sw.js + src/main.js messaging), the page's
 # markup is already asserted by horn, a11y and resilience-ui, and putting the
@@ -60,6 +60,7 @@ tests/sw-failover.test.mjs	tests/sw-failover.test.mjs
 tests/webmcp.test.mjs	tests/webmcp.test.mjs
 tests/gate-smoke.test.js	tests/gate-smoke.test.js
 tests/webmcp-browser.test.mjs	tests/webmcp-browser.test.mjs
+tests/webmcp-fuzz.test.mjs	tests/webmcp-fuzz.test.mjs
 tests/resilience-ui.test.mjs	tests/resilience-ui.test.mjs
 ~test/a11y.test.mjs	test/a11y.test.mjs
 ~test/sw-offline.test.mjs	test/sw-offline.test.mjs
@@ -89,4 +90,4 @@ tests/acceptance.mjs	tests/acceptance.mjs
 # that runs through the hook - the runner injects it into every script-tier (.mjs) suite, so
 # the row must track that set, not a snapshot of it (airhorn-5t8: resilience-ui and
 # sw-failover were missing; airhorn-10q for quiescence.mjs, airhorn-n00 for the report hook).
-tests/support/**	tests/a11y.test.mjs tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/webmcp.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs
+tests/support/**	tests/a11y.test.mjs tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs

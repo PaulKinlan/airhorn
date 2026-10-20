@@ -41,11 +41,46 @@ const mimeTypes = {
 //  - a spy on the app badge API.
 const instrumentation = `
   (() => {
-    window.__probe = { starts: 0, peak: 0, level: 0, samples: 0, ctxState: null };
+    window.__probe = { starts: 0, peak: 0, level: 0, samples: 0, ctxState: null, active: 0, maxActive: 0, contexts: 0, oscStarts: 0, oscActive: 0, maxOscActive: 0 };
     window.__badge = { calls: [], cleared: 0 };
 
     const AC = window.AudioContext || window.webkitAudioContext;
     if (AC) {
+      // Count AudioContext constructions: more than one for a page's lifetime is
+      // a leak, which a hostile caller must not be able to provoke (airhorn-9e9).
+      try {
+        window.AudioContext = new Proxy(AC, {
+          construct(target, args, newTarget) {
+            window.__probe.contexts += 1;
+            return Reflect.construct(target, args, newTarget);
+          },
+        });
+      } catch {}
+
+      // Count oscillators (the synth fallback path) the same way.
+      const createOscillator = AC.prototype.createOscillator;
+      AC.prototype.createOscillator = function (...args) {
+        const osc = createOscillator.apply(this, args);
+        const oscStart = osc.start.bind(osc);
+        osc.start = (...startArgs) => {
+          window.__probe.oscStarts += 1;
+          window.__probe.oscActive += 1;
+          if (window.__probe.oscActive > window.__probe.maxOscActive) window.__probe.maxOscActive = window.__probe.oscActive;
+          return oscStart(...startArgs);
+        };
+        const oscStop = osc.stop.bind(osc);
+        let oscReleased = false;
+        osc.stop = (...stopArgs) => {
+          const result = oscStop(...stopArgs);
+          if (!oscReleased) {
+            oscReleased = true;
+            setTimeout(() => { window.__probe.oscActive -= 1; }, 0);
+          }
+          return result;
+        };
+        return osc;
+      };
+
       const createBufferSource = AC.prototype.createBufferSource;
       AC.prototype.createBufferSource = function (...args) {
         const ctx = this;
@@ -69,6 +104,14 @@ const instrumentation = `
         const start = source.start.bind(source);
         source.start = (...startArgs) => {
           window.__probe.starts += 1;
+          window.__probe.active += 1;
+          if (window.__probe.active > window.__probe.maxActive) window.__probe.maxActive = window.__probe.active;
+          let released = false;
+          source.addEventListener('ended', () => {
+            if (released) return;
+            released = true;
+            window.__probe.active -= 1;
+          });
           const result = start(...startArgs);
           const timer = setInterval(() => {
             analyser.getFloatTimeDomainData(data);
@@ -142,6 +185,19 @@ const instrumentation = `
           throw err;
         }
       }
+      return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    };
+
+    // Hostile-input helper: object inputs go to executeTool as objects (what a
+    // native model context requires). A non-object cannot reach a native model
+    // context at all, so the JSON-text form is attempted and its refusal is
+    // recorded as the platform's own safe no-op.
+    window.__callAny = async (name, value) => {
+      const tools = await document.modelContext.getTools();
+      const tool = tools.find((entry) => entry.name === name);
+      if (!tool) throw new Error('Unknown tool "' + name + '"');
+      const payload = value !== null && typeof value === 'object' ? value : JSON.stringify(value);
+      const raw = await document.modelContext.executeTool(tool, payload, {});
       return typeof raw === 'string' ? JSON.parse(raw) : raw;
     };
   })();
@@ -449,7 +505,300 @@ async function run() {
       throw new Error('get_horn_state should report the finished blast as not playing');
     }
 
-    // 5. No page errors.
+    // 5. Hostile callers (airhorn-9e9): wrong types, huge payloads, extra
+    // properties. Every call must end in a structured refusal or a safe no-op -
+    // never a coercion, never an unhandled rejection, never a started horn.
+    // Some of these (anything that is not an object) are refused by the
+    // platform itself before the tool runs; that is a safe no-op too, and the
+    // check below records which layer said no.
+    const hostile = await evaluate(`(async () => {
+      const cases = [
+        ['loop as a string', { loop: 'true' }, true],
+        ['loop as an object', { loop: { value: true } }, true],
+        ['loop as a number', { loop: 1 }, true],
+        ['loop as null', { loop: null }, true],
+        ['loop as an array', { loop: [true] }, true],
+        ['input as a plain string', 'hello', true],
+        ['input as a number', 42, true],
+        ['input as an array', [1, 2, 3], true],
+        ['input as null (missing arguments)', null, false],
+        ['extra properties', { loop: false, volume: 11, nested: { a: [1, 2] } }, false],
+      ];
+      const out = [];
+      for (const [label, value, expectRefusal] of cases) {
+        const horn = document.querySelector('.horn');
+        const before = { starts: window.__probe.starts, pressed: horn.getAttribute('aria-pressed') };
+        const began = performance.now();
+        let entry;
+        try {
+          entry = { label, expectRefusal, resolved: true, result: await window.__callAny('play_horn', value) };
+        } catch (err) {
+          entry = { label, expectRefusal, resolved: false, platformRefused: true, rejected: String((err && err.message) || err) };
+        }
+        entry.ms = Math.round(performance.now() - began);
+        entry.startsDelta = window.__probe.starts - before.starts;
+        entry.pressedBefore = before.pressed;
+        entry.pressedAfter = horn.getAttribute('aria-pressed');
+        out.push(entry);
+        await window.__call('stop_horn');
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      // A megabyte of junk must be refused promptly and echoed back at nobody.
+      const mega = 'x'.repeat(1000000);
+      const megaBegan = performance.now();
+      const megaStartsBefore = window.__probe.starts;
+      const megaEntry = { label: 'megabyte payload', expectRefusal: true };
+      try {
+        megaEntry.resolved = true;
+        megaEntry.result = await window.__callAny('play_horn', { loop: mega });
+        megaEntry.responseBytes = JSON.stringify(megaEntry.result).length;
+        megaEntry.echoedPayload = JSON.stringify(megaEntry.result).includes(mega.slice(0, 32));
+      } catch (err) {
+        megaEntry.resolved = false;
+        megaEntry.platformRefused = true;
+        megaEntry.rejected = String((err && err.message) || err);
+      }
+      megaEntry.ms = Math.round(performance.now() - megaBegan);
+      megaEntry.startsDelta = window.__probe.starts - megaStartsBefore;
+      await window.__call('stop_horn');
+      out.push(megaEntry);
+      return out;
+    })()`);
+    console.log('hostile input:', hostile);
+
+    for (const entry of hostile) {
+      if (!entry.resolved) {
+        // Refused before the tool ran: nothing may have sounded or stuck.
+        if (!/invalid input|not an object|is required/i.test(entry.rejected)) {
+          throw new Error(`${entry.label} rejected unexpectedly: ${entry.rejected}`);
+        }
+        if (entry.startsDelta !== 0) {
+          throw new Error(`${entry.label} was refused by the platform but still started audio`);
+        }
+        if (entry.pressedAfter !== entry.pressedBefore) {
+          throw new Error(`${entry.label} was refused by the platform but changed the button state`);
+        }
+        continue;
+      }
+      if (typeof entry.result.playing !== 'boolean' || typeof entry.result.loop !== 'boolean') {
+        throw new Error(`play_horn result is not structured for ${entry.label}: ${JSON.stringify(entry.result)}`);
+      }
+      if (entry.expectRefusal) {
+        if (entry.result.code !== 'invalid_input') {
+          throw new Error(`${entry.label} should be refused as invalid_input: ${JSON.stringify(entry.result)}`);
+        }
+        if (entry.result.playing !== false) {
+          throw new Error(`${entry.label} reported a playing horn despite being refused`);
+        }
+        if (entry.startsDelta !== 0) {
+          throw new Error(`${entry.label} started audio despite being refused`);
+        }
+        if (entry.pressedAfter !== entry.pressedBefore) {
+          throw new Error(`${entry.label} changed the button state`);
+        }
+      } else {
+        if (entry.result.error) {
+          throw new Error(`${entry.label} should be a safe no-op, got ${JSON.stringify(entry.result)}`);
+        }
+        if (entry.startsDelta !== 1) {
+          throw new Error(`${entry.label} should sound the horn once, starts delta ${entry.startsDelta}`);
+        }
+        if (entry.result.loop !== false) {
+          throw new Error(`${entry.label} should not have looped: ${JSON.stringify(entry.result)}`);
+        }
+      }
+      if (entry.result.code && entry.result.error.length > 200) {
+        throw new Error(`${entry.label} returned a ${entry.result.error.length}-character error message`);
+      }
+    }
+
+    const mega = hostile.find((entry) => entry.label === 'megabyte payload');
+    if (mega.resolved) {
+      if (mega.result.code !== 'invalid_input') {
+        throw new Error(`a megabyte payload should be refused: ${JSON.stringify(mega.result)}`);
+      }
+      if (mega.responseBytes > 512) {
+        throw new Error(`the refusal repeated ${mega.responseBytes} bytes back at the caller`);
+      }
+      if (mega.echoedPayload) throw new Error('the refusal echoed the hostile payload');
+      if (mega.ms > 500) throw new Error(`refusing a megabyte took ${mega.ms}ms`);
+    } else if (mega.ms > 500) {
+      throw new Error(`the platform took ${mega.ms}ms to refuse a megabyte payload`);
+    }
+
+    // 6. Rapid repeated invocation: a flood must not stack playback, allocate
+    // more audio nodes than it can clean up, or leak an AudioContext.
+    const flood = await evaluate(`(async () => {
+      const horn = document.querySelector('.horn');
+      const before = { starts: window.__probe.starts, contexts: window.__probe.contexts, pressed: horn.getAttribute('aria-pressed') };
+      window.__probe.maxActive = window.__probe.active;
+      let rejected = 0;
+      const results = await Promise.all(Array.from({ length: 40 }, () =>
+        window.__call('play_horn', { loop: true }).catch((err) => {
+          rejected += 1;
+          return { rejected: String((err && err.message) || err) };
+        })
+      ));
+      await new Promise((r) => setTimeout(r, 300));
+      const during = {
+        active: window.__probe.active,
+        maxActive: window.__probe.maxActive,
+        level: window.__probe.level,
+        pressed: horn.getAttribute('aria-pressed'),
+        contexts: window.__probe.contexts,
+        state: await window.__call('get_horn_state'),
+      };
+      const stopped = await window.__call('stop_horn');
+      await new Promise((r) => setTimeout(r, 400));
+      return {
+        before,
+        rejected,
+        answers: results.length,
+        accepted: results.filter((r) => r.code === undefined).length,
+        rateLimited: results.filter((r) => r.code === 'rate_limited').length,
+        structured: results.every((r) => typeof r.playing === 'boolean' && typeof r.loop === 'boolean'),
+        during,
+        stopped,
+        after: {
+          active: window.__probe.active,
+          level: window.__probe.level,
+          pressed: horn.getAttribute('aria-pressed'),
+          contexts: window.__probe.contexts,
+          started: window.__probe.starts - before.starts,
+          state: await window.__call('get_horn_state'),
+        },
+      };
+    })()`);
+    console.log('play flood (40 concurrent):', flood);
+
+    if (flood.rejected !== 0) throw new Error('a play flood must not reject');
+    if (flood.answers !== 40) throw new Error('every call in a flood must be answered');
+    if (!flood.structured) throw new Error('every answer in a flood must be structured');
+    if (flood.accepted < 1) throw new Error('a flood should still sound the horn at least once');
+    if (flood.rateLimited < 1) throw new Error('the rate limit should refuse part of a 40-call flood');
+    if (flood.during.state.playing !== true) throw new Error('the flood should leave the horn sounding');
+    if (flood.during.active > 1) {
+      throw new Error(`the flood left ${flood.during.active} playbacks sounding at once (max ${flood.during.maxActive})`);
+    }
+    if (flood.during.contexts !== flood.before.contexts) {
+      throw new Error(`the flood created ${flood.during.contexts - flood.before.contexts} extra AudioContext(s)`);
+    }
+    if (flood.stopped.playing !== false) throw new Error('stop_horn after a flood must silence the horn');
+    if (flood.after.active !== 0) throw new Error(`stop_horn left ${flood.after.active} source(s) sounding`);
+    if (flood.after.level > 0.01) throw new Error(`audio is still audible after the flood (level ${flood.after.level})`);
+    if (flood.after.pressed !== 'false') throw new Error('the flood left the button pressed');
+    if (flood.after.state.playing !== false || flood.after.state.loop !== false) {
+      throw new Error(`the horn did not settle after the flood: ${JSON.stringify(flood.after.state)}`);
+    }
+
+    // 7. Invocation while offline: a structured answer, and silence still works.
+    await send('Network.enable');
+    await send('Network.emulateNetworkConditions', {
+      offline: true,
+      latency: 0,
+      downloadThroughput: -1,
+      uploadThroughput: -1,
+    });
+    const offline = await evaluate(`(async () => {
+      const before = window.__probe.starts;
+      let entry;
+      try {
+        entry = { resolved: true, result: await window.__call('play_horn', { loop: true }) };
+      } catch (err) {
+        entry = { resolved: false, rejected: String((err && err.message) || err) };
+      }
+      entry.startsDelta = window.__probe.starts - before;
+      return { entry, stopped: await window.__call('stop_horn'), state: await window.__call('get_horn_state') };
+    })()`);
+    console.log('offline invocation:', offline);
+    await send('Network.emulateNetworkConditions', {
+      offline: false,
+      latency: 0,
+      downloadThroughput: -1,
+      uploadThroughput: -1,
+    });
+
+    if (!offline.entry.resolved) throw new Error(`play_horn rejected while offline: ${offline.entry.rejected}`);
+    if (typeof offline.entry.result.playing !== 'boolean') throw new Error('offline play_horn was not structured');
+    if (offline.entry.result.error && typeof offline.entry.result.code !== 'string') {
+      throw new Error('an offline refusal must carry a machine-readable code');
+    }
+    if (offline.stopped.playing !== false) throw new Error('stop_horn must work offline');
+    if (offline.state.playing !== false) throw new Error('the horn must be silent after an offline stop');
+
+    // 8. The sample never decodes (audio graph not ready): the horn still
+    // answers structurally and falls back to live synthesis instead of failing.
+    const pageErrorsBeforeReload = await evaluate('window.__pageErrors || []');
+    if (pageErrorsBeforeReload.length > 0) {
+      throw new Error(`In-page errors before the fallback reload: ${JSON.stringify(pageErrorsBeforeReload)}`);
+    }
+    await send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `(() => {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC && AC.prototype) {
+          AC.prototype.decodeAudioData = () => Promise.reject(new Error('sample decode blocked by the fuzz suite'));
+        }
+      })();`,
+    });
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+
+    let fallbackReady = false;
+    for (let i = 0; i < 100; i += 1) {
+      try {
+        fallbackReady = await evaluate(`(async () => {
+          if (!document.querySelector('.horn') || !document.modelContext) return false;
+          return (await document.modelContext.getTools()).length >= 3;
+        })()`);
+      } catch {
+        fallbackReady = false;
+      }
+      if (fallbackReady) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (!fallbackReady) throw new Error('WebMCP tools were never registered after the fallback reload');
+
+    const fallback = await evaluate(`(async () => {
+      const horn = document.querySelector('.horn');
+      const before = { oscStarts: window.__probe.oscStarts, starts: window.__probe.starts };
+      let entry;
+      try {
+        entry = { resolved: true, result: await window.__call('play_horn', { loop: true }) };
+      } catch (err) {
+        entry = { resolved: false, rejected: String((err && err.message) || err) };
+      }
+      await new Promise((r) => setTimeout(r, 250));
+      const during = {
+        oscStarts: window.__probe.oscStarts - before.oscStarts,
+        oscActive: window.__probe.oscActive,
+        sampleStarts: window.__probe.starts - before.starts,
+        pressed: horn.getAttribute('aria-pressed'),
+        state: await window.__call('get_horn_state'),
+      };
+      const stopped = await window.__call('stop_horn');
+      await new Promise((r) => setTimeout(r, 300));
+      return {
+        entry,
+        during,
+        stopped,
+        after: { oscActive: window.__probe.oscActive, pressed: horn.getAttribute('aria-pressed'), state: await window.__call('get_horn_state') },
+      };
+    })()`);
+    console.log('synth fallback (sample decode blocked):', fallback);
+
+    if (!fallback.entry.resolved) throw new Error(`play_horn rejected on the synth fallback: ${fallback.entry.rejected}`);
+    if (fallback.entry.result.playing !== true) {
+      throw new Error(`the synth fallback should still sound the horn: ${JSON.stringify(fallback.entry.result)}`);
+    }
+    if (fallback.during.oscStarts < 1) throw new Error('the synth fallback produced no oscillators');
+    if (fallback.during.sampleStarts !== 0) throw new Error('the synth fallback should not start a sample source');
+    if (fallback.during.state.playing !== true) throw new Error('the synth fallback should report a playing horn');
+    if (fallback.during.pressed !== 'true') throw new Error('the synth fallback should press the button');
+    if (fallback.stopped.playing !== false) throw new Error('stop_horn must silence the synth fallback');
+    if (fallback.after.oscActive !== 0) throw new Error(`the synth fallback leaked ${fallback.after.oscActive} oscillator(s)`);
+    if (fallback.after.state.playing !== false) throw new Error('the synth fallback did not settle after stop_horn');
+
+    // 9. No page errors. Note: the page-level `__pageErrors` array is per-document,
+    // so this covers the reloaded document; the pre-reload check above covered the first.
     const pageErrors = await evaluate('window.__pageErrors || []');
     if (pageErrors.length > 0) {
       throw new Error(`In-page errors detected: ${JSON.stringify(pageErrors)}`);

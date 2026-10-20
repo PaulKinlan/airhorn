@@ -18,6 +18,7 @@
   ],
   "src/webmcp.js": [
     "tests/webmcp.test.mjs",
+    "tests/webmcp-fuzz.test.mjs",
     "tests/webmcp-browser.test.mjs"
   ],
   "vite.config.js": [
@@ -53,6 +54,7 @@
     "tests/sw-offline.test.mjs",
     "tests/sw-failover.test.mjs",
     "tests/webmcp.test.mjs",
+    "tests/webmcp-fuzz.test.mjs",
     "tests/webmcp-browser.test.mjs",
     "tests/resilience-ui.test.mjs"
   ]
