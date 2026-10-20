@@ -32,6 +32,9 @@
  */
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+// The one profile-marker sweep (airhorn-byun): the tools and this helper share
+// a single definition in tools/lib/reap.mjs instead of five drifting copies.
+import { sweepProfile } from '../../tools/lib/reap.mjs';
 
 export function chromeBin() {
   return process.env.CHROME_BIN ||
@@ -79,42 +82,6 @@ export function killTree(pid) {
     }
   } catch { /* ps failed; fall through to killing the parent */ }
   try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
-}
-
-/*
- * SIGKILL every process whose command line carries this launch's unique
- * --user-data-dir: the browser itself and every child it forked all carry it,
- * so one /proc read finds the whole tree and one pass kills it. The browser
- * dies in the same pass as its children are found, so it cannot out-fork the
- * cleanup - the measured failure of a snapshot tree-kill that leaves chrome
- * alive while it works (airhorn-77ih: 11 processes survived a kill ~95ms into
- * startup). A later pass runs only while the previous one found somebody, and
- * it exists for the fork race: a child forked between the first read and its
- * parent's death is visible to it. Synchronous by design so signal handlers
- * can use it; on a /proc-less system it does nothing and killTree is the
- * fallback.
- */
-function sweepProfile(profileDir) {
-  const marker = `--user-data-dir=${profileDir}`;
-  for (let pass = 0; pass < 3; pass += 1) {
-    const victims = [];
-    try {
-      for (const entry of fs.readdirSync('/proc')) {
-        if (!/^\d+$/.test(entry)) continue;
-        const pid = Number(entry);
-        if (pid === process.pid) continue;
-        let cmdline;
-        try { cmdline = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8'); } catch { continue; }
-        if (cmdline.includes(marker)) victims.push(pid);
-      }
-    } catch {
-      return; // no /proc (non-Linux)
-    }
-    if (victims.length === 0) return;
-    for (const pid of victims) {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
-    }
-  }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
