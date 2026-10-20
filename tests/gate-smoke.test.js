@@ -497,6 +497,96 @@ test('every tools script parses - recognised extensions at any depth (airhorn-7l
   assert.deepEqual(missingTools, [], `pinned tools scripts went missing from tools/: ${missingTools.join(', ')} - restore them or update this inventory deliberately`);
 });
 
+test('a launch that never starts fails labelled and leaves no profile behind (airhorn-trj7)', () => {
+  // No browser is started: a CHROME_BIN that does not exist makes spawn() report
+  // through the child's 'error' event, which with no listener is an
+  // uncaughtException - it aborts the tool before any teardown and leaves the
+  // profile dir mkdtemp'd for the launch behind. TMPDIR (and --out) are per-test
+  // so a concurrent lane's tool run cannot be mistaken for this one's leak, and
+  // so the probe never writes into the repo. One representative tool: the other
+  // two take the same two-line race, and only this one allocates the dir itself.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsm-launch-'));
+  try {
+    const res = spawnSync(process.execPath,
+      [path.join(root, 'tools', 'install-https-proof.mjs'), '--out', path.join(tmp, 'out')], {
+        encoding: 'utf8',
+        timeout: 60000,
+        env: { ...process.env, CHROME_BIN: path.join(tmp, 'no-such-chrome'), TMPDIR: tmp },
+      });
+    assert.equal(res.status, 1, `expected a labelled failure (rc 1), got ${res.status}: ${res.stderr}`);
+    assert.doesNotMatch(res.stderr, /Unhandled 'error' event/,
+      `a spawn error must route into the tool's own teardown, not abort it: ${res.stderr}`);
+    assert.match(res.stderr, /chrome launch failed: .*ENOENT/,
+      `the launch failure must be labelled: ${res.stderr}`);
+    const left = fs.readdirSync(tmp).filter((name) => name !== 'out');
+    assert.deepEqual(left, [], `the failed launch left ${JSON.stringify(left)} behind`);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('an audit whose browser never starts reports a labelled ERROR row and keeps its exit contract (airhorn-r5me)', () => {
+  // The audit's contract is "exit 0 and print a table whatever it finds", so a
+  // CHROME_BIN that does not exist has to become an ERROR row for that scenario,
+  // not an uncaught 'error' event that aborts the run and leaks the launch
+  // profile. TMPDIR, RESILIENCE_OUT and the profile live under one per-test dir,
+  // so this probe cannot collide with a concurrent lane's audit.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsm-audit-'));
+  try {
+    const res = spawnSync(process.execPath, [path.join(root, 'tools', 'resilience-audit.mjs')], {
+      encoding: 'utf8',
+      timeout: 120000,
+      env: {
+        ...process.env,
+        RESILIENCE_ONLY: 'liefi',
+        RESILIENCE_OUT: path.join(tmp, 'evidence'),
+        CHROME_BIN: path.join(tmp, 'no-such-chrome'),
+        TMPDIR: tmp,
+      },
+    });
+    assert.equal(res.status, 0, `the audit exits 0 whatever it finds; got ${res.status}: ${res.stderr}`);
+    assert.match(res.stdout, /\[liefi\][\s\S]*ERROR chrome launch failed: .*ENOENT/,
+      `the scenario must carry a labelled ERROR row: ${res.stdout}`);
+    assert.doesNotMatch(res.stderr, /Unhandled 'error' event/,
+      `a spawn error must not abort the audit: ${res.stderr}`);
+    const left = fs.readdirSync(tmp).filter((name) => name !== 'evidence');
+    assert.deepEqual(left, [], `the failed launch left ${JSON.stringify(left)} behind`);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a tool holding a handle the peer will not close still exits, and its output survives (airhorn-s1wy)', () => {
+  // cache-growth's success path used to set process.exitCode and return, so a
+  // peer that swallows the ws close-frame kept the event loop alive after the
+  // run had PASSed and the process never exited. Driven as a child so a hang
+  // cannot hang the suite, and with no files so it cannot collide with a
+  // concurrent lane: the drained exit terminates the process, exitCode alone
+  // does not, and 200KB piped through the drain arrives whole (a bare
+  // process.exit drops the tail beyond the 64KB pipe buffer).
+  const held = 'setInterval(() => {}, 1000); ';
+  const drained = spawnSync(process.execPath,
+    ['--input-type=module', '-e', held + "process.stdout.write('', () => process.exit(0));"],
+    { encoding: 'utf8', timeout: 10000 });
+  assert.equal(drained.status, 0, `the drained exit must terminate the process: ${drained.error || drained.stderr}`);
+  const exitCodeOnly = spawnSync(process.execPath,
+    ['--input-type=module', '-e', held + 'process.exitCode = 0;'],
+    { encoding: 'utf8', timeout: 500 });
+  assert.equal(exitCodeOnly.signal, 'SIGTERM',
+    'exitCode alone must NOT terminate a held loop, or this pin proves nothing about the shape it replaced');
+  const big = spawnSync(process.execPath, ['--input-type=module', '-e',
+    held + "for (let i = 0; i < 200; i++) process.stdout.write('x'.repeat(1000) + '\\n'); " +
+    "process.stdout.write('', () => process.exit(0));"], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(big.stdout.length, 200200,
+    `a piped write must arrive whole before the drained exit fires; got ${big.stdout.length} of 200200`);
+  // And the tool itself must still carry that exit: the shape above is what a
+  // revert to exitCode-only would silently take away, and no assertion on the
+  // mechanism can see a regression in the tool's own tail.
+  const source = fs.readFileSync(path.join(root, 'tools', 'cache-growth.mjs'), 'utf8');
+  assert.match(source, /main\(\)\.then\(\(code\) => \{[\s\S]{0,1200}?process\.exit\(code\)/,
+    'cache-growth\'s success path must hard-exit (drained) - process.exitCode alone hangs on a swallowed close-frame');
+});
+
 test('every script-tier suite is gated by a tests/support change (airhorn-dco)', () => {
   // The report hook is runner-injected into EVERY script-tier (*.test.mjs)
   // suite, so a hook edit can break any of them; the support row must name all

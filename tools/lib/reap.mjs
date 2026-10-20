@@ -14,7 +14,10 @@
  * nothing reads as a clean kill. A missing /proc is a documented no-op (a
  * non-Linux host); ANY other /proc scan failure is printed to stderr and the
  * sweep gives up loudly - 'reaped 14' and 'reaped 0, scan broken' no longer
- * read the same.
+ * read the same. The same applies to the marker premise itself: if no process
+ * carries `--user-data-dir=<dir>` while one still names the profile dir on its
+ * command line, chrome's argv has drifted, nothing is reaped, and the sweep now
+ * says so instead of leaving an orphan tree in silence (airhorn-qum7).
  */
 import fs from 'node:fs';
 
@@ -35,6 +38,11 @@ export function sweepProfile(profileDir) {
   const marker = `--user-data-dir=${profileDir}`;
   for (let pass = 0; pass < 3; pass += 1) {
     const victims = [];
+    // Processes that name the profile dir without carrying the marker. On a
+    // zero-victim pass these are the difference between "the browser is
+    // already gone" and "chrome renamed the flag and we are about to leave a
+    // tree behind", so they are collected only to explain the second case.
+    const related = [];
     try {
       for (const entry of fs.readdirSync('/proc')) {
         if (!/^\d+$/.test(entry)) continue;
@@ -43,13 +51,25 @@ export function sweepProfile(profileDir) {
         let cmdline;
         try { cmdline = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8'); } catch { continue; }
         if (cmdline.includes(marker)) victims.push(pid);
+        else if (cmdline.includes(profileDir)) related.push(pid);
       }
     } catch (err) {
       if (err?.code === 'ENOENT') return; // no /proc (non-Linux): documented no-op
       console.error(`reap: /proc scan failed (${err?.message ?? err}); the tree kill did not run`);
       return;
     }
-    if (victims.length === 0) return;
+    if (victims.length === 0) {
+      // A real swallow, not a clean kill: somebody is still holding this
+      // launch's profile but no longer carries the marker the sweep keys on.
+      // Report it and reap nothing - killing on a path match alone would be a
+      // different (unreviewed) premise, and silence is how the orphan happens.
+      if (related.length > 0) {
+        console.error(`reap: no process carries --user-data-dir=${profileDir}, but ${related.length} ` +
+          `still name the profile dir (pid ${related.join(', ')}); nothing was reaped - ` +
+          `chrome's argv may have drifted from the marker`);
+      }
+      return;
+    }
     for (const pid of victims) {
       try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
     }

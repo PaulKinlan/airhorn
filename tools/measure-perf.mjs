@@ -83,13 +83,21 @@ async function main() {
   // SIGKILL runs no handler, so a detached launch outlived the kill.
   liveBrowser = { chrome, profileDir };
 
+  // A spawn that never produced a process reports through the 'error' event,
+  // not a rejection: with no listener that is an uncaughtException, so it aborts
+  // the tool BEFORE the teardown below can run (airhorn-trj7). Raced against the
+  // handshake so a bad CHROME_BIN takes the same cleanup as every other
+  // launch-window failure.
+  const spawnFailed = new Promise((_, reject) =>
+    chrome.once('error', (err) => reject(new Error(`chrome launch failed: ${err.message}`))));
+
   let wsUrl = null;
   let ws = null;
   // The early window (handshake, discovery, ws connect) sits before the try
   // whose finally reaps, so a failure there used to throw with chrome and its
   // profile alive (airhorn-51lr). Route it into the same teardown.
   try {
-    await new Promise((resolve, reject) => {
+    await Promise.race([spawnFailed, new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Chrome timeout')), 10000);
       chrome.stderr.on('data', (d) => {
         const match = d.toString().match(/ws:\/\/[^\s]+/);
@@ -99,7 +107,7 @@ async function main() {
           resolve();
         }
       });
-    });
+    })]);
 
     const chromePort = new URL(wsUrl).port;
     // Discovery is bounded like the handshake above: a DevTools endpoint that

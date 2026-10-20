@@ -828,7 +828,16 @@ async function main() {
 }
 
 main().then((code) => {
-  process.exitCode = code;
+  // Hard exit on the success path too (airhorn-s1wy): a peer that swallows the
+  // ws close-frame also swallows teardown's ws.close(), so the half-open socket
+  // keeps the event loop alive after every check has passed and a PASSing run
+  // never exits - soak.mjs's main().then exits for the same reason
+  // (airhorn-uenq). The exit is drained through stdout's write callback rather
+  // than called bare: a bare process.exit drops queued bytes once stdout is a
+  // pipe and the output is larger than its 64KB buffer (measured on a
+  // 200000-byte write; this tool's summary is ~2KB today, which is why the bead
+  // asked for the drain rather than the bare call).
+  process.stdout.write('', () => process.exit(code));
 }).catch((err) => {
   console.error(`cache-growth: FAIL — ${err.message}`);
   // Hard exit: a hostile peer that swallowed frames also swallows the ws

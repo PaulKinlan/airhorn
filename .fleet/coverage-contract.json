@@ -1,71 +1,74 @@
 {
-  "index.html": [
-    "tests/horn.test.js",
-    "tests/a11y.test.mjs",
-    "tests/webmcp-browser.test.mjs",
-    "tests/resilience-ui.test.mjs"
-  ],
-  "src/horn.js": [
-    "tests/horn.test.js",
-    "tests/a11y.test.mjs",
-    "tests/shortcuts.test.mjs"
-  ],
-  "src/main.js": [
-    "tests/horn.test.js",
-    "tests/a11y.test.mjs",
-    "tests/sw-failover.test.mjs",
-    "tests/webmcp-browser.test.mjs",
-    "tests/resilience-ui.test.mjs",
-    "tests/shortcuts.test.mjs"
-  ],
-  "src/webmcp.js": [
-    "tests/webmcp.test.mjs",
-    "tests/webmcp-fuzz.test.mjs",
-    "tests/webmcp-browser.test.mjs"
-  ],
-  "vite.config.js": [
-    "tests/horn.test.js",
-    "tests/a11y.test.mjs",
-    "tests/sw-offline.test.mjs",
-    "tests/webmcp-browser.test.mjs"
-  ],
-  "server.ts": [
-    "tests/gate-smoke.test.js"
-  ],
-  "public/sw.js": [
-    "tests/sw-offline.test.mjs",
-    "tests/sw-failover.test.mjs"
-  ],
-  "public/manifest.json": [
-    "tests/sw-offline.test.mjs"
-  ],
-  "public/sounds/**": [
-    "tests/sw-offline.test.mjs"
-  ],
-  "public/scripts/**": [
-    "tests/a11y.test.mjs"
-  ],
-  "tools/*": [
-    "tests/gate-smoke.test.js"
-  ],
-  ".fleet/coverage-contract.json": [
-    "tests/gate-smoke.test.js"
-  ],
-  "tests/support/browser.mjs": [
-    "tests/test-support.test.js"
-  ],
-  "tests/support/signal-exit.mjs": [
-    "tests/test-support.test.js"
-  ],
-  "tests/support/**": [
-    "tests/a11y.test.mjs",
-    "tests/sw-offline.test.mjs",
-    "tests/sw-failover.test.mjs",
-    "tests/webmcp.test.mjs",
-    "tests/webmcp-fuzz.test.mjs",
-    "tests/webmcp-browser.test.mjs",
-    "tests/resilience-ui.test.mjs",
-    "tests/shortcuts.test.mjs",
-    "tests/multitab.test.mjs"
-  ]
+ "index.html": [
+  "tests/horn.test.js",
+  "tests/a11y.test.mjs",
+  "tests/webmcp-browser.test.mjs",
+  "tests/resilience-ui.test.mjs"
+ ],
+ "src/horn.js": [
+  "tests/horn.test.js",
+  "tests/a11y.test.mjs",
+  "tests/shortcuts.test.mjs"
+ ],
+ "src/main.js": [
+  "tests/horn.test.js",
+  "tests/a11y.test.mjs",
+  "tests/sw-failover.test.mjs",
+  "tests/webmcp-browser.test.mjs",
+  "tests/resilience-ui.test.mjs",
+  "tests/shortcuts.test.mjs"
+ ],
+ "src/webmcp.js": [
+  "tests/webmcp.test.mjs",
+  "tests/webmcp-fuzz.test.mjs",
+  "tests/webmcp-browser.test.mjs"
+ ],
+ "vite.config.js": [
+  "tests/horn.test.js",
+  "tests/a11y.test.mjs",
+  "tests/sw-offline.test.mjs",
+  "tests/webmcp-browser.test.mjs"
+ ],
+ "server.ts": [
+  "tests/gate-smoke.test.js"
+ ],
+ "public/sw.js": [
+  "tests/sw-offline.test.mjs",
+  "tests/sw-failover.test.mjs"
+ ],
+ "public/manifest.json": [
+  "tests/sw-offline.test.mjs"
+ ],
+ "public/sounds/**": [
+  "tests/sw-offline.test.mjs"
+ ],
+ "public/scripts/**": [
+  "tests/a11y.test.mjs"
+ ],
+ "tools/*": [
+  "tests/gate-smoke.test.js"
+ ],
+ "tools/lib/**": [
+  "tests/test-support.test.js"
+ ],
+ ".fleet/coverage-contract.json": [
+  "tests/gate-smoke.test.js"
+ ],
+ "tests/support/browser.mjs": [
+  "tests/test-support.test.js"
+ ],
+ "tests/support/signal-exit.mjs": [
+  "tests/test-support.test.js"
+ ],
+ "tests/support/**": [
+  "tests/a11y.test.mjs",
+  "tests/sw-offline.test.mjs",
+  "tests/sw-failover.test.mjs",
+  "tests/webmcp.test.mjs",
+  "tests/webmcp-fuzz.test.mjs",
+  "tests/webmcp-browser.test.mjs",
+  "tests/resilience-ui.test.mjs",
+  "tests/shortcuts.test.mjs",
+  "tests/multitab.test.mjs"
+ ]
 }

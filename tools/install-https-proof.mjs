@@ -39,6 +39,24 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import { sweepProfile } from './lib/reap.mjs';
+import { installSignalExit } from '../tests/support/signal-exit.mjs';
+
+// The bound-kill handler (airhorn-y6mi): this is the one tool of the four that
+// drives a browser and never registered one, so a SIGTERM/SIGINT - fleet-gate's
+// bound, a reaper's job-tree kill, Ctrl-C - killed the node process while the
+// chrome tree it had launched and its /tmp profile survived (measured at
+// ba2cad3: two chrome processes and one profile dir left by a group TERM). The
+// group kill only reaches chrome's main process; the sweep is what finds the
+// renderers that outlive it, so the launch is registered here for the handler.
+let liveBrowser = null;
+installSignalExit(() => {
+  if (!liveBrowser) return;
+  const { chrome, profileDir } = liveBrowser;
+  liveBrowser = null;
+  sweepProfile(profileDir);
+  try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
+  try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
+});
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, '../dist');
@@ -123,6 +141,15 @@ async function launchChrome(extraFlags) {
   // stay in the caller's process group so an ancestor group-kill - what
   // fleet-gate's bound and any job-tree reaper send - reaches the whole tree;
   // SIGKILL runs no handler, so a detached launch outlived the kill.
+  liveBrowser = { chrome, profileDir };
+
+  // A spawn that never produced a process reports through the 'error' event,
+  // not a rejection: with no listener that is an uncaughtException, so it aborts
+  // the tool BEFORE any teardown and leaves the mkdtemp'd profile dir behind
+  // (airhorn-trj7). Raced against the handshake so a bad CHROME_BIN takes
+  // reapNow() like every other launch-window failure.
+  const spawnFailed = new Promise((_, reject) =>
+    chrome.once('error', (err) => reject(new Error(`chrome launch failed: ${err.message}`))));
 
   let wsUrl = null;
   let ws = null;
@@ -131,6 +158,7 @@ async function launchChrome(extraFlags) {
   // with chrome and its profile alive, because cleanup only existed after
   // everything had succeeded (airhorn-51lr).
   const cleanup = () => {
+    liveBrowser = null;
     try { ws?.close(); } catch {}
     chrome.kill('SIGTERM');
     setTimeout(() => { try { chrome.kill('SIGKILL'); } catch {} }, 2000);
@@ -144,6 +172,7 @@ async function launchChrome(extraFlags) {
   // sends, which sit after it and must take the same teardown when a peer
   // that completed the upgrade swallows their replies (airhorn-nbh9).
   const reapNow = () => {
+    liveBrowser = null;
     try { ws?.close(); } catch {}
     sweepProfile(profileDir);
     try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
@@ -154,7 +183,7 @@ async function launchChrome(extraFlags) {
     }
   };
   try {
-    await new Promise((resolve, reject) => {
+    await Promise.race([spawnFailed, new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('Chrome timeout')), 15000);
       const onData = d => {
         const m = d.toString().match(/ws:\/\/[^\s]+/);
@@ -163,7 +192,7 @@ async function launchChrome(extraFlags) {
       chrome.stderr.on('data', onData);
       chrome.stdout.on('data', onData);
       chrome.on('exit', code => reject(new Error('Chrome exited early: ' + code)));
-    });
+    })]);
 
     const port = new URL(wsUrl).port;
     // Discovery is bounded like the handshake above: a DevTools endpoint that
@@ -407,6 +436,7 @@ async function main() {
     if (httpEv.installPrompt.fired) throw new Error('the insecure-HTTP contrast fired the prompt - the contrast is invalid');
     console.log('install-https-proof: PASS');
   } finally {
+    liveBrowser = null; // the sweep below owns it now; a late signal must not repeat it
     // Synchronous reap (airhorn-nbh9): cleanup()'s kill and rm are
     // timer-delayed and the process exits before those timers fire when a
     // failure throws past the launch window - the 51lr lesson applies to the

@@ -255,8 +255,18 @@ async function launchBrowser() {
     throw err;
   };
 
+  // A spawn that never produced a process reports through the 'error' event,
+  // not a rejection - and a missing CHROME_BIN is the ordinary case, since the
+  // default path does not exist on a machine without Chrome. With no listener
+  // that is an uncaughtException: it aborts the audit before fail() can run and
+  // leaves the launch profile behind, where the header promises a labelled
+  // result for every scenario (airhorn-r5me). Raced against the handshake so it
+  // takes the same fail() teardown as the ws-silent and exits-early shapes.
+  const spawnFailed = new Promise((_, reject) => proc.once('error', (err) =>
+    reject(new Error(`chrome launch failed: ${err.message}`))));
+
   try {
-    const wsUrl = await new Promise((resolve, reject) => {
+    const wsUrl = await Promise.race([spawnFailed, new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('chrome launch timeout')), 20000);
       proc.stderr.on('data', (d) => {
         const m = d.toString().match(/ws:\/\/\S+/);
@@ -269,7 +279,7 @@ async function launchBrowser() {
         clearTimeout(timer);
         reject(new Error(`chrome exited early (${code})`));
       });
-    });
+    })]);
 
     const cdp = await Cdp.connect(wsUrl);
     return { proc, cdp, profileDir };
