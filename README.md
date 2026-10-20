@@ -201,6 +201,18 @@ explicitly, a suite can emit a marker line (`console.log('##case## <name>')`), w
 counted as a named case; `ok - <name>` / `not ok - <name>` lines are recognised the same
 way. A suite that dies before reporting is shown as `no result` and still fails the gate.
 
+## Evidence and limitations
+
+All automated test passes and performance numbers in this repository were produced
+by a synthetic harness on a single Linux VM running Chromium.
+
+See [EVIDENCE-LIMITS.md](EVIDENCE-LIMITS.md) for a blunt inventory of what our
+evidence does not cover (zero WebKit/Safari or Gecko verification, synthetic
+`AnalyserNode` probes instead of human ears, self-signed local certs instead of public
+HTTPS, performance measured by emulated mobile throttling or by an unthrottled desktop
+headless harness rather than on a phone, WebMCP flags, and artificial test shims), what
+closing each gap entails, and what it costs.
+
 ## Known gaps
 
 - In the light scheme the red horn on the blue background is 1.18:1, below the 3:1
