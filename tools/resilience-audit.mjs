@@ -23,6 +23,33 @@
  */
 
 import { spawn } from 'node:child_process';
+
+// SIGKILL every process carrying this launch's --user-data-dir: the browser
+// and every child it forked all carry it, so one /proc read finds the whole
+// tree and the browser dies in the same pass as its children are found.
+// Synchronous so the failure path can use it; a no-op where /proc does not
+// exist (airhorn-e4im, the tools' copy of tests/support/browser.mjs's
+// sweepProfile).
+function sweepProfile(profileDir) {
+  const marker = `--user-data-dir=${profileDir}`;
+  for (let pass = 0; pass < 2; pass += 1) {
+    let victims;
+    try {
+      victims = fs.readdirSync('/proc')
+        .filter((entry) => /^\d+$/.test(entry) && Number(entry) !== process.pid)
+        .filter((entry) => {
+          try { return fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8').includes(marker); } catch { return false; }
+        })
+        .map(Number);
+    } catch {
+      return;
+    }
+    if (victims.length === 0) return;
+    for (const pid of victims) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+  }
+}
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -153,11 +180,25 @@ class Cdp {
     };
   }
 
-  static async connect(wsUrl) {
+  static async connect(wsUrl, { timeoutMs = 15000 } = {}) {
     const ws = new WebSocket(wsUrl);
+    // Bounded like every other wait in the launch window: a peer that
+    // completes the HTTP discovery and never finishes the ws upgrade must
+    // reject instead of parking the tool with its launch alive (airhorn-e4im,
+    // same class as airhorn-doek).
     await new Promise((resolve, reject) => {
-      ws.onopen = resolve;
-      ws.onerror = () => reject(new Error(`cannot connect to ${wsUrl}`));
+      // The rejected paths close the socket too: a half-open ws keeps the
+      // event loop alive and the audit never exits after a failed scenario.
+      const bound = setTimeout(() => {
+        try { ws.close(); } catch { /* never opened */ }
+        reject(new Error(`DevTools ws handshake timeout: ${wsUrl} never opened within ${timeoutMs}ms`));
+      }, timeoutMs);
+      ws.onopen = () => { clearTimeout(bound); resolve(); };
+      ws.onerror = () => {
+        clearTimeout(bound);
+        try { ws.close(); } catch { /* already closed */ }
+        reject(new Error(`cannot connect to ${wsUrl}`));
+      };
     });
     return new Cdp(ws);
   }
@@ -213,27 +254,52 @@ async function launchBrowser() {
     'about:blank',
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
-  const wsUrl = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('chrome launch timeout')), 20000);
-    proc.stderr.on('data', (d) => {
-      const m = d.toString().match(/ws:\/\/\S+/);
-      if (m) {
-        clearTimeout(timer);
-        resolve(m[0]);
-      }
-    });
-  });
+  // Self-cleaning launch window (airhorn-e4im): every failure after the spawn
+  // - stderr that never arrives, chrome dying early, a connect that never
+  // opens - used to throw out of here with proc and profileDir unreachable
+  // by the caller (withBrowser's finally closes null). One teardown owns
+  // them all.
+  const fail = (err) => {
+    sweepProfile(profileDir);
+    try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+    try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
+    throw err;
+  };
 
-  const cdp = await Cdp.connect(wsUrl);
-  return { proc, cdp, profileDir };
+  try {
+    const wsUrl = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('chrome launch timeout')), 20000);
+      proc.stderr.on('data', (d) => {
+        const m = d.toString().match(/ws:\/\/\S+/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[0]);
+        }
+      });
+      proc.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error(`chrome exited early (${code})`));
+      });
+    });
+
+    const cdp = await Cdp.connect(wsUrl);
+    return { proc, cdp, profileDir };
+  } catch (err) {
+    return fail(err);
+  }
 }
 
 async function closeBrowser(browser) {
   if (!browser) return;
   try { await browser.cdp.send('Browser.close'); } catch { /* already dead */ }
+  // The sweep ends renderers/cache children a main-only kill leaves behind
+  // to recreate files after the rm (airhorn-jx9, airhorn-nn26 - the same
+  // race audio-parity's finally names), then the pid kill as belt and
+  // braces.
+  sweepProfile(browser.profileDir);
   try { browser.proc.kill('SIGKILL'); } catch { /* already dead */ }
   browser.cdp.close();
-  try { fs.rmSync(browser.profileDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { fs.rmSync(browser.profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
 }
 
 /* ----------------------------------------------------- page instrumentation */
