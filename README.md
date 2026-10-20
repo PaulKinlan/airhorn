@@ -213,6 +213,10 @@ HTTPS, performance measured by emulated mobile throttling or by an unthrottled d
 headless harness rather than on a phone, WebMCP flags, and artificial test shims), what
 closing each gap entails, and what it costs.
 
+[PHONE-CHECK.md](PHONE-CHECK.md) is the same gaps as a two-minute checklist you can run
+on a real phone (Android Chrome, iOS Safari), with the exact pass/fail observable for
+each step - useful, because our evidence is only ever a headless Chromium on a Linux VM.
+
 ## Known gaps
 
 - In the light scheme the red horn on the blue background is 1.18:1, below the 3:1
