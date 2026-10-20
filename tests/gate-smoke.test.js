@@ -371,6 +371,37 @@ test('a launch that never starts fails labelled and leaves no profile behind (ai
   }
 });
 
+test('an audit whose browser never starts reports a labelled ERROR row and keeps its exit contract (airhorn-r5me)', () => {
+  // The audit's contract is "exit 0 and print a table whatever it finds", so a
+  // CHROME_BIN that does not exist has to become an ERROR row for that scenario,
+  // not an uncaught 'error' event that aborts the run and leaks the launch
+  // profile. TMPDIR, RESILIENCE_OUT and the profile live under one per-test dir,
+  // so this probe cannot collide with a concurrent lane's audit.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsm-audit-'));
+  try {
+    const res = spawnSync(process.execPath, [path.join(root, 'tools', 'resilience-audit.mjs')], {
+      encoding: 'utf8',
+      timeout: 120000,
+      env: {
+        ...process.env,
+        RESILIENCE_ONLY: 'liefi',
+        RESILIENCE_OUT: path.join(tmp, 'evidence'),
+        CHROME_BIN: path.join(tmp, 'no-such-chrome'),
+        TMPDIR: tmp,
+      },
+    });
+    assert.equal(res.status, 0, `the audit exits 0 whatever it finds; got ${res.status}: ${res.stderr}`);
+    assert.match(res.stdout, /\[liefi\][\s\S]*ERROR chrome launch failed: .*ENOENT/,
+      `the scenario must carry a labelled ERROR row: ${res.stdout}`);
+    assert.doesNotMatch(res.stderr, /Unhandled 'error' event/,
+      `a spawn error must not abort the audit: ${res.stderr}`);
+    const left = fs.readdirSync(tmp).filter((name) => name !== 'evidence');
+    assert.deepEqual(left, [], `the failed launch left ${JSON.stringify(left)} behind`);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('every script-tier suite is gated by a tests/support change (airhorn-dco)', () => {
   // The report hook is runner-injected into EVERY script-tier (*.test.mjs)
   // suite, so a hook edit can break any of them; the support row must name all
