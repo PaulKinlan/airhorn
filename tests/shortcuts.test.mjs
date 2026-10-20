@@ -31,11 +31,11 @@
  * Run with: npm test (the fast gate builds dist/ first)
  */
 
-import { spawn, execFileSync } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { launchBrowser } from './support/browser.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, '../dist');
@@ -169,87 +169,23 @@ function startServer() {
 
 // Close a browser the way it has to be closed: killing the parent alone leaves
 // its renderers behind (the reaper found 13 processes, 47 minutes old, from one
-// such run). Chrome's children are killed deepest-first, then the parent, and
-// browsers are registered so SIGTERM/SIGINT (what a bound-kill sends first) does
-// the same thing.
+// such run). browser.mjs's killNow() tree-kills deepest-first, and browsers are
+// registered so SIGTERM/SIGINT (what a bound-kill sends first) does the same
+// thing. In the gate's shared Chrome killNow() is a no-op - the gate owns that
+// browser's whole tree and reaps it, targets included.
 const openBrowsers = new Set();
-function killTree(pid) {
-  try {
-    const table = execFileSync('ps', ['-eo', 'pid=,ppid='], { encoding: 'utf8' });
-    const children = new Map();
-    for (const line of table.trim().split('\n')) {
-      const [child, parent] = line.trim().split(/\s+/).map(Number);
-      if (!children.has(parent)) children.set(parent, []);
-      children.get(parent).push(child);
-    }
-    const order = [];
-    const walk = (node) => {
-      for (const child of children.get(node) || []) {
-        walk(child);
-        order.push(child);
-      }
-    };
-    walk(pid);
-    for (const child of [...order].reverse()) {
-      try { process.kill(child, 'SIGKILL'); } catch {}
-    }
-  } catch {}
-  try { process.kill(pid, 'SIGKILL'); } catch {}
-}
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
-    for (const browser of openBrowsers) killTree(browser.chrome.pid);
+    for (const browser of openBrowsers) browser.browser.killNow();
     process.exit(143);
   });
 }
 
 async function launch({ autoplay, label }) {
-  const chromeBin = process.env.CHROME_BIN ||
-    (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
-    fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' :
-    fs.existsSync('/usr/bin/chromium-browser') ? '/usr/bin/chromium-browser' : 'google-chrome');
+  const browser = await launchBrowser({ autoplay, label, timeoutMs: 15000 });
 
-  const args = [
-    '--headless=new',
-    '--no-sandbox',
-    '--disable-gpu',
-    '--remote-debugging-port=0',
-    // No crash reporting: a crashpad handler outlives the browser it belongs to
-    // when the parent is killed abruptly, and it is a shared-path process that
-    // cannot be attributed to a profile afterwards (the reaper found one 47
-    // minutes old). A test browser has nothing to report.
-    '--disable-breakpad',
-    '--disable-crash-reporter',
-    `--user-data-dir=/tmp/chrome-shortcuts-${label}-${Date.now()}`,
-  ];
-  if (autoplay) args.splice(3, 0, '--autoplay-policy=no-user-gesture-required');
-  args.push('about:blank');
-
-  const chrome = spawn(chromeBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-  let wsUrl = null;
-  const stderr = [];
-  await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error(`Chrome start timeout (${label}): ${stderr.join('\n')}`)), 15000);
-    chrome.stderr.on('data', (data) => {
-      const text = data.toString();
-      stderr.push(text);
-      const match = text.match(/ws:\/\/[^\s]+/);
-      if (match) {
-        wsUrl = match[0];
-        clearTimeout(timeout);
-        resolve();
-      }
-    });
-    chrome.on('error', (err) => {
-      clearTimeout(timeout);
-      reject(err);
-    });
-  });
-
-  const chromePort = new URL(wsUrl).port;
-  const targets = await (await fetch(`http://127.0.0.1:${chromePort}/json/list`)).json();
-  const ws = new WebSocket(targets.find((t) => t.type === 'page').webSocketDebuggerUrl);
+  const ws = new WebSocket(browser.pageWsUrl);
   await new Promise((resolve, reject) => {
     ws.onopen = resolve;
     ws.onerror = reject;
@@ -351,12 +287,12 @@ async function launch({ autoplay, label }) {
     offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1,
   });
 
-  const handle = { chrome };
+  const handle = { browser };
   openBrowsers.add(handle);
   const close = async () => {
     openBrowsers.delete(handle);
     try { ws.close(); } catch {}
-    killTree(chrome.pid);
+    await browser.close();
   };
 
   return { send, evaluate, snapshot, navigate, waitFor, press, setOffline, close, sleep, logs };

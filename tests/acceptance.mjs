@@ -20,11 +20,12 @@
  * Run with: npm run test:acceptance   (builds first)
  */
 
-import { spawn, execSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { launchBrowser, chromeBin } from './support/browser.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, '../dist');
@@ -263,54 +264,13 @@ async function run() {
   const port = server.address().port;
   const origin = `http://127.0.0.1:${port}`;
 
-  let chrome = null;
+  let browser = null;
   let ws = null;
 
   try {
     /* -------------------------------- browser -------------------------------- */
-    const chromeBin = process.env.CHROME_BIN ||
-      (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
-      fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' :
-      fs.existsSync('/usr/bin/chromium-browser') ? '/usr/bin/chromium-browser' : 'google-chrome');
-
-    chrome = spawn(chromeBin, [
-      '--headless=new',
-      '--no-sandbox',
-      '--disable-gpu',
-      '--autoplay-policy=no-user-gesture-required',
-      '--enable-features=WebMCP,WebMCPTesting',
-      '--remote-debugging-port=0',
-      `--user-data-dir=/tmp/chrome-acceptance-profile-${Date.now()}`,
-      'about:blank',
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
-
-    let wsUrl = null;
-    const stderrLines = [];
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(
-        () => reject(new Error(`Chrome start timeout: ${stderrLines.join('\n')}`)), 20000,
-      );
-      chrome.stderr.on('data', (data) => {
-        const text = data.toString();
-        stderrLines.push(text);
-        const match = text.match(/ws:\/\/[^\s]+/);
-        if (match) {
-          wsUrl = match[0];
-          clearTimeout(timeout);
-          resolve();
-        }
-      });
-      chrome.on('error', (err) => { clearTimeout(timeout); reject(err); });
-      chrome.on('exit', (code) => {
-        clearTimeout(timeout);
-        reject(new Error(`Chrome exited early (${code}): ${stderrLines.join('\n')}`));
-      });
-    });
-
-    const chromePort = new URL(wsUrl).port;
-    const targets = await (await fetch(`http://127.0.0.1:${chromePort}/json/list`)).json();
-    const pageTarget = targets.find((t) => t.type === 'page');
-    ws = new WebSocket(pageTarget.webSocketDebuggerUrl);
+    browser = await launchBrowser({ autoplay: true, webmcp: true, label: 'acceptance', timeoutMs: 20000 });
+    ws = new WebSocket(browser.pageWsUrl);
     await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
 
     let msgId = 1;
@@ -429,7 +389,7 @@ async function run() {
     notes.webmcp = {
       native: webmcpNative,
       source: await evaluate('window.__webmcpSource || "none"'),
-      chrome: execSync(`${JSON.stringify(chromeBin)} --version`).toString().trim(),
+      chrome: execSync(`${JSON.stringify(chromeBin())} --version`).toString().trim(),
       flags: '--enable-features=WebMCP,WebMCPTesting',
     };
 
@@ -895,8 +855,8 @@ async function run() {
     if (ws) {
       try { ws.close(); } catch {}
     }
-    if (chrome) {
-      try { chrome.kill('SIGKILL'); } catch {}
+    if (browser) {
+      await browser.close();
     }
     await new Promise((resolve) => server.close(resolve));
   }

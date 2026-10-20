@@ -1,8 +1,8 @@
-import { spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { launchBrowser } from './support/browser.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EVIDENCE_DIR = '/tmp/airhorn-boot-watchdog';
@@ -95,38 +95,8 @@ async function testBootWatchdog() {
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
 
-  const chromeBin = process.env.CHROME_BIN ||
-    (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
-    fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' :
-    fs.existsSync('/usr/bin/chromium-browser') ? '/usr/bin/chromium-browser' : 'google-chrome');
-
-  const profileDir = '/tmp/chrome-boot-watchdog-profile-' + Date.now();
-  const chrome = spawn(chromeBin, [
-    '--headless=new',
-    '--no-sandbox',
-    '--disable-gpu',
-    '--remote-debugging-port=0',
-    `--user-data-dir=${profileDir}`,
-    'about:blank'
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
-
-  let wsUrl = null;
-  await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Chrome timeout')), 10000);
-    chrome.stderr.on('data', (d) => {
-      const match = d.toString().match(/ws:\/\/[^\s]+/);
-      if (match) {
-        wsUrl = match[0];
-        clearTimeout(timeout);
-        resolve();
-      }
-    });
-  });
-
-  const chromePort = new URL(wsUrl).port;
-  const targetsRes = await fetch(`http://127.0.0.1:${chromePort}/json/list`);
-  const targets = await targetsRes.json();
-  const pageWsUrl = targets.find(t => t.type === 'page').webSocketDebuggerUrl;
+  const browser = await launchBrowser({ label: 'resilience-ui', timeoutMs: 10000 });
+  const pageWsUrl = browser.pageWsUrl;
 
   const ws = new WebSocket(pageWsUrl);
   await new Promise(r => ws.onopen = r);
@@ -686,11 +656,8 @@ async function testBootWatchdog() {
 
     console.log('ALL RESILIENCE-UI CHECKS PASSED!');
   } finally {
-    chrome.kill('SIGTERM');
+    await browser.close();
     server.close();
-    try {
-      fs.rmSync(profileDir, { recursive: true, force: true });
-    } catch {}
   }
 }
 

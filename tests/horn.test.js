@@ -430,11 +430,11 @@ test('gracefully handles unavailable AudioContext', async () => {
 });
 
 test('browser verification: forced mp3 404 still activates synth, sounds audibly, and toggles UI', async () => {
-  const { spawn } = await import('node:child_process');
   const http = await import('node:http');
   const fs = await import('node:fs');
   const path = await import('node:path');
   const { fileURLToPath } = await import('node:url');
+  const { launchBrowser } = await import('./support/browser.mjs');
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const distDir = path.join(__dirname, '../dist');
@@ -443,9 +443,8 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
   }
 
   let server = null;
-  let chrome = null;
+  let browser = null;
   let ws = null;
-  const profileDir = '/tmp/chrome-horn-fallback-' + Date.now();
 
   try {
     let delayMp3 = 0;
@@ -497,42 +496,9 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
     await new Promise(r => server.listen(0, '127.0.0.1', r));
     const port = server.address().port;
 
-    const chromeBin = process.env.CHROME_BIN ||
-      (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
-      fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : 'google-chrome');
+    browser = await launchBrowser({ autoplay: true, label: 'horn', timeoutMs: 10000 });
 
-    chrome = spawn(chromeBin, [
-      '--headless=new',
-      '--no-sandbox',
-      '--disable-gpu',
-      '--autoplay-policy=no-user-gesture-required',
-      '--remote-debugging-port=0',
-      `--user-data-dir=${profileDir}`,
-      'about:blank'
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
-
-    let wsUrl = null;
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Chrome timeout')), 10000);
-      chrome.stderr.on('data', (d) => {
-        const match = d.toString().match(/ws:\/\/[^\s]+/);
-        if (match) {
-          wsUrl = match[0];
-          clearTimeout(timeout);
-          resolve();
-        }
-      });
-      chrome.on('error', (err) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
-    });
-
-    const chromePort = new URL(wsUrl).port;
-    const targetsRes = await fetch(`http://127.0.0.1:${chromePort}/json/list`);
-    const targets = await targetsRes.json();
-    const pageWsUrl = targets.find(t => t.type === 'page').webSocketDebuggerUrl;
-
+    const pageWsUrl = browser.pageWsUrl;
     ws = new WebSocket(pageWsUrl);
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('WebSocket onopen timeout')), 5000);
@@ -780,15 +746,12 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
     if (ws) {
       try { ws.close(); } catch {}
     }
-    if (chrome) {
-      chrome.kill('SIGTERM');
+    if (browser) {
+      await browser.close();
     }
     if (server) {
       server.close();
     }
-    try {
-      fs.rmSync(profileDir, { recursive: true, force: true });
-    } catch {}
   }
 });
 
