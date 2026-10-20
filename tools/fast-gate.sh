@@ -2,7 +2,10 @@
 # tools/fast-gate.sh — airhorn's FAST tier: run the suites that cover what a change can affect,
 # and FAIL LOUDLY on a changed file that maps to none (~/fleet/docs/speed.md R2/R5/R14).
 #
-# Output contract — these exact lines are parsed by ~/fleet/remote/check-coverage.py:
+# Output contract — these exact lines are parsed by ~/fleet/remote/producer-verdict.py:
+# (the machine declaration that names them is tools/check.conf; the pin that keeps the two
+# in step is tests/gate-smoke.test.js 'the fleet contract recognises every rc-0 verdict line
+# the gate emits' — airhorn-3dph)
 #   fast-gate: running: <suite>
 #   fast-gate: passed: <suite>
 #   fast-gate: failed: <suite>
@@ -22,9 +25,11 @@
 #   FAST_GATE_JOBS=2 bash tools/fast-gate.sh    # cap parallel suites
 #   FAST_GATE_ALLOW_ZERO=1 bash tools/fast-gate.sh  # bless a suite-free change (every file exempt)
 #
-# Exit codes: 0 = every selected suite passed (or nothing was affected, or a suite-free change was
-# explicitly acknowledged with FAST_GATE_ALLOW_ZERO=1); 1 = a suite failed, a mapped suite is missing,
-# a changed file is unmapped, or a non-empty change selected ZERO suites without the acknowledgement.
+# Exit codes: 0 = every selected suite passed (or nothing was affected, or a zero-execution verdict
+# was explicitly acknowledged with FAST_GATE_ALLOW_ZERO=1: every changed file exempt, or every
+# selected suite '~'-pending); 1 = a suite failed, a mapped suite is missing, a changed file is
+# unmapped, a non-empty change selected ZERO suites without the acknowledgement, or every selected
+# suite is '~'-pending (nothing executed) without the acknowledgement.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
@@ -275,7 +280,19 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
 fi
 
 if [ "${#RUN[@]}" -eq 0 ]; then
-  echo "fast-gate: PASS (0 suite(s), ${#CHANGED[@]} changed file(s), all pending)"
+  # Every selected suite is '~'-pending, so ZERO suites executed: the same green-with-no-suites
+  # shape airhorn-n0jd closed for '!' rows, reached through a map row instead of a changed path
+  # (airhorn-dn7d). A '~' row that never lands (a forgotten sibling branch) would otherwise keep
+  # every change to its source permanently green with nothing run. Same rule, same acknowledgement:
+  # FAIL unless FAST_GATE_ALLOW_ZERO=1 explicitly blesses the zero-execution verdict.
+  if [ "${FAST_GATE_ALLOW_ZERO:-0}" != "1" ]; then
+    echo "fast-gate: FAIL - ${#PENDING[@]} selected suite(s) are all '~'-pending, so 0 suite(s) executed." >&2
+    echo "fast-gate: a verdict with zero executed suites cannot be green (airhorn-n0jd, airhorn-dn7d); the" >&2
+    echo "fast-gate: pending suites are named above. Land the sibling branch that brings them, or - if this" >&2
+    echo "fast-gate: change genuinely must execute nothing - re-run with FAST_GATE_ALLOW_ZERO=1." >&2
+    exit 1
+  fi
+  echo "fast-gate: ZERO-SUITE PASS (${#CHANGED[@]} changed file(s), all ${#PENDING[@]} pending; FAST_GATE_ALLOW_ZERO=1)"
   exit 0
 fi
 
