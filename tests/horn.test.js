@@ -9,9 +9,14 @@ import { Horn } from '../src/horn.js';
 
 class FakeAudioParam {
   value = 1;
-  setValueAtTime(val) { this.value = val; }
-  exponentialRampToValueAtTime(val) { this.value = val; }
+  // Every scheduled value, in order: the synth voice contract (level, length,
+  // pitch - airhorn-u7s) is asserted against these rather than against one
+  // final value, which release automation overwrites.
+  scheduled = [];
+  setValueAtTime(val) { this.value = val; this.scheduled.push(val); }
+  exponentialRampToValueAtTime(val) { this.value = val; this.scheduled.push(val); }
   cancelScheduledValues() {}
+  get peak() { return this.scheduled.length ? Math.max(...this.scheduled) : this.value; }
 }
 
 class FakeAudioNode {
@@ -28,8 +33,9 @@ class FakeOscillatorNode extends FakeAudioNode {
   frequency = new FakeAudioParam();
   started = false;
   stopped = false;
+  stopTime = null;
   start() { this.started = true; }
-  stop() { this.stopped = true; }
+  stop(time) { this.stopped = true; this.stopTime = time ?? null; }
 }
 
 class FakeBufferSourceNode extends EventTarget {
@@ -146,7 +152,7 @@ test('falls back to synth when fetch returns 404', async () => {
     assert.equal(horn.isPlaying(), true);
     assert.equal(ctx.sources.length, 0);
     assert.equal(ctx.oscillators.length, 3);
-    assert.ok(ctx.oscillators.every(o => o.type === 'sawtooth' && o.started));
+    assert.ok(ctx.oscillators.every(o => o.type === 'triangle' && o.started));
 
     let stoppedCalled = false;
     horn.onstopped = () => { stoppedCalled = true; };
@@ -757,4 +763,47 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
   }
 });
 
+test('the fallback voice keeps the measured parity with the sample (airhorn-u7s)', async () => {
+  // These five values are not style: they are what makes the synthesised blast
+  // measure like the recording (pitch, loudness, length, attack, brightness).
+  // tools/audio-parity.mjs is the evidence; this pin is the regression guard, so
+  // a future tuning change cannot silently reopen the gap it closed.
+  //   pitch    715/1441/2156 Hz - the sample's own partials (was 233/349/466)
+  //   level    0.8 peak gain     - RMS -12.9 vs the sample's -14.0 dBFS (was 0.5)
+  //   length   0.9 s scheduled   - 0.80 s audible vs the sample's 0.84 (was 1.2)
+  //   attack   0.14 s            - the recording swells for ~180 ms (was 0.04)
+  //   waveform triangle          - a sawtooth here measures 3.3 kHz centroid, 2.7x
+  //                                the sample's 1.2 kHz; triangle lands at 1.5 kHz
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  globalThis.fetch = async () => ({ ok: false, status: 404 });
 
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    await horn.start({ loop: false });
+
+    assert.equal(ctx.oscillators.length, 3);
+    assert.deepEqual(
+      ctx.oscillators.map((osc) => osc.type),
+      ['triangle', 'triangle', 'triangle'],
+      'the fallback must use the triangle voice measured in parity with the sample',
+    );
+    assert.deepEqual(
+      ctx.oscillators.map((osc) => osc.frequency.scheduled[0]),
+      [715, 1441, 2156],
+      'the fallback must sound the sample\'s partials, not a 2.6-octave-lower chord',
+    );
+
+    const master = ctx.gains[0];
+    assert.equal(master.gain.peak, 0.8, 'the fallback level is matched to the sample (-14 dBFS RMS)');
+    assert.equal(master.gain.scheduled[1], 0.8, 'the attack ramp must reach the matched level');
+    // Attack: the envelope reaches full level 0.14 s in, not 0.04 s.
+    assert.ok(master.gain.scheduled.includes(0.8), 'the attack must not be a hard 40 ms step');
+
+    for (const osc of ctx.oscillators) {
+      assert.equal(osc.stopTime, 0.9, 'a single blast is scheduled for the sample\'s ~0.8 s length');
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
