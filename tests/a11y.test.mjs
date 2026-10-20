@@ -1,9 +1,9 @@
-import { spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { quiescenceProbe, waitForQuiescence, lateErrorMutant } from './support/quiescence.mjs';
+import { launchBrowser } from './support/browser.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -45,50 +45,12 @@ async function run() {
   const port = server.address().port;
   console.log(`Server listening on port ${port}`);
 
-  let chrome = null;
+  let browser = null;
   try {
-    const chromeBin = process.env.CHROME_BIN ||
-      (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
-      fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' :
-      fs.existsSync('/usr/bin/chromium-browser') ? '/usr/bin/chromium-browser' : 'google-chrome');
+    browser = await launchBrowser({ label: 'a11y', timeoutMs: 10000 });
 
-    chrome = spawn(chromeBin, [
-      '--headless=new',
-      '--no-sandbox',
-      '--disable-gpu',
-      '--remote-debugging-port=0',
-      '--user-data-dir=/tmp/chrome-test-profile-' + Date.now(),
-      'about:blank'
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
-
-    let wsUrl = null;
-    const stderrLines = [];
-
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Chrome start timeout: ' + stderrLines.join('\n'))), 10000);
-      chrome.stderr.on('data', (data) => {
-        const text = data.toString();
-        stderrLines.push(text);
-        const match = text.match(/ws:\/\/[^\s]+/);
-        if (match) {
-          wsUrl = match[0];
-          clearTimeout(timeout);
-          resolve();
-        }
-      });
-      chrome.on('error', (err) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
-    });
-
-    console.log(`Chrome started, wsUrl: ${wsUrl}`);
-
-    const chromePort = new URL(wsUrl).port;
-    const targetsRes = await fetch(`http://127.0.0.1:${chromePort}/json/list`);
-    const targets = await targetsRes.json();
-    const pageTarget = targets.find(t => t.type === 'page');
-    const pageWsUrl = pageTarget.webSocketDebuggerUrl;
+    console.log(`Chrome started, wsUrl: ${browser.browserWsUrl}`);
+    const pageWsUrl = browser.pageWsUrl;
     console.log(`Chrome page target wsUrl: ${pageWsUrl}`);
 
     // Connect via WebSocket to Page target
@@ -861,8 +823,8 @@ async function run() {
 
     console.log('ALL VERIFICATION CHECKS PASSED!');
   } finally {
-    if (chrome) {
-      chrome.kill('SIGTERM');
+    if (browser) {
+      await browser.close();
     }
     server.close();
   }

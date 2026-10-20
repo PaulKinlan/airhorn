@@ -46,11 +46,11 @@
  * Run with: npm test (the fast gate builds dist/ first)
  */
 
-import { spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { launchBrowser } from './support/browser.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, '../dist');
@@ -259,31 +259,12 @@ async function run() {
     }
   };
 
-  const profileDir = fs.mkdtempSync('/tmp/airhorn-multitab-');
-  const chrome = spawn(process.env.CHROME_BIN || 'google-chrome', [
-    '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-    // Launching the app from a shortcut is a user gesture; the two-tab world
-    // this suite models has the same audience (shortcuts suite, context A).
-    '--autoplay-policy=no-user-gesture-required',
-    '--remote-debugging-port=0', `--user-data-dir=${profileDir}`,
-    '--disable-breakpad', '--disable-crash-reporter',
-    'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  const browser = await launchBrowser({ autoplay: true, label: 'multitab', timeoutMs: 20000 });
 
   let cdp = null;
   try {
-    const wsUrl = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Chrome timeout')), 20000);
-      chrome.stderr.on('data', (d) => {
-        const m = d.toString().match(/ws:\/\/\S+/);
-        if (m) { clearTimeout(timer); resolve(m[0]); }
-      });
-    });
-    cdp = await connectCdp(wsUrl);
+    cdp = await connectCdp(browser.browserWsUrl);
     const { send, waitForEvent } = cdp;
-
-    const targets = await (await fetch(`http://127.0.0.1:${new URL(wsUrl).port}/json/list`)).json();
-    const first = targets.find((t) => t.type === 'page');
 
     // openTab: a real second tab of the same origin, with its own CDP session,
     // its own instrumented documents and a per-tab identity for the log.
@@ -370,9 +351,17 @@ async function run() {
 
     console.log('--- Opening tab B on the same origin (shared worker) ---');
     const B = await openTab('B', `${origin}/`);
-    assert(await B.hornState(), 'tab B did not boot');
+    // .booted, not object truthiness: hornState() returns an object even when
+    // the tab never booted, and an object is always truthy (airhorn-tuuq M1).
+    assert((await B.hornState()).booted, 'tab B did not boot');
     const badgeApi = await B.evaluate('window.__badgeApi');
     console.log(`  two tabs live; badge API present in this browser: ${badgeApi}`);
+    // The badge assertions below are the point of sections B/C (airhorn-xkq,
+    // airhorn-70k); an `if (badgeApi)` guard with no else reads green by
+    // skipping them (airhorn-tuuq M5). Fail loudly instead: without the API
+    // this suite cannot verify its headline behavior, and the gate's Chrome
+    // always has it.
+    assert(badgeApi === true, 'setAppBadge/clearAppBadge not exposed in this browser; the badge-sharing assertions would be skipped');
 
     /* ------- B. horning in one tab must not leave the other one stale ------ */
     console.log('\n--- B. three blasts in tab A; tab B must stay honest throughout ---');
@@ -567,7 +556,12 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       await D.waitBooted();
       console.log(`  late tab announced its reload: ${JSON.stringify(ready)}`);
     } else {
-      console.log('  late tab did not need to reload (it activated onto the new controller); nothing to assert.');
+      // D opened on an origin the previous worker already controlled, so it
+      // hadController at parse and MUST reload via controllerchange when the
+      // new worker takes over (airhorn-56j). 'No reload needed' cannot happen
+      // here; letting it log-and-pass made this section green when the reload
+      // was removed entirely (airhorn-tuuq M9, mutation-verified).
+      throw new Error('the mid-install tab never reloaded on controllerchange - the airhorn-56j announcement path was not exercised');
     }
     state.swShim = null;
 
@@ -735,15 +729,9 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
     console.log('\nALL MULTITAB COHERENCE CHECKS PASSED');
   } finally {
     try { cdp?.ws.close(); } catch { /* already gone */ }
-    // Kill the GROUP, not the launched pid: SIGKILL to the main chrome
-    // process orphaned renderers/cache children that kept writing the
-    // profile after the rmSync below (airhorn-jx9, fleet lessons: signal
-    // the group).
-    try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* group gone */ }
-    try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
-    // Leave no profile dir behind: fleet-tmp-clean only reclaims marked
-    // paths, so an unremoved /tmp profile is retained forever (airhorn-jx9).
-    try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch { /* already gone */ }
+    // browser.close() does what airhorn-jx9's inline group-kill + rmSync did:
+    // SIGTERM, tree-SIGKILL after 1.5s, profile removal.
+    try { await browser.close(); } catch { /* already gone */ }
     server.close();
   }
 }

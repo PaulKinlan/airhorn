@@ -273,13 +273,17 @@ fi
 
 printf 'fast-gate: running: %s\n' "${RUN[@]}"
 n=0
+SUITE_PIDS=()
 for s in "${RUN[@]}"; do
   key=$(printf '%s' "$s" | tr '/.' '__')
   ( cd "$ROOT" && AIRHORN_RESULTS_DIR="$RESULTS_DIR" $(runner_for "$s") "$s" >"$TMP/$key.log" 2>&1; echo $? >"$TMP/$key.rc" ) &
+  SUITE_PIDS+=($!)
   n=$((n + 1))
   if [ "$n" -ge "$JOBS" ]; then wait -n; n=$((n - 1)); fi
 done
-wait
+# Wait on the suite pids by name: a bare 'wait' would also reap any other
+# background job this script ever starts, and an immortal one would hang the gate.
+wait "${SUITE_PIDS[@]}"
 
 # Report what each suite actually did, not just that it exited: for node:test the
 # TAP summary, for script-tier suites the hook's own line (which names the step a

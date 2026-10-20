@@ -23,11 +23,11 @@
  * Run with: npm test (the fast gate builds dist/ first)
  */
 
-import { spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { launchBrowser } from './support/browser.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, '../dist');
@@ -156,28 +156,14 @@ async function run() {
     }
   };
 
-  const profileDir = fs.mkdtempSync('/tmp/airhorn-failover-');
-  const chrome = spawn(process.env.CHROME_BIN || 'google-chrome', [
-    '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-    '--remote-debugging-port=0', `--user-data-dir=${profileDir}`,
-    'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  const browser = await launchBrowser({ label: 'sw-failover', timeoutMs: 20000 });
 
   let cdp = null;
   try {
-    const wsUrl = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Chrome timeout')), 20000);
-      chrome.stderr.on('data', (d) => {
-        const m = d.toString().match(/ws:\/\/\S+/);
-        if (m) { clearTimeout(timer); resolve(m[0]); }
-      });
-    });
-    cdp = await connectCdp(wsUrl);
+    cdp = await connectCdp(browser.browserWsUrl);
     const { send, waitForEvent } = cdp;
 
-    const targets = await (await fetch(`http://127.0.0.1:${new URL(wsUrl).port}/json/list`)).json();
-    const page = targets.find((t) => t.type === 'page');
-    const { sessionId } = await send('Target.attachToTarget', { targetId: page.id, flatten: true });
+    const { sessionId } = await send('Target.attachToTarget', { targetId: browser.pageTargetId, flatten: true });
     const session = (method, params = {}) => send(method, params, sessionId);
 
     await session('Page.enable');
@@ -271,6 +257,12 @@ async function run() {
       return { title: document.title, text: text.slice(0, 300), hasRetry: !!retry };
     })()`).catch(() => ({ title: '', text: '', hasRetry: false }));
     assert(noShell.loaded, 'the fallback navigation never completed');
+    // The title pins the served document: without it, the app's own shell
+    // (buttons + long body text) or Chrome's offline error page (reload
+    // button + "No internet") both satisfy hasRetry and text.length
+    // (airhorn-tuuq F3).
+    assert(fallback.title === 'The Air Horner - no connection',
+      `the no-shell fallback was not the service worker's offline document: ${JSON.stringify(fallback)}`);
     assert(fallback.hasRetry,
       `the no-shell fallback offers no way to retry: ${JSON.stringify(fallback)}`);
     assert(fallback.text.length > 10,
@@ -293,7 +285,11 @@ async function run() {
       const text = live.map((el) => (el.textContent || '').trim()).join(' | ');
       return { regions: live.length, text };
     })()`);
-    const REPORT_RE = /update|could not|failed|latest|previous version/i;
+    // The FAILURE copy, not the progress copy: /update/i alone matches the
+    // "Updating the Air Horner..." announcement that fires at updatefound, so
+    // the old regex passed green with the failure announcement deleted
+    // (airhorn-tuuq F1). It must name the failure outcome.
+    const REPORT_RE = /could not update|previous version|update failed/i;
     // Same 3s window, but it stops as soon as the report lands (airhorn-iwf).
     const report = (await waitUntil(async () => {
       const r = await readReport();
@@ -320,15 +316,9 @@ async function run() {
     console.log('\nALL FAILOVER CHECKS PASSED!');
   } finally {
     try { cdp?.ws.close(); } catch { /* already gone */ }
-    // Kill the GROUP, not the launched pid: SIGKILL to the main chrome
-    // process orphaned renderers/cache children that kept writing the
-    // profile after the rmSync below (airhorn-jx9, fleet lessons: signal
-    // the group).
-    try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* group gone */ }
-    try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
-    // Leave no profile dir behind: fleet-tmp-clean only reclaims marked
-    // paths, so an unremoved /tmp profile is retained forever (airhorn-jx9).
-    try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch { /* already gone */ }
+    // browser.close() does what airhorn-jx9's inline group-kill + rmSync did:
+    // SIGTERM, tree-SIGKILL after 1.5s, profile removal.
+    try { await browser.close(); } catch { /* already gone */ }
     server.close();
   }
 }

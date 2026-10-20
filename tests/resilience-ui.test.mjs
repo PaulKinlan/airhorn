@@ -1,8 +1,8 @@
-import { spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { launchBrowser } from './support/browser.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EVIDENCE_DIR = '/tmp/airhorn-boot-watchdog';
@@ -95,38 +95,8 @@ async function testBootWatchdog() {
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
 
-  const chromeBin = process.env.CHROME_BIN ||
-    (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
-    fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' :
-    fs.existsSync('/usr/bin/chromium-browser') ? '/usr/bin/chromium-browser' : 'google-chrome');
-
-  const profileDir = '/tmp/chrome-boot-watchdog-profile-' + Date.now();
-  const chrome = spawn(chromeBin, [
-    '--headless=new',
-    '--no-sandbox',
-    '--disable-gpu',
-    '--remote-debugging-port=0',
-    `--user-data-dir=${profileDir}`,
-    'about:blank'
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
-
-  let wsUrl = null;
-  await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Chrome timeout')), 10000);
-    chrome.stderr.on('data', (d) => {
-      const match = d.toString().match(/ws:\/\/[^\s]+/);
-      if (match) {
-        wsUrl = match[0];
-        clearTimeout(timeout);
-        resolve();
-      }
-    });
-  });
-
-  const chromePort = new URL(wsUrl).port;
-  const targetsRes = await fetch(`http://127.0.0.1:${chromePort}/json/list`);
-  const targets = await targetsRes.json();
-  const pageWsUrl = targets.find(t => t.type === 'page').webSocketDebuggerUrl;
+  const browser = await launchBrowser({ label: 'resilience-ui', timeoutMs: 10000 });
+  const pageWsUrl = browser.pageWsUrl;
 
   const ws = new WebSocket(pageWsUrl);
   await new Promise(r => ws.onopen = r);
@@ -539,6 +509,23 @@ async function testBootWatchdog() {
 
     // --- Case 8: a slow bundle arriving late retires the banner (airhorn-duj) ---
     console.log('--- Case 8: slow bundle arrives after the banner');
+    // Run the late-boot scenario on a page with NO service-worker controller.
+    // The update cases (6/10) publish a byte-different worker; a page WITH a
+    // controller reloads itself via controllerchange the moment that worker
+    // takes over, and the fresh document's banner is hidden BY DEFAULT - the
+    // 'banner retired' assertion then passes without the retirement ever
+    // running. (Found by the ie0b mutation check: disabling the retirement in
+    // the page left this case green; navs showed 'reload'.) Unregister first,
+    // like case 10, so the only thing that can hide the banner is the boot.
+    await evaluateAwaited(`(async () => {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg) await reg.unregister();
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    })()`);
+    // The old worker dies with its last client (this page); give the browser
+    // a beat to drop the registration before the fresh navigation.
+    await new Promise(r => setTimeout(r, 500));
     await send('Fetch.enable', { patterns: [{ urlPattern: '*assets/*.js', requestStage: 'Request' }] });
     fetchHold = true;
     // Mark the outgoing document first: Page.navigate resolves when the
@@ -620,6 +607,12 @@ async function testBootWatchdog() {
     if ((await evaluate(`window.__hadControllerAtParse`)) !== false) {
       throw new Error('expected a page with no controller at parse for the no-reload update generation');
     }
+    // __statusLog survives navigation via sessionStorage, so it still holds
+    // case 6's "new version is ready". Without clearing it, the wait below
+    // matches that leftover on its first poll and case 10 passes without any
+    // update happening at all (airhorn-0p88 / airhorn-tuuq R1,
+    // mutation-verified: swBody = swV1 here still passed green).
+    await evaluate(`window.__statusLog.length = 0; sessionStorage.setItem('__statusLog', '[]'); 1`);
     swBody = swV2;
     await evaluate(`navigator.serviceWorker.getRegistration().then(reg => reg.update())`);
     await waitUntil(`window.__statusLog.some(m => /new version is ready/i.test(m))`, 10000, 'successful update to complete');
@@ -686,11 +679,8 @@ async function testBootWatchdog() {
 
     console.log('ALL RESILIENCE-UI CHECKS PASSED!');
   } finally {
-    chrome.kill('SIGTERM');
+    await browser.close();
     server.close();
-    try {
-      fs.rmSync(profileDir, { recursive: true, force: true });
-    } catch {}
   }
 }
 
