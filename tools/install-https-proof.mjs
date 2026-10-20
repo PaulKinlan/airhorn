@@ -164,6 +164,21 @@ async function launchChrome(extraFlags) {
     const rm = () => { try { fs.rmSync(profileDir, { recursive: true, force: true }); return true; } catch { return false; } };
     setTimeout(() => { if (!rm()) setTimeout(rm, 1500); }, 300);
   };
+  // The launch window's synchronous reap (airhorn-51lr): cleanup()'s kill and
+  // rm are timer-delayed and the process exits before those timers fire. Used
+  // by the launch try/catch below AND by the Page.enable/Runtime.enable
+  // sends, which sit after it and must take the same teardown when a peer
+  // that completed the upgrade swallows their replies (airhorn-nbh9).
+  const reapNow = () => {
+    try { ws?.close(); } catch {}
+    sweepTree(profileDir);
+    try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try { fs.rmSync(profileDir, { recursive: true, force: true }); break; } catch { /* writeback race - retry */ }
+      const wait = Date.now() + 100;
+      while (Date.now() < wait) { /* spin: signal/error path, keep it sync */ }
+    }
+  };
   try {
     await new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('Chrome timeout')), 15000);
@@ -198,17 +213,7 @@ async function launchChrome(extraFlags) {
       ws.onerror = () => { clearTimeout(bound); reject(new Error('DevTools ws handshake failed: the page socket errored')); };
     });
   } catch (err) {
-    // Synchronous reap: cleanup()'s rm is timer-delayed and the process exits
-    // before those timers fire, so the error path must not rely on it
-    // (airhorn-51lr). Bounded retries absorb the dying child's writeback.
-    try { ws?.close(); } catch {}
-    sweepTree(profileDir);
-    try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      try { fs.rmSync(profileDir, { recursive: true, force: true }); break; } catch { /* writeback race - retry */ }
-      const wait = Date.now() + 100;
-      while (Date.now() < wait) { /* spin: signal/error path, keep it sync */ }
-    }
+    reapNow();
     throw err;
   }
 
@@ -226,10 +231,33 @@ async function launchChrome(extraFlags) {
   const send = (method, params = {}) => {
     const id = msgId++;
     return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
+      // The reply wait is bounded like every wait in this file (airhorn-nbh9,
+      // the class below airhorn-doek's ws-open bound): a peer that completes
+      // the upgrade and then never replies rejects labelled instead of
+      // parking the tool with its launch alive.
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`CDP reply timeout: ${method} got no reply within 30000ms`));
+      }, 30000);
+      pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
       ws.send(JSON.stringify({ id, method, params }));
     });
   };
+  // The injection and evaluation domains must be enabled for
+  // addScriptToEvaluateOnNewDocument to take effect on new documents. These
+  // sends sit after the launch try/catch, so they carry their own reap: a
+  // peer that completed the upgrade and swallows the replies is a launch
+  // failure and must take the same synchronous teardown (airhorn-nbh9).
+  try {
+    await send('Page.enable');
+    await send('Runtime.enable');
+  } catch (err) {
+    reapNow();
+    throw err;
+  }
   const evaluate = async expression => {
     const res = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
     if (res.exceptionDetails) {
@@ -238,10 +266,6 @@ async function launchChrome(extraFlags) {
     return res.result.value;
   };
 
-  // The injection and evaluation domains must be enabled for
-  // addScriptToEvaluateOnNewDocument to take effect on new documents.
-  await send('Page.enable');
-  await send('Runtime.enable');
   const waitFor = async (expression, timeoutMs = 20000, everyMs = 200) => {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
@@ -261,7 +285,7 @@ async function launchChrome(extraFlags) {
     fs.writeFileSync(path.join(outDir, file), Buffer.from(res.data, 'base64'));
     return file;
   };
-  return { send, evaluate, waitFor, navigate, screenshot, cleanup };
+  return { send, evaluate, waitFor, navigate, screenshot, cleanup, chrome, profileDir };
 }
 
 // Runs one origin end to end and returns its evidence object. On the HTTP
@@ -352,6 +376,8 @@ async function main() {
   let serverHttp = null;
   let serverHttps = null;
   let cdp = null;
+  let chrome = null;
+  let profileDir = null;
   try {
     const { key, cert, spki } = makeSelfSignedCert(tmp);
     serverHttp = await makeServer(distDir, null);
@@ -368,6 +394,8 @@ async function main() {
       `--host-resolver-rules=MAP ${HOSTNAME} 127.0.0.1`,
       `--ignore-certificate-errors-spki-list=${spki}`,
     ]);
+    chrome = cdp.chrome;
+    profileDir = cdp.profileDir;
 
     const httpEv = await probeOrigin(cdp, `http://${HOSTNAME}:${httpPort}/`, 'http-insecure', false);
     const httpsEv = await probeOrigin(cdp, `https://${HOSTNAME}:${httpsPort}/`, 'https-selfsigned', true);
@@ -405,6 +433,17 @@ async function main() {
     if (httpEv.installPrompt.fired) throw new Error('the insecure-HTTP contrast fired the prompt - the contrast is invalid');
     console.log('install-https-proof: PASS');
   } finally {
+    // Synchronous reap (airhorn-nbh9): cleanup()'s kill and rm are
+    // timer-delayed and the process exits before those timers fire when a
+    // failure throws past the launch window - the 51lr lesson applies to the
+    // whole run, not just the launch it originally covered.
+    if (chrome) {
+      sweepTree(profileDir);
+      try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+    if (profileDir) {
+      try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
+    }
     if (cdp) cdp.cleanup();
     if (serverHttp) serverHttp.close();
     if (serverHttps) serverHttps.close();
