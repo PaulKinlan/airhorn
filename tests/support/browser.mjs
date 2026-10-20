@@ -26,7 +26,7 @@
  *     port,            // devtools HTTP port
  *     pageTargetId,    // the fresh page's target id
  *     pageWsUrl,       // ... and its WebSocket URL (suites connect their client here)
- *     close(),         // SIGTERM, then profile-marker sweep after 1.5s; removes the profile
+ *     close(),         // sweep + profile rm synchronously (signal-safe); exit race after
  *     killNow(),       // synchronous tree-kill, for signal handlers
  *   }
  */
@@ -159,8 +159,11 @@ export async function launchBrowser({ autoplay = false, webmcp = false, label = 
     // Belt and braces for anything the marker somehow missed.
     try { killTree(chrome.pid); } catch { /* already gone */ }
     // A SIGKILL'd child lands final writebacks during the rm walk, so this
-    // needs the retries, not a bare rm (airhorn-jx9, airhorn-yfh8).
-    try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* best effort */ }
+    // needs the retries, not a bare rm (airhorn-jx9, airhorn-yfh8). The
+    // budget is sized to fit a signal handler's grace: the launch-window
+    // guard runs BEFORE a suite's signal-exit cleanup, so every millisecond
+    // spent here is taken off close()'s budget downstream (airhorn-gau8).
+    try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
   };
   // Nothing in the caller can reap this browser yet: every suite registers its
   // own signal handler only AFTER launchBrowser resolves, so a bound-kill during
@@ -270,15 +273,23 @@ export async function launchBrowser({ autoplay = false, webmcp = false, label = 
       if (closed) return;
       closed = true;
       try { chrome.kill('SIGTERM'); } catch { /* already gone */ }
-      await Promise.race([exited.then(() => true), sleep(1500).then(() => false)]);
-      // End every member of the launch before the rm: after a graceful exit
-      // this costs one /proc read; if the TERM did not land, the sweep kills
-      // the browser and its tree in one pass. A dying renderer's writeback is
-      // what makes the rm need retries at all, and under a signal handler's
-      // grace budget even retries can lose (measured, airhorn-77ih).
+      // Everything that matters below is SYNCHRONOUS, and it must be: once
+      // this method awaits, the process can be exited under it - a signal
+      // handler's grace timer, or a sibling cleanup throwing while this one
+      // is in flight (airhorn-gau8's repro: a launch still pending makes
+      // inflight?.close() a TypeError, and signal-exit answers the rejection
+      // by exiting 143 while close() is still awaiting). close() used to
+      // wait 1500ms for a graceful exit before touching the profile; inside
+      // a bound-kill that wait alone ate the whole grace and the profile
+      // survived. A healthy chrome TERM-exits in ~120ms (measured); the rm
+      // retries absorb its writeback, which is what they are for
+      // (airhorn-jx9, airhorn-yfh8) - and the rm budget is sized so the
+      // signal path fits signal-exit's 2s grace with room to spare.
       sweepProfile(profileDir);
-      // Retries for the writeback race, same as reap() (airhorn-jx9, airhorn-yfh8).
-      try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* best effort */ }
+      try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
+      // Tidiness only - the profile is already gone; nothing above is guarded
+      // by this await.
+      await Promise.race([exited.then(() => true), sleep(400).then(() => false)]);
     },
     killNow() {
       reap();
