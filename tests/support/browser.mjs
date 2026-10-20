@@ -130,8 +130,19 @@ export async function launchBrowser({ autoplay = false, webmcp = false, label = 
   }
 
   const port = new URL(browserWsUrl).port;
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  const pageTarget = targets.find((t) => t.type === 'page');
+  // DevTools discovery is a failure path too: if the /json/list fetch rejects
+  // or no page target exists, launchBrowser must not return with the Chrome
+  // process and its /tmp profile still alive (airhorn-9nea).
+  let pageTarget;
+  try {
+    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+    pageTarget = targets.find((t) => t.type === 'page');
+    if (!pageTarget) throw new Error(`no page target in /json/list (${label}): ${JSON.stringify(targets.map((t) => t.type))}`);
+  } catch (err) {
+    killTree(chrome.pid);
+    try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    throw err;
+  }
 
   let closed = false;
   const exited = new Promise((r) => chrome.on('exit', r));

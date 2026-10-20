@@ -171,8 +171,7 @@ function startServer() {
 // its renderers behind (the reaper found 13 processes, 47 minutes old, from one
 // such run). browser.mjs's killNow() tree-kills deepest-first, and browsers are
 // registered so SIGTERM/SIGINT (what a bound-kill sends first) does the same
-// thing. In the gate's shared Chrome killNow() is a no-op - the gate owns that
-// browser's whole tree and reaps it, targets included.
+// thing.
 const openBrowsers = new Set();
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
