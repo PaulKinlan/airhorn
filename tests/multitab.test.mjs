@@ -779,6 +779,56 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       console.log('  navigator.locks unavailable in this browser; nothing to assert.');
     }
 
+    /* -- J. a launch's acknowledge wins over a pending locked bump (airhorn-3v90) -- */
+    console.log('\n--- J. a launch cannot be overwritten by a blast bump that queued before the look ---');
+    if (haveLocks) {
+      // The reviewer's repro (airhorn-3v90): a blast's bump queues on the
+      // origin lock; a launch delivery then arrives - the user coming to
+      // look. The acknowledge must WIN: the pending bump must not publish
+      // its stale total after the look cleared the badge. Stand-in launch
+      // consumer installed before the page scripts so the app's consumer
+      // lands in it (the platform cannot deliver launches headless).
+      const launchStandIn = `(() => {
+        window.__jLaunchParams = null;
+        Object.defineProperty(window, 'launchQueue', { configurable: true, value: { setConsumer(fn) { window.__launchConsumer = fn; } } });
+        return true;
+      })()`;
+      const J2 = await openTab('J2', `${origin}/`, { preScript: launchStandIn });
+      await send('Target.activateTarget', { targetId: J2.targetId });
+      await waitUntil(async () => (await J2.evaluate(`document.visibilityState`)) === 'visible', 5000);
+      // The test owns the origin lock: J2's blast bump queues behind it.
+      await J2.evaluate(`(() => { window.__jHold = navigator.locks.request('airhorn:blast-count', () => new Promise((r) => { window.__jRelease = r; })); return true; })()`);
+      const jHeld = await waitUntil(async () => {
+        try { return await J2.evaluate(`typeof window.__jRelease === 'function'`); } catch { return false; }
+      }, 5000);
+      assert(jHeld, 'the test could not hold the origin badge lock - sequence J cannot force the ordering');
+      await J2.evaluate(`window.__airhorn.start()`);
+      await sleep(300);
+      // The launch arrives while the bump is still queued: the user comes
+      // to look. (Today the acknowledge runs immediately and finds no count
+      // to clear; with the fix it queues behind the bump on the lock.)
+      await J2.evaluate(`window.__launchConsumer({ targetURL: ${JSON.stringify(origin + '/')}, files: [] })`);
+      await sleep(200);
+      await J2.evaluate(`window.__jRelease && window.__jRelease()`);
+      await sleep(600);
+      const jCount = await J2.evaluate(`window.localStorage.getItem('airhorn:blast-count')`);
+      const jBadge = await J2.badge();
+      const last = jBadge[jBadge.length - 1];
+      assert(jCount === null && last && last.fn === 'clearAppBadge',
+        `the launch acknowledged the badge but a stale queued bump republished it: storage=${JSON.stringify(jCount)}, last badge call=${JSON.stringify(last)} - ` +
+        `the user's look must win over a blast that happened before it (airhorn-3v90)`);
+      // And acknowledgement must not break later badge movement.
+      await J2.evaluate(`window.__airhorn.start()`);
+      await waitUntil(async () => (await J2.hornState()).playing === false, 6000);
+      const jAfter = await J2.badge();
+      assert(jAfter.some((e) => e.fn === 'setAppBadge'),
+        `a blast after the launch acknowledge did not badge the fresh count: ${JSON.stringify(jAfter)} (airhorn-3v90)`);
+      await closeTab(J2);
+      console.log('  the launch acknowledge beat the queued bump, and later blasts still badge.');
+    } else {
+      console.log('  navigator.locks unavailable; nothing to assert.');
+    }
+
     console.log('\nALL MULTITAB COHERENCE CHECKS PASSED');
   } finally {
     try { cdp?.ws.close(); } catch { /* already gone */ }

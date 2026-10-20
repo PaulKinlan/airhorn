@@ -122,6 +122,7 @@ const TAP_HINT = 'The horn needs a tap to make a sound.';
 // blast anywhere increments the shared count so 4 blasts in two tabs read 4,
 // not 1 (airhorn-xkq).
 const BADGE_COUNT_KEY = 'airhorn:blast-count';
+const BADGE_EPOCH_KEY = 'airhorn:badge-epoch';
 
 class AirHorn {
   #horn;
@@ -299,23 +300,59 @@ class AirHorn {
 
   // The "you looked at it again" acknowledgement (airhorn-7x7m): clear the
   // shared count and the OS badge so the badge never shows a total from a
-  // session nobody is looking at.
-  #acknowledgeSharedBadgeCount() {
-    const current = this.#readSharedBadgeCount();
-    if (current === null) {
-      // Storage unavailable: the shared count is unknowable, but the badge is
-      // still one per origin and this tab may have set it through the per-tab
-      // fallback. A look-transition is the same acknowledge any tab performs,
-      // so clear - a tab that cannot read storage must still be able to
-      // retire the badge it set itself, or no event in the app ever could
-      // (airhorn-0w1q).
-      this.#counter = 0;
+  // session nobody is looking at. The clear runs UNDER the blast-count lock
+  // and bumps a storage epoch, so a blast bump that queued before the look
+  // cannot publish its stale total afterwards (airhorn-3v90): bumps compare
+  // the epoch they captured at entry against the stored one inside the lock
+  // and drop themselves when an acknowledge happened in between. Without a
+  // lock manager this is the old best-effort synchronous clear.
+  async #acknowledgeSharedBadgeCount() {
+    if (!navigator.locks?.request) {
+      const current = this.#readSharedBadgeCount();
+      if (current === null) {
+        // Storage unavailable: the shared count is unknowable, but the badge is
+        // still one per origin and this tab may have set it through the per-tab
+        // fallback. A look-transition is the same acknowledge any tab performs,
+        // so clear - a tab that cannot read storage must still be able to
+        // retire the badge it set itself, or no event in the app ever could
+        // (airhorn-0w1q).
+        this.#counter = 0;
+        navigator.clearAppBadge?.();
+        return;
+      }
+      if (current === 0) return;
+      try { window.localStorage.removeItem(BADGE_COUNT_KEY); } catch {}
       navigator.clearAppBadge?.();
       return;
     }
-    if (current === 0) return;
-    try { window.localStorage.removeItem(BADGE_COUNT_KEY); } catch {}
-    navigator.clearAppBadge?.();
+    const acknowledge = () => {
+      const current = this.#readSharedBadgeCount();
+      // The epoch is bumped even when nothing is owed: a bump queued behind
+      // this acknowledge still represents a blast that happened BEFORE the
+      // look, and must not publish after it (airhorn-3v90).
+      let epoch = 0;
+      try { epoch = Number(window.localStorage.getItem(BADGE_EPOCH_KEY)) || 0; } catch {}
+      try { window.localStorage.setItem(BADGE_EPOCH_KEY, String(epoch + 1)); } catch {}
+      if (current === null) {
+        // Storage unavailable: the shared count is unknowable, but the badge is
+        // still one per origin and this tab may have set it through the per-tab
+        // fallback. A look-transition is the same acknowledge any tab performs,
+        // so clear - a tab that cannot read storage must still be able to
+        // retire the badge it set itself, or no event in the app ever could
+        // (airhorn-0w1q).
+        this.#counter = 0;
+        navigator.clearAppBadge?.();
+        return;
+      }
+      if (current === 0) return;
+      try { window.localStorage.removeItem(BADGE_COUNT_KEY); } catch {}
+      navigator.clearAppBadge?.();
+    };
+    try {
+      await navigator.locks.request(BADGE_COUNT_KEY, acknowledge);
+    } catch {
+      acknowledge();
+    }
   }
 
   // Called from the launch consumer (module scope): a launch of the installed
@@ -334,7 +371,16 @@ class AirHorn {
       this.#counter = (this.#counter % 99) + 1;
       return this.#counter;
     }
+    // The blast's intent is stamped with the badge epoch BEFORE queuing on
+    // the lock: an acknowledge that arrives while this bump waits bumps the
+    // stored epoch, and this bump then drops itself inside the lock instead
+    // of publishing a total the user's look already cleared (airhorn-3v90).
+    let myEpoch = 0;
+    try { myEpoch = Number(window.localStorage.getItem(BADGE_EPOCH_KEY)) || 0; } catch {}
     const bump = () => {
+      let stored = myEpoch;
+      try { stored = Number(window.localStorage.getItem(BADGE_EPOCH_KEY)) || 0; } catch {}
+      if (stored !== myEpoch) return null;
       // The re-read happens INSIDE the origin lock: interleaved tabs
       // serialize here instead of each writing pre-blast count + 1, which
       // clobbered the first writer's blast (airhorn-rqz1).
