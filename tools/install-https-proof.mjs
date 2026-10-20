@@ -157,7 +157,14 @@ async function launchChrome(extraFlags) {
     }
     const page = targets.find(t => t.type === 'page');
     ws = new WebSocket(page.webSocketDebuggerUrl);
-    await new Promise(r => ws.onopen = r);
+    // Bounded like discovery above: a peer that answers /json/list but never
+    // completes the ws upgrade must reject into the cleanup instead of parking
+    // the tool with its launch alive (airhorn-doek).
+    await new Promise((resolve, reject) => {
+      const bound = setTimeout(() => reject(new Error('DevTools ws handshake timeout: the page socket never opened within 15000ms')), 15000);
+      ws.onopen = () => { clearTimeout(bound); resolve(); };
+      ws.onerror = () => { clearTimeout(bound); reject(new Error('DevTools ws handshake failed: the page socket errored')); };
+    });
   } catch (err) {
     // Synchronous reap: cleanup()'s rm is timer-delayed and the process exits
     // before those timers fire, so the error path must not rely on it

@@ -183,6 +183,46 @@ test('a bound-kill during discovery reaps the browser before the process dies (a
   }
 });
 
+test('an ancestor group-kill reaches the browser: it is not detached into its own group (airhorn-acex)', async () => {
+  // fleet-gate's bound and any job-tree reaper kill the caller's PROCESS GROUP,
+  // and a SIGKILL runs no node handler - so if the launcher had put the browser
+  // into its own group (detached: true), nothing but the reaper's orphan sweep
+  // would ever reach it. The stand-in suite below is spawned detached exactly
+  // as a gate job is (it is its own group leader), and the kill is the bound's:
+  // SIGKILL to the whole group.
+  const dir = marker();
+  const peer = await silentPeer();
+  const stub = stubChrome(dir, peer.port);
+  const label = runLabel('groupkill');
+  const realChromeBin = process.env.CHROME_BIN;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    const { launchBrowser } = await import(${JSON.stringify(SUPPORT)});
+    launchBrowser({ label: ${JSON.stringify(label)}, discoveryMs: 60000, timeoutMs: 60000 }).catch(() => {});
+    console.log('launching');
+    await new Promise(() => {});
+  `], { env: { ...process.env, CHROME_BIN: stub }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  let out = '';
+  child.stdout.on('data', (d) => { out += d.toString(); });
+  try {
+    assert.ok(await waitFor(async () => out.includes('launching') && liveStubProcesses(stub).length > 0),
+      'the stand-in suite never got as far as launching the stub browser');
+    const exit = new Promise((r) => child.on('exit', (code, signal) => r({ code, signal })));
+    process.kill(-child.pid, 'SIGKILL');
+    const how = await exit;
+    assert.equal(how.signal, 'SIGKILL',
+      `the group kill must take the stand-in itself: ${JSON.stringify(how)}`);
+    assert.ok(await waitFor(() => liveStubProcesses(stub).length === 0),
+      'the browser was launched into its own process group: it escaped the ancestor group-kill ' +
+      'that a bound sends (airhorn-acex) - it must be in the caller\'s group');
+  } finally {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* group already gone */ }
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await peer.close();
+    removeProfiles(label);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /* -- the shared bound-kill handler (airhorn-4vfn) --------------------------- */
 
 // A stand-in suite: install the shared handler, then take the signal a bound
