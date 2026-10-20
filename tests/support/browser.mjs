@@ -100,7 +100,7 @@ export async function launchBrowser({ autoplay = false, webmcp = false, label = 
     '--remote-debugging-port=0',
     `--user-data-dir=${profileDir}`,
     'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
   // One reap path for every way a launch can end without a handle: startup
   // failure, discovery failure, or the launch being cut short (airhorn-9nea,
@@ -109,8 +109,17 @@ export async function launchBrowser({ autoplay = false, webmcp = false, label = 
   const reap = () => {
     if (closed) return;
     closed = true;
-    killTree(chrome.pid);
-    try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    // Group-kill FIRST (airhorn-77ih): a ps-snapshot tree-kill taken while
+    // chrome is still forking misses the children it spawns afterwards -
+    // measured: 11 processes survived a tree-kill ~95ms into startup. chrome
+    // is its own group leader (detached: true above), so one group SIGKILL
+    // catches every current and future member instantaneously; the tree-kill
+    // stays as belt and braces for anything the group somehow missed.
+    try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* already gone */ }
+    try { killTree(chrome.pid); } catch { /* already gone */ }
+    // A SIGKILL'd child lands final writebacks during the rm walk, so this
+    // needs the retries, not a bare rm (airhorn-jx9, airhorn-yfh8).
+    try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* best effort */ }
   };
   // Nothing in the caller can reap this browser yet: every suite registers its
   // own signal handler only AFTER launchBrowser resolves, so a bound-kill during
@@ -222,7 +231,13 @@ export async function launchBrowser({ autoplay = false, webmcp = false, label = 
       try { chrome.kill('SIGTERM'); } catch { /* already gone */ }
       const gone = await Promise.race([exited.then(() => true), sleep(1500).then(() => false)]);
       if (!gone) killTree(chrome.pid);
-      try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      // End every group member before the rm: a dying renderer's writeback is
+      // what makes the rm need retries at all, and under a signal handler's
+      // grace budget even retries can lose (measured, airhorn-77ih). Group is
+      // empty (ESRCH) once the leader is gone - caught below.
+      try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* already gone */ }
+      // Retries for the writeback race, same as reap() (airhorn-jx9, airhorn-yfh8).
+      try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* best effort */ }
     },
     killNow() {
       reap();
