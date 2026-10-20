@@ -244,6 +244,22 @@ async function testBootWatchdog() {
     if ((await evaluate(bannerHiddenExpr)) !== true) {
       throw new Error('Boot-failure banner visible on a healthy boot');
     }
+    // The pre-swap/styled geometry contract (airhorn-fgvq): #airhorn must
+    // fill the viewport in BOTH frames. It used to shrink-wrap the horn before
+    // the async sheet landed (219px wide at a 780px viewport) and become full
+    // width when the sheet applied - the page's only layout shift, measured at
+    // CLS 0.3599 on 5 of 6 loads, attributed to div#airhorn. Case 7 pins the
+    // unstyled frame; this pins the styled one, so the two cannot drift again.
+    const airhornBoxExpr = `(() => {
+      const r = document.getElementById('airhorn').getBoundingClientRect();
+      return { w: Math.round(r.width), h: Math.round(r.height), vw: innerWidth, vh: innerHeight };
+    })()`;
+    const styledBox = await evaluate(airhornBoxExpr);
+    // Tolerance covers a classic scrollbar, not a shrink-wrap: the defect this
+    // guards was 219px against 780px.
+    if (styledBox.w < styledBox.vw - 20 || styledBox.h < styledBox.vh - 20) {
+      throw new Error(`styled #airhorn does not fill the viewport: ${JSON.stringify(styledBox)}`);
+    }
     // The one polite live region must exist but say nothing on a healthy,
     // connected boot: rendered (so changes are announced) yet visually
     // hidden while empty.
@@ -421,9 +437,18 @@ async function testBootWatchdog() {
       const ir = inner ? inner.getBoundingClientRect() : null;
       const installer = document.getElementById('installer');
       const h1 = document.querySelector('h1');
+      const airhorn = document.getElementById('airhorn');
+      const ar = airhorn ? airhorn.getBoundingClientRect() : null;
       return {
         w: Math.round(r.width),
         h: Math.round(r.height),
+        // airhorn-fgvq: the frame before the sheet lands must already be the
+        // STYLED frame's geometry (a viewport-filling #airhorn), or the swap
+        // shifts the only element on the page by 0.3599 CLS.
+        airhornW: ar ? Math.round(ar.width) : 0,
+        airhornH: ar ? Math.round(ar.height) : 0,
+        viewportW: innerWidth,
+        viewportH: innerHeight,
         labelText: label ? label.textContent.trim() : null,
         labelVisible: !!label && label.getClientRects().length > 0,
         // airhorn-e18: the pre-swap frame must be the designed horn -
@@ -511,6 +536,9 @@ async function testBootWatchdog() {
     })()`);
     if (!installReachable.visible || !installReachable.clickable || !installReachable.focusable) {
       throw new Error(`install unreachable unstyled even with .available: ${JSON.stringify(installReachable)}`);
+    }
+    if (unstyled.airhornW < unstyled.viewportW - 20 || unstyled.airhornH < unstyled.viewportH - 20) {
+      throw new Error(`unstyled #airhorn does not fill the viewport, so the sheet swap shifts the page: ${JSON.stringify(unstyled)}`);
     }
     await shot('blocked-css');
     console.log(`  blocked CSS: horn ${unstyled.w}x${unstyled.h}, labelled, installer hidden until .available, still sounds`);
