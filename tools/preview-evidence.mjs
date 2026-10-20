@@ -15,7 +15,8 @@
  *   evidence.json         structured results: render checks, offline assertions,
  *                         offline-play check, WebMCP tool listing (flag on),
  *                         installability probe (manifest + SW + beforeinstallprompt),
- *                         published-file inventory
+ *                         published-file inventory (raw and gzip bytes per file,
+ *                         plus the totals DEPLOY.md quotes)
  *
  * Exit code 0 only if every REQUIRED capture succeeded; assertions that cannot
  * hold without HTTPS (a real beforeinstallprompt on a device) are recorded, not
@@ -26,6 +27,7 @@ import { spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
@@ -258,13 +260,25 @@ async function launchChrome(extraFlags = []) {
   return { chrome, send, evaluate, waitFor, waitEvent, navigate, screenshot, cleanup };
 }
 
+// The published-file inventory is the deploy pack's size claim, so it records the
+// gzip size of every file as well as the raw size (airhorn-2rxv): DEPLOY.md used
+// to quote a gzip total that nothing in the pack could reproduce, which made a
+// stale number indistinguishable from a fresh one. zlib level 9, i.e. what
+// `gzip -9` writes; a host's own compressor may beat it (brotli more so).
 async function inventoryDist() {
   const files = [];
   function walk(current) {
     for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) walk(full);
-      else files.push({ path: '/' + path.relative(distDir, full).split(path.sep).join('/'), bytes: fs.statSync(full).size });
+      else {
+        const buf = fs.readFileSync(full);
+        files.push({
+          path: '/' + path.relative(distDir, full).split(path.sep).join('/'),
+          bytes: buf.length,
+          gzipBytes: zlib.gzipSync(buf, { level: 9 }).length,
+        });
+      }
     }
   }
   walk(distDir);
@@ -429,6 +443,9 @@ async function main() {
     url: origin + '/',
     chrome: CHROME_BIN,
     publishedFiles: await inventoryDist(),
+    // Totals are what DEPLOY.md quotes; keeping them here means the doc's size
+    // claim is a read of this file, not a hand-measurement that goes stale.
+    publishedTotals: null,
     captures: [],
     checks: {},
     installability: {},
@@ -458,10 +475,18 @@ async function main() {
     server.close();
   }
 
+  evidence.publishedTotals = {
+    files: evidence.publishedFiles.length,
+    bytes: evidence.publishedFiles.reduce((n, f) => n + f.bytes, 0),
+    gzipBytes: evidence.publishedFiles.reduce((n, f) => n + f.gzipBytes, 0),
+  };
+
   fs.writeFileSync(path.join(outDir, 'evidence.json'), JSON.stringify(evidence, null, 2) + '\n');
 
   // Human summary.
   const ok = [];
+  const t = evidence.publishedTotals;
+  ok.push(`published: ${t.files} file(s), ${t.bytes} B raw, ${t.gzipBytes} B gzipped (zlib level 9)`);
   ok.push(`screenshots: ${evidence.captures.join(', ')}`);
   ok.push(`desktop horn width: ${Math.round(evidence.checks.cssAppliedDesktop)}px; offline: ${Math.round(evidence.checks.offlineHornWidth)}px`);
   ok.push(`dark applied: ${evidence.checks.darkApplied} (bg ${evidence.checks.darkBaselineBg} -> ${evidence.checks.darkBg}; negative control detects false: ${evidence.checks.darkDetectorCanFail})`);

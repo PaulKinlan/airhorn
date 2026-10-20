@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-19T20:11:26.390Z",
+  "generatedAt": "2026-10-20T20:46:24.556Z",
   "hostname": "airhorn.test (mapped to 127.0.0.1 via --host-resolver-rules)",
   "chromeUserAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
   "flagsUsed": [
@@ -14,9 +14,9 @@
   ],
   "flagFindings": "Blanket --ignore-certificate-errors was measured first and does NOT fire beforeinstallprompt on this Chrome (155.0.0.0 headless): the page loads and isSecureContext is true, but the installability checker still sees the invalid certificate. Trusting the key via --ignore-certificate-errors-spki-list is required; see flagFindings fields on each leg.",
   "http": {
-    "origin": "http://airhorn.test:33673/",
+    "origin": "http://airhorn.test:36325/",
     "label": "http-insecure",
-    "href": "http://airhorn.test:33673/",
+    "href": "http://airhorn.test:36325/",
     "installCollectorType": "object",
     "secureContext": false,
     "serviceWorkerRegistration": {
@@ -55,17 +55,17 @@
     "screenshot": "install-http-insecure.png"
   },
   "https": {
-    "origin": "https://airhorn.test:37449/",
+    "origin": "https://airhorn.test:36245/",
     "label": "https-selfsigned",
-    "href": "https://airhorn.test:37449/",
+    "href": "https://airhorn.test:36245/",
     "installCollectorType": "object",
     "secureContext": true,
     "serviceWorkerRegistration": {
-      "scope": "https://airhorn.test:37449/",
+      "scope": "https://airhorn.test:36245/",
       "state": "activated"
     },
     "serviceWorker": {
-      "scriptURL": "https://airhorn.test:37449/sw.js",
+      "scriptURL": "https://airhorn.test:36245/sw.js",
       "state": "activated"
     },
     "manifest": {
@@ -83,7 +83,7 @@
     "startUrlInScope": false,
     "installPrompt": {
       "fired": true,
-      "at": 1792440684701,
+      "at": 1792529182667,
       "platforms": [
         "web"
       ],

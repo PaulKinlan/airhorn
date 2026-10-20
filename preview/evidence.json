@@ -1,113 +1,144 @@
 {
-  "generatedAt": "2026-10-19T18:01:15.012Z",
-  "url": "http://127.0.0.1:33451/",
+  "generatedAt": "2026-10-20T20:46:47.335Z",
+  "url": "http://127.0.0.1:42149/",
   "chrome": "/usr/bin/google-chrome",
   "publishedFiles": [
     {
       "path": "/.well-known/assetlinks.json",
-      "bytes": 300
+      "bytes": 300,
+      "gzipBytes": 239
     },
     {
-      "path": "/assets/index-tVe8U205.js",
-      "bytes": 9850
+      "path": "/assets/index-C81EVIwm.js",
+      "bytes": 16657,
+      "gzipBytes": 5820
     },
     {
       "path": "/favicon.ico",
-      "bytes": 3143
+      "bytes": 3143,
+      "gzipBytes": 3166
     },
     {
       "path": "/humans.txt",
-      "bytes": 219
+      "bytes": 219,
+      "gzipBytes": 186
     },
     {
       "path": "/images/airhorn.svg",
-      "bytes": 353
+      "bytes": 353,
+      "gzipBytes": 245
     },
     {
       "path": "/images/screenshot-narrow.png",
-      "bytes": 24467
+      "bytes": 24467,
+      "gzipBytes": 20397
     },
     {
       "path": "/images/screenshot-wide.png",
-      "bytes": 23230
+      "bytes": 23230,
+      "gzipBytes": 20853
     },
     {
       "path": "/images/touch/Airhorner-maskable.svg",
-      "bytes": 494
+      "bytes": 494,
+      "gzipBytes": 257
     },
     {
       "path": "/images/touch/android-launchericon-144-144.png",
-      "bytes": 5675
+      "bytes": 5675,
+      "gzipBytes": 5669
     },
     {
       "path": "/images/touch/android-launchericon-192-192.png",
-      "bytes": 7578
+      "bytes": 7578,
+      "gzipBytes": 7531
     },
     {
       "path": "/images/touch/android-launchericon-48-48.png",
-      "bytes": 1769
+      "bytes": 1769,
+      "gzipBytes": 1792
     },
     {
       "path": "/images/touch/android-launchericon-512-512.png",
-      "bytes": 25755
+      "bytes": 25755,
+      "gzipBytes": 25021
     },
     {
       "path": "/images/touch/android-launchericon-72-72.png",
-      "bytes": 2826
+      "bytes": 2826,
+      "gzipBytes": 2849
     },
     {
       "path": "/images/touch/android-launchericon-96-96.png",
-      "bytes": 3737
+      "bytes": 3737,
+      "gzipBytes": 3760
     },
     {
       "path": "/images/touch/android-maskableicon-144-144.png",
-      "bytes": 6706
+      "bytes": 6706,
+      "gzipBytes": 6157
     },
     {
       "path": "/images/touch/android-maskableicon-192-192.png",
-      "bytes": 8701
+      "bytes": 8701,
+      "gzipBytes": 8115
     },
     {
       "path": "/images/touch/android-maskableicon-48-48.png",
-      "bytes": 3183
+      "bytes": 3183,
+      "gzipBytes": 2663
     },
     {
       "path": "/images/touch/android-maskableicon-512-512.png",
-      "bytes": 18464
+      "bytes": 18464,
+      "gzipBytes": 17409
     },
     {
       "path": "/images/touch/android-maskableicon-72-72.png",
-      "bytes": 4090
+      "bytes": 4090,
+      "gzipBytes": 3578
     },
     {
       "path": "/images/touch/android-maskableicon-96-96.png",
-      "bytes": 4988
+      "bytes": 4988,
+      "gzipBytes": 4464
     },
     {
       "path": "/index.html",
-      "bytes": 11965
+      "bytes": 16478,
+      "gzipBytes": 5355
     },
     {
       "path": "/manifest.json",
-      "bytes": 2980
+      "bytes": 2980,
+      "gzipBytes": 633
     },
     {
       "path": "/robots.txt",
-      "bytes": 78
+      "bytes": 78,
+      "gzipBytes": 94
     },
     {
       "path": "/sounds/airhorn.mp3",
-      "bytes": 40858
+      "bytes": 40858,
+      "gzipBytes": 28859
     },
     {
       "path": "/styles/main.css",
-      "bytes": 11879
+      "bytes": 11879,
+      "gzipBytes": 4023
     },
     {
       "path": "/sw.js",
-      "bytes": 8927
+      "bytes": 9441,
+      "gzipBytes": 3703
     }
   ],
+  "publishedTotals": {
+    "files": 26,
+    "bytes": 244049,
+    "gzipBytes": 182838
+  },
   "captures": [
     "horn-light.png",
     "horn-dark.png",
@@ -133,7 +164,7 @@
   },
   "installability": {
     "secureContext": true,
-    "manifestLink": "http://127.0.0.1:33451/manifest.json",
+    "manifestLink": "http://127.0.0.1:42149/manifest.json",
     "manifest": {
       "name": "The Air Horner",
       "short_name": "Airhorner",
@@ -217,7 +248,7 @@
     "has512Icon": true,
     "hasMaskable": true,
     "serviceWorker": {
-      "scriptURL": "http://127.0.0.1:33451/sw.js",
+      "scriptURL": "http://127.0.0.1:42149/sw.js",
       "state": "activated"
     },
     "swHasFetchHandler": true,
@@ -229,15 +260,15 @@
     "tools": [
       {
         "name": "get_horn_state",
-        "description": "Reports whether the Air Horner is sounding right now, whether it is looping, and whether audio is available in this browser."
+        "description": "Reports whether the Air Horner is sounding right now, whether it is looping, and whether audio is available in this browser. Read-only and side-effect free; safe to call at any time, including while stopped or mid-start, and it answers whatever the caller sends (arguments are ignored). Returns {playing, loop, hasAudioContext}."
       },
       {
         "name": "play_horn",
-        "description": "Sound the Air Horner. Starts audio playback, pressed state and app badge, exactly like pressing the on-screen horn button."
+        "description": "Sound the Air Horner. Starts audio playback, pressed state and app badge, exactly like pressing the on-screen horn button. A call replaces anything already sounding (restarting the blast), and calls are rate limited, so repeated or concurrent invocations leave exactly one horn playing. Pass `loop: true` to keep it sounding until stop_horn is called, `loop: false` (the default) for a single blast. `loop` must be a real boolean: strings, numbers and objects are refused with a structured error rather than guessed at. Returns {playing, loop} when this call started the horn. A refused call returns {playing, loop, code, error} and changes nothing: code is one of invalid_input, audio_unavailable, not_started, rate_limited, timeout or internal, so treat a present code as the refusal and playing as the current state of the horn (it can already be sounding from an earlier call)."
       },
       {
         "name": "stop_horn",
-        "description": "Silence the Air Horner immediately."
+        "description": "Silence the Air Horner immediately. Always honoured: it is never queued behind a start, rate limited, cancelled by an aborted call, or refused for bad arguments - silence must always be possible - so it is also safe to call when nothing is sounding. Takes no arguments; anything provided is ignored. Returns {playing: false, loop: false}."
       }
     ],
     "expectedToolsPresent": true
