@@ -13,8 +13,12 @@ class FakeAudioParam {
   // pitch - airhorn-u7s) is asserted against these rather than against one
   // final value, which release automation overwrites.
   scheduled = [];
-  setValueAtTime(val) { this.value = val; this.scheduled.push(val); }
-  exponentialRampToValueAtTime(val) { this.value = val; this.scheduled.push(val); }
+  // The time argument each call carried: without it the attack-time pin was
+  // a tautology of the level assert - the ramp could end at 0.04 s or 0.14 s
+  // and both passed (airhorn-n0sd).
+  scheduledTimes = [];
+  setValueAtTime(val, time = 0) { this.value = val; this.scheduled.push(val); this.scheduledTimes.push(time); }
+  exponentialRampToValueAtTime(val, time = 0) { this.value = val; this.scheduled.push(val); this.scheduledTimes.push(time); }
   cancelScheduledValues() {}
   get peak() { return this.scheduled.length ? Math.max(...this.scheduled) : this.value; }
 }
@@ -789,8 +793,12 @@ test('the fallback voice keeps the measured parity with the sample (airhorn-u7s)
     const master = ctx.gains[0];
     assert.equal(master.gain.peak, 0.8, 'the fallback level is matched to the sample (-14 dBFS RMS)');
     assert.equal(master.gain.scheduled[1], 0.8, 'the attack ramp must reach the matched level');
-    // Attack: the envelope reaches full level 0.14 s in, not 0.04 s.
-    assert.ok(master.gain.scheduled.includes(0.8), 'the attack must not be a hard 40 ms step');
+    // Attack: the envelope reaches full level 0.14 s in, not 0.04 s - pinned
+    // through the ramp's TIME, which the fake now records (airhorn-n0sd; the
+    // previous includes() assert was a tautology of scheduled[1] === 0.8).
+    const attackIdx = master.gain.scheduled.indexOf(0.8);
+    assert.ok(attackIdx > 0, 'the attack must ramp to the level, not start at it');
+    assert.equal(master.gain.scheduledTimes[attackIdx], 0.14, 'the attack must take the recording\'s 0.14 s swell, not a hard 40 ms step');
 
     for (const osc of ctx.oscillators) {
       assert.equal(osc.stopTime, 0.9, 'a single blast is scheduled for the sample\'s ~0.8 s length');
