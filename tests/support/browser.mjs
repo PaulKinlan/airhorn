@@ -286,6 +286,10 @@ export async function launchBrowser({ autoplay = false, webmcp = false, label = 
       // (airhorn-jx9, airhorn-yfh8) - and the rm budget is sized so the
       // signal path fits signal-exit's 2s grace with room to spare.
       sweepProfile(profileDir);
+      // Belt and braces for anything the marker somehow missed, as in reap()
+      // above - and the ONLY kill on a /proc-less system, where the sweep
+      // returns without acting (airhorn-v54f).
+      try { killTree(chrome.pid); } catch { /* already gone */ }
       try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
       // Tidiness only - the profile is already gone; nothing above is guarded
       // by this await.
