@@ -90,4 +90,4 @@ tests/acceptance.mjs	tests/acceptance.mjs
 # that runs through the hook - the runner injects it into every script-tier (.mjs) suite, so
 # the row must track that set, not a snapshot of it (airhorn-5t8: resilience-ui and
 # sw-failover were missing; airhorn-10q for quiescence.mjs, airhorn-n00 for the report hook).
-tests/support/**	tests/a11y.test.mjs tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/webmcp.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs
+tests/support/**	tests/a11y.test.mjs tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs
