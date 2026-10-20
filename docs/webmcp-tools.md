@@ -2,8 +2,8 @@
 
 The Air Horner exposes three WebMCP tools so an in-page agent can sound the horn
 through the same code path a person uses — the button's `aria-pressed` state, the
-`.horning` class, the app badge and the analytics event all stay correct whichever
-way the horn was triggered.
+`.horning` class and the app badge all stay correct whichever way the horn was
+triggered.
 
 This page is the contract for an agent author: names, schemas, return shapes, error
 semantics, annotations, availability and how to try it. Every statement here is
@@ -177,6 +177,7 @@ case names.
 
 | claim | evidence |
 | --- | --- |
+| the tools drive the same code path as the button (pressed state, `.horning`, app badge) | browser suite: `play_horn` / `stop_horn` sections assert `aria-pressed`, `horning` and the badge calls |
 | three tools, in this order, with schemas and annotations | code: `createHornTools` in `src/webmcp.js`; tests: `registers play_horn, stop_horn and get_horn_state when modelContext exists`, `annotations describe which tools mutate state`, `the published schemas and descriptions match what the tools actually do` |
 | `loop` defaults to a single blast | `play_horn defaults to a single, non-looping blast`, `missing arguments are a single, non-looping blast`; browser suite's "single blast" section |
 | `play_horn` replaces whatever is sounding | `repeated accepted calls supersede each other rather than accumulating`, `a concurrent flood never stacks playback and every call resolves` |

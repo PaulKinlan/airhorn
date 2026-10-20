@@ -206,6 +206,15 @@ test('is a silent no-op where WebMCP is unavailable', async () => {
     assert.equal(result.controller, null);
   });
 
+  // A modelContext whose registerTool is not callable is treated as absent too:
+  // the check is on the method, not on the object (docs/webmcp-tools.md).
+  await withDocument({ registerTool: 'not-a-function' }, async () => {
+    const result = await registerHornTools(airhorn);
+    assert.equal(result.registered, false);
+    assert.deepEqual(result.names, []);
+    assert.equal(result.controller, null);
+  });
+
   // No document at all (e.g. a worker or a plain Node import).
   delete globalThis.document;
   const result = await registerHornTools(airhorn);
