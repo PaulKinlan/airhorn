@@ -509,6 +509,23 @@ async function testBootWatchdog() {
 
     // --- Case 8: a slow bundle arriving late retires the banner (airhorn-duj) ---
     console.log('--- Case 8: slow bundle arrives after the banner');
+    // Run the late-boot scenario on a page with NO service-worker controller.
+    // The update cases (6/10) publish a byte-different worker; a page WITH a
+    // controller reloads itself via controllerchange the moment that worker
+    // takes over, and the fresh document's banner is hidden BY DEFAULT - the
+    // 'banner retired' assertion then passes without the retirement ever
+    // running. (Found by the ie0b mutation check: disabling the retirement in
+    // the page left this case green; navs showed 'reload'.) Unregister first,
+    // like case 10, so the only thing that can hide the banner is the boot.
+    await evaluateAwaited(`(async () => {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg) await reg.unregister();
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    })()`);
+    // The old worker dies with its last client (this page); give the browser
+    // a beat to drop the registration before the fresh navigation.
+    await new Promise(r => setTimeout(r, 500));
     await send('Fetch.enable', { patterns: [{ urlPattern: '*assets/*.js', requestStage: 'Request' }] });
     fetchHold = true;
     // Mark the outgoing document first: Page.navigate resolves when the
