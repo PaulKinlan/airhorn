@@ -280,6 +280,13 @@ async function launchBrowser() {
         clearTimeout(timer);
         reject(new Error(`chrome exited early (${code})`));
       });
+      // A spawn failure (CHROME_BIN that does not exist, EACCES, ...) emits
+      // 'error' ASYNC on the child: without this listener it is uncaught and
+      // kills the process with the profile already mkdtemp'd (airhorn-r5me).
+      proc.on('error', (spawnErr) => {
+        clearTimeout(timer);
+        reject(new Error(`chrome spawn failed: ${spawnErr.message}`));
+      });
     });
 
     const cdp = await Cdp.connect(wsUrl);
