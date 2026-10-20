@@ -27,8 +27,25 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 import { sweepProfile } from './lib/reap.mjs';
+
+// Every launch's teardown lives in a try/finally, which a bound-kill (fleet-gate's
+// SIGTERM, a job-tree reaper, Ctrl-C) never reaches - so the chrome tree and its
+// /tmp profile survived the kill (airhorn-dpua, the tools' copy of the gap
+// airhorn-4vfn closed for the suites). The tool drives one browser at a time, so
+// a single slot is the whole live set; the handler does the same sweep + removal
+// synchronously inside its grace.
+let liveBrowser = null;
+installSignalExit(() => {
+  if (!liveBrowser) return;
+  const { chrome, profileDir } = liveBrowser;
+  liveBrowser = null;
+  sweepProfile(profileDir);
+  try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
+  try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
+});
 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -105,6 +122,7 @@ async function launchChrome(extraFlags = []) {
   // stay in the caller's process group so an ancestor group-kill - what
   // fleet-gate's bound and any job-tree reaper send - reaches the whole tree;
   // SIGKILL runs no handler, so a detached launch outlived the kill.
+  liveBrowser = { chrome, profileDir };
 
   let wsUrl = null;
   let ws = null;
@@ -113,6 +131,7 @@ async function launchChrome(extraFlags = []) {
   // with chrome and its profile alive, because cleanup only existed after
   // everything had succeeded (airhorn-51lr).
   const cleanup = () => {
+    liveBrowser = null;
     try { ws?.close(); } catch {}
     sweepProfile(profileDir);
     try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
