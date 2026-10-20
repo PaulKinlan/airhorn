@@ -607,6 +607,12 @@ async function testBootWatchdog() {
     if ((await evaluate(`window.__hadControllerAtParse`)) !== false) {
       throw new Error('expected a page with no controller at parse for the no-reload update generation');
     }
+    // __statusLog survives navigation via sessionStorage, so it still holds
+    // case 6's "new version is ready". Without clearing it, the wait below
+    // matches that leftover on its first poll and case 10 passes without any
+    // update happening at all (airhorn-0p88 / airhorn-tuuq R1,
+    // mutation-verified: swBody = swV1 here still passed green).
+    await evaluate(`window.__statusLog.length = 0; sessionStorage.setItem('__statusLog', '[]'); 1`);
     swBody = swV2;
     await evaluate(`navigator.serviceWorker.getRegistration().then(reg => reg.update())`);
     await waitUntil(`window.__statusLog.some(m => /new version is ready/i.test(m))`, 10000, 'successful update to complete');

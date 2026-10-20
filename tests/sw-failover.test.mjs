@@ -257,6 +257,12 @@ async function run() {
       return { title: document.title, text: text.slice(0, 300), hasRetry: !!retry };
     })()`).catch(() => ({ title: '', text: '', hasRetry: false }));
     assert(noShell.loaded, 'the fallback navigation never completed');
+    // The title pins the served document: without it, the app's own shell
+    // (buttons + long body text) or Chrome's offline error page (reload
+    // button + "No internet") both satisfy hasRetry and text.length
+    // (airhorn-tuuq F3).
+    assert(fallback.title === 'The Air Horner - no connection',
+      `the no-shell fallback was not the service worker's offline document: ${JSON.stringify(fallback)}`);
     assert(fallback.hasRetry,
       `the no-shell fallback offers no way to retry: ${JSON.stringify(fallback)}`);
     assert(fallback.text.length > 10,
@@ -279,7 +285,11 @@ async function run() {
       const text = live.map((el) => (el.textContent || '').trim()).join(' | ');
       return { regions: live.length, text };
     })()`);
-    const REPORT_RE = /update|could not|failed|latest|previous version/i;
+    // The FAILURE copy, not the progress copy: /update/i alone matches the
+    // "Updating the Air Horner..." announcement that fires at updatefound, so
+    // the old regex passed green with the failure announcement deleted
+    // (airhorn-tuuq F1). It must name the failure outcome.
+    const REPORT_RE = /could not update|previous version|update failed/i;
     // Same 3s window, but it stops as soon as the report lands (airhorn-iwf).
     const report = (await waitUntil(async () => {
       const r = await readReport();

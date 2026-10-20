@@ -351,9 +351,17 @@ async function run() {
 
     console.log('--- Opening tab B on the same origin (shared worker) ---');
     const B = await openTab('B', `${origin}/`);
-    assert(await B.hornState(), 'tab B did not boot');
+    // .booted, not object truthiness: hornState() returns an object even when
+    // the tab never booted, and an object is always truthy (airhorn-tuuq M1).
+    assert((await B.hornState()).booted, 'tab B did not boot');
     const badgeApi = await B.evaluate('window.__badgeApi');
     console.log(`  two tabs live; badge API present in this browser: ${badgeApi}`);
+    // The badge assertions below are the point of sections B/C (airhorn-xkq,
+    // airhorn-70k); an `if (badgeApi)` guard with no else reads green by
+    // skipping them (airhorn-tuuq M5). Fail loudly instead: without the API
+    // this suite cannot verify its headline behavior, and the gate's Chrome
+    // always has it.
+    assert(badgeApi === true, 'setAppBadge/clearAppBadge not exposed in this browser; the badge-sharing assertions would be skipped');
 
     /* ------- B. horning in one tab must not leave the other one stale ------ */
     console.log('\n--- B. three blasts in tab A; tab B must stay honest throughout ---');
@@ -548,7 +556,12 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       await D.waitBooted();
       console.log(`  late tab announced its reload: ${JSON.stringify(ready)}`);
     } else {
-      console.log('  late tab did not need to reload (it activated onto the new controller); nothing to assert.');
+      // D opened on an origin the previous worker already controlled, so it
+      // hadController at parse and MUST reload via controllerchange when the
+      // new worker takes over (airhorn-56j). 'No reload needed' cannot happen
+      // here; letting it log-and-pass made this section green when the reload
+      // was removed entirely (airhorn-tuuq M9, mutation-verified).
+      throw new Error('the mid-install tab never reloaded on controllerchange - the airhorn-56j announcement path was not exercised');
     }
     state.swShim = null;
 

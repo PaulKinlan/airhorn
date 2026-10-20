@@ -527,19 +527,20 @@ async function checkBlockedAutoplay(base) {
     Object.assign(blocked, await browser.snapshot());
 
     const audible = blocked.peak > 0.3 && blocked.ctxState === 'running';
-    if (!audible) {
-      // The one thing that must never happen: the page says it is playing while
-      // the graph is suspended and nothing can be heard.
-      assert(blocked.pressed === 'false' && blocked.horning === false,
-        `/#instant in a tab without audio activation claims to be playing: aria-pressed=${blocked.pressed}, .horning=${blocked.horning}, ctx=${blocked.ctxState}, peak=${blocked.peak.toFixed(4)}`);
-      assert(blocked.playing === false,
-        `/#instant in a tab without audio activation reports isPlaying()=true while silent (ctx ${blocked.ctxState})`);
-      assert(blocked.starts === 0,
-        `/#instant scheduled ${blocked.starts} source(s) into a suspended context: a delayed blast when the context resumes`);
-      console.log(`  blocked as expected (ctx ${blocked.ctxState}), and the page did not claim to play`);
-    } else {
-      console.log(`  this browser allowed audio without a gesture (ctx ${blocked.ctxState}); state-consistency trivially holds`);
-    }
+    // The launch disabled autoplay, so audible playback means the environment
+    // ignored it - that is a loud failure, not a reason to skip the contract
+    // (the old else-branch read green while asserting nothing; airhorn-tuuq S6).
+    assert(!audible,
+      `/#instant was given no autoplay permission but audio ran anyway (ctx ${blocked.ctxState}, peak ${blocked.peak.toFixed(4)}) - the test environment, not the app, is broken`);
+    // The one thing that must never happen: the page says it is playing while
+    // the graph is suspended and nothing can be heard.
+    assert(blocked.pressed === 'false' && blocked.horning === false,
+      `/#instant in a tab without audio activation claims to be playing: aria-pressed=${blocked.pressed}, .horning=${blocked.horning}, ctx=${blocked.ctxState}, peak=${blocked.peak.toFixed(4)}`);
+    assert(blocked.playing === false,
+      `/#instant in a tab without audio activation reports isPlaying()=true while silent (ctx ${blocked.ctxState})`);
+    assert(blocked.starts === 0,
+      `/#instant scheduled ${blocked.starts} source(s) into a suspended context: a delayed blast when the context resumes`);
+    console.log(`  blocked as expected (ctx ${blocked.ctxState}), and the page did not claim to play`);
 
     // Silence must not read as broken (airhorn-hlg): the page says what is
     // wrong through its one polite live region, and the horn - a real button -
