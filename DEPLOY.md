@@ -2,9 +2,11 @@
 
 This is the operator runbook for shipping V2, and the record of what local
 verification proves. **Every command in steps 1–6 was run literally, in order,
-on a Linux VM on 2026-10-20** (Node 24.22.0, npm 11.19.1, Chrome 155) against
-the build of `ba2cad3` — the expected output quoted for each step is what
-actually happened, not a sketch. Steps marked **PRODUCTION ONLY** touch DNS,
+on a Linux VM on 2026-10-20** (Node 24.22.0, npm 11.19.1, Chrome 155) — first
+against `ba2cad3` to write this document, then again against `b477ddb` to
+regenerate everything in `preview/` after the CLS fix
+(`airhorn-qons`). The expected output quoted for each step is what actually
+happened on that second run, not a sketch. Steps marked **PRODUCTION ONLY** touch DNS,
 hosting or credentials, were *not* run here, and each says what you should
 expect to see when you run it for real.
 
@@ -22,14 +24,14 @@ changing `public/sw.js` and the manifest.
 
 Totals for the build below (from `preview/evidence.json`, `publishedTotals`):
 
-- **26 files, 244,049 B (~244 KB) raw, 182,838 B (~183 KB) gzipped** (zlib
+- **26 files, 244,741 B (~245 KB) raw, 183,085 B (~183 KB) gzipped** (zlib
   level 9, decimal KB; a real host's brotli will usually do better).
 
 | Path | Raw | Gzip |
 | --- | --- | --- |
-| `index.html` | 16,478 B | 5,355 B |
+| `index.html` | 17,170 B | 5,600 B |
 | `assets/index-C81EVIwm.js` — **one hashed bundle; the hash changes on every build** | 16,657 B | 5,820 B |
-| `sw.js` — build-stamped by the Vite plugin in `vite.config.js` (`__BUILD_HASH__` → cache name `airhorner-2.0.0-<hash>`, plus the exact `/assets/*` list) | 9,441 B | 3,703 B |
+| `sw.js` — build-stamped by the Vite plugin in `vite.config.js` (`__BUILD_HASH__` → cache name `airhorner-2.0.0-<hash>`, plus the exact `/assets/*` list) | 9,441 B | 3,705 B |
 | `manifest.json` — install metadata (name, id, standalone, 192/512 + maskable icons, screenshots, *Instant Blast* shortcut) | 2,980 B | 633 B |
 | `styles/main.css` | 11,879 B | 4,023 B |
 | `sounds/airhorn.mp3` | 40,858 B | 28,859 B |
@@ -37,12 +39,22 @@ Totals for the build below (from `preview/evidence.json`, `publishedTotals`):
 | `favicon.ico`, `robots.txt`, `humans.txt` | — | — |
 | `.well-known/assetlinks.json` — **see the warning in step 7** | 300 B | 239 B |
 
-Those numbers are **per build**, and they were stale in this document until
-2026-10-20: it quoted a 232,215 B build whose `index.html` was 11,965 B and
-whose bundle was 9,850 B, both since grown. Do not copy them into
-a release note: regenerate with step 4 and read `publishedTotals`. The same
+Those numbers are **per build** and they have gone stale in this document
+twice (it once quoted a 232,215 B build whose `index.html` was 11,965 B, and the
+pre-CLS-fix build was 244,049 B with a 16,478 B `index.html`). Do not copy them
+into a release note: regenerate with step 4 and read `publishedTotals`. The same
 applies to the bundle filename — `index-C81EVIwm.js` is this build's hash;
 `sw.js` names it, and a stale name in an edge config breaks the app.
+
+**Everything in `preview/` that this document quotes is generated**, and by the
+commands below: `evidence.json` and the four `horn-*.png` screenshots by step 4,
+`CWV-report.txt` by step 5, `preview/https/` (evidence json + two screenshots)
+by step 6 — after `npm run build` (step 2). Two files in the directory are not
+part of this runbook: `audio-parity.json`/`audio-parity.md` come from
+`node tools/audio-parity.mjs --json preview/audio-parity.json`, and
+`manifest-shortcuts.md` is a hand-written analysis, not a generated artefact.
+If a number in this document disagrees with `preview/evidence.json`, the
+document is stale — not the pack.
 
 ## Preconditions
 
@@ -203,7 +215,7 @@ succeeded. Observed, in full:
 
 ```
 === Preview evidence pack ===
-  published: 26 file(s), 244049 B raw, 182838 B gzipped (zlib level 9)
+  published: 26 file(s), 244741 B raw, 183085 B gzipped (zlib level 9)
   screenshots: horn-light.png, horn-dark.png, horn-320.png, horn-offline.png
   desktop horn width: 219px; offline: 219px
   dark applied: true (bg rgb(33, 150, 243) -> rgb(7, 19, 31); negative control detects false: true)
@@ -217,38 +229,54 @@ preview-evidence: PASS
 
 The `published:` line is where the size claims in step 1 come from. Re-run this
 after **any** source change: the screenshots and `generatedAt` are the record of
-*that* build, and the bundle hash in them changes with it.
+*that* build, and the bundle hash in them changes with it. This is the only
+source of the pack's size numbers — step 1 must not be edited by hand.
 
-## Step 5 — performance report (dry-runnable, but read the variance)
+## Step 5 — performance report (dry-runnable; desktop-class, so quote the conditions)
 
 ```bash
 node tools/measure-perf.mjs > preview/CWV-report.txt
 ```
 
-Unthrottled desktop headless Chrome at the default viewport, against a loopback
+Unthrottled desktop headless Chrome, default viewport, against a loopback
 server — **not** a phone and not a mobile network (see
 [EVIDENCE-LIMITS.md](EVIDENCE-LIMITS.md) §4 for why that distinction matters).
-Three consecutive runs on the dry-run host, same build
-(`preview/CWV-report.txt` is the first of them):
+The report now says so itself on its `Conditions:` line, so
+`preview/CWV-report.txt` cannot be quoted without the caveat travelling with it:
 
-| Load | Transferred | First Paint | INP (p98) | CLS |
-| --- | --- | --- | --- | --- |
-| cold | 103,496 B | 276 / 224 / 192 ms | 24 ms | 0.0000 / 0.0000 / **0.3599** |
-| repeat (SW) | 0 B | 56 / 68 / 72 ms | 16 / 24 / 24 ms | 0.3599 / 0.0000 / 0.0000 |
+```
+Conditions: NO CPU throttling, NO network throttling, default viewport 780x437 @1x,
+server on loopback - a desktop-class measurement, NOT a phone on a mobile network
+```
 
-Two things to take from that table rather than a single number:
+Three consecutive runs on the dry-run host against this build
+(`preview/CWV-report.txt` is the third of them):
 
-- **Bytes are stable, timings are not.** The cold load transfers 103,496 B
-  over the network and the repeat load transfers 0 B, every run. First paint
-  moved by ~80 ms run to run on a 2-vCPU VM, so do not quote a millisecond
-  figure as a promise; quote the class and the command.
-- **CLS is not reliably 0.0000.** Four of six loads scored 0.0000, two scored
-  **0.3599** — a large shift, far past the 0.1 "good" threshold. It is filed as
-  a suspected layout-shift defect with this reproduction (`airhorn-fgvq`);
-  until that is understood, this document does not claim a clean CLS for the
-  deployed app. `LCP` is likewise unreliable in this tool: it printed
-  `None (0 entries recorded)` on 4 of 6 loads and 112–332 ms on the others,
-  because the observer only sees entries recorded inside its sampling window.
+| Load | Transferred | First Paint | LCP | INP (p98) | CLS |
+| --- | --- | --- | --- | --- | --- |
+| cold | 104,188 B | 232 / 260 / 104 ms | 324 / 308 / 332 ms | 24 ms | 0.0000 ×3 |
+| repeat (SW) | 0 B | 60 / 56 / 64 ms | 100 / 104 / 120 ms | none / 32 ms / none | 0.0000 ×3 |
+
+Three things to take from that rather than a single number:
+
+- **Bytes are stable, timings are not.** The cold load transfers 104,188 B over
+  the network and the repeat load transfers 0 B, every run. First paint moved
+  by ~150 ms run to run on a 2-vCPU VM and INP flipped between "none ≥16 ms" and
+  32 ms, so quote the class and the command, never a millisecond figure as a
+  promise.
+- **CLS is 0.0000, and that is now a measured claim, not a lucky run.** Before
+  `airhorn-fgvq` this page scored 0.3599 on 5 of 6 loads: the inline critical
+  layer let `#airhorn` shrink-wrap the horn (219 px wide) until the async sheet
+  made it viewport-wide (780 px), a shift on the page's only element. The
+  critical layer now sizes that box like `main.css` does, and three runs here
+  (six loads) score 0.0000. `LCP` also became reliable for the same reason: the
+  horn's box now has its final size from the first paint, so the entry is
+  recorded (324/308/332 ms cold) instead of `None (0 entries recorded)`, which
+  is what it printed on 4 of 6 loads before the fix.
+- **This is a desktop-class number only.** Nothing here is throttled, so the
+  mobile-class figures `airhorn-df1` measured (see
+  [EVIDENCE-LIMITS.md](EVIDENCE-LIMITS.md) §4) are roughly an order of magnitude
+  worse; do not carry these numbers into a CWV/RUM claim.
 
 ## Step 6 — the HTTPS installability proof (dry-runnable, self-signed only)
 
@@ -263,8 +291,8 @@ is the scheme. Observed:
 
 ```
   chrome: ... HeadlessChrome/155.0.0.0 Safari/537.36
-  HTTP  http://airhorn.test:36325/: secureContext=false sw=false prompt={"fired":false,"at":0,"platforms":null,"promptError":null,"choice":null}
-  HTTPS https://airhorn.test:36245/: secureContext=true sw=true prompt={"fired":true,...,"platforms":["web"],"promptError":"NotAllowedError: Failed to execute 'prompt' on 'BeforeInstallPromptEvent': The prompt() method must be called with a user gesture","choice":null} button={"disabled":false,"hasAvailableClass":true,"visibility":"visible","pointerEvents":"auto","text":"Install"}
+  HTTP  http://airhorn.test:<port>/:  secureContext=false sw=false prompt={"fired":false,"at":0,"platforms":null,"promptError":null,"choice":null}
+  HTTPS https://airhorn.test:<port>/: secureContext=true sw=true prompt={"fired":true,...,"platforms":["web"],"promptError":"NotAllowedError: Failed to execute 'prompt' on 'BeforeInstallPromptEvent': The prompt() method must be called with a user gesture","choice":null} button={"disabled":false,"hasAvailableClass":true,"visibility":"visible","pointerEvents":"auto","text":"Install"}
   screenshots: install-http-insecure.png, install-https-selfsigned.png
 install-https-proof: PASS
 ```
@@ -379,7 +407,7 @@ Kept from the ship/no-ship record, in one place, with the full list in
 ## Scope of this dry run
 
 Steps 1–6 were executed against a fresh `git archive` copy of `ba2cad3` on
-2026-10-20; the only files they write are `dist/` and `preview/`. **No
+2026-10-20, and again against `b477ddb` to regenerate the pack; the only files they write are `dist/` and `preview/`. **No
 production resource was touched**: no DNS record, no hosting configuration, no
 certificate, no credential, and nothing was uploaded anywhere. Steps 7–8 are
 written from the requirements the local checks establish (origin root, HTTPS,

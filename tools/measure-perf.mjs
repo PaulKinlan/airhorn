@@ -381,6 +381,20 @@ async function main() {
 
     console.log('=== Performance Measurement Report ===');
     console.log(`Tooling: Google Chrome Headless (${chromeBin}) via CDP WebSocket`);
+    // The conditions belong IN the report, not only next to it (airhorn-qons):
+    // the checked-in preview/CWV-report.txt is quoted as perf evidence, and a
+    // reader who sees only these lines has to be able to tell that this is not
+    // a phone. The tool applies no Emulation at all - no CPU throttle, no
+    // network throttle, default viewport, loopback server.
+    const viewportRes = await send('Runtime.evaluate', {
+      expression: '({ w: innerWidth, h: innerHeight, dpr: devicePixelRatio })',
+      returnByValue: true,
+    });
+    const viewport = viewportRes.result.value
+      ? `${viewportRes.result.value.w}x${viewportRes.result.value.h} @${viewportRes.result.value.dpr}x`
+      : 'unknown';
+    console.log(`Conditions: NO CPU throttling, NO network throttling, default viewport ${viewport}, ` +
+      'server on loopback - a desktop-class measurement, NOT a phone on a mobile network');
     console.log(`SW Controller Present: ${swActive}`);
     console.table({
       'Cold Load': {

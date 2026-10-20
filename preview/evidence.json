@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-10-20T20:46:47.335Z",
-  "url": "http://127.0.0.1:42149/",
+  "generatedAt": "2026-10-20T21:34:20.863Z",
+  "url": "http://127.0.0.1:40939/",
   "chrome": "/usr/bin/google-chrome",
   "publishedFiles": [
     {
@@ -105,8 +105,8 @@
     },
     {
       "path": "/index.html",
-      "bytes": 16478,
-      "gzipBytes": 5355
+      "bytes": 17170,
+      "gzipBytes": 5600
     },
     {
       "path": "/manifest.json",
@@ -131,13 +131,13 @@
     {
       "path": "/sw.js",
       "bytes": 9441,
-      "gzipBytes": 3703
+      "gzipBytes": 3705
     }
   ],
   "publishedTotals": {
     "files": 26,
-    "bytes": 244049,
-    "gzipBytes": 182838
+    "bytes": 244741,
+    "gzipBytes": 183085
   },
   "captures": [
     "horn-light.png",
@@ -164,7 +164,7 @@
   },
   "installability": {
     "secureContext": true,
-    "manifestLink": "http://127.0.0.1:42149/manifest.json",
+    "manifestLink": "http://127.0.0.1:40939/manifest.json",
     "manifest": {
       "name": "The Air Horner",
       "short_name": "Airhorner",
@@ -248,7 +248,7 @@
     "has512Icon": true,
     "hasMaskable": true,
     "serviceWorker": {
-      "scriptURL": "http://127.0.0.1:42149/sw.js",
+      "scriptURL": "http://127.0.0.1:40939/sw.js",
       "state": "activated"
     },
     "swHasFetchHandler": true,
