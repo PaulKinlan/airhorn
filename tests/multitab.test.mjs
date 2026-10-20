@@ -51,28 +51,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { installSignalExit } from './support/signal-exit.mjs';
 
 // A bound-kill (SIGTERM first, then the grace bound) bypasses the try/finally
 // in run(), which is the only place the browser is closed (SIGTERM, tree
 // SIGKILL, profile removal): without this, a timed-out run leaked the whole
-// chrome tree plus its /tmp profile (airhorn-1l0a; shape from
-// tools/audio-parity.mjs, tests/shortcuts.test.mjs). The close is awaited
-// but raced against 2s so a wedged close cannot outlive the grace bound.
+// chrome tree plus its /tmp profile (airhorn-1l0a). The handler itself is
+// shared with the other suites and the browser tools (tests/support/
+// signal-exit.mjs, airhorn-4vfn); it runs once, races the close against the
+// grace bound, and exits with the signal's own code.
 let liveBrowser = null;
-let signalHandled = false;
-for (const [signal, code] of [['SIGTERM', 128 + 15], ['SIGINT', 128 + 2]]) {
-  process.on(signal, () => {
-    if (signalHandled) return;
-    signalHandled = true;
-    const browser = liveBrowser;
-    liveBrowser = null;
-    if (!browser) { process.exit(code); return; }
-    Promise.race([
-      browser.close().catch(() => {}),
-      new Promise((resolve) => setTimeout(resolve, 2000)),
-    ]).then(() => process.exit(code));
-  });
-}
+installSignalExit(async () => {
+  const browser = liveBrowser;
+  liveBrowser = null;
+  if (browser) await browser.close().catch(() => {});
+});
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, '../dist');

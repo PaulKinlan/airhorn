@@ -45,6 +45,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -835,22 +836,18 @@ function printSweep(results) {
 // in main(), which is the only place the browser group is killed and the
 // profile removed: a timed-out run leaked a 12-process chrome tree plus its
 // /tmp profile (airhorn-w0ys). Register the live browser and do the same
-// group-kill + profile removal on SIGTERM/SIGINT, then exit with the
-// signal's own code - the same shape as tests/shortcuts.test.mjs. A
-// process.on('exit') rm is NOT enough: no exit event fires on a signal
-// default-death.
+// group-kill + profile removal on SIGTERM/SIGINT through the shared handler
+// (tests/support/signal-exit.mjs, airhorn-4vfn). A process.on('exit') rm is
+// NOT enough: no exit event fires on a signal default-death.
 let liveBrowser = null;
-const signalCleanup = () => {
+installSignalExit(() => {
   if (!liveBrowser) return;
   const { chrome, profileDir } = liveBrowser;
   liveBrowser = null;
   try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* already gone */ }
   try { chrome.kill('SIGTERM'); } catch { /* already gone */ }
   try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* best effort */ }
-};
-for (const [signal, code] of [['SIGTERM', 128 + 15], ['SIGINT', 128 + 2]]) {
-  process.on(signal, () => { signalCleanup(); process.exit(code); });
-}
+});
 
 async function main() {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
