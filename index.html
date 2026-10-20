@@ -34,18 +34,23 @@
     <meta name='twitter:image' content='https://airhorner.com/images/touch/android-launchericon-192-192.png'>
     <meta name='twitter:creator' content='@paul_kinlan'>
     <!-- Critical fallback (airhorn-zb0), extended for the async stylesheet
-         (airhorn-c5e): main.css loads non-render-blocking (media=print,
-         swapped to all on load) so first paint waits only for the HTML. That
-         makes this inline block the stylesheet for the first paint on every
-         load, not just when the sheet fails - so it now also mirrors the
-         page tokens, centering and horn colours from main.css. Values here
-         MUST stay identical to main.css's (the a11y and resilience suites
-         pin computed styles on both paths); the layer is declared before
-         main.css's own, so every main.css rule beats these once it swaps in
-         (unlayered styles would win the cascade forever - they would have
-         pinned the installer hidden). Until the sheet lands the horn shows
-         its designed fallback look: geometry and colours now, edge shadow,
-         boundary ring and press animation when the sheet arrives. -->
+         (airhorn-c5e), geometry fixed per review finding airhorn-e18:
+         main.css loads non-render-blocking (media=print, swapped to all on
+         load) so first paint waits only for the HTML. That makes this inline
+         block the stylesheet for the first paint on every load, so it paints
+         the DESIGNED horn: tokens, centering, colours, and .inner as the sole
+         in-flow grid child of .horn (concentric 80% disc). The label is
+         absolutely positioned below the horn and hidden while the sheet is
+         in flight or loaded; if the sheet genuinely fails, its onerror adds
+         .stylesheet-failed and the label is revealed (airhorn-zb0's
+         labelled-unstyled contract; a no-JS browser cannot report a failed
+         sheet, there the aria-label still names the button). #installer is
+         out of flow so the pre-swap frame cannot reflow when the sheet
+         lands. Values here MUST stay identical to main.css's (the a11y and
+         resilience suites pin computed styles on both paths); the layer is
+         declared before main.css's own, so every main.css rule beats these
+         once it swaps in (unlayered styles would win the cascade forever -
+         they would have pinned the installer hidden). -->
     <style>
       @layer critical {
         :root {
@@ -96,11 +101,30 @@
           border-radius: 50%;
           display: grid;
           place-items: center;
+          /* Anchor for the absolutely-positioned label below (airhorn-e18:
+             the label must never become a second grid row - that squashed
+             .inner into an ellipse at first paint). */
+          position: relative;
           background-color: var(--horn-bg);
         }
 
         .horn-label {
           font: inherit;
+          /* Hidden during the async window: the designed horn speaks for
+             itself (the aria-label carries the name). Revealed only when
+             the sheet genuinely fails, via .stylesheet-failed set by the
+             link's onerror below. Absolutely positioned so, when revealed,
+             it sits under the horn instead of becoming a second grid row. */
+          display: none;
+          position: absolute;
+          top: 100%;
+          left: 0;
+          right: 0;
+          text-align: center;
+        }
+
+        .stylesheet-failed .horn-label {
+          display: block;
         }
 
         .inner {
@@ -133,6 +157,12 @@
         }
 
         #installer:not(.available) {
+          /* Out of flow (airhorn-e18): in-flow, the hidden installer added
+             21px of scrollHeight that collapsed the moment main.css fixed
+             its position - a reflow on every first load. */
+          position: absolute;
+          top: 0;
+          inset-inline-end: 0;
           visibility: hidden;
           pointer-events: none;
         }
@@ -141,7 +171,7 @@
     <!-- Async stylesheet: fetched at low priority, swapped to screen media
          on load. No JS (noscript) keeps the classic blocking link, since
          without JS this inline critical block is all there is either way. -->
-    <link rel='stylesheet' href='/styles/main.css' media='print' onload="this.media='all'">
+    <link rel='stylesheet' href='/styles/main.css' media='print' onload="this.media='all'" onerror="document.documentElement.classList.add('stylesheet-failed')">
     <noscript><link rel='stylesheet' href='/styles/main.css'></noscript>
     <link rel='preload' href='/sounds/airhorn.mp3' as='fetch' crossorigin>
   </head>

@@ -436,6 +436,9 @@ async function testBootWatchdog() {
       const horn = document.querySelector('.horn');
       const r = horn.getBoundingClientRect();
       const label = document.querySelector('.horn-label');
+      const lr = label ? label.getBoundingClientRect() : null;
+      const inner = document.querySelector('.horn .inner');
+      const ir = inner ? inner.getBoundingClientRect() : null;
       const installer = document.getElementById('installer');
       const h1 = document.querySelector('h1');
       return {
@@ -443,6 +446,35 @@ async function testBootWatchdog() {
         h: Math.round(r.height),
         labelText: label ? label.textContent.trim() : null,
         labelVisible: !!label && label.getClientRects().length > 0,
+        // airhorn-e18: the pre-swap frame must be the designed horn -
+        // .inner a concentric square disc, never a second grid row's
+        // squashed ellipse, and the label never inside the horn body.
+        innerSquare: !!ir && Math.abs(ir.width - ir.height) <= 2,
+        innerConcentric: !!ir && Math.abs((ir.left + ir.width / 2) - (r.left + r.width / 2)) <= 2
+          && Math.abs((ir.top + ir.height / 2) - (r.top + r.height / 2)) <= 2,
+        innerRatio: !!ir ? Math.round((ir.width / r.width) * 100) : 0,
+        labelBelowHorn: !!lr && !!r && lr.top >= r.bottom - 2,
+        // airhorn-e18 second-order: while unavailable the installer must be
+        // out of flow, or the pre-swap frame carries dead height that
+        // collapses when the sheet lands. Pinned as a CSSOM contract (not a
+        // live-position probe) because the natural beforeinstallprompt can
+        // legitimately have fired before this probe runs - once it has, the
+        // installer is supposed to be reachable below the fold.
+        installerOutOfFlowRule: (() => {
+          for (const sheet of document.styleSheets) {
+            if (sheet.href) continue;
+            const walk = rules => {
+              for (const rule of rules) {
+                if (rule.cssRules && rule.cssRules.length) { const hit = walk(rule.cssRules); if (hit) return hit; }
+                if (rule.selectorText && rule.selectorText.includes('#installer:not(.available)')
+                  && rule.style && rule.style.getPropertyValue('position') === 'absolute') return true;
+              }
+              return false;
+            };
+            if (walk(sheet.cssRules)) return true;
+          }
+          return false;
+        })(),
         installerGone: !!installer && installer.getClientRects().length === 0,
         // The critical fallback hides the installer only while the prompt is
         // unavailable (airhorn-5yv): once beforeinstallprompt has fired (it
@@ -467,6 +499,12 @@ async function testBootWatchdog() {
     }
     if (!unstyled.installerHonest) throw new Error('install button neither honestly hidden nor reachable without CSS');
     if (!unstyled.h1Hidden) throw new Error('visually-hidden heading showed as prose without CSS');
+    // airhorn-e18: unstyled must mean the designed horn, not a squashed one.
+    if (!unstyled.innerSquare || !unstyled.innerConcentric || unstyled.innerRatio !== 80) {
+      throw new Error(`pre-swap horn malformed (airhorn-e18): ${JSON.stringify(unstyled)}`);
+    }
+    if (!unstyled.labelBelowHorn) throw new Error(`label inside the horn body pre-swap: ${JSON.stringify(unstyled)}`);
+    if (!unstyled.installerOutOfFlowRule) throw new Error(`critical layer no longer takes the unavailable installer out of flow: ${JSON.stringify(unstyled)}`);
     // And the unstyled horn still sounds: the failure this replaces was a
     // page that looked broken but passed a naive usability check.
     await evaluate(`document.querySelector('.horn').click()`);
