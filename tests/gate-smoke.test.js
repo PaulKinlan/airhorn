@@ -271,15 +271,61 @@ test('a change that selects ZERO suites fails loudly, green only by explicit ack
   assert.equal(query.status, 0, `--list is a query, not a verdict: ${query.stderr}`);
 });
 
+// Builds a throwaway repo around a copy of the REAL gate script: the gate resolves its map
+// relative to its own location, so this exercises the real selection/verdict code end to end.
+// The map names one landed suite (tests/pass.test.js) and one '~'-pending suite
+// (tests/pending.test.js), with a source shape for each outcome under test. Caller cleans up.
+const buildGateProbe = () => {
+  const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-contract-'));
+  const toolsDir = path.join(probe, 'tools');
+  fs.mkdirSync(toolsDir);
+  fs.mkdirSync(path.join(probe, 'tests'));
+  fs.copyFileSync(gate, path.join(toolsDir, 'fast-gate.sh'));
+  // The runner config is part of the gate: without its pinned TAP reporter the probe's
+  // node --test would emit the spec summary and the gate would read the suite as silent.
+  fs.copyFileSync(path.join(root, 'tools', 'gate.conf'), path.join(toolsDir, 'gate.conf'));
+  fs.writeFileSync(path.join(probe, 'package.json'),
+    JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'true' } }));
+  fs.writeFileSync(path.join(probe, 'tests', 'pass.test.js'),
+    "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('one passing case', () => { assert.ok(true); });\n");
+  fs.writeFileSync(path.join(toolsDir, 'suite-map.tsv'), [
+    'src/a.js\ttests/pass.test.js',
+    'pending-src.txt\ttests/pending.test.js',
+    'mixed-src.js\ttests/pass.test.js tests/pending.test.js',
+    'tests/pass.test.js\ttests/pass.test.js',
+    '~tests/pending.test.js\ttests/pending.test.js',
+    '!*.md',
+    '',
+  ].join('\n'));
+  for (const args of [['init'], ['config', 'user.email', 'probe@example.invalid'], ['config', 'user.name', 'probe'], ['add', '-A'], ['commit', '-m', 'probe']]) {
+    const g = spawnSync('git', ['-C', probe, ...args], { encoding: 'utf8' });
+    assert.equal(g.status, 0, `probe git ${args[0]} failed: ${g.stderr}`);
+  }
+  // Strip ambient gate knobs AND the test harness's own markers: node --test sets
+  // NODE_TEST_CONTEXT in this process, and a grandchild suite that inherits it believes it
+  // is a managed test child, writes nothing and exits 0 (the same silent green the
+  // airhorn-0ct pin strips before its own child runs) - so the gate would read a passing
+  // suite as silent. Production never runs the gate under these, so the probe must not.
+  const cleanEnv = {};
+  for (const k of Object.keys(process.env)) {
+    if (!k.startsWith('FAST_GATE_') && !k.startsWith('AIRHORN_') && !k.startsWith('NODE_TEST_')) cleanEnv[k] = process.env[k];
+  }
+  return {
+    probe,
+    run: (args, env = {}) => spawnSync('bash', [path.join(toolsDir, 'fast-gate.sh'), ...args], {
+      cwd: probe, encoding: 'utf8', env: { ...cleanEnv, ...env },
+    }),
+  };
+};
+
 test('the fleet contract recognises every rc-0 verdict line the gate emits (airhorn-3dph)', () => {
   // tools/check.conf is the CONTRACT the coord installs as ~/.fleet/check.conf: it tells
   // fleet-check which gate lines certify a pass. When the gate's verdict lines drift from it,
   // the declared contract silently downgrades blessed passes: airhorn-3dph shipped a
-  // ZERO-SUITE PASS line that matched NEITHER contract regex (and an all-pending line named
-  // only by a loose unanchored prefix), so the opt-in pass would have read UNKNOWN at the
-  // first install that names a contract owner. This pin runs the REAL gate script in a
-  // throwaway repo, captures one instance of every rc-0 verdict line it can emit, and
-  // requires the contract to classify each one - and to classify nothing an rc-1 run prints.
+  // ZERO-SUITE PASS line that matched NEITHER contract regex, so the opt-in pass would have
+  // read UNKNOWN at the first install that names a contract owner. This pin runs the REAL
+  // gate in a throwaway repo, captures one instance of every rc-0 verdict line it can emit,
+  // and requires the contract to classify each one - and to classify nothing an rc-1 run prints.
   const conf = spawnSync('bash', [
     '-c', 'source "$1"; printf "%s\\n%s\\n%s\\n%s\\n" "$CHECK_FAST_PASS_RE" "$CHECK_FAST_NO_WORK_RE" "${CHECK_FAST_NO_WORK_POLICY-UNSET}" "${CHECK_FAST_CONTRACT_OWNER-}"',
     'check.conf', path.join(root, 'tools', 'check.conf'),
@@ -302,82 +348,78 @@ test('the fleet contract recognises every rc-0 verdict line the gate emits (airh
     assert.fail(`contract patterns must be valid regexes: ${err.message}`);
   }
 
-  // The throwaway repo: the gate resolves its map relative to its own location, so a copy of
-  // the real script with a minimal map exercises the real selection/verdict code end to end.
-  const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-contract-'));
+  const { probe, run } = buildGateProbe();
   try {
-    const toolsDir = path.join(probe, 'tools');
-    fs.mkdirSync(toolsDir);
-    fs.mkdirSync(path.join(probe, 'tests'));
-    fs.copyFileSync(gate, path.join(toolsDir, 'fast-gate.sh'));
-    // The runner config is part of the gate: without its pinned TAP reporter the probe's
-    // node --test would emit the spec summary and the gate would read the suite as silent.
-    fs.copyFileSync(path.join(root, 'tools', 'gate.conf'), path.join(toolsDir, 'gate.conf'));
-    fs.writeFileSync(path.join(probe, 'package.json'),
-      JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'true' } }));
-    fs.writeFileSync(path.join(probe, 'tests', 'pass.test.js'),
-      "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('one passing case', () => { assert.ok(true); });\n");
-    fs.writeFileSync(path.join(toolsDir, 'suite-map.tsv'), [
-      'src/a.js\ttests/pass.test.js',
-      'pending-src.txt\ttests/pending.test.js',
-      'tests/pass.test.js\ttests/pass.test.js',
-      '~tests/pending.test.js\ttests/pending.test.js',
-      '!*.md',
-      '',
-    ].join('\n'));
-    for (const args of [['init'], ['config', 'user.email', 'probe@example.invalid'], ['config', 'user.name', 'probe'], ['add', '-A'], ['commit', '-m', 'probe']]) {
-      const g = spawnSync('git', ['-C', probe, ...args], { encoding: 'utf8' });
-      assert.equal(g.status, 0, `probe git ${args[0]} failed: ${g.stderr}`);
-    }
-    // Strip ambient gate knobs AND the test harness's own markers: node --test sets
-    // NODE_TEST_CONTEXT in this process, and a grandchild suite that inherits it believes it
-    // is a managed test child, writes nothing and exits 0 (the same silent green the
-    // airhorn-0ct pin strips before its own child runs) - so the gate would read a passing
-    // suite as silent. Production never runs the gate under these, so the probe must not.
-    const cleanEnv = {};
-    for (const k of Object.keys(process.env)) {
-      if (!k.startsWith('FAST_GATE_') && !k.startsWith('AIRHORN_') && !k.startsWith('NODE_TEST_')) cleanEnv[k] = process.env[k];
-    }
-    const run = (args, env = {}) => spawnSync('bash', [path.join(toolsDir, 'fast-gate.sh'), ...args], {
-      cwd: probe, encoding: 'utf8', env: { ...cleanEnv, ...env },
-    });
     const noChanged = run([]);                                       // nothing changed at all
     const positive = run(['--changed', 'src/a.js']);                 // one real suite runs
-    const allPending = run(['--changed', 'pending-src.txt']);        // only a '~'-pending suite selected
-    const blessed = run(['--changed', 'exempt.md'], { FAST_GATE_ALLOW_ZERO: '1' });
+    const blessedExempt = run(['--changed', 'exempt.md'], { FAST_GATE_ALLOW_ZERO: '1' });
+    const blessedPending = run(['--changed', 'pending-src.txt'], { FAST_GATE_ALLOW_ZERO: '1' });
     const refused = run(['--changed', 'exempt.md']);                 // rc 1: zero-suite without the bless
+    const allPending = run(['--changed', 'pending-src.txt']);        // rc 1: every selected suite '~'-pending (airhorn-dn7d)
     const unmapped = run(['--changed', 'unmapped.txt']);             // rc 1: no row, no exemption
-    for (const [name, r] of [['no-changed', noChanged], ['positive', positive], ['all-pending', allPending], ['blessed', blessed]]) {
+    for (const [name, r] of [['no-changed', noChanged], ['positive', positive], ['blessed-exempt', blessedExempt], ['blessed-pending', blessedPending]]) {
       assert.equal(r.status, 0, `${name} must exit 0:\n${r.stdout}\n${r.stderr}`);
     }
     assert.equal(refused.status, 1, `zero-suite without the acknowledgement must exit 1: ${refused.stdout}`);
+    assert.equal(allPending.status, 1, `an all-pending change without the acknowledgement must exit 1: ${allPending.stdout}`);
     assert.equal(unmapped.status, 1, `an unmapped change must exit 1: ${unmapped.stdout}`);
 
     // The exact rc-0 verdict lines, pinned so a reformat of any one of them fails HERE, by name.
     const noChangedLine = 'fast-gate: no changed files';
     const positiveLine = 'fast-gate: PASS (1 suite(s), 1 changed file(s))';
-    const allPendingLine = 'fast-gate: PASS (0 suite(s), 1 changed file(s), all pending)';
-    const blessedLine = 'fast-gate: ZERO-SUITE PASS (1 changed file(s), all 1 exempt; FAST_GATE_ALLOW_ZERO=1)';
-    for (const [name, r, line] of [['no-changed', noChanged, noChangedLine], ['positive', positive, positiveLine], ['all-pending', allPending, allPendingLine], ['blessed', blessed, blessedLine]]) {
+    const blessedExemptLine = 'fast-gate: ZERO-SUITE PASS (1 changed file(s), all 1 exempt; FAST_GATE_ALLOW_ZERO=1)';
+    const blessedPendingLine = 'fast-gate: ZERO-SUITE PASS (1 changed file(s), all 1 pending; FAST_GATE_ALLOW_ZERO=1)';
+    for (const [name, r, line] of [['no-changed', noChanged, noChangedLine], ['positive', positive, positiveLine], ['blessed-exempt', blessedExempt, blessedExemptLine], ['blessed-pending', blessedPending, blessedPendingLine]]) {
       assert.ok(r.stdout.includes(line), `${name} must print the pinned verdict line ${line}, got:\n${r.stdout}`);
     }
     // The classification is the contract: exactly one regex owns each rc-0 line.
     assert.match(positiveLine, passRe, 'a >=1-suite PASS must certify via CHECK_FAST_PASS_RE');
     assert.doesNotMatch(positiveLine, noWorkRe, 'a suite-running PASS must not classify as no-work');
-    for (const line of [noChangedLine, allPendingLine, blessedLine]) {
-      assert.match(line, noWorkRe, `a no-suite rc-0 line must certify via CHECK_FAST_NO_WORK_RE: ${line}`);
-      assert.doesNotMatch(line, passRe, `a no-suite rc-0 line must not read as a suite-running PASS: ${line}`);
+    for (const line of [noChangedLine, blessedExemptLine, blessedPendingLine]) {
+      assert.match(line, noWorkRe, `a zero-execution rc-0 line must certify via CHECK_FAST_NO_WORK_RE: ${line}`);
+      assert.doesNotMatch(line, passRe, `a zero-execution rc-0 line must not read as a suite-running PASS: ${line}`);
     }
     // ...and nothing an rc-1 run prints may classify, in either direction.
-    const rc1Lines = [noChanged, positive, allPending, blessed, refused, unmapped]
-      .filter((r) => r.status !== 0)
+    const rc1Lines = [refused, allPending, unmapped]
       .flatMap((r) => [...r.stdout.split('\n'), ...r.stderr.split('\n')])
       .filter((l) => l.startsWith('fast-gate: '));
-    assert.ok(rc1Lines.length >= 4, `the rc-1 runs must have produced contract-visible lines: ${rc1Lines}`);
+    assert.ok(rc1Lines.length >= 6, `the rc-1 runs must have produced contract-visible lines: ${rc1Lines}`);
     for (const line of rc1Lines) {
       assert.doesNotMatch(line, passRe, `an rc-1 line must never read as PASS: ${line}`);
       assert.doesNotMatch(line, noWorkRe, `an rc-1 line must never read as no-work: ${line}`);
     }
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
+test("an all-'~'-pending change fails loudly: zero executed suites is not green (airhorn-dn7d)", () => {
+  // The door airhorn-n0jd closed for '!' rows, still open through '~' rows: a source row
+  // naming ONLY a pending suite selected it, skipped it, printed 'PASS (0 suite(s), all
+  // pending)' and exited 0 - so a '~' row that never lands (a forgotten sibling branch)
+  // keeps every change to its source permanently green with nothing run. Same rule as n0jd:
+  // FAIL by default, green only under the explicit FAST_GATE_ALLOW_ZERO acknowledgement,
+  // and only with a labelled line - never a bare PASS.
+  const { probe, run } = buildGateProbe();
+  try {
+    const loud = run(['--changed', 'pending-src.txt']);
+    assert.equal(loud.status, 1, `a change whose selected suites are all pending must not read green: ${loud.stdout}`);
+    assert.ok(loud.stdout.includes('fast-gate: pending: tests/pending.test.js'),
+      `the pending suite must be named on stdout: ${loud.stdout}`);
+    assert.ok(loud.stderr.includes("all '~'-pending"), `the failure must say why: ${loud.stderr}`);
+    assert.ok(loud.stderr.includes('0 suite(s) executed'), `the failure must state the invariant: ${loud.stderr}`);
+    assert.ok(loud.stderr.includes('FAST_GATE_ALLOW_ZERO'), `the failure must name the acknowledgement: ${loud.stderr}`);
+    const blessed = run(['--changed', 'pending-src.txt'], { FAST_GATE_ALLOW_ZERO: '1' });
+    assert.equal(blessed.status, 0, `the explicit acknowledgement must pass: ${blessed.stderr}`);
+    assert.ok(blessed.stdout.includes('ZERO-SUITE PASS (1 changed file(s), all 1 pending; FAST_GATE_ALLOW_ZERO=1)'),
+      `the pass must be labelled, not a bare PASS: ${blessed.stdout}`);
+    // A MIXED selection is untouched: the landed suite still runs, the pending one stays loud.
+    const mixed = run(['--changed', 'mixed-src.js']);
+    assert.equal(mixed.status, 0, `a change with a landed suite among pending ones must still run it: ${mixed.stderr}`);
+    assert.ok(mixed.stdout.includes('fast-gate: pending: tests/pending.test.js'),
+      `the pending suite must stay loud: ${mixed.stdout}`);
+    assert.ok(mixed.stdout.includes('fast-gate: PASS (1 suite(s), 1 changed file(s))'),
+      `the landed suite must run and be the count: ${mixed.stdout}`);
   } finally {
     fs.rmSync(probe, { recursive: true, force: true });
   }
