@@ -51,7 +51,16 @@ async function testBootWatchdog() {
   const swV1 = '// resilience-ui suite: no-op service worker stub v1\n' +
     'self.addEventListener("install", (e) => self.skipWaiting());\n' +
     'self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));\n';
-  const swV2 = swV1.replace('v1', 'v2');
+  // v2 announces ITS OWN activation to the page ("sw-v2-active"): a
+  // version-true completion signal for case 10. The controller alone cannot
+  // serve as one - the page self-registers swV1 during its boot, so a
+  // controller exists before any update is requested (airhorn-j72n,
+  // airhorn-0p88 by a new route) - and the page's announcement chain cannot
+  // serve as one either, because its latency tracks box load (airhorn-bogq,
+  // airhorn-twlb: the union gate failed on exactly that).
+  const swV2 = swV1.replace('v1', 'v2') +
+    'self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim().then(() => ' +
+    'self.clients.matchAll().then((cs) => cs.forEach((c) => c.postMessage("sw-v2-active"))))));\n';
   let swBody = swV1;
 
   // The suite times its healthy-boot assertion off the page's own watchdog
@@ -615,7 +624,19 @@ async function testBootWatchdog() {
     await evaluate(`window.__statusLog.length = 0; sessionStorage.setItem('__statusLog', '[]'); 1`);
     swBody = swV2;
     await evaluate(`navigator.serviceWorker.getRegistration().then(reg => reg.update())`);
-    await waitUntil(`window.__statusLog.some(m => /new version is ready/i.test(m))`, 10000, 'successful update to complete');
+    // Completion gates on a VERSION-TRUE signal from the v2 worker itself:
+    // the page listens for the worker's own postMessage, which only v2's
+    // activate sends. The controller cannot be the gate - the page
+    // self-registers swV1 during boot, so a controller exists before the
+    // update is even requested (airhorn-j72n) - and the announcement chain
+    // cannot be the gate - its latency tracks box load (airhorn-bogq,
+    // airhorn-twlb). The announcement is still observed and logged, and the
+    // swq false-failure check still polices its copy.
+    await evaluate(`window.__v2active = false; navigator.serviceWorker.addEventListener('message', (e) => { if (e.data === 'sw-v2-active') window.__v2active = true; }); 1`);
+    await waitUntil('window.__v2active', 10000,
+      'the v2 worker itself to report active and claiming (version-true ground truth)');
+    const announcement = await evaluate(`window.__statusLog.filter(m => /new version is ready/i.test(m))`);
+    console.log('  swq: v2 active and claiming; announcement chain so far:', JSON.stringify(announcement));
     await new Promise(r => setTimeout(r, 1500)); // let the replaced worker settle
     const falseFailures = await evaluate(`window.__statusLog.filter(m => /could not update/i.test(m))`);
     if (falseFailures.length > 0) {
