@@ -46,11 +46,11 @@
  * Run with: npm test (the fast gate builds dist/ first)
  */
 
-import { spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { launchBrowser } from './support/browser.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, '../dist');
@@ -259,31 +259,12 @@ async function run() {
     }
   };
 
-  const profileDir = fs.mkdtempSync('/tmp/airhorn-multitab-');
-  const chrome = spawn(process.env.CHROME_BIN || 'google-chrome', [
-    '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-    // Launching the app from a shortcut is a user gesture; the two-tab world
-    // this suite models has the same audience (shortcuts suite, context A).
-    '--autoplay-policy=no-user-gesture-required',
-    '--remote-debugging-port=0', `--user-data-dir=${profileDir}`,
-    '--disable-breakpad', '--disable-crash-reporter',
-    'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  const browser = await launchBrowser({ autoplay: true, label: 'multitab', timeoutMs: 20000 });
 
   let cdp = null;
   try {
-    const wsUrl = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Chrome timeout')), 20000);
-      chrome.stderr.on('data', (d) => {
-        const m = d.toString().match(/ws:\/\/\S+/);
-        if (m) { clearTimeout(timer); resolve(m[0]); }
-      });
-    });
-    cdp = await connectCdp(wsUrl);
+    cdp = await connectCdp(browser.browserWsUrl);
     const { send, waitForEvent } = cdp;
-
-    const targets = await (await fetch(`http://127.0.0.1:${new URL(wsUrl).port}/json/list`)).json();
-    const first = targets.find((t) => t.type === 'page');
 
     // openTab: a real second tab of the same origin, with its own CDP session,
     // its own instrumented documents and a per-tab identity for the log.
@@ -735,15 +716,9 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
     console.log('\nALL MULTITAB COHERENCE CHECKS PASSED');
   } finally {
     try { cdp?.ws.close(); } catch { /* already gone */ }
-    // Kill the GROUP, not the launched pid: SIGKILL to the main chrome
-    // process orphaned renderers/cache children that kept writing the
-    // profile after the rmSync below (airhorn-jx9, fleet lessons: signal
-    // the group).
-    try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* group gone */ }
-    try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
-    // Leave no profile dir behind: fleet-tmp-clean only reclaims marked
-    // paths, so an unremoved /tmp profile is retained forever (airhorn-jx9).
-    try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch { /* already gone */ }
+    // browser.close() does what airhorn-jx9's inline group-kill + rmSync did:
+    // SIGTERM, tree-SIGKILL after 1.5s, profile removal.
+    try { await browser.close(); } catch { /* already gone */ }
     server.close();
   }
 }
