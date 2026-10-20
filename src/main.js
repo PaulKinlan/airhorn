@@ -255,7 +255,11 @@ class AirHorn {
     if ('setAppBadge' in navigator) {
       // The count is shared across tabs (airhorn-xkq): the badge is app-wide,
       // so 4 blasts in two tabs must read 4, not whichever tab wrote last.
-      navigator.setAppBadge(this.#bumpSharedBadgeCount());
+      // The bump is serialized behind an origin lock (airhorn-rqz1), so the
+      // value arrives asynchronously.
+      this.#bumpSharedBadgeCount().then((n) => {
+        if (n !== null) navigator.setAppBadge(n);
+      });
     }
 
     trackEvent('horn_play');
@@ -304,7 +308,7 @@ class AirHorn {
     navigator.clearAppBadge?.();
   }
 
-  #bumpSharedBadgeCount() {
+  async #bumpSharedBadgeCount() {
     const current = this.#readSharedBadgeCount();
     if (current === null) {
       // No shared storage: keep the old per-tab counter so the badge still
@@ -312,13 +316,31 @@ class AirHorn {
       this.#counter = (this.#counter % 99) + 1;
       return this.#counter;
     }
-    const next = (current % 99) + 1;
-    try {
-      window.localStorage.setItem(BADGE_COUNT_KEY, String(next));
-    } catch {
-      // Best effort: the blast still happens, the badge just may not move.
+    const bump = () => {
+      // The re-read happens INSIDE the origin lock: interleaved tabs
+      // serialize here instead of each writing pre-blast count + 1, which
+      // clobbered the first writer's blast (airhorn-rqz1).
+      const now = this.#readSharedBadgeCount();
+      const next = ((now === null ? 0 : now) % 99) + 1;
+      try {
+        window.localStorage.setItem(BADGE_COUNT_KEY, String(next));
+      } catch {
+        // Best effort: the blast still happens, the badge just may not move.
+      }
+      return next;
+    };
+    // Web Locks serialize the read-modify-write across every tab of the
+    // origin, so two tabs blasting "at the same time" cannot lose an
+    // increment. Without a lock manager the unlocked bump is the old
+    // best-effort behaviour for a cosmetic badge.
+    if (navigator.locks?.request) {
+      try {
+        return await navigator.locks.request(BADGE_COUNT_KEY, bump);
+      } catch {
+        return bump();
+      }
     }
-    return next;
+    return bump();
   }
 
   stop({ immediate = false } = {}) {

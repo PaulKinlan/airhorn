@@ -678,6 +678,60 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       console.log('  storage-blocked tab booted, left the shared badge alone, and still badged its own blasts from one.');
     }
 
+    /* -- I. two simultaneous bumps cannot lose an increment (airhorn-rqz1) -- */
+    console.log('\n--- I. simultaneous blasts in two tabs cannot lose an increment ---');
+    const haveLocks = await A2.evaluate(`!!navigator.locks?.request`);
+    if (haveLocks) {
+      // Deterministic interleaving: the TEST holds the app's origin lock, so
+      // (with the fix) any blast bump in either tab queues behind it and both
+      // serialize on release - the shared count must end at before+2. Without
+      // the lock both tabs read the pre-blast count and write before+1:
+      // one blast lost.
+      await send('Target.activateTarget', { targetId: A2.targetId });
+      await waitUntil(async () => (await A2.evaluate(`document.visibilityState`)) === 'visible', 5000);
+      const before = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      // The assignment expression evaluates to the REQUEST'S PROMISE, and
+      // evaluate awaits promises - so return a plain true and never let the
+      // harness await a promise that resolves only at release.
+      await A2.evaluate(`(() => { window.__rqz1Hold = navigator.locks.request('airhorn:blast-count', () => new Promise((r) => { window.__rqz1Release = r; })); return true; })()`);
+      // locks.request's PROMISE resolves only when the callback COMPLETES
+      // (at release) - awaiting it here would hang the suite. The lock is
+      // GRANTED when the callback invokes, which is when __rqz1Release
+      // appears; poll for that.
+      const held = await waitUntil(async () => {
+        try { return await A2.evaluate(`typeof window.__rqz1Release === 'function'`); } catch { return false; }
+      }, 5000);
+      assert(held, 'the test could not hold the origin badge lock - sequence I cannot force the interleaving');
+      await A2.evaluate(`window.__airhorn.start()`);
+      await sleep(300);
+      // The red assert: while the TEST owns the origin lock, a blast's
+      // read-modify-write must not have written. Unfixed code bumps
+      // immediately (count already before+1 under the hold); the fixed app
+      // queues its bump behind the lock. CDP dispatches the two tabs'
+      // evaluations sequentially, so an interleaving cannot be forced from
+      // outside - proving the bumps serialize IS proving no blast can be
+      // lost, because every bump then re-reads inside the lock.
+      const duringHold = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      assert(duringHold === before,
+        `a blast's increment was written while another holder owned the origin lock (count ${before} -> ${duringHold} under the hold) - ` +
+        `the increment is a non-atomic read-modify-write, so interleaved tabs can lose a blast (airhorn-rqz1)`);
+      await A2.evaluate(`window.__rqz1Release && window.__rqz1Release()`);
+      await B.evaluate(`window.__airhorn.start()`);
+      const settled = await waitUntil(async () => {
+        const n = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+        return n === before + 2 ? n : null;
+      }, 5000);
+      const after = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      assert(settled,
+        `two blasts in two tabs produced a shared count of ${after}, expected ${before + 2} - ` +
+        `the increment is a non-atomic read-modify-write, so the second writer clobbered the first and a blast was lost (airhorn-rqz1)`);
+      await A2.evaluate(`window.__airhorn.stop({ immediate: true })`);
+      await B.evaluate(`window.__airhorn.stop({ immediate: true })`);
+      console.log(`  simultaneous bumps serialized: ${before} -> ${after}, no blast lost.`);
+    } else {
+      console.log('  navigator.locks unavailable in this browser; nothing to assert.');
+    }
+
     console.log('\nALL MULTITAB COHERENCE CHECKS PASSED');
   } finally {
     try { cdp?.ws.close(); } catch { /* already gone */ }
