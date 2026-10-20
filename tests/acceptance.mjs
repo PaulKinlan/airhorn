@@ -649,11 +649,25 @@ async function run() {
 
       await resetProbe();
       const playResult = await evaluate(`window.__call('play_horn', {})`);
-      await sleep(400);
-      const duringPlay = await hornState();
+      // play_horn defaults to a ONE-SHOT blast (~0.7 s). A fixed sleep plus a
+      // screenshot before the single get_horn_state read lost that race on a
+      // loaded machine (gate 06544cbc: 'did not report playing' with peak
+      // 0.678 - the horn sounded, the read landed after the blast ended), so
+      // poll for the playing window and capture all during-play evidence at
+      // the first playing===true read. A blast that never reports playing
+      // still fails below.
+      let stateResult = null;
+      let duringPlay = null;
+      for (let i = 0; i < 30 && !duringPlay; i += 1) {
+        stateResult = await evaluate(`window.__call('get_horn_state', {})`);
+        if (stateResult.playing === true) {
+          duringPlay = await hornState();
+        } else {
+          await sleep(100);
+        }
+      }
       const playingShot = await shot('09-webmcp-play.png');
 
-      const stateResult = await evaluate(`window.__call('get_horn_state', {})`);
       const stopResult = await evaluate(`window.__call('stop_horn', {})`);
       await sleep(150);
       const afterStop = await hornState();
@@ -669,9 +683,9 @@ async function run() {
         if (!discovery.names.includes(name)) problems.push(`tool ${name} not registered`);
       }
       if (!discovery.hasSchemas) problems.push('a tool is missing an object inputSchema');
-      if (!(duringPlay.peak > 0.01)) problems.push(`executeTool('play_horn') made no audio (peak=${duringPlay.peak})`);
+      if (!(duringPlay && duringPlay.peak > 0.01)) problems.push(`executeTool('play_horn') made no audio (peak=${duringPlay && duringPlay.peak})`);
       if (playResult.playing !== true) problems.push(`play_horn returned ${JSON.stringify(playResult)}`);
-      if (duringPlay.pressed !== 'true') problems.push('play_horn did not update aria-pressed');
+      if (!duringPlay || duringPlay.pressed !== 'true') problems.push('play_horn did not update aria-pressed');
       if (stateResult.playing !== true) problems.push('get_horn_state did not report playing');
       if (stateResult.hasAudioContext !== true) problems.push('get_horn_state reports no AudioContext');
       if (stopResult.playing !== false) problems.push(`stop_horn returned ${JSON.stringify(stopResult)}`);

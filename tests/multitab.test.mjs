@@ -668,8 +668,79 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       const g2After = await G2.badge();
       assert(g2After.some((e) => e.fn === 'setAppBadge' && e.arg === 1),
         `the storage-blocked tab's own blast did not badge via the per-tab fallback: ${JSON.stringify(g2After)} (airhorn-danq)`);
+      // The badge the blocked tab set for itself is acknowledged when the
+      // user looks at it again (airhorn-0w1q): the OS badge is one per
+      // origin, so its look-transition is the same acknowledge any tab
+      // performs, and its fallback counter restarts.
+      const g2LogBefore = (await G2.badge()).length;
+      await send('Target.activateTarget', { targetId: B.targetId });
+      await waitUntil(async () => (await B.evaluate(`document.visibilityState`)) === 'visible', 5000);
+      await send('Target.activateTarget', { targetId: G2.targetId });
+      const g2Acked = await waitUntil(async () => {
+        const l = await G2.badge();
+        return l.length > g2LogBefore && l.slice(g2LogBefore).some((e) => e.fn === 'clearAppBadge') ? l : null;
+      }, 5000);
+      assert(g2Acked,
+        `the blocked-storage tab never acknowledged the badge it set itself (calls after its look-transition: ${JSON.stringify((await G2.badge()).slice(g2LogBefore))}) - ` +
+        `no event in the app can ever clear that badge (airhorn-0w1q)`);
+      await G2.clickHorn();
+      await waitUntil(async () => (await G2.hornState()).playing === false, 6000);
+      const g2Restart = await G2.badge();
+      assert(g2Restart.slice(-1).some((e) => e.fn === 'setAppBadge' && e.arg === 1),
+        `after its acknowledgement the blocked tab's next blast did not restart at 1: ${JSON.stringify(g2Restart)} (airhorn-0w1q)`);
       await closeTab(G2);
-      console.log('  storage-blocked tab booted, left the shared badge alone, and still badged its own blasts from one.');
+      console.log('  storage-blocked tab booted, left the shared badge alone, badged its own blasts from one, and acknowledged them when looked at again.');
+    }
+
+    /* -- H. a launch of the installed app acknowledges the badge (airhorn-2eh8) -- */
+    console.log('\n--- H. a launch of the installed app acknowledges the badge ---');
+    if (badgeApi) {
+      // The sequences before this one move focus around and G ends by closing
+      // its own (activated) tab, which hands tab B a look-transition - the
+      // same acknowledge as sequence F. That clear is asynchronous (it runs
+      // under the origin lock), so a blast fired straight after it is
+      // acknowledged away and H measures the previous look instead of the
+      // launch (gate 649e7ea7 on the airhorn-ecp union: 'a foreground blast
+      // did not advance the shared badge count'). Settle the look first, then
+      // make the count, so the only thing that can clear it is the launch.
+      await send('Target.activateTarget', { targetId: B.targetId });
+      await waitUntil(async () => (await B.evaluate(`document.visibilityState`)) === 'visible', 5000);
+      const hSettled = await waitUntil(async () =>
+        (await B.evaluate(`window.localStorage.getItem('airhorn:blast-count')`)) === null ? true : null, 5000);
+      assert(hSettled,
+        'tab B never settled its look-transition acknowledge before the launch sequence: ' +
+        `storage is ${JSON.stringify(await B.evaluate(`window.localStorage.getItem('airhorn:blast-count')`))}`);
+      // A shared count exists (blast in the foreground tab B).
+      await B.clickHorn();
+      await waitUntil(async () => (await B.hornState()).playing === false, 6000);
+      const hCount = await waitUntil(async () => {
+        const n = Number(await B.evaluate(`window.localStorage.getItem('airhorn:blast-count')`)) || 0;
+        return n > 0 ? n : null;
+      }, 5000);
+      assert(hCount > 0, 'a foreground blast did not advance the shared badge count');
+      // A cold launch: a fresh tab whose launch queue has a delivery queued
+      // BEFORE the app loads - the platform delivers a queued launch to
+      // setConsumer right at startup, which is the cold-launch path. The app
+      // must acknowledge the shared badge in that consumer: the launch is
+      // the user coming to look. A plain tab boot (sequence B's tab C) never
+      // fires a launch and still only derives (airhorn-70k).
+      const LQ = await openTab('LQ', `${origin}/`, { preScript: `
+        try {
+          Object.defineProperty(window, 'launchQueue', { configurable: true, value: { setConsumer(fn) { fn({}); } } });
+        } catch (e) { window.__lqStubError = String(e); }
+      ` });
+      await sleep(300);
+      const lqStub = await LQ.evaluate('window.__lqStubError || null');
+      assert(!lqStub, `could not queue a launch delivery in the test tab: ${lqStub}`);
+      const lqLog = await LQ.badge();
+      assert(lqLog.some((e) => e.fn === 'clearAppBadge'),
+        `a launch of the app did not acknowledge the shared badge: ${JSON.stringify(lqLog)} - ` +
+        `the cold launch displays yesterday's count with nothing clearing it (airhorn-2eh8)`);
+      const lqStorage = await LQ.evaluate(`window.localStorage.getItem('airhorn:blast-count')`);
+      assert(lqStorage === null,
+        `the launch did not clear the stored count (got ${JSON.stringify(lqStorage)}) (airhorn-2eh8)`);
+      await closeTab(LQ);
+      console.log('  the launch consumer acknowledged the badge; plain tab boots still only derive (airhorn-70k).');
     }
 
     /* -- I. two simultaneous bumps cannot lose an increment (airhorn-rqz1) -- */
@@ -724,6 +795,56 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       console.log(`  simultaneous bumps serialized: ${before} -> ${after}, no blast lost.`);
     } else {
       console.log('  navigator.locks unavailable in this browser; nothing to assert.');
+    }
+
+    /* -- J. a launch's acknowledge wins over a pending locked bump (airhorn-3v90) -- */
+    console.log('\n--- J. a launch cannot be overwritten by a blast bump that queued before the look ---');
+    if (haveLocks) {
+      // The reviewer's repro (airhorn-3v90): a blast's bump queues on the
+      // origin lock; a launch delivery then arrives - the user coming to
+      // look. The acknowledge must WIN: the pending bump must not publish
+      // its stale total after the look cleared the badge. Stand-in launch
+      // consumer installed before the page scripts so the app's consumer
+      // lands in it (the platform cannot deliver launches headless).
+      const launchStandIn = `(() => {
+        window.__jLaunchParams = null;
+        Object.defineProperty(window, 'launchQueue', { configurable: true, value: { setConsumer(fn) { window.__launchConsumer = fn; } } });
+        return true;
+      })()`;
+      const J2 = await openTab('J2', `${origin}/`, { preScript: launchStandIn });
+      await send('Target.activateTarget', { targetId: J2.targetId });
+      await waitUntil(async () => (await J2.evaluate(`document.visibilityState`)) === 'visible', 5000);
+      // The test owns the origin lock: J2's blast bump queues behind it.
+      await J2.evaluate(`(() => { window.__jHold = navigator.locks.request('airhorn:blast-count', () => new Promise((r) => { window.__jRelease = r; })); return true; })()`);
+      const jHeld = await waitUntil(async () => {
+        try { return await J2.evaluate(`typeof window.__jRelease === 'function'`); } catch { return false; }
+      }, 5000);
+      assert(jHeld, 'the test could not hold the origin badge lock - sequence J cannot force the ordering');
+      await J2.evaluate(`window.__airhorn.start()`);
+      await sleep(300);
+      // The launch arrives while the bump is still queued: the user comes
+      // to look. (Today the acknowledge runs immediately and finds no count
+      // to clear; with the fix it queues behind the bump on the lock.)
+      await J2.evaluate(`window.__launchConsumer({ targetURL: ${JSON.stringify(origin + '/')}, files: [] })`);
+      await sleep(200);
+      await J2.evaluate(`window.__jRelease && window.__jRelease()`);
+      await sleep(600);
+      const jCount = await J2.evaluate(`window.localStorage.getItem('airhorn:blast-count')`);
+      const jBadge = await J2.badge();
+      const last = jBadge[jBadge.length - 1];
+      assert(jCount === null && last && last.fn === 'clearAppBadge',
+        `the launch acknowledged the badge but a stale queued bump republished it: storage=${JSON.stringify(jCount)}, last badge call=${JSON.stringify(last)} - ` +
+        `the user's look must win over a blast that happened before it (airhorn-3v90)`);
+      // And acknowledgement must not break later badge movement.
+      await J2.evaluate(`window.__airhorn.start()`);
+      await waitUntil(async () => (await J2.hornState()).playing === false, 6000);
+      const jAfter = await J2.badge();
+      assert(jAfter.some((e) => e.fn === 'setAppBadge'),
+        `a blast after the launch acknowledge did not badge the fresh count: ${JSON.stringify(jAfter)} (airhorn-3v90)`);
+      await closeTab(J2);
+      console.log('  the launch acknowledge beat the queued bump, and later blasts still badge.');
+    } else {
+      console.log('  navigator.locks unavailable; nothing to assert.');
     }
 
     console.log('\nALL MULTITAB COHERENCE CHECKS PASSED');
