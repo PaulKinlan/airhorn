@@ -37,34 +37,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { sweepTree } from './sweep-tree.mjs';
 
-// SIGKILL every process carrying this launch's --user-data-dir: the browser
-// and every child it forked all carry it, so one /proc read finds the whole
-// tree and the browser dies in the same pass as its children are found -
-// nothing can out-fork the cleanup. The second pass catches a child that
-// raced the first read. Synchronous so the error/signal paths can use it;
-// a no-op where /proc does not exist (airhorn-105n, the tools' copy of
-// tests/support/browser.mjs's sweepProfile).
-function sweepTree(profileDir) {
-  const marker = `--user-data-dir=${profileDir}`;
-  for (let pass = 0; pass < 2; pass += 1) {
-    let victims;
-    try {
-      victims = fs.readdirSync('/proc')
-        .filter((entry) => /^\d+$/.test(entry) && Number(entry) !== process.pid)
-        .filter((entry) => {
-          try { return fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8').includes(marker); } catch { return false; }
-        })
-        .map(Number);
-    } catch {
-      return;
-    }
-    if (victims.length === 0) return;
-    for (const pid of victims) {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
-    }
-  }
-}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, '../dist');
