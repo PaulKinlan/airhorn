@@ -286,11 +286,12 @@ async function run() {
 
     // openTab: a real second tab of the same origin, with its own CDP session,
     // its own instrumented documents and a per-tab identity for the log.
-    const openTab = async (name, url, { instrument = true } = {}) => {
+    const openTab = async (name, url, { instrument = true, preScript = null } = {}) => {
       const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
       const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
       const session = (method, params = {}) => send(method, params, sessionId);
       if (instrument) await session('Page.addScriptToEvaluateOnNewDocument', { source: tabInstrumentation });
+      if (preScript) await session('Page.addScriptToEvaluateOnNewDocument', { source: preScript });
       await session('Page.enable');
       await session('Runtime.enable');
       const evaluate = async (expression) => {
@@ -630,6 +631,11 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
         `a fresh tab re-displayed an acknowledged count: ${JSON.stringify(ackLog)} - ` +
         `the count should have been cleared when the user came back to the app (airhorn-7x7m)`);
       await closeTab(ACK);
+      // Closing the foreground ACK tab can flip a hidden tab back to visible,
+      // and its acknowledge would race the blast below - settle the
+      // foreground on B first (a no-op if B never went hidden).
+      await send('Target.activateTarget', { targetId: B.targetId });
+      await waitUntil(async () => (await B.evaluate(`document.visibilityState`)) === 'visible', 5000);
       // The badge still works after an acknowledgement: a foreground blast
       // in B starts the shared count from one again.
       await B.clickHorn();
@@ -638,6 +644,37 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       assert(afterBlast === 1,
         `after an acknowledgement a fresh blast did not restart the shared count at 1 (got ${afterBlast}) (airhorn-7x7m)`);
       console.log('  switching back to the app cleared the shared count for every tab, a fresh tab boots owing nothing, and a fresh blast restarts the count at 1.');
+    }
+
+    /* -- G. a storage-blocked tab must not wipe the badge (airhorn-danq) --- */
+    console.log('\n--- G. a tab that cannot read storage must leave the shared badge alone ---');
+    if (badgeApi) {
+      // A normal foreground blast first: a shared count and badge exist for
+      // the blocked tab to (not) disturb.
+      await B.clickHorn();
+      await waitUntil(async () => (await B.hornState()).playing === false, 6000);
+      const gCount = await B.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      assert(gCount > 0, 'a foreground blast did not advance the shared badge count');
+      // The airhorn-danq repro: a tab whose localStorage access THROWS
+      // (blocked cookies/site data, some embedded webviews). The app must
+      // still boot, must not touch the badge whose count it cannot know, and
+      // its own blasts must still badge via the per-tab fallback.
+      const blocked = `Object.defineProperty(window, 'localStorage', { configurable: true, get() { throw new Error('blocked'); } });`;
+      const G2 = await openTab('G2', `${origin}/`, { preScript: blocked });
+      await sleep(200);
+      const g2State = await G2.hornState();
+      assert(g2State.booted, 'the storage-blocked tab did not boot at all');
+      const g2Boot = await G2.badge();
+      assert(!g2Boot.some((e) => e.fn === 'clearAppBadge'),
+        `a storage-blocked tab cleared the app badge at boot: ${JSON.stringify(g2Boot)} - ` +
+        `it cannot know the shared count, so it must not touch the badge another tab set (airhorn-danq)`);
+      await G2.clickHorn();
+      await waitUntil(async () => (await G2.hornState()).playing === false, 6000);
+      const g2After = await G2.badge();
+      assert(g2After.some((e) => e.fn === 'setAppBadge' && e.arg === 1),
+        `the storage-blocked tab's own blast did not badge via the per-tab fallback: ${JSON.stringify(g2After)} (airhorn-danq)`);
+      await closeTab(G2);
+      console.log('  storage-blocked tab booted, left the shared badge alone, and still badged its own blasts from one.');
     }
 
     console.log('\nALL MULTITAB COHERENCE CHECKS PASSED');

@@ -139,8 +139,14 @@ class AirHorn {
     // whatever another tab may have just set.
     if ('setAppBadge' in navigator || 'clearAppBadge' in navigator) {
       const shared = this.#readSharedBadgeCount();
-      if (shared > 0) navigator.setAppBadge?.(shared);
-      else navigator.clearAppBadge?.();
+      // Storage unavailable: the shared count is unknowable, so do nothing
+      // to the badge here - clearing it would wipe a badge another tab just
+      // set (airhorn-danq). Blasts still badge via the per-tab fallback in
+      // #bumpSharedBadgeCount.
+      if (shared !== null) {
+        if (shared > 0) navigator.setAppBadge?.(shared);
+        else navigator.clearAppBadge?.();
+      }
       // A badge means "activity since you last looked" (airhorn-7x7m): when
       // this tab becomes visible again the user has looked, so the shared
       // count is acknowledged - cleared from storage and from the OS badge.
