@@ -84,9 +84,24 @@
           background-color: var(--page-bg);
         }
 
-        #container,
-        #airhorn {
+        #container {
           block-size: 100%;
+          display: grid;
+          place-items: center;
+        }
+
+        #airhorn {
+          /* Same box as main.css's #airhorn (airhorn-fgvq). Left as `auto`, this
+             shrink-wrapped the horn (219px wide at 780x437) until the async
+             sheet landed and made it inline-size:100% (780px) - the single
+             layout shift measured on this page, 0.3599, on 5 of 6 loads, and
+             attributed to div#airhorn itself because the box the grid centres
+             INSIDE is what resized. The horn's own size never changes; only
+             the box around it did. */
+          inline-size: 100%;
+          block-size: 100%;
+          min-inline-size: 0;
+          min-block-size: 0;
           display: grid;
           place-items: center;
         }
