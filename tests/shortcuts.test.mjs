@@ -31,7 +31,7 @@
  * Run with: npm test (the fast gate builds dist/ first)
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -66,16 +66,31 @@ function assert(condition, message) {
 // output (airhorn-aos).
 const instrumentation = `
   window.__probe = { starts: 0, level: 0, peak: 0, states: [], errors: [] };
-  // Launch Handler API: headless Chrome does not expose window.launchQueue, so
-  // stand in for the platform's half - record the consumer the page registers
-  // and let the test fire launches the way the OS would. When the API is real,
-  // its source is recorded instead of faked.
+  // Launch Handler API: headless Chrome 155 DOES expose window.launchQueue, but a
+  // page cannot make the platform deliver a launch, so the platform's half is
+  // stood in for - record the consumer the page registers, deliver the cold
+  // launch's params at setConsumer, and let the test fire repeat launches. The
+  // real API's presence is recorded so the report cannot claim otherwise.
   const nativeLaunchQueue = typeof window.launchQueue?.setConsumer === 'function';
   window.__launchQueueSource = nativeLaunchQueue ? 'native+stand-in' : 'stand-in';
+  // A cold launch carries LaunchParams that are enqueued before the page runs
+  // and delivered when the consumer is set: model that, because that delivery is
+  // what double-fired the horn alongside the load-time URL handling
+  // (airhorn-lw9).
+  window.__pendingLaunches = location.hash === '#instant'
+    ? [{ targetURL: location.href, files: [] }]
+    : [];
   try {
     Object.defineProperty(window, 'launchQueue', {
       configurable: true,
-      value: { setConsumer(fn) { window.__launchConsumer = fn; } },
+      value: {
+        setConsumer(fn) {
+          window.__launchConsumer = fn;
+          const pending = window.__pendingLaunches.slice();
+          window.__pendingLaunches.length = 0;
+          for (const params of pending) setTimeout(() => fn(params), 0);
+        },
+      },
     });
   } catch (err) {
     window.__launchQueueError = String(err && err.message || err);
@@ -152,16 +167,39 @@ function startServer() {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
 
-// A gate that is killed (exit 124 on its bound) SIGKILLs the process group, so a
-// suite's finally block never runs and its headless browsers survive to starve
-// the next run. Browsers are registered here and closed on SIGTERM/SIGINT, which
-// is what a bound-kill sends first.
+// Close a browser the way it has to be closed: killing the parent alone leaves
+// its renderers behind (the reaper found 13 processes, 47 minutes old, from one
+// such run). Chrome's children are killed deepest-first, then the parent, and
+// browsers are registered so SIGTERM/SIGINT (what a bound-kill sends first) does
+// the same thing.
 const openBrowsers = new Set();
+function killTree(pid) {
+  try {
+    const table = execFileSync('ps', ['-eo', 'pid=,ppid='], { encoding: 'utf8' });
+    const children = new Map();
+    for (const line of table.trim().split('\n')) {
+      const [child, parent] = line.trim().split(/\s+/).map(Number);
+      if (!children.has(parent)) children.set(parent, []);
+      children.get(parent).push(child);
+    }
+    const order = [];
+    const walk = (node) => {
+      for (const child of children.get(node) || []) {
+        walk(child);
+        order.push(child);
+      }
+    };
+    walk(pid);
+    for (const child of [...order].reverse()) {
+      try { process.kill(child, 'SIGKILL'); } catch {}
+    }
+  } catch {}
+  try { process.kill(pid, 'SIGKILL'); } catch {}
+}
+
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
-    for (const browser of openBrowsers) {
-      try { browser.chrome.kill('SIGKILL'); } catch {}
-    }
+    for (const browser of openBrowsers) killTree(browser.chrome.pid);
     process.exit(143);
   });
 }
@@ -312,7 +350,7 @@ async function launch({ autoplay, label }) {
   const close = async () => {
     openBrowsers.delete(handle);
     try { ws.close(); } catch {}
-    chrome.kill('SIGKILL');
+    killTree(chrome.pid);
   };
 
   return { send, evaluate, snapshot, navigate, waitFor, press, setOffline, close, sleep, logs };
@@ -402,7 +440,10 @@ async function checkPromptAndShareable(base) {
       `the URL after a #instant launch is ${instant.href}; the deep link must survive so it can be shared`);
     assert(instant.pressed === 'true' && instant.horning,
       `/#instant did not light the horn up: aria-pressed=${instant.pressed}, horning=${instant.horning}`);
-    assert(instant.starts === 1, `/#instant started ${instant.starts} source(s), expected 1`);
+    // Exactly one: the platform reports the cold launch through the queue as well,
+    // and the load handler has already served the URL (airhorn-lw9).
+    assert(instant.starts === 1,
+      `/#instant started ${instant.starts} source(s), expected exactly 1 (a cold launch is reported twice: URL + launch queue)`);
     assert(instant.peak > 0.3,
       `/#instant produced no audio (peak ${instant.peak.toFixed(4)}, ctx ${instant.ctxState})`);
     assert(instant.ctxState === 'running', `/#instant ran the graph in state ${instant.ctxState}`);
@@ -448,8 +489,11 @@ async function checkPromptAndShareable(base) {
     assert(relaunched.hash === '#instant', `a repeat launch moved the URL to ${relaunched.href}`);
     console.log(`  repeat launch blasted again (${queue.source} queue): starts ${beforeLaunch.starts} -> ${relaunched.starts}, peak ${relaunched.peak.toFixed(3)}`);
 
-    // A launch that is not the instant deep link must not sound the horn.
-    await browser.sleep(900);
+    // A launch that is not the instant deep link must not sound the horn. Wait
+    // for the repeat blast to finish ringing out first - otherwise the previous
+    // source's tail is still in the analyser window and "peak stayed low" says
+    // nothing about the launch being tested (the gate caught exactly that).
+    await browser.waitFor((s) => s.playing === false, { label: 'the repeat blast to finish', timeout: 8000 });
     await browser.evaluate(`window.__probe.reset(); window.__fireLaunch(${JSON.stringify(base + '/')}); 1`);
     await browser.sleep(700);
     const otherLaunch = await browser.snapshot();
@@ -575,6 +619,14 @@ async function checkBlockedAutoplay(base) {
     assert(!/tap/i.test(first.after.status),
       `the "needs a tap" hint stayed after the horn played: ${JSON.stringify(first.after.status)}`);
     console.log(`  first press played (peak ${first.during.peak.toFixed(3)}, ctx ${first.during.ctxState}) and cleared the hint`);
+
+    // A newer message outranks a stale hint (airhorn-xsu): clearing the hint must
+    // not wipe whatever replaced it in the one live region.
+    await browser.evaluate(`document.getElementById('app-status').textContent = 'Back online.'; 1`);
+    const second = await browser.press(400);
+    assert(second.during.peak > 0.3, `the horn did not play after the hint was replaced (peak ${second.during.peak.toFixed(4)})`);
+    assert(second.after.status === 'Back online.',
+      `a successful start wiped a newer status message: ${JSON.stringify(second.after.status)}`);
   } finally {
     await browser.close();
   }

@@ -111,6 +111,10 @@ class Installer {
   }
 }
 
+// One sentence, in one place: the announcement and the check that it is still
+// the current message have to agree (airhorn-xsu).
+const TAP_HINT = 'The horn needs a tap to make a sound.';
+
 class AirHorn {
   #horn;
   #image;
@@ -186,7 +190,13 @@ class AirHorn {
       if (ok === true || this.#horn.isPlaying()) {
         if (this.#announcedTapHint) {
           this.#announcedTapHint = false;
-          window.__airhornAnnounce?.('');
+          // Only take back the hint if the region still holds it: a later message
+          // (connection lost, an update notice) outranks a stale hint
+          // (airhorn-xsu).
+          const region = document.getElementById('app-status');
+          if (!region || region.textContent === TAP_HINT) {
+            window.__airhornAnnounce?.('');
+          }
         }
         return;
       }
@@ -198,7 +208,7 @@ class AirHorn {
       // through the page's one polite live region, and put the user on the
       // control that fixes it.
       if (this.#horn.hasAudioContext()) {
-        window.__airhornAnnounce?.('The horn needs a tap to make a sound.');
+        window.__airhornAnnounce?.(TAP_HINT);
         this.#announcedTapHint = true;
         this.#image.focus?.({ preventScroll: false });
       } else {
@@ -260,9 +270,12 @@ window.addEventListener('load', () => {
   });
 
   const fireInstant = () => airhorn.start({ loop: false });
+  let urlLaunchAt = null;
+  let coldLaunchSettled = false;
 
   if (location.hash === '#instant') {
     fireInstant();
+    urlLaunchAt = performance.now();
   }
 
   window.addEventListener('hashchange', () => {
@@ -289,9 +302,21 @@ window.addEventListener('load', () => {
           return;
         }
       }
-      if (hash === '#instant') {
-        fireInstant();
+      if (hash !== '#instant') return;
+      // A cold launch is reported through the queue as well, and the load handler
+      // has already served it: firing again starts a second, overlapping source,
+      // bumps the badge twice and tracks the event twice (airhorn-lw9). The
+      // platform delivers a cold launch's params immediately after setConsumer,
+      // so the first delivery within a moment of the load-time fire IS that
+      // launch; anything later is a genuine repeat press and does re-fire.
+      // (isPlaying() cannot be the test: the URL fire is still fetching and
+      // decoding the sample when the params arrive.)
+      const firstDelivery = !coldLaunchSettled;
+      coldLaunchSettled = true;
+      if (firstDelivery && urlLaunchAt !== null && performance.now() - urlLaunchAt < 500) {
+        return;
       }
+      fireInstant();
     });
   }
 
