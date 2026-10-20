@@ -695,10 +695,28 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
     /* -- H. a launch of the installed app acknowledges the badge (airhorn-2eh8) -- */
     console.log('\n--- H. a launch of the installed app acknowledges the badge ---');
     if (badgeApi) {
+      // The sequences before this one move focus around and G ends by closing
+      // its own (activated) tab, which hands tab B a look-transition - the
+      // same acknowledge as sequence F. That clear is asynchronous (it runs
+      // under the origin lock), so a blast fired straight after it is
+      // acknowledged away and H measures the previous look instead of the
+      // launch (gate 649e7ea7 on the airhorn-ecp union: 'a foreground blast
+      // did not advance the shared badge count'). Settle the look first, then
+      // make the count, so the only thing that can clear it is the launch.
+      await send('Target.activateTarget', { targetId: B.targetId });
+      await waitUntil(async () => (await B.evaluate(`document.visibilityState`)) === 'visible', 5000);
+      const hSettled = await waitUntil(async () =>
+        (await B.evaluate(`window.localStorage.getItem('airhorn:blast-count')`)) === null ? true : null, 5000);
+      assert(hSettled,
+        'tab B never settled its look-transition acknowledge before the launch sequence: ' +
+        `storage is ${JSON.stringify(await B.evaluate(`window.localStorage.getItem('airhorn:blast-count')`))}`);
       // A shared count exists (blast in the foreground tab B).
       await B.clickHorn();
       await waitUntil(async () => (await B.hornState()).playing === false, 6000);
-      const hCount = await B.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      const hCount = await waitUntil(async () => {
+        const n = Number(await B.evaluate(`window.localStorage.getItem('airhorn:blast-count')`)) || 0;
+        return n > 0 ? n : null;
+      }, 5000);
       assert(hCount > 0, 'a foreground blast did not advance the shared badge count');
       // A cold launch: a fresh tab whose launch queue has a delivery queued
       // BEFORE the app loads - the platform delivers a queued launch to
