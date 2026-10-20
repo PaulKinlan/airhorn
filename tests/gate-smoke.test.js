@@ -271,6 +271,118 @@ test('a change that selects ZERO suites fails loudly, green only by explicit ack
   assert.equal(query.status, 0, `--list is a query, not a verdict: ${query.stderr}`);
 });
 
+test('the fleet contract recognises every rc-0 verdict line the gate emits (airhorn-3dph)', () => {
+  // tools/check.conf is the CONTRACT the coord installs as ~/.fleet/check.conf: it tells
+  // fleet-check which gate lines certify a pass. When the gate's verdict lines drift from it,
+  // the declared contract silently downgrades blessed passes: airhorn-3dph shipped a
+  // ZERO-SUITE PASS line that matched NEITHER contract regex (and an all-pending line named
+  // only by a loose unanchored prefix), so the opt-in pass would have read UNKNOWN at the
+  // first install that names a contract owner. This pin runs the REAL gate script in a
+  // throwaway repo, captures one instance of every rc-0 verdict line it can emit, and
+  // requires the contract to classify each one - and to classify nothing an rc-1 run prints.
+  const conf = spawnSync('bash', [
+    '-c', 'source "$1"; printf "%s\\n%s\\n%s\\n%s\\n" "$CHECK_FAST_PASS_RE" "$CHECK_FAST_NO_WORK_RE" "${CHECK_FAST_NO_WORK_POLICY-UNSET}" "${CHECK_FAST_CONTRACT_OWNER-}"',
+    'check.conf', path.join(root, 'tools', 'check.conf'),
+  ], { encoding: 'utf8' });
+  assert.equal(conf.status, 0, `check.conf must source cleanly: ${conf.stderr}`);
+  const [passReStr, noWorkReStr, noWorkPolicy, contractOwner] = conf.stdout.split('\n');
+  assert.notEqual(contractOwner, '',
+    'the contract must name CHECK_FAST_CONTRACT_OWNER: fleet-check UNSETS an ownerless declaration, which is how the airhorn-3dph drift stayed invisible');
+  assert.equal(noWorkPolicy, 'pass',
+    'the no-work lines must certify (no-work-exempt passes): an unset policy reads them as UNKNOWN');
+  for (const [name, re] of [['CHECK_FAST_PASS_RE', passReStr], ['CHECK_FAST_NO_WORK_RE', noWorkReStr]]) {
+    assert.ok(re.startsWith('^'), `${name} must be line-anchored: producer-verdict.py refuses unanchored patterns`);
+    assert.ok(re.endsWith('$'), `${name} must match whole lines: the dead prefix alternative that hid airhorn-3dph matched by loose prefix`);
+  }
+  let passRe, noWorkRe;
+  try {
+    passRe = new RegExp(passReStr);
+    noWorkRe = new RegExp(noWorkReStr);
+  } catch (err) {
+    assert.fail(`contract patterns must be valid regexes: ${err.message}`);
+  }
+
+  // The throwaway repo: the gate resolves its map relative to its own location, so a copy of
+  // the real script with a minimal map exercises the real selection/verdict code end to end.
+  const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-contract-'));
+  try {
+    const toolsDir = path.join(probe, 'tools');
+    fs.mkdirSync(toolsDir);
+    fs.mkdirSync(path.join(probe, 'tests'));
+    fs.copyFileSync(gate, path.join(toolsDir, 'fast-gate.sh'));
+    // The runner config is part of the gate: without its pinned TAP reporter the probe's
+    // node --test would emit the spec summary and the gate would read the suite as silent.
+    fs.copyFileSync(path.join(root, 'tools', 'gate.conf'), path.join(toolsDir, 'gate.conf'));
+    fs.writeFileSync(path.join(probe, 'package.json'),
+      JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'true' } }));
+    fs.writeFileSync(path.join(probe, 'tests', 'pass.test.js'),
+      "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('one passing case', () => { assert.ok(true); });\n");
+    fs.writeFileSync(path.join(toolsDir, 'suite-map.tsv'), [
+      'src/a.js\ttests/pass.test.js',
+      'pending-src.txt\ttests/pending.test.js',
+      'tests/pass.test.js\ttests/pass.test.js',
+      '~tests/pending.test.js\ttests/pending.test.js',
+      '!*.md',
+      '',
+    ].join('\n'));
+    for (const args of [['init'], ['config', 'user.email', 'probe@example.invalid'], ['config', 'user.name', 'probe'], ['add', '-A'], ['commit', '-m', 'probe']]) {
+      const g = spawnSync('git', ['-C', probe, ...args], { encoding: 'utf8' });
+      assert.equal(g.status, 0, `probe git ${args[0]} failed: ${g.stderr}`);
+    }
+    // Strip ambient gate knobs AND the test harness's own markers: node --test sets
+    // NODE_TEST_CONTEXT in this process, and a grandchild suite that inherits it believes it
+    // is a managed test child, writes nothing and exits 0 (the same silent green the
+    // airhorn-0ct pin strips before its own child runs) - so the gate would read a passing
+    // suite as silent. Production never runs the gate under these, so the probe must not.
+    const cleanEnv = {};
+    for (const k of Object.keys(process.env)) {
+      if (!k.startsWith('FAST_GATE_') && !k.startsWith('AIRHORN_') && !k.startsWith('NODE_TEST_')) cleanEnv[k] = process.env[k];
+    }
+    const run = (args, env = {}) => spawnSync('bash', [path.join(toolsDir, 'fast-gate.sh'), ...args], {
+      cwd: probe, encoding: 'utf8', env: { ...cleanEnv, ...env },
+    });
+    const noChanged = run([]);                                       // nothing changed at all
+    const positive = run(['--changed', 'src/a.js']);                 // one real suite runs
+    const allPending = run(['--changed', 'pending-src.txt']);        // only a '~'-pending suite selected
+    const blessed = run(['--changed', 'exempt.md'], { FAST_GATE_ALLOW_ZERO: '1' });
+    const refused = run(['--changed', 'exempt.md']);                 // rc 1: zero-suite without the bless
+    const unmapped = run(['--changed', 'unmapped.txt']);             // rc 1: no row, no exemption
+    for (const [name, r] of [['no-changed', noChanged], ['positive', positive], ['all-pending', allPending], ['blessed', blessed]]) {
+      assert.equal(r.status, 0, `${name} must exit 0:\n${r.stdout}\n${r.stderr}`);
+    }
+    assert.equal(refused.status, 1, `zero-suite without the acknowledgement must exit 1: ${refused.stdout}`);
+    assert.equal(unmapped.status, 1, `an unmapped change must exit 1: ${unmapped.stdout}`);
+
+    // The exact rc-0 verdict lines, pinned so a reformat of any one of them fails HERE, by name.
+    const noChangedLine = 'fast-gate: no changed files';
+    const positiveLine = 'fast-gate: PASS (1 suite(s), 1 changed file(s))';
+    const allPendingLine = 'fast-gate: PASS (0 suite(s), 1 changed file(s), all pending)';
+    const blessedLine = 'fast-gate: ZERO-SUITE PASS (1 changed file(s), all 1 exempt; FAST_GATE_ALLOW_ZERO=1)';
+    for (const [name, r, line] of [['no-changed', noChanged, noChangedLine], ['positive', positive, positiveLine], ['all-pending', allPending, allPendingLine], ['blessed', blessed, blessedLine]]) {
+      assert.ok(r.stdout.includes(line), `${name} must print the pinned verdict line ${line}, got:\n${r.stdout}`);
+    }
+    // The classification is the contract: exactly one regex owns each rc-0 line.
+    assert.match(positiveLine, passRe, 'a >=1-suite PASS must certify via CHECK_FAST_PASS_RE');
+    assert.doesNotMatch(positiveLine, noWorkRe, 'a suite-running PASS must not classify as no-work');
+    for (const line of [noChangedLine, allPendingLine, blessedLine]) {
+      assert.match(line, noWorkRe, `a no-suite rc-0 line must certify via CHECK_FAST_NO_WORK_RE: ${line}`);
+      assert.doesNotMatch(line, passRe, `a no-suite rc-0 line must not read as a suite-running PASS: ${line}`);
+    }
+    // ...and nothing an rc-1 run prints may classify, in either direction.
+    const rc1Lines = [noChanged, positive, allPending, blessed, refused, unmapped]
+      .filter((r) => r.status !== 0)
+      .flatMap((r) => [...r.stdout.split('\n'), ...r.stderr.split('\n')])
+      .filter((l) => l.startsWith('fast-gate: '));
+    assert.ok(rc1Lines.length >= 4, `the rc-1 runs must have produced contract-visible lines: ${rc1Lines}`);
+    for (const line of rc1Lines) {
+      assert.doesNotMatch(line, passRe, `an rc-1 line must never read as PASS: ${line}`);
+      assert.doesNotMatch(line, noWorkRe, `an rc-1 line must never read as no-work: ${line}`);
+    }
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
 test('every tools script parses - recognised extensions at any depth (airhorn-7lm, airhorn-7z5, airhorn-h19)', () => {
   // Glob, not names (airhorn-v1n), and every RECOGNISED script extension,
   // not just .mjs (airhorn-h19: .cjs and .ts were unparseable, extensionless

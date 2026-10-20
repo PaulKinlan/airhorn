@@ -2,7 +2,10 @@
 # tools/fast-gate.sh — airhorn's FAST tier: run the suites that cover what a change can affect,
 # and FAIL LOUDLY on a changed file that maps to none (~/fleet/docs/speed.md R2/R5/R14).
 #
-# Output contract — these exact lines are parsed by ~/fleet/remote/check-coverage.py:
+# Output contract — these exact lines are parsed by ~/fleet/remote/producer-verdict.py:
+# (the machine declaration that names them is tools/check.conf; the pin that keeps the two
+# in step is tests/gate-smoke.test.js 'the fleet contract recognises every rc-0 verdict line
+# the gate emits' — airhorn-3dph)
 #   fast-gate: running: <suite>
 #   fast-gate: passed: <suite>
 #   fast-gate: failed: <suite>
