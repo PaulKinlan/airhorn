@@ -1125,7 +1125,11 @@ async function main() {
 }
 
 main().then((code) => {
-  process.exitCode = code;
+  // Same drain the catch has: even a PASSING soak against a peer that
+  // swallows the ws close-frame holds the event loop on the half-open socket
+  // after every check has passed (airhorn-uenq). The summary and report are
+  // written by the time main() resolves; nothing legitimate is pending.
+  process.exit(code);
 }).catch((err) => {
   console.error(`soak: FAIL — ${err.message}`);
   // Hard exit: a hostile peer that swallowed frames also swallows the ws
