@@ -57,28 +57,48 @@ async function main() {
     '--remote-debugging-port=0',
     `--user-data-dir=${profileDir}`,
     'about:blank'
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
   let wsUrl = null;
-  await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Chrome timeout')), 10000);
-    chrome.stderr.on('data', (d) => {
-      const match = d.toString().match(/ws:\/\/[^\s]+/);
-      if (match) {
-        wsUrl = match[0];
-        clearTimeout(timeout);
-        resolve();
-      }
+  let ws = null;
+  // The early window (handshake, discovery, ws connect) sits before the try
+  // whose finally reaps, so a failure there used to throw with chrome and its
+  // profile alive (airhorn-51lr). Route it into the same teardown.
+  try {
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Chrome timeout')), 10000);
+      chrome.stderr.on('data', (d) => {
+        const match = d.toString().match(/ws:\/\/[^\s]+/);
+        if (match) {
+          wsUrl = match[0];
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
     });
-  });
 
-  const chromePort = new URL(wsUrl).port;
-  const targetsRes = await fetch(`http://127.0.0.1:${chromePort}/json/list`);
-  const targets = await targetsRes.json();
-  const pageWsUrl = targets.find(t => t.type === 'page').webSocketDebuggerUrl;
+    const chromePort = new URL(wsUrl).port;
+    // Discovery is bounded like the handshake above: a DevTools endpoint that
+    // accepts and never answers must reject into this tool's cleanup instead of
+    // parking it until undici's ~300s headers timeout (airhorn-9vg3).
+    let targets;
+    try {
+      const res = await fetch(`http://127.0.0.1:${chromePort}/json/list`, { signal: AbortSignal.timeout(10000) });
+      targets = await res.json();
+    } catch (err) {
+      if (err?.name === 'TimeoutError') throw new Error('DevTools discovery timeout: /json/list did not settle within 10000ms');
+      throw err;
+    }
+    const pageWsUrl = targets.find(t => t.type === 'page').webSocketDebuggerUrl;
 
-  const ws = new WebSocket(pageWsUrl);
-  await new Promise(r => ws.onopen = r);
+    ws = new WebSocket(pageWsUrl);
+    await new Promise(r => ws.onopen = r);
+  } catch (err) {
+    try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* already gone */ }
+    try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
+    try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* best effort */ }
+    throw err;
+  }
 
   let msgId = 1;
   const pending = new Map();

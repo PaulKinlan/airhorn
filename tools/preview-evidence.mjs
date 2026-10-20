@@ -97,30 +97,54 @@ async function launchChrome(extraFlags = []) {
     '--remote-debugging-port=0',
     `--user-data-dir=${profileDir}`,
     'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
   let wsUrl = null;
-  await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Chrome timeout')), 15000);
-    const onData = (d) => {
-      const match = d.toString().match(/ws:\/\/[^\s]+/);
-      if (match && !wsUrl) {
-        wsUrl = match[0];
-        clearTimeout(timeout);
-        resolve();
-      }
-    };
-    chrome.stderr.on('data', onData);
-    chrome.stdout.on('data', onData);
-    chrome.on('exit', (code) => reject(new Error('Chrome exited early with code ' + code)));
-  });
+  let ws = null;
+  // Hoisted so the early window (handshake, discovery, ws connect) can take
+  // the same teardown the happy path uses: a failure there used to escape
+  // with chrome and its profile alive, because cleanup only existed after
+  // everything had succeeded (airhorn-51lr).
+  const cleanup = () => {
+    try { ws?.close(); } catch {}
+    try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* already gone */ }
+    try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
+    fs.rmSync(profileDir, { recursive: true, force: true });
+  };
+  try {
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Chrome timeout')), 15000);
+      const onData = (d) => {
+        const match = d.toString().match(/ws:\/\/[^\s]+/);
+        if (match && !wsUrl) {
+          wsUrl = match[0];
+          clearTimeout(timeout);
+          resolve();
+        }
+      };
+      chrome.stderr.on('data', onData);
+      chrome.stdout.on('data', onData);
+      chrome.on('exit', (code) => reject(new Error('Chrome exited early with code ' + code)));
+    });
 
-  const port = new URL(wsUrl).port;
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  const page = targets.find(t => t.type === 'page');
-
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise(r => ws.onopen = r);
+    const port = new URL(wsUrl).port;
+    // Discovery is bounded like the handshake above: a DevTools endpoint that
+    // accepts and never answers must reject into this tool's cleanup instead of
+    // parking it until undici's ~300s headers timeout (airhorn-9vg3).
+    let targets;
+    try {
+      targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(15000) })).json();
+    } catch (err) {
+      if (err?.name === 'TimeoutError') throw new Error('DevTools discovery timeout: /json/list did not settle within 15000ms');
+      throw err;
+    }
+    const page = targets.find(t => t.type === 'page');
+    ws = new WebSocket(page.webSocketDebuggerUrl);
+    await new Promise(r => ws.onopen = r);
+  } catch (err) {
+    cleanup();
+    throw err;
+  }
 
   let msgId = 1;
   const pending = new Map();
@@ -185,12 +209,6 @@ async function launchChrome(extraFlags = []) {
     const res = await send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(path.join(outDir, file), Buffer.from(res.data, 'base64'));
     return file;
-  };
-
-  const cleanup = () => {
-    try { ws.close(); } catch {}
-    chrome.kill('SIGKILL');
-    fs.rmSync(profileDir, { recursive: true, force: true });
   };
 
   return { chrome, send, evaluate, waitFor, waitEvent, navigate, screenshot, cleanup };
