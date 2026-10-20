@@ -8,8 +8,13 @@
  * been forking, so a child forked between the reads was missed. One module
  * now owns the marker premise, the pass count and the failure diagnostic,
  * the way airhorn-4vfn collapsed the signal-exit copies. tools/resilience-
- * audit.mjs still carries its own copy (airhorn-mgcl) and migrates with that
- * bead.
+ * audit.mjs migrates with this landing too (its copy was airhorn-mgcl).
+ *
+ * Failure diagnostic (airhorn-qum7, airhorn-chxk): a sweep that silently did
+ * nothing reads as a clean kill. A missing /proc is a documented no-op (a
+ * non-Linux host); ANY other /proc scan failure is printed to stderr and the
+ * sweep gives up loudly - 'reaped 14' and 'reaped 0, scan broken' no longer
+ * read the same.
  */
 import fs from 'node:fs';
 
@@ -39,8 +44,10 @@ export function sweepProfile(profileDir) {
         try { cmdline = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8'); } catch { continue; }
         if (cmdline.includes(marker)) victims.push(pid);
       }
-    } catch {
-      return; // no /proc (non-Linux)
+    } catch (err) {
+      if (err?.code === 'ENOENT') return; // no /proc (non-Linux): documented no-op
+      console.error(`reap: /proc scan failed (${err?.message ?? err}); the tree kill did not run`);
+      return;
     }
     if (victims.length === 0) return;
     for (const pid of victims) {
