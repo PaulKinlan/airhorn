@@ -181,9 +181,7 @@ class AirHorn {
     // A keyboard hold is sounding the horn (airhorn-ay73 state machine below).
     let pressing = false;
     let heldKeyCode = null;        // the key we believe is physically held
-    let heldKeyLastSeen = 0;       // last keydown seen for it (repeats refresh)
     let cancelledKey = null;       // a hold cancelled mid-hold: its repeat tail must not restart the horn
-    let cancelledKeyLastSeen = 0;
 
     // Retire the hold. suppress=true marks the key so its repeat tail (the
     // user may still physically hold it through a blur/tab-hide/Escape)
@@ -193,7 +191,6 @@ class AirHorn {
     const endHold = (suppress = false) => {
       if (suppress && heldKeyCode !== null) {
         cancelledKey = heldKeyCode;
-        cancelledKeyLastSeen = performance.now();
       }
       pressing = false;
       heldKeyCode = null;
@@ -210,15 +207,15 @@ class AirHorn {
       }
       if (!['Space', 'Enter'].includes(e.code)) return;
       e.preventDefault();
-      const now = performance.now();
       if (cancelledKey === e.code) {
-        // The hold on this key was cancelled (blur, tab-hide, Escape). Its OS
-        // repeat tail arrives within ~50ms steps, so a keydown more than a
-        // second after the last seen one is a genuinely new press.
-        if (now - cancelledKeyLastSeen < 1000) {
-          cancelledKeyLastSeen = now;
-          return;
-        }
+        // The hold on this key was cancelled (blur, tab-hide, Escape). Auto-
+        // repeat keydowns carry repeat=true for exactly as long as the key is
+        // physically held, so they are the tail: ignored until the key is
+        // provably released (the keyup clears the cancellation). A first
+        // keydown (repeat=false) is a genuine new press and always starts a
+        // hold - however soon after the cancellation (airhorn-5a5x; the
+        // previous 1s-stamp window swallowed it).
+        if (e.repeat) return;
         cancelledKey = null;
       }
       if (!pressing) {
@@ -226,9 +223,6 @@ class AirHorn {
         this.start({ loop: true });
         pressing = true;
         heldKeyCode = e.code;
-        heldKeyLastSeen = now;
-      } else if (heldKeyCode === e.code) {
-        heldKeyLastSeen = now;
       }
     });
 
