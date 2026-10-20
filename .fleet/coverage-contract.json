@@ -51,6 +51,9 @@
   ".fleet/coverage-contract.json": [
     "tests/gate-smoke.test.js"
   ],
+  "tests/support/browser.mjs": [
+    "tests/browser-support.test.js"
+  ],
   "tests/support/**": [
     "tests/a11y.test.mjs",
     "tests/sw-offline.test.mjs",
