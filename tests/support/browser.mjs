@@ -89,10 +89,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  *              is a user gesture; suites asserting blocked autoplay pass false)
  *   webmcp:    --enable-features=WebMCP,WebMCPTesting (every suite that sets it
  *              also sets autoplay)
- *   label:     names the profile dir and timeout errors
- *   timeoutMs: bound on chrome startup
+ *   label:       names the profile dir and timeout errors
+ *   timeoutMs:   bound on chrome startup
+ *   discoveryMs: bound on /json/list discovery (capped by timeoutMs)
  */
-export async function launchBrowser({ autoplay = false, webmcp = false, label = 'suite', timeoutMs = 15000 } = {}) {
+export async function launchBrowser({ autoplay = false, webmcp = false, label = 'suite', timeoutMs = 15000, discoveryMs = 5000 } = {}) {
   const profileDir = fs.mkdtempSync(`/tmp/chrome-${label}-`);
   const chrome = spawn(chromeBin(), [
     ...familyArgs({ autoplay, webmcp }),
@@ -101,8 +102,42 @@ export async function launchBrowser({ autoplay = false, webmcp = false, label = 
     'about:blank',
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
+  // One reap path for every way a launch can end without a handle: startup
+  // failure, discovery failure, or the launch being cut short (airhorn-9nea,
+  // airhorn-4yhb).
+  let closed = false;
+  const reap = () => {
+    if (closed) return;
+    closed = true;
+    killTree(chrome.pid);
+    try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  };
+  // Nothing in the caller can reap this browser yet: every suite registers its
+  // own signal handler only AFTER launchBrowser resolves, so a bound-kill during
+  // startup or discovery left the whole chrome tree and its profile behind
+  // (airhorn-4yhb). Prepended, so it reaps before a suite's own handler runs;
+  // if it is the only listener, the signal is re-raised so the process still
+  // dies the way it would have without the guard.
+  const onSignal = function onLaunchSignal(signal) {
+    reap();
+    if (process.listenerCount(signal) > 1) return;
+    process.removeListener(signal, onLaunchSignal);
+    process.kill(process.pid, signal);
+  };
+  const onExit = () => reap();
+  const signals = ['SIGTERM', 'SIGINT'];
+  for (const signal of signals) process.prependListener(signal, onSignal);
+  process.on('exit', onExit);
+  const release = () => {
+    for (const signal of signals) process.removeListener(signal, onSignal);
+    process.removeListener('exit', onExit);
+  };
+
   let browserWsUrl = null;
+  let pageTarget = null;
+  let port = null;
   const stderrLines = [];
+  const discoveryBound = Math.max(1, Math.min(discoveryMs, timeoutMs));
   try {
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(
@@ -123,28 +158,57 @@ export async function launchBrowser({ autoplay = false, webmcp = false, label = 
         reject(new Error(`Chrome exited early (${code}) (${label}): ${stderrLines.join('\n')}`));
       });
     });
-  } catch (err) {
-    killTree(chrome.pid);
-    try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch { /* best effort */ }
-    throw err;
-  }
 
-  const port = new URL(browserWsUrl).port;
-  // DevTools discovery is a failure path too: if the /json/list fetch rejects
-  // or no page target exists, launchBrowser must not return with the Chrome
-  // process and its /tmp profile still alive (airhorn-9nea).
-  let pageTarget;
-  try {
-    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+    port = new URL(browserWsUrl).port;
+    // DevTools discovery is a failure path too: if the /json/list fetch rejects
+    // or no page target exists, launchBrowser must not return with the Chrome
+    // process and its /tmp profile still alive (airhorn-9nea). A peer that
+    // accepts the connection and never answers is the third case: with no
+    // bound it parked the launch until undici's 300s headers timeout - longer
+    // than any suite or gate bound - so the practical outcome was a bound-kill
+    // with an unreaped browser (airhorn-4yhb). The bound is enforced twice: the
+    // abort frees the socket straight away, and the race holds even if the fetch
+    // in scope ignores an AbortSignal (a stub in a test, an older runtime). The
+    // clock starts here, not at spawn, so a slow chrome start cannot eat it.
+    const discoverySignal = AbortSignal.timeout(discoveryBound);
+    let discoveryTimer = null;
+    const discoveryTimeout = new Promise((resolve, reject) => {
+      discoveryTimer = setTimeout(() => reject(new Error(
+        `DevTools discovery timeout (${discoveryBound}ms) (${label}): /json/list never answered on port ${port}`)),
+      discoveryBound);
+    });
+    let targets;
+    try {
+      targets = await Promise.race([
+        discoveryTimeout,
+        (async () => {
+          try {
+            const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: discoverySignal });
+            return await res.json();
+          } catch (err) {
+            // The abort fires at the same bound, so it can win the race: the
+            // failure must read the same however it lost.
+            if (discoverySignal.aborted) {
+              throw new Error(`DevTools discovery timeout (${discoveryBound}ms) (${label}): /json/list never answered on port ${port}`);
+            }
+            throw err;
+          }
+        })(),
+      ]);
+    } finally {
+      clearTimeout(discoveryTimer);
+    }
     pageTarget = targets.find((t) => t.type === 'page');
     if (!pageTarget) throw new Error(`no page target in /json/list (${label}): ${JSON.stringify(targets.map((t) => t.type))}`);
   } catch (err) {
-    killTree(chrome.pid);
-    try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    reap();
     throw err;
+  } finally {
+    // Past this point the caller owns the lifecycle (it registers its own
+    // handler as soon as it has the handle).
+    release();
   }
 
-  let closed = false;
   const exited = new Promise((r) => chrome.on('exit', r));
   return {
     chrome,
@@ -161,9 +225,7 @@ export async function launchBrowser({ autoplay = false, webmcp = false, label = 
       try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch { /* best effort */ }
     },
     killNow() {
-      if (closed) return;
-      closed = true;
-      killTree(chrome.pid);
+      reap();
     },
   };
 }
