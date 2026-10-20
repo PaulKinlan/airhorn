@@ -11,6 +11,11 @@
  * must not outlive the grace bound, and must exit with the signal's own code
  * (airhorn-4vfn).
  *
+ * tools/lib/reap.mjs: the shared profile-marker sweep must reap a tree that
+ * carries the marker, and must SAY SO when nothing carries it while a process
+ * still names the profile dir - the marker premise drifting must not turn into
+ * silent orphan processes (airhorn-qum7).
+ *
  * The browser tests drive the helper with a stub CHROME_BIN (a shell script that
  * announces a ws:// URL on stderr and stays alive, exactly as the real binary
  * does) and a real silent DevTools peer - an HTTP server that accepts the
@@ -28,7 +33,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 const SUPPORT = pathToFileURL(path.join(import.meta.dirname, 'support', 'browser.mjs')).href;
@@ -367,4 +372,62 @@ test('a wedged cleanup cannot hold the process past the grace bound (airhorn-4vf
   const result = await runStandIn({ signal: 'SIGTERM', graceMs: 250, cleanup: 'await new Promise(() => {});' });
   assert.equal(result.code, 128 + 15, `the grace bound must still exit 143: ${JSON.stringify(result)}`);
   assert.ok(result.elapsed < 3000, `a wedged cleanup held the process for ${result.elapsed}ms against a 250ms grace bound`);
+});
+
+/* ------------------------------------------------------- tools/lib/reap.mjs */
+
+const REAP = pathToFileURL(path.join(import.meta.dirname, '..', 'tools', 'lib', 'reap.mjs')).href;
+
+// Runs the real sweep in a child process so its stderr diagnostic is asserted
+// on rather than inferred: sweepProfile writes to the process it runs in, and
+// silencing that in-suite would also silence the thing under test.
+const runSweep = (dir) => {
+  const script = `import { sweepProfile } from ${JSON.stringify(REAP)};\n` +
+    `sweepProfile(${JSON.stringify(dir)});\n`;
+  const res = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 30000 });
+  return { rc: res.status, stderr: res.stderr ?? '' };
+};
+
+// A process whose command line carries exactly the given trailing arguments -
+// a stand-in for a chrome that either does or does not carry the sweep's
+// marker. A unique profile path per test keeps the sweep from seeing anything
+// but this run's stand-in.
+const spawnStandIn = (args) => spawn(process.execPath,
+  ['--input-type=module', '-e', 'setInterval(() => {}, 1000);', ...args], { stdio: 'ignore' });
+
+const isAlive = (pid) => {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+};
+
+test('a sweep whose marker matches nothing, while a process still names the profile, says so (airhorn-qum7)', async () => {
+  const label = runLabel('reap-drift');
+  const dir = `/tmp/${label}`;
+  const standIn = spawnStandIn([dir]);          // names the dir, no --user-data-dir=
+  try {
+    await new Promise((r) => setTimeout(r, 300)); // let the stand-in exec
+    const result = runSweep(dir);
+    assert.equal(result.rc, 0, `the sweep must not fail: ${JSON.stringify(result)}`);
+    assert.match(result.stderr, /no process carries --user-data-dir=/,
+      `a sweep that reaped nothing while a process still names the profile must say so; got ${JSON.stringify(result.stderr)}`);
+    assert.match(result.stderr, new RegExp(`pid ${standIn.pid}\\b`),
+      `the diagnostic must name the process it left alone; got ${JSON.stringify(result.stderr)}`);
+    assert.ok(isAlive(standIn.pid), 'a marker miss must not kill anything - the diagnostic is the whole output');
+  } finally {
+    try { standIn.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+});
+
+test('the same sweep still kills everything that carries the marker, silently (airhorn-qum7)', async () => {
+  const label = runLabel('reap-marker');
+  const dir = `/tmp/${label}`;
+  const standIn = spawnStandIn([`--user-data-dir=${dir}`]);
+  try {
+    await new Promise((r) => setTimeout(r, 300));
+    const result = runSweep(dir);
+    assert.equal(result.rc, 0, `the sweep must not fail: ${JSON.stringify(result)}`);
+    assert.equal(result.stderr, '', `a normal sweep must stay quiet; got ${JSON.stringify(result.stderr)}`);
+    assert.ok(!isAlive(standIn.pid), 'a process carrying the marker must be reaped');
+  } finally {
+    try { standIn.kill('SIGKILL'); } catch { /* already gone */ }
+  }
 });

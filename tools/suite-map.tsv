@@ -38,6 +38,11 @@ server.ts	tests/gate-smoke.test.js
 # tools/* is covered by a REAL smoke suite: the gate's own selection contract
 # plus syntax checks of the scripts it names (airhorn-1ye).
 tools/*	tests/gate-smoke.test.js
+# tools/lib/** is the shared runtime the tools import (reap.mjs is the profile
+# marker sweep). It is NOT matched by `tools/*`, which does not cross a slash, so
+# a change to it used to select zero suites - a shared helper with no owner.
+# tests/test-support.test.js drives it directly (marker hit and marker miss).
+tools/lib/**	tests/test-support.test.js
 # The SW/offline suite covers the PWA surface (it verifies sw caching + manifest contents in dist)
 # AND the worker's cache-integrity behaviour (a corrupt entry must be evicted and healed, never
 # served - airhorn-un5; merged into it in airhorn-iwf so one worker change pays one Chromium launch,
