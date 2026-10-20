@@ -143,7 +143,7 @@ megabyte of hostile input comes back as a short message, not as a megabyte of ec
 | `invalid_input` | `play_horn` got an `input` that is not an object (a string, number, boolean, array, function), or a `loop` that is present and not a boolean | nothing |
 | `rate_limited` | more than 20 admitted starts in the last 1000 ms | nothing |
 | `audio_unavailable` | the browser has no Web Audio, so the horn cannot sound | nothing |
-| `not_started` | audio is blocked, or a `stop_horn` arrived before the start completed | nothing (and it is silenced) |
+| `not_started` | audio is blocked, or a `stop_horn` arrived before the start completed | nothing is playing |
 | `timeout` | the start did not report back within the start timeout (5 s by default) | the abandoned start is stopped |
 | `internal` | an unexpected failure in the horn, or an unreadable state in `get_horn_state` | nothing guaranteed |
 
@@ -186,7 +186,7 @@ case names.
 | input validated, not coerced; type named, payload never echoed | `play_horn refuses wrong-typed input with a structured error instead of coercing it`, `a hostile megabyte payload is refused quickly and never echoed back` |
 | extra properties ignored, no prototype pollution | `a huge argument object with a valid loop flag is a safe no-op on the extra data`, `unknown properties and prototype-shaped keys cannot change behaviour or pollute` |
 | `stop_horn` always silences | `stop_horn silences the horn whatever the caller sends, and state is always readable`, `stop_horn is never rate limited and answers immediately during a play flood`, `stop_horn still silences the horn when its own call is aborted` |
-| `stop_horn`/`get_horn_state` take no arguments | `stop_horn and get_horn_state ignore extra properties`, `the published schemas...` |
+| `stop_horn`/`get_horn_state` take no arguments | `stop_horn and get_horn_state ignore extra properties`, `the published schemas and descriptions match what the tools actually do` |
 | `get_horn_state` shape, and its degraded shape | `stop_horn silences the horn whatever the caller sends, and state is always readable`, `a broken horn instance yields structured errors, never rejections` |
 | `audio_unavailable` / `not_started` | `reports a structured error instead of throwing without Web Audio`, `invocation before the audio graph is ready still resolves` |
 | only cancellation rejects; cancelled mid-start is silenced | `honours a cancelled execution signal`, `an aborted call rejects and never starts the horn`, `a call cancelled mid-start is silenced instead of left looping` |
