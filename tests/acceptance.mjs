@@ -718,11 +718,16 @@ async function run() {
       if (afterStop.pressed !== 'false') problems.push('stop_horn did not clear aria-pressed');
       if (!silent) problems.push('audio still audible after stop_horn');
 
+      // The never-playing path leaves duringPlay null (the guards above turn
+      // that into problem lines); format the peak defensively so the record()
+      // narration cannot throw before the diagnosis and the three screenshots
+      // are captured (airhorn-py61).
+      const playPeakText = duringPlay && duringPlay.peak != null ? duringPlay.peak.toFixed(3) : 'n/a';
       record('4. WebMCP: tools discovered and executeTool sounds the horn',
         problems.length === 0,
         (problems.length ? problems.join('; ') + ' | ' : '') +
           `source=${discovery.source}, tools=[${discovery.names.join(', ')}], ` +
-          `play peak=${duringPlay.peak.toFixed(3)}, stop silent=${silent}` +
+          `play peak=${playPeakText}, stop silent=${silent}` +
           (webmcpNative ? '' : ' | NOTE: browser exposes no native document.modelContext'),
         [toolsShot, playingShot, stoppedShot]);
       notes.webmcp = { ...notes.webmcp, discovery, playResult, stateResult, stopResult };
