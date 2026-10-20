@@ -92,7 +92,14 @@ async function main() {
     const pageWsUrl = targets.find(t => t.type === 'page').webSocketDebuggerUrl;
 
     ws = new WebSocket(pageWsUrl);
-    await new Promise(r => ws.onopen = r);
+    // Bounded like discovery above: a peer that answers /json/list but never
+    // completes the ws upgrade must reject into the cleanup instead of parking
+    // the tool with its launch alive (airhorn-doek).
+    await new Promise((resolve, reject) => {
+      const bound = setTimeout(() => reject(new Error('DevTools ws handshake timeout: the page socket never opened within 10000ms')), 10000);
+      ws.onopen = () => { clearTimeout(bound); resolve(); };
+      ws.onerror = () => { clearTimeout(bound); reject(new Error('DevTools ws handshake failed: the page socket errored')); };
+    });
   } catch (err) {
     try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* already gone */ }
     try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
