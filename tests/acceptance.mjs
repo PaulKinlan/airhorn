@@ -266,12 +266,38 @@ async function run() {
 
   let browser = null;
   let ws = null;
+  let browserWs = null;
 
   try {
     /* -------------------------------- browser -------------------------------- */
     browser = await launchBrowser({ autoplay: true, webmcp: true, label: 'acceptance', timeoutMs: 20000 });
     ws = new WebSocket(browser.pageWsUrl);
     await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
+
+    // Browser-level connection: creating and activating a real second tab is
+    // how the keyboard-hold case produces a genuine window blur and tab-hide
+    // (airhorn-ay73).
+    const version = await (await fetch(`http://127.0.0.1:${browser.port}/json/version`)).json();
+    browserWs = new WebSocket(version.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => { browserWs.onopen = resolve; browserWs.onerror = reject; });
+    let browserMsgId = 1;
+    const browserPending = new Map();
+    browserWs.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.id && browserPending.has(msg.id)) {
+        const p = browserPending.get(msg.id);
+        browserPending.delete(msg.id);
+        if (msg.error) p.reject(new Error(msg.error.message));
+        else p.resolve(msg.result);
+      }
+    };
+    const browserSend = (method, params = {}) => {
+      const id = browserMsgId++;
+      return new Promise((resolve, reject) => {
+        browserPending.set(id, { resolve, reject });
+        browserWs.send(JSON.stringify({ id, method, params }));
+      });
+    };
 
     let msgId = 1;
     const pending = new Map();
@@ -824,6 +850,130 @@ async function run() {
       record('5. reduced motion + dark mode render sanely', false, err.message, []);
     }
 
+    /* ----------------------- 6. keyboard hold semantics ---------------------- */
+    try {
+      // A fresh page: case 3 forces the synth fallback and case 5 leaves the
+      // context's gesture state warm, and neither must decide whether a
+      // keyboard hold works - the semantics under test are per page load
+      // (airhorn-ay73).
+      await send('Page.reload');
+      for (let i = 0; i < 60; i += 1) {
+        try {
+          if (await evaluate(`!!window.__airhorn && document.readyState === 'complete' && document.querySelector('.horn')`)) break;
+        } catch {}
+        await sleep(250);
+      }
+      const key = (type, over = {}) => send('Input.dispatchKeyEvent', {
+        type,
+        key: over.key ?? ' ',
+        code: over.code ?? 'Space',
+        windowsVirtualKeyCode: over.wvk ?? 32,
+        ...(type === 'keyDown' ? { text: over.text ?? ' ' } : {}),
+        ...(over.autoRepeat ? { autoRepeat: true } : {}),
+      });
+      const spaceDown = (autoRepeat = false) => key('keyDown', autoRepeat ? { autoRepeat: true } : {});
+      const spaceUp = () => key('keyUp');
+      const escapeDown = () => key('keyDown', { key: 'Escape', code: 'Escape', wvk: 27 });
+      // The hold state machine is asserted through its DOM state (horning
+      // class, aria-pressed, isLooping), not through the audio layer: once
+      // case 3 forces the synth fallback the source counter and peaks no
+      // longer mean what they mean on the sample path (airhorn-ay73).
+      const state = () => evaluate(`(() => ({
+        horning: document.querySelector('.horn').classList.contains('horning'),
+        pressed: document.querySelector('.horn').getAttribute('aria-pressed'),
+        loop: window.__airhorn.isLooping(),
+        kd: window.__kd || 0,
+        ku: window.__ku || 0,
+        active: document.activeElement ? (document.activeElement.className || document.activeElement.tagName) : 'none',
+      }))()`);
+      const problems = [];
+      const seq = [];
+      const note = () => `[${seq.join(' -> ')}]`;
+
+      await evaluate(`document.querySelector('.horn').focus(); window.__kd = 0; window.__ku = 0; window.__blurs = 0; window.__hides = 0; window.addEventListener('blur', () => { window.__blurs++; }); document.addEventListener('visibilitychange', () => { if (document.hidden) window.__hides++; }); document.querySelector('.horn').addEventListener('keydown', () => { window.__kd++; }); document.querySelector('.horn').addEventListener('keyup', () => { window.__ku++; }); true`);
+
+      // Hold Space: exactly one blast; 2s of OS key repeat must not retrigger.
+      await spaceDown();
+      seq.push('Space down');
+      await sleep(200);
+      let s = await state();
+      if (s.horning !== true || s.pressed !== 'true' || s.loop !== true) problems.push(`holding Space did not light the hold (horning=${s.horning}, pressed=${s.pressed}, loop=${s.loop}) ${note()}`);
+      for (let i = 0; i < 40; i += 1) { await spaceDown(true); await sleep(50); }
+      seq.push('Space repeat x40 (~2s)');
+      s = await state();
+      if (s.horning !== true || s.pressed !== 'true') problems.push(`the hold did not survive 2s of OS key repeat (horning=${s.horning}, pressed=${s.pressed}) - the repeat tail must not retire or retrigger it ${note()}`);
+      await spaceUp();
+      await sleep(250);
+      seq.push('Space up');
+      s = await state();
+      if (s.horning !== false || s.pressed !== 'false' || s.loop !== false) problems.push(`Space keyup did not stop the hold (horning=${s.horning}, pressed=${s.pressed}, loop=${s.loop}) - the ring-out may sound but the hold must be off ${note()}`);
+
+      // Escape mid-hold: the horn retires and stays retired through the
+      // repeat tail; the key's release clears the cancellation so a fresh
+      // hold works.
+      await spaceDown();
+      seq.push('Space down');
+      await sleep(200);
+      s = await state();
+      if (s.horning !== true) problems.push(`the fresh hold before Escape was not lit (horning=${s.horning}) ${note()}`);
+      await escapeDown();
+      seq.push('Escape (while held)');
+      await sleep(150);
+      for (let i = 0; i < 6; i += 1) { await spaceDown(true); await sleep(50); }
+      seq.push('Space repeat x6 after Escape');
+      s = await state();
+      if (s.horning !== false || s.pressed !== 'false' || s.loop !== false) problems.push(`Escape did not stop the held horn (horning=${s.horning}, pressed=${s.pressed}, loop=${s.loop}) or its repeat tail restarted it ${note()}`);
+      await spaceUp();
+      await sleep(100);
+      seq.push('Space up');
+      await spaceDown();
+      seq.push('Space down (fresh)');
+      await sleep(200);
+      s = await state();
+      if (s.horning !== true || s.pressed !== 'true') problems.push(`a fresh hold after Escape did not start the horn (horning=${s.horning}, pressed=${s.pressed}) ${note()}`);
+      await spaceUp();
+      await sleep(250);
+
+      // Blur + tab-hide mid-hold: a real second tab takes activation, which
+      // blurs the window and hides the page in one real browser step. The
+      // horn must be stopped - and stay stopped through repeats arriving
+      // after the hide; and after the key is released the hold must not be
+      // stuck: a fresh hold starts exactly one blast.
+      await spaceDown();
+      seq.push('Space down');
+      await sleep(200);
+      s = await state();
+      if (s.horning !== true) problems.push(`the fresh hold before the tab switch was not lit (horning=${s.horning}) ${note()}`);
+      const extra = await browserSend('Target.createTarget', { url: `${origin}/` });
+      await sleep(500);
+      seq.push('second tab activated (blur + hide)');
+      s = await state();
+      if (s.horning !== false || s.pressed !== 'false' || s.loop !== false) problems.push(`the hold kept sounding after the window lost activation (blur/tab-hide): horning=${s.horning}, pressed=${s.pressed}, loop=${s.loop} ${note()}`);
+      for (let i = 0; i < 4; i += 1) { await spaceDown(true); await sleep(50); }
+      seq.push('Space repeat x4 while hidden');
+      s = await state();
+      if (s.horning !== false || s.pressed !== 'false') problems.push(`the hold restarted from repeats while the page was hidden (horning=${s.horning}, pressed=${s.pressed}) ${note()}`);
+      await spaceUp();
+      seq.push('Space up while hidden');
+      await browserSend('Target.closeTarget', { targetId: extra.targetId });
+      await sleep(400);
+      await evaluate(`document.querySelector('.horn').focus(); true`);
+      await spaceDown();
+      seq.push('Space down (fresh after hide)');
+      await sleep(200);
+      s = await state();
+      if (s.horning !== true || s.pressed !== 'true') problems.push(`after hide + keyup the hold was stuck: a fresh hold did not start (horning=${s.horning}, pressed=${s.pressed}) ${note()}`);
+      await spaceUp();
+      await sleep(250);
+
+      record('6. keyboard hold: one blast per hold, repeats ignored, Escape/blur/hide never stick',
+        problems.length === 0,
+        (problems.length ? problems.join('; ') + ' | ' : '') + `key sequence: ${seq.join(' -> ')}`,
+        []);
+    } catch (err) {
+      record('6. keyboard hold: one blast per hold, repeats ignored, Escape/blur/hide never stick', false, err.message, []);
+    }
+
     /* -------------------------- page errors / badge --------------------------- */
     const pageErrors = await evaluate('window.__pageErrors || []');
     const errorLines = [...pageErrors, ...pageConsole.filter((m) => m.type === 'error')];
@@ -868,6 +1018,9 @@ async function run() {
   } finally {
     if (ws) {
       try { ws.close(); } catch {}
+    }
+    if (browserWs) {
+      try { browserWs.close(); } catch {}
     }
     if (browser) {
       await browser.close();
