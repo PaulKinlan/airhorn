@@ -101,3 +101,33 @@ Distance from the sample (sum of normalised deltas; 0 = identical): **19.6 → 3
 The **loop seam is clean in both paths** (seam step is the same as mid-loop, 1.04
 for the shipped 0.24–0.34 s loop and 1.01 for the fallback, which has no buffer
 boundary at all). No click, no 10 Hz buzz — nothing to fix there.
+
+## The tool itself broke, and was repaired (airhorn-not0)
+
+Months of green here stopped being true when `airhorn-x4l` gave `Horn.start()` a
+production guard: **it returns `false` instead of scheduling audio into a
+`suspended` context**, so a tab whose audio the browser is holding back never
+claims a horn nobody can hear. An `OfflineAudioContext` is `suspended` until
+`startRendering()`, so after that guard *every* render in this tool returned
+`false` and measured silence — and silence compares as silence. The tool failed
+with `the synth render did not use the fallback: the 404 sentinel was served`,
+which named the wrong symptom (the fallback was never reached because no path
+started at all). It failed identically on `master`, so it blocked every branch.
+
+Two changes, both in `tools/audio-parity.mjs`:
+
+1. **The injected port now reads as running.** A Proxy over the real
+   `OfflineAudioContext` overrides `state` only (that is the sole property the
+   guard reads), binding every method to the real port because Web Audio refuses
+   to run one off another receiver. In a tab the press resumes the context, so a
+   running graph is what a listener actually gets; the port models that instead of
+   modelling a page-load with no gesture.
+2. **Every render asserts it started.** A silent render used to surface as whichever
+   downstream check ran first; `mustStart()` now names the path and the resolved
+   value: `the sample blast render did not start: Horn.start() resolved false —
+   the injected context was refused`. Proved by re-running with the Proxy removed:
+   that message, exit 1, at the first render.
+
+Repaired numbers are identical to the table above (distance 3.15, `--check` exits
+0), which is the evidence that the fix restored the measurement rather than
+changing it.
