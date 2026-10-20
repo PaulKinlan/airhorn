@@ -259,8 +259,8 @@ test('a change that selects ZERO suites fails loudly, green only by explicit ack
   });
   const loud = run(['--changed', 'README.md']);
   assert.equal(loud.status, 1, `an exempt-only change must not read green: ${loud.stdout}`);
-  assert.ok(loud.stdout.includes('fast-gate: zero-suite: README.md'),
-    `the exempt file must be named: ${loud.stdout}`);
+  assert.ok(loud.stdout.includes('fast-gate: zero-suite: README.md (exempt)'),
+    `the exempt file must be named with its reason: ${loud.stdout}`);
   assert.ok(loud.stderr.includes('FAST_GATE_ALLOW_ZERO'),
     `the failure must name the acknowledgement: ${loud.stderr}`);
   const blessed = run(['--changed', 'README.md'], { FAST_GATE_ALLOW_ZERO: '1' });
@@ -355,12 +355,20 @@ test('the fleet contract recognises every rc-0 verdict line the gate emits (airh
     const blessedExempt = run(['--changed', 'exempt.md'], { FAST_GATE_ALLOW_ZERO: '1' });
     const blessedPending = run(['--changed', 'pending-src.txt'], { FAST_GATE_ALLOW_ZERO: '1' });
     const refused = run(['--changed', 'exempt.md']);                 // rc 1: zero-suite without the bless
+    const deletedSuite = run(['--changed', 'tests/gone.test.js']);   // rc 1: a deleted suite selects nothing (airhorn-wiq9)
+    const blessedDeleted = run(['--changed', 'tests/gone.test.js'], { FAST_GATE_ALLOW_ZERO: '1' }); // rc 0: the same bless, deleted-suite composition
     const allPending = run(['--changed', 'pending-src.txt']);        // rc 1: every selected suite '~'-pending (airhorn-dn7d)
     const unmapped = run(['--changed', 'unmapped.txt']);             // rc 1: no row, no exemption
     for (const [name, r] of [['no-changed', noChanged], ['positive', positive], ['blessed-exempt', blessedExempt], ['blessed-pending', blessedPending]]) {
       assert.equal(r.status, 0, `${name} must exit 0:\n${r.stdout}\n${r.stderr}`);
     }
     assert.equal(refused.status, 1, `zero-suite without the acknowledgement must exit 1: ${refused.stdout}`);
+    assert.equal(deletedSuite.status, 1, `a deleted-suite-only change without the acknowledgement must exit 1: ${deletedSuite.stdout}`);
+    assert.ok(deletedSuite.stdout.includes('fast-gate: zero-suite: tests/gone.test.js (deleted suite; selects nothing by design)'),
+      `the deleted suite must be named with its reason: ${deletedSuite.stdout}`);
+    assert.ok(deletedSuite.stderr.includes('every one is exempt or a'),
+      `the failure must not blame a non-existent exemption row (airhorn-wiq9): ${deletedSuite.stderr}`);
+    assert.equal(blessedDeleted.status, 0, `the explicit acknowledgement must pass for a deleted suite too: ${blessedDeleted.stderr}`);
     assert.equal(allPending.status, 1, `an all-pending change without the acknowledgement must exit 1: ${allPending.stdout}`);
     assert.equal(unmapped.status, 1, `an unmapped change must exit 1: ${unmapped.stdout}`);
 
@@ -369,18 +377,19 @@ test('the fleet contract recognises every rc-0 verdict line the gate emits (airh
     const positiveLine = 'fast-gate: PASS (1 suite(s), 1 changed file(s))';
     const blessedExemptLine = 'fast-gate: ZERO-SUITE PASS (1 changed file(s), all 1 exempt; FAST_GATE_ALLOW_ZERO=1)';
     const blessedPendingLine = 'fast-gate: ZERO-SUITE PASS (1 changed file(s), all 1 pending; FAST_GATE_ALLOW_ZERO=1)';
-    for (const [name, r, line] of [['no-changed', noChanged, noChangedLine], ['positive', positive, positiveLine], ['blessed-exempt', blessedExempt, blessedExemptLine], ['blessed-pending', blessedPending, blessedPendingLine]]) {
+    const blessedDeletedLine = 'fast-gate: ZERO-SUITE PASS (1 changed file(s): 0 exempt, 1 deleted-suite; FAST_GATE_ALLOW_ZERO=1)';
+    for (const [name, r, line] of [['no-changed', noChanged, noChangedLine], ['positive', positive, positiveLine], ['blessed-exempt', blessedExempt, blessedExemptLine], ['blessed-pending', blessedPending, blessedPendingLine], ['blessed-deleted', blessedDeleted, blessedDeletedLine]]) {
       assert.ok(r.stdout.includes(line), `${name} must print the pinned verdict line ${line}, got:\n${r.stdout}`);
     }
     // The classification is the contract: exactly one regex owns each rc-0 line.
     assert.match(positiveLine, passRe, 'a >=1-suite PASS must certify via CHECK_FAST_PASS_RE');
     assert.doesNotMatch(positiveLine, noWorkRe, 'a suite-running PASS must not classify as no-work');
-    for (const line of [noChangedLine, blessedExemptLine, blessedPendingLine]) {
+    for (const line of [noChangedLine, blessedExemptLine, blessedPendingLine, blessedDeletedLine]) {
       assert.match(line, noWorkRe, `a zero-execution rc-0 line must certify via CHECK_FAST_NO_WORK_RE: ${line}`);
       assert.doesNotMatch(line, passRe, `a zero-execution rc-0 line must not read as a suite-running PASS: ${line}`);
     }
     // ...and nothing an rc-1 run prints may classify, in either direction.
-    const rc1Lines = [refused, allPending, unmapped]
+    const rc1Lines = [refused, deletedSuite, allPending, unmapped]
       .flatMap((r) => [...r.stdout.split('\n'), ...r.stderr.split('\n')])
       .filter((l) => l.startsWith('fast-gate: '));
     assert.ok(rc1Lines.length >= 6, `the rc-1 runs must have produced contract-visible lines: ${rc1Lines}`);
