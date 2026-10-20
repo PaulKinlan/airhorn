@@ -4,9 +4,8 @@
  * The app is a PWA people leave open in two tabs, and nothing ever tested two
  * tabs of the SAME origin, sharing ONE service worker registration. Each
  * sequence below drives the real page in a real second target and asserts a
- * coherence property; anything the app gets wrong is printed as a
- * "MULTITAB FINDING" line with the exact sequence that produced it, and the
- * finding is filed on the bead.
+ * coherence property; a cross-tab defect fails the suite with the bead ID in
+ * the message.
  *
  *   A. an SW update discovered with two tabs open announces in BOTH tabs
  *      (update notice + controllerchange), each message at most once per tab,
@@ -15,21 +14,27 @@
  *   B. horning in one tab never leaves the other tab showing a stale horn
  *      state (aria-pressed / .horning stay honest in the tab that did not
  *      press), and the app badge - which is OS-wide, shared by every tab -
- *      is recorded per call so cross-tab semantics are observable.
+ *      reads the SHARED total: 4 blasts across two tabs must read 4
+ *      (airhorn-xkq), and a freshly opened tab must derive it, never clear it
+ *      (airhorn-70k).
  *   C. an offline -> online transition is announced exactly once in EVERY
  *      open tab (each tab has its own live region; no duplicates per tab).
  *   D. closing one tab mid-horn does not tear down the other tab's audio or
- *      badge, and the survivor can still blast; opening a tab, likewise, must
- *      not damage the badge another tab just set.
+ *      badge, and the survivor can still blast.
  *   E. a tab opened WHILE an update is already installing (it never saw
- *      updatefound) still gets the new controller - observe whether its
- *      reload is announced or silent (the app's own contract is "update
- *      notices through the one polite voice").
+ *      updatefound) still gets the new controller - and the tab that reloads
+ *      must say why: exactly one 'A new version is ready' announcement
+ *      (airhorn-56j).
  *
  * Sound is measured, not inferred: the shortcuts suite's probe (reroute every
  * connect() to ctx.destination through a pass-through analyser) is injected
  * at document start in every tab, together with a badge spy and an announcer
  * logger that mirrors into sessionStorage so logs survive the update reload.
+ *
+ * Cross-tab defects fail HERE with the bead ID in the message - the three
+ * findings this suite surfaced (airhorn-xkq last-writer-wins badge,
+ * airhorn-70k boot-time badge wipe, airhorn-56j silent mid-install reload)
+ * are regressions this suite must catch, not observations it files.
  *
  * Run with: npm test (the fast gate builds dist/ first)
  */
@@ -258,9 +263,6 @@ async function run() {
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
   let cdp = null;
-  const findings = [];
-  const finding = (text) => { findings.push(text); console.log(`  MULTITAB FINDING: ${text}`); };
-
   try {
     const wsUrl = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('Chrome timeout')), 20000);
@@ -390,26 +392,28 @@ async function run() {
     }
     console.log(`  tab A: 3 honest blasts; tab B never claimed one. badge calls during: ${JSON.stringify(AbadgeLog)}`);
 
-    console.log('--- now one blast in tab B: what does the shared app badge become? ---');
+    console.log('--- now one blast in tab B: the badge must read the shared total (airhorn-xkq) ---');
     await B.clickHorn();
     await waitUntil(async () => (await B.hornState()).playing === false, 6000);
     const blogB = await B.badge();
-    const blogA = await A.badge();
     if (badgeApi) {
       const lastB = blogB.filter((e) => e.fn === 'setAppBadge').slice(-1);
-      if (lastB.length && lastB[0].arg === 1 && blogA.some((e) => e.fn === 'setAppBadge' && e.arg === 3)) {
-        finding(`badge is last-writer-wins, not a total: A blasted 3x (setAppBadge 1,2,3) then B blasted 1x (setAppBadge 1) - the shared OS badge now reads 1 after 4 total blasts across two tabs. Sequence: tab A blast x3 -> tab B blast x1 -> navigator.setAppBadge(1) from tab B overwrites tab A's 3. Each tab counts its own AirHorn #counter (src/main.js) and pushes it to the app-wide badge.`);
-      } else {
-        console.log(`  badge semantics: A=${JSON.stringify(blogA)} B=${JSON.stringify(blogB)}`);
-      }
+      assert(lastB.length === 1 && lastB[0].arg === 4,
+        `after 4 blasts across two tabs the badge was set to ${JSON.stringify(lastB)}, expected the shared total 4 - the badge is OS-wide but the counter is per-tab, so the last writer wins (airhorn-xkq)`);
+      console.log(`  shared badge: A wrote 1,2,3 then B wrote ${lastB[0].arg} - the app-wide badge tracks total blasts.`);
     }
 
-    console.log('--- opening tab C while the badge is live (its constructor clears it) ---');
+    console.log('--- opening tab C must not damage the badge another tab set (airhorn-70k) ---');
     const C = await openTab('C', `${origin}/`);
     await sleep(200);
     const blogC = await C.badge();
-    if (badgeApi && blogC.some((e) => e.fn === 'clearAppBadge')) {
-      finding(`opening a tab erases the app badge another tab set: sequence: tab A blast x3 -> tab B blast x1 -> open tab C -> tab C's AirHorn constructor calls navigator.clearAppBadge() at boot (src/main.js) -> the shared badge reads nothing after 4 blasts. The badge belongs to the origin's tabs collectively but is cleared by every fresh construction.`);
+    if (badgeApi) {
+      assert(!blogC.some((e) => e.fn === 'clearAppBadge'),
+        `a freshly opened tab cleared the app badge at boot: ${JSON.stringify(blogC)} - the badge is shared by every tab of the origin, so a new tab must derive it, never clear it (airhorn-70k)`);
+      const cSet = blogC.filter((e) => e.fn === 'setAppBadge');
+      assert(cSet.length === 1 && cSet[0].arg === 4,
+        `a freshly opened tab did not derive the shared badge (expected setAppBadge(4)): ${JSON.stringify(blogC)} (airhorn-70k)`);
+      console.log(`  tab C booted and derived the badge: ${JSON.stringify(blogC)}`);
     }
     await closeTab(C);
 
@@ -532,22 +536,21 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
     const D = await openTab('D', `${origin}/`);
     await D.evaluate(`window.__mtMark = 'late-tab'`);
     await D.ann('update2');
-    const dAnnouncementsBefore = await D.evaluate(
-      `(JSON.parse(sessionStorage.getItem('__annLog')||'[]').filter(x=>x.e==='update2').map(x=>x.m))`);
     const dReloaded = await waitUntil(async () => B.evaluate(
       `navigator.serviceWorker.getRegistration().then((r) => !!(r && r.active && r.active.state === 'activated'))`), 20000)
       && await waitUntil(async () => D.evaluate(`window.__mtMark === undefined`).catch(() => false), 20000);
     if (dReloaded) {
       const dAnnouncementsAfter = await D.evaluate(
         `(JSON.parse(sessionStorage.getItem('__annLog')||'[]').filter(x=>x.e==='update2').map(x=>x.m))`);
-      const announced = dAnnouncementsAfter.some((m) => /update|version/i.test(m));
-      if (!announced && dAnnouncementsBefore.length === 0) {
-        finding(`a tab opened mid-install reloads for the update SILENTLY: sequence: two tabs open, SW v2 active -> tab B calls reg.update() -> new worker 'installing' -> open tab D (loads on the OLD controller, receives no updatefound) -> worker finishes, skipWaiting already posted -> tab D gets controllerchange and reloads with ZERO announcements (its live region never said an update was coming or ready). The app's own contract is that update notices go through the one polite voice; this tab reloads with no voice at all.`);
-      }
+      // The tab that reloads must say why (airhorn-56j): exactly one ready
+      // announcement, not silence, not a duplicate of the installing notice.
+      const ready = dAnnouncementsAfter.filter((m) => /A new version is ready/.test(m));
+      assert(ready.length === 1,
+        `a tab opened mid-install reloaded for the update with ${ready.length} 'ready' announcements (expected exactly 1): ${JSON.stringify(dAnnouncementsAfter)} - the reload was silent, against the app's one-polite-voice contract (airhorn-56j)`);
       await D.waitBooted();
-      console.log(`  late tab reloaded; announcements before/during: ${JSON.stringify(dAnnouncementsAfter)}`);
+      console.log(`  late tab announced its reload: ${JSON.stringify(ready)}`);
     } else {
-      console.log('  late tab did not need to reload (it activated onto the new controller); no silent-reload finding.');
+      console.log('  late tab did not need to reload (it activated onto the new controller); nothing to assert.');
     }
     state.swShim = null;
 
@@ -556,10 +559,6 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
     assert(dFinal.booted && bFinal.booted, 'a tab did not recover after the final update');
     assert(dFinal.bootAlertHidden && bFinal.bootAlertHidden, 'the boot-failure alert showed after the final update');
 
-    if (findings.length) {
-      console.log(`\n${findings.length} MULTITAB FINDING(S) recorded (filed on airhorn-dae with exact sequences):`);
-      for (const f of findings) console.log(`  - ${f}`);
-    }
     console.log('\nALL MULTITAB COHERENCE CHECKS PASSED');
   } finally {
     try { cdp?.ws.close(); } catch { /* already gone */ }
