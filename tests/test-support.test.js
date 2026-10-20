@@ -49,10 +49,21 @@ const silentPeer = () => new Promise((resolve) => {
   }));
 });
 
+// A DevTools endpoint that answers /json/list with one page target - the
+// discovery the helper needs to resolve a handle. The page ws it advertises is
+// never dialled by these tests.
+const discoveryPeer = () => new Promise((resolve) => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify([{ type: 'page', webSocketDebuggerUrl: 'ws://127.0.0.1:9/devtools/page/x' }]));
+  });
+  server.listen(0, '127.0.0.1', () => resolve({ port: server.address().port, close: () => new Promise((r) => server.close(r)) }));
+});
+
 // A stand-in for the chrome binary: prints the ws:// line the helper scrapes,
 // then idles so the launch reaches discovery. Chrome's own args are ignored.
 function stubChrome(dir, port) {
-  const file = path.join(dir, 'chrome-stub.sh');
+  const file = path.join(dir, `chrome-stub-${port}.sh`);
   fs.writeFileSync(file,
     '#!/bin/sh\n' +
     `echo "DevTools listening on ws://127.0.0.1:${port}/devtools/browser/stub" >&2\n` +
@@ -219,6 +230,62 @@ test('an ancestor group-kill reaches the browser: it is not detached into its ow
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     await peer.close();
     removeProfiles(label);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a SIGTERM in the launch window leaves no profile for the OWNED browser either (airhorn-gau8)', async () => {
+  // The half the earlier verification missed: 0 chrome PIDs reproduced, but
+  // the OWNED browser's /tmp profile survived - close() paid a 1.5s graceful
+  // wait inside signal-exit's 2s grace and the rm never ran. Both browsers'
+  // processes AND profiles are asserted here. (The writeback-storm timing
+  // that made this fail against real chrome is proven by the bead's real-
+  // chrome repro; a stub's empty profile cannot carry that.)
+  const dir = marker();
+  const labelOwned = runLabel('gau8owned');
+  const labelInflight = runLabel('gau8inflight');
+  const peerOwned = await discoveryPeer();
+  const peerInflight = await silentPeer();
+  const stubOwned = stubChrome(dir, peerOwned.port);
+  const stubInflight = stubChrome(dir, peerInflight.port);
+  const realChromeBin = process.env.CHROME_BIN;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    const { launchBrowser } = await import(${JSON.stringify(SUPPORT)});
+    const { installSignalExit } = await import(${JSON.stringify(SIGNAL_EXIT)});
+    let owned = null, inflight = null;
+    installSignalExit(async () => { await Promise.all([owned?.close(), inflight?.close()]); });
+    process.env.CHROME_BIN = ${JSON.stringify(stubOwned)};
+    owned = await launchBrowser({ label: ${JSON.stringify(labelOwned)} });
+    process.env.CHROME_BIN = ${JSON.stringify(stubInflight)};
+    launchBrowser({ label: ${JSON.stringify(labelInflight)}, discoveryMs: 60000, timeoutMs: 60000 })
+      .then((h) => { inflight = h; }).catch(() => {});
+    console.log('two-up');
+    setTimeout(() => process.kill(process.pid, 'SIGTERM'), 150);
+    await new Promise(() => {});
+  `], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  child.stdout.on('data', (d) => { out += d.toString(); });
+  try {
+    assert.ok(await waitFor(async () => out.includes('two-up') && liveStubProcesses(stubOwned).length > 0 && liveStubProcesses(stubInflight).length > 0),
+      'the stand-in never got both browsers up');
+    const exit = new Promise((r) => child.on('exit', (code, signal) => r({ code, signal })));
+    child.kill('SIGTERM');
+    const how = await exit;
+    assert.equal(how.code, 128 + 15,
+      `the stand-in must die the bound-kill way (installSignalExit exits 143): ${JSON.stringify(how)}`);
+    assert.ok(await waitFor(() => liveStubProcesses(stubOwned).length === 0 && liveStubProcesses(stubInflight).length === 0),
+      'a SIGTERM in the launch window left chrome processes running');
+    assert.ok(await waitFor(() => profilesFor(labelOwned).length === 0),
+      'the OWNED browser\'s /tmp profile survived the bound-kill (airhorn-gau8)');
+    assert.deepEqual(profilesFor(labelInflight), [],
+      'the in-flight browser\'s /tmp profile survived the bound-kill');
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    process.env.CHROME_BIN = realChromeBin;
+    await peerOwned.close();
+    await peerInflight.close();
+    removeProfiles(labelOwned);
+    removeProfiles(labelInflight);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
