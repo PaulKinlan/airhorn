@@ -215,6 +215,12 @@ async function launch({ autoplay, label }) {
     '--no-sandbox',
     '--disable-gpu',
     '--remote-debugging-port=0',
+    // No crash reporting: a crashpad handler outlives the browser it belongs to
+    // when the parent is killed abruptly, and it is a shared-path process that
+    // cannot be attributed to a profile afterwards (the reaper found one 47
+    // minutes old). A test browser has nothing to report.
+    '--disable-breakpad',
+    '--disable-crash-reporter',
     `--user-data-dir=/tmp/chrome-shortcuts-${label}-${Date.now()}`,
   ];
   if (autoplay) args.splice(3, 0, '--autoplay-policy=no-user-gesture-required');
