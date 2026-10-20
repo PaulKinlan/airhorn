@@ -156,11 +156,12 @@ async function run() {
     }
   };
 
+  const profileDir = fs.mkdtempSync('/tmp/airhorn-failover-');
   const chrome = spawn(process.env.CHROME_BIN || 'google-chrome', [
     '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-    '--remote-debugging-port=0', `--user-data-dir=${fs.mkdtempSync('/tmp/airhorn-failover-')}`,
+    '--remote-debugging-port=0', `--user-data-dir=${profileDir}`,
     'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
   let cdp = null;
   try {
@@ -319,7 +320,15 @@ async function run() {
     console.log('\nALL FAILOVER CHECKS PASSED!');
   } finally {
     try { cdp?.ws.close(); } catch { /* already gone */ }
+    // Kill the GROUP, not the launched pid: SIGKILL to the main chrome
+    // process orphaned renderers/cache children that kept writing the
+    // profile after the rmSync below (airhorn-jx9, fleet lessons: signal
+    // the group).
+    try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* group gone */ }
     try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
+    // Leave no profile dir behind: fleet-tmp-clean only reclaims marked
+    // paths, so an unremoved /tmp profile is retained forever (airhorn-jx9).
+    try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch { /* already gone */ }
     server.close();
   }
 }
