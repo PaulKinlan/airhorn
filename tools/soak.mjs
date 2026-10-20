@@ -547,7 +547,18 @@ async function main() {
     const send = (method, params = {}) => {
       const id = msgId++;
       return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
+        // The reply wait is bounded like every wait in this file (airhorn-kduy,
+        // the nbh9 class): a peer that completes the upgrade and swallows the
+        // frame rejects labelled instead of parking the soak with its launch
+        // alive and its cleanup unrun.
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error(`CDP reply timeout: ${method} got no reply within 30000ms`));
+        }, 30000);
+        pending.set(id, {
+          resolve: (v) => { clearTimeout(timer); resolve(v); },
+          reject: (e) => { clearTimeout(timer); reject(e); },
+        });
         ws.send(JSON.stringify({ id, method, params }));
       });
     };
@@ -1117,5 +1128,9 @@ main().then((code) => {
   process.exitCode = code;
 }).catch((err) => {
   console.error(`soak: FAIL — ${err.message}`);
-  process.exitCode = 1;
+  // Hard exit: a hostile peer that swallowed frames also swallows the ws
+  // close-frame, so teardown's ws.close() never completes and the socket
+  // holds the event loop past the finally (airhorn-kduy; cache-growth's
+  // catch does the same).
+  process.exit(1);
 });

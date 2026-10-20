@@ -206,7 +206,18 @@ class Cdp {
   send(method, params = {}, sessionId) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      // The reply wait is bounded like every wait in the launch window
+      // (airhorn-1t5c, the nbh9 class): a peer that completes the upgrade and
+      // never replies rejects labelled instead of parking the audit before
+      // its fail() teardown can run.
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`CDP reply timeout: ${method} got no reply within 30000ms`));
+      }, 30000);
+      this.pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
       const payload = { id, method, params };
       if (sessionId) payload.sessionId = sessionId;
       this.ws.send(JSON.stringify(payload));
@@ -1081,7 +1092,14 @@ async function runAudit() {
 // no-op that exits 0.
 const isMain = import.meta.main ?? (!!process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url));
 if (isMain) {
-  runAudit().catch((err) => {
+  runAudit().then(() => {
+    // Force the exit once the report is written: a hostile DevTools peer that
+    // swallowed frames also swallows the ws close-frame, so the socket holds
+    // the event loop forever after the scenarios are done (airhorn-1t5c; the
+    // same shape cache-growth and soak handle in their catches). The short
+    // delay lets piped stdout flush.
+    setTimeout(() => process.exit(process.exitCode || 0), 250);
+  }).catch((err) => {
     console.error('audit harness failed:', err);
     process.exit(1);
   });
