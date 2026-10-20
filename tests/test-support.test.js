@@ -62,11 +62,15 @@ const discoveryPeer = () => new Promise((resolve) => {
 
 // A stand-in for the chrome binary: prints the ws:// line the helper scrapes,
 // then idles so the launch reaches discovery. Chrome's own args are ignored.
-function stubChrome(dir, port) {
+// opts.ignoreTerm makes it ignore SIGTERM - a stand-in for a chrome whose
+// graceful shutdown does not fit the caller's budget, which is what makes the
+// gau8 test able to FAIL against a close() that waits before it sweeps.
+function stubChrome(dir, port, { ignoreTerm = false } = {}) {
   const file = path.join(dir, `chrome-stub-${port}.sh`);
   fs.writeFileSync(file,
     '#!/bin/sh\n' +
     `echo "DevTools listening on ws://127.0.0.1:${port}/devtools/browser/stub" >&2\n` +
+    (ignoreTerm ? 'trap "" TERM\n' : '') +
     'while :; do sleep 5; done\n', { mode: 0o755 });
   return file;
 }
@@ -237,23 +241,30 @@ test('an ancestor group-kill reaches the browser: it is not detached into its ow
 test('a SIGTERM in the launch window leaves no profile for the OWNED browser either (airhorn-gau8)', async () => {
   // The half the earlier verification missed: 0 chrome PIDs reproduced, but
   // the OWNED browser's /tmp profile survived - close() paid a 1.5s graceful
-  // wait inside signal-exit's 2s grace and the rm never ran. Both browsers'
-  // processes AND profiles are asserted here. (The writeback-storm timing
-  // that made this fail against real chrome is proven by the bead's real-
-  // chrome repro; a stub's empty profile cannot carry that.)
+  // wait inside signal-exit's grace and the rm never ran. Both browsers'
+  // processes AND profiles are asserted here. The owned stub ignores TERM and
+  // the grace is 800ms, so a close() that waits before it sweeps loses the
+  // profile and FAILS this test (airhorn-x0eu); the writeback-storm shape of
+  // the defect is separately proven by the bead's real-chrome repro.
   const dir = marker();
   const labelOwned = runLabel('gau8owned');
   const labelInflight = runLabel('gau8inflight');
   const peerOwned = await discoveryPeer();
   const peerInflight = await silentPeer();
-  const stubOwned = stubChrome(dir, peerOwned.port);
+  const stubOwned = stubChrome(dir, peerOwned.port, { ignoreTerm: true });
   const stubInflight = stubChrome(dir, peerInflight.port);
   const realChromeBin = process.env.CHROME_BIN;
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
     const { launchBrowser } = await import(${JSON.stringify(SUPPORT)});
     const { installSignalExit } = await import(${JSON.stringify(SIGNAL_EXIT)});
     let owned = null, inflight = null;
-    installSignalExit(async () => { await Promise.all([owned?.close(), inflight?.close()]); });
+    // 800ms grace: TIGHTER than the default 2s, so the pre-gau8 close() (which
+    // waited up to 1500ms for a graceful exit before sweeping) cannot finish
+    // inside it - the owned stub below IGNORES TERM, exactly the slow-exit
+    // case that made the real defect. Post-fix close() sweeps and rms
+    // synchronously before its first await (~10ms) and passes with room to
+    // spare: the test can now FAIL against the defect it guards (airhorn-x0eu).
+    installSignalExit(async () => { await Promise.all([owned?.close(), inflight?.close()]); }, { graceMs: 800 });
     process.env.CHROME_BIN = ${JSON.stringify(stubOwned)};
     owned = await launchBrowser({ label: ${JSON.stringify(labelOwned)} });
     process.env.CHROME_BIN = ${JSON.stringify(stubInflight)};
