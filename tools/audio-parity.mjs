@@ -19,7 +19,10 @@
  *     with the step in the middle of the loop, which is what a click sounds like
  *
  * Both paths go through the real module: Horn.start() on an injected
- * OfflineAudioContext. The sample path uses the shipped asset; the synth path
+ * OfflineAudioContext presented as running (an offline port is 'suspended' until
+ * startRendering(), and Horn refuses a suspended context - airhorn-x4l/not0), so
+ * a render that was never started fails the tool instead of comparing silence.
+ * The sample path uses the shipped asset; the synth path
  * points audioSrc at a 404, which is exactly how the fallback is reached in
  * production (sample unavailable or undecodable). usingFallback is reported per
  * render, so a broken asset can never silently compare the synth with itself.
@@ -405,16 +408,49 @@ const page = `<!doctype html>
   // OfflineAudioContext. The sample path uses the real asset; the synth path
   // points audioSrc at a 404, which is how the fallback is reached in production.
 
+  // An OfflineAudioContext is 'suspended' until startRendering(), but Horn.start()
+  // refuses to schedule into a suspended context - a real production guard
+  // (airhorn-x4l): a tab whose audio the browser is still holding back must not
+  // report a horn nobody can hear, nor fire a delayed blast on a later click. In
+  // a tab the press itself resumes the context, so the graph Horn plays into is a
+  // RUNNING one; this port emulates exactly that. Only 'state' is overridden - it
+  // is the one property the guard reads - and every method is bound to the real
+  // port, because Web Audio refuses to run one off another receiver.
+  function runningPort(ctx) {
+    const reported = ctx.state === 'suspended' ? 'running' : ctx.state;
+    return new Proxy(ctx, {
+      get(target, key) {
+        if (key === 'state') return reported;
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  }
+
   async function renderHorn({ audioSrc, loop, seconds }) {
     const { Horn } = await import('/src/horn.js');
     const ctx = new OfflineAudioContext(1, Math.round(SR * seconds), SR);
-    const horn = new Horn({ audioContext: ctx, ...(audioSrc ? { audioSrc } : {}) });
+    const horn = new Horn({ audioContext: runningPort(ctx), ...(audioSrc ? { audioSrc } : {}) });
     const started = await horn.start({ loop });
     const rendered = await ctx.startRendering();
     const data = rendered.getChannelData(0);
     let checksum = 0;
     for (let i = 0; i < data.length; i += 97) checksum = (checksum * 31 + Math.round(data[i] * 1e6)) % 1e12;
     return { started, data, usingFallback: horn.usingFallback === true, checksum };
+  }
+
+  // A render that never started is silence, and silence compares as silence: the
+  // real drift (a context the module refuses) then surfaces as whichever check
+  // runs first - airhorn-not0 arrived as "the synth render did not use the
+  // fallback", which named the wrong symptom. Assert the precondition per path.
+  function mustStart(name, render) {
+    if (render.started !== true) {
+      throw new Error(
+        'the ' + name + ' render did not start: Horn.start() resolved ' + JSON.stringify(render.started) +
+        ' - the injected context was refused, so this path cannot be measured at all',
+      );
+    }
+    return render;
   }
 
   // Mirrors the constants in src/horn.js. The replica's fidelity check below
@@ -489,7 +525,7 @@ const page = `<!doctype html>
     const missingSrc = '/sounds/__no-such-sample__.mp3';
     const out = { sampleRate: SR, seconds, paths: {}, replica: null, sweep: null };
 
-    const sampleBlast = await renderHorn({ loop: false, seconds });
+    const sampleBlast = mustStart('sample blast', await renderHorn({ loop: false, seconds }));
     if (sampleBlast.usingFallback) {
       throw new Error('the sample render fell back to the synth: the shipped mp3 did not load');
     }
@@ -500,7 +536,7 @@ const page = `<!doctype html>
       ...summarise(sampleBlast.data, { loop: false }),
     };
 
-    const synthBlast = await renderHorn({ audioSrc: missingSrc, loop: false, seconds });
+    const synthBlast = mustStart('synth blast', await renderHorn({ audioSrc: missingSrc, loop: false, seconds }));
     if (synthBlast.usingFallback !== true) {
       throw new Error('the synth render did not use the fallback: the 404 sentinel was served');
     }
@@ -511,7 +547,7 @@ const page = `<!doctype html>
       ...summarise(synthBlast.data, { loop: false }),
     };
 
-    const sampleLoop = await renderHorn({ loop: true, seconds });
+    const sampleLoop = mustStart('sample loop', await renderHorn({ loop: true, seconds }));
     out.paths.sampleLoop = {
       started: sampleLoop.started,
       usingFallback: sampleLoop.usingFallback,
@@ -519,7 +555,7 @@ const page = `<!doctype html>
       ...summarise(sampleLoop.data, { loop: true }),
     };
 
-    const synthLoop = await renderHorn({ audioSrc: missingSrc, loop: true, seconds });
+    const synthLoop = mustStart('synth loop', await renderHorn({ audioSrc: missingSrc, loop: true, seconds }));
     out.paths.synthLoop = {
       started: synthLoop.started,
       usingFallback: synthLoop.usingFallback,

@@ -3,8 +3,24 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 import { sweepProfile } from './lib/reap.mjs';
+
+// The teardown below lives in a try/finally, which a bound-kill (fleet-gate's
+// SIGTERM, a job-tree reaper, Ctrl-C) never reaches - so the chrome tree and its
+// /tmp profile survived the kill (airhorn-dpua, the tools' copy of the gap
+// airhorn-4vfn closed for the suites). Register the live launch and do the same
+// sweep + removal synchronously inside the handler's grace.
+let liveBrowser = null;
+installSignalExit(() => {
+  if (!liveBrowser) return;
+  const { chrome, profileDir } = liveBrowser;
+  liveBrowser = null;
+  sweepProfile(profileDir);
+  try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
+  try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
+});
 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -65,6 +81,7 @@ async function main() {
   // stay in the caller's process group so an ancestor group-kill - what
   // fleet-gate's bound and any job-tree reaper send - reaches the whole tree;
   // SIGKILL runs no handler, so a detached launch outlived the kill.
+  liveBrowser = { chrome, profileDir };
 
   let wsUrl = null;
   let ws = null;
@@ -108,6 +125,7 @@ async function main() {
       ws.onerror = () => { clearTimeout(bound); reject(new Error('DevTools ws handshake failed: the page socket errored')); };
     });
   } catch (err) {
+    liveBrowser = null;
     sweepProfile(profileDir);
     try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
     try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* best effort */ }
@@ -384,10 +402,20 @@ async function main() {
     });
 
   } finally {
-    ws.close();
-    chrome.kill('SIGKILL');
+    try { ws.close(); } catch { /* already closed */ }
+    // The success path used to leak one profile dir per run (airhorn-5xqi):
+    // `chrome.kill('SIGKILL')` is asynchronous, so chrome's children were still
+    // writing to the profile when the bare rm ran, and their writeback re-created
+    // Default/ inside the directory it had just deleted (observed: rc=0 and
+    // /tmp/chrome-perf-profile-*/Default/ left behind). Sweep the whole tree by
+    // this launch's --user-data-dir first - a SIGKILL runs no handler and every
+    // child carries the marker, so one /proc read kills the writers - then remove
+    // with the retries the failure path above already had.
+    liveBrowser = null;
+    sweepProfile(profileDir);
+    try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
     server.close();
-    fs.rmSync(profileDir, { recursive: true, force: true });
+    try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* best effort */ }
   }
 }
 
