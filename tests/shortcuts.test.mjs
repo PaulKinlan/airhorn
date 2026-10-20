@@ -31,7 +31,7 @@
  * Run with: npm test (the fast gate builds dist/ first)
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -66,6 +66,41 @@ function assert(condition, message) {
 // output (airhorn-aos).
 const instrumentation = `
   window.__probe = { starts: 0, level: 0, peak: 0, states: [], errors: [] };
+  // Launch Handler API: headless Chrome 155 DOES expose window.launchQueue, but a
+  // page cannot make the platform deliver a launch, so the platform's half is
+  // stood in for - record the consumer the page registers, deliver the cold
+  // launch's params at setConsumer, and let the test fire repeat launches. The
+  // real API's presence is recorded so the report cannot claim otherwise.
+  const nativeLaunchQueue = typeof window.launchQueue?.setConsumer === 'function';
+  window.__launchQueueSource = nativeLaunchQueue ? 'native+stand-in' : 'stand-in';
+  // A cold launch carries LaunchParams that are enqueued before the page runs
+  // and delivered when the consumer is set: model that, because that delivery is
+  // what double-fired the horn alongside the load-time URL handling
+  // (airhorn-lw9).
+  window.__pendingLaunches = location.hash === '#instant'
+    ? [{ targetURL: location.href, files: [] }]
+    : [];
+  try {
+    Object.defineProperty(window, 'launchQueue', {
+      configurable: true,
+      value: {
+        setConsumer(fn) {
+          window.__launchConsumer = fn;
+          const pending = window.__pendingLaunches.slice();
+          window.__pendingLaunches.length = 0;
+          for (const params of pending) setTimeout(() => fn(params), 0);
+        },
+      },
+    });
+  } catch (err) {
+    window.__launchQueueError = String(err && err.message || err);
+  }
+  window.__fireLaunch = (targetURL) => {
+    if (typeof window.__launchConsumer !== 'function') {
+      throw new Error('the page never registered a launch consumer');
+    }
+    window.__launchConsumer({ targetURL, files: [] });
+  };
   window.__probe.reset = () => { window.__probe.level = 0; window.__probe.peak = 0; window.__probe.states.length = 0; };
   window.addEventListener('error', (e) => window.__probe.errors.push(e.message));
   window.addEventListener('unhandledrejection', (e) => window.__probe.errors.push(String(e.reason && e.reason.message || e.reason)));
@@ -132,16 +167,39 @@ function startServer() {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
 
-// A gate that is killed (exit 124 on its bound) SIGKILLs the process group, so a
-// suite's finally block never runs and its headless browsers survive to starve
-// the next run. Browsers are registered here and closed on SIGTERM/SIGINT, which
-// is what a bound-kill sends first.
+// Close a browser the way it has to be closed: killing the parent alone leaves
+// its renderers behind (the reaper found 13 processes, 47 minutes old, from one
+// such run). Chrome's children are killed deepest-first, then the parent, and
+// browsers are registered so SIGTERM/SIGINT (what a bound-kill sends first) does
+// the same thing.
 const openBrowsers = new Set();
+function killTree(pid) {
+  try {
+    const table = execFileSync('ps', ['-eo', 'pid=,ppid='], { encoding: 'utf8' });
+    const children = new Map();
+    for (const line of table.trim().split('\n')) {
+      const [child, parent] = line.trim().split(/\s+/).map(Number);
+      if (!children.has(parent)) children.set(parent, []);
+      children.get(parent).push(child);
+    }
+    const order = [];
+    const walk = (node) => {
+      for (const child of children.get(node) || []) {
+        walk(child);
+        order.push(child);
+      }
+    };
+    walk(pid);
+    for (const child of [...order].reverse()) {
+      try { process.kill(child, 'SIGKILL'); } catch {}
+    }
+  } catch {}
+  try { process.kill(pid, 'SIGKILL'); } catch {}
+}
+
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
-    for (const browser of openBrowsers) {
-      try { browser.chrome.kill('SIGKILL'); } catch {}
-    }
+    for (const browser of openBrowsers) killTree(browser.chrome.pid);
     process.exit(143);
   });
 }
@@ -157,6 +215,12 @@ async function launch({ autoplay, label }) {
     '--no-sandbox',
     '--disable-gpu',
     '--remote-debugging-port=0',
+    // No crash reporting: a crashpad handler outlives the browser it belongs to
+    // when the parent is killed abruptly, and it is a shared-path process that
+    // cannot be attributed to a profile afterwards (the reaper found one 47
+    // minutes old). A test browser has nothing to report.
+    '--disable-breakpad',
+    '--disable-crash-reporter',
     `--user-data-dir=/tmp/chrome-shortcuts-${label}-${Date.now()}`,
   ];
   if (autoplay) args.splice(3, 0, '--autoplay-policy=no-user-gesture-required');
@@ -246,6 +310,8 @@ async function launch({ autoplay, label }) {
       errors: window.__probe.errors.slice(),
       controlled: !!(navigator.serviceWorker && navigator.serviceWorker.controller),
       onLine: navigator.onLine,
+      status: (document.getElementById('app-status') || {}).textContent || '',
+      active: (document.activeElement && document.activeElement.className) || '',
     };
   })()`);
 
@@ -290,7 +356,7 @@ async function launch({ autoplay, label }) {
   const close = async () => {
     openBrowsers.delete(handle);
     try { ws.close(); } catch {}
-    chrome.kill('SIGKILL');
+    killTree(chrome.pid);
   };
 
   return { send, evaluate, snapshot, navigate, waitFor, press, setOffline, close, sleep, logs };
@@ -380,7 +446,10 @@ async function checkPromptAndShareable(base) {
       `the URL after a #instant launch is ${instant.href}; the deep link must survive so it can be shared`);
     assert(instant.pressed === 'true' && instant.horning,
       `/#instant did not light the horn up: aria-pressed=${instant.pressed}, horning=${instant.horning}`);
-    assert(instant.starts === 1, `/#instant started ${instant.starts} source(s), expected 1`);
+    // Exactly one: the platform reports the cold launch through the queue as well,
+    // and the load handler has already served the URL (airhorn-lw9).
+    assert(instant.starts === 1,
+      `/#instant started ${instant.starts} source(s), expected exactly 1 (a cold launch is reported twice: URL + launch queue)`);
     assert(instant.peak > 0.3,
       `/#instant produced no audio (peak ${instant.peak.toFixed(4)}, ctx ${instant.ctxState})`);
     assert(instant.ctxState === 'running', `/#instant ran the graph in state ${instant.ctxState}`);
@@ -408,6 +477,37 @@ async function checkPromptAndShareable(base) {
     assert(again.pressed === 'false' && again.playing === false,
       `after a same-URL navigation the horn is ${again.pressed}/${again.playing}, expected at rest`);
     console.log('  second launch on the identical URL is a no-op (focus-existing), horn at rest');
+
+    console.log('--- 4b. a repeat launch re-fires the deep link (airhorn-hlg) ---');
+    // The case the product call is about: the window is already on #instant, and
+    // a second press of the shortcut must fire again rather than be swallowed as
+    // a duplicate. The same-URL navigation above is a no-op; the launch queue is
+    // the signal that says "this was a real press".
+    const queue = await browser.evaluate('({ source: window.__launchQueueSource, hasConsumer: typeof window.__launchConsumer === "function" })');
+    assert(queue.hasConsumer, `the page registered no launch consumer, so a repeat launch cannot re-fire (launchQueue: ${queue.source})`);
+    const beforeLaunch = await browser.snapshot();
+    await browser.evaluate(`window.__probe.reset(); window.__fireLaunch(${JSON.stringify(base + '/#instant')}); 1`);
+    const relaunched = await browser.waitFor((s) => s.peak > 0.3, { label: 'the repeat launch to blast', timeout: 8000 });
+    assert(relaunched.starts > beforeLaunch.starts,
+      `a repeat launch did not start anything (starts ${beforeLaunch.starts} -> ${relaunched.starts})`);
+    assert(relaunched.pressed === 'true' && relaunched.playing === true,
+      `a repeat launch left the horn unpressed/unplaying (aria-pressed ${relaunched.pressed}, playing ${relaunched.playing})`);
+    assert(relaunched.hash === '#instant', `a repeat launch moved the URL to ${relaunched.href}`);
+    console.log(`  repeat launch blasted again (${queue.source} queue): starts ${beforeLaunch.starts} -> ${relaunched.starts}, peak ${relaunched.peak.toFixed(3)}`);
+
+    // A launch that is not the instant deep link must not sound the horn. Wait
+    // for the repeat blast to finish ringing out first - otherwise the previous
+    // source's tail is still in the analyser window and "peak stayed low" says
+    // nothing about the launch being tested (the gate caught exactly that).
+    await browser.waitFor((s) => s.playing === false, { label: 'the repeat blast to finish', timeout: 8000 });
+    await browser.evaluate(`window.__probe.reset(); window.__fireLaunch(${JSON.stringify(base + '/')}); 1`);
+    await browser.sleep(700);
+    const otherLaunch = await browser.snapshot();
+    // Not "exactly 0": the previous blast's ring-out can leave a sliver in the
+    // analyser window. Anything below the blast threshold means nothing sounded.
+    assert(otherLaunch.peak < 0.05 && otherLaunch.starts === relaunched.starts,
+      `a launch of / sounded the horn (peak ${otherLaunch.peak.toFixed(6)}, starts ${relaunched.starts} -> ${otherLaunch.starts})`);
+    assert(otherLaunch.hash === '#instant', `a launch of / moved the URL to ${otherLaunch.href}`);
 
     console.log('--- 5. an unknown hash: nothing blasts, the horn still works ---');
     await browser.navigate('about:blank', { wait: 50 });
@@ -505,6 +605,15 @@ async function checkBlockedAutoplay(base) {
       console.log(`  this browser allowed audio without a gesture (ctx ${blocked.ctxState}); state-consistency trivially holds`);
     }
 
+    // Silence must not read as broken (airhorn-hlg): the page says what is
+    // wrong through its one polite live region, and the horn - a real button -
+    // is the focused next action.
+    assert(/tap/i.test(blocked.status),
+      `a blocked deep link said nothing: #app-status is ${JSON.stringify(blocked.status)}`);
+    assert(/horn/.test(blocked.active),
+      `the horn is not the focused next action after a blocked deep link (active element class ${JSON.stringify(blocked.active)})`);
+    console.log(`  announced ${JSON.stringify(blocked.status)} and focused the horn`);
+
     // And the first real press must still work - a silent deep link is a page
     // that has not been touched, not a broken one.
     const first = await browser.press(400);
@@ -512,7 +621,18 @@ async function checkBlockedAutoplay(base) {
       `the first press after a blocked deep link produced no sound (peak ${first.during.peak.toFixed(4)}, ctx ${first.during.ctxState})`);
     assert(first.during.pressed === 'true', 'the first press after a blocked deep link did not light the horn');
     assert(first.after.horning === false, 'the horn stayed lit after release');
-    console.log(`  first press played (peak ${first.during.peak.toFixed(3)}, ctx ${first.during.ctxState})`);
+    // The hint must not outlive the problem it described.
+    assert(!/tap/i.test(first.after.status),
+      `the "needs a tap" hint stayed after the horn played: ${JSON.stringify(first.after.status)}`);
+    console.log(`  first press played (peak ${first.during.peak.toFixed(3)}, ctx ${first.during.ctxState}) and cleared the hint`);
+
+    // A newer message outranks a stale hint (airhorn-xsu): clearing the hint must
+    // not wipe whatever replaced it in the one live region.
+    await browser.evaluate(`document.getElementById('app-status').textContent = 'Back online.'; 1`);
+    const second = await browser.press(400);
+    assert(second.during.peak > 0.3, `the horn did not play after the hint was replaced (peak ${second.during.peak.toFixed(4)})`);
+    assert(second.after.status === 'Back online.',
+      `a successful start wiped a newer status message: ${JSON.stringify(second.after.status)}`);
   } finally {
     await browser.close();
   }

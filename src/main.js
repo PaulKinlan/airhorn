@@ -111,10 +111,15 @@ class Installer {
   }
 }
 
+// One sentence, in one place: the announcement and the check that it is still
+// the current message have to agree (airhorn-xsu).
+const TAP_HINT = 'The horn needs a tap to make a sound.';
+
 class AirHorn {
   #horn;
   #image;
   #counter = 0;
+  #announcedTapHint = false;
   #loop = false;
 
   constructor(root) {
@@ -182,10 +187,33 @@ class AirHorn {
     // audio graph suspended - take it back rather than claim a horn nobody can
     // hear (airhorn-x4l).
     started.then((ok) => {
-      if (ok === true || this.#horn.isPlaying()) return;
+      if (ok === true || this.#horn.isPlaying()) {
+        if (this.#announcedTapHint) {
+          this.#announcedTapHint = false;
+          // Only take back the hint if the region still holds it: a later message
+          // (connection lost, an update notice) outranks a stale hint
+          // (airhorn-xsu).
+          const region = document.getElementById('app-status');
+          if (!region || region.textContent === TAP_HINT) {
+            window.__airhornAnnounce?.('');
+          }
+        }
+        return;
+      }
       this.#loop = false;
       this.#image.classList.remove('horning');
       this.#image.setAttribute('aria-pressed', 'false');
+      // Silence must not read as broken (airhorn-hlg). Either the graph is
+      // suspended until a gesture, or there is no Web Audio at all - say which,
+      // through the page's one polite live region, and put the user on the
+      // control that fixes it.
+      if (this.#horn.hasAudioContext()) {
+        window.__airhornAnnounce?.(TAP_HINT);
+        this.#announcedTapHint = true;
+        this.#image.focus?.({ preventScroll: false });
+      } else {
+        window.__airhornAnnounce?.('This browser cannot play the air horn.');
+      }
     });
 
     this.#horn.onstopped = () => {
@@ -241,15 +269,56 @@ window.addEventListener('load', () => {
     // WebMCP is an enhancement: never let a registration failure break the horn.
   });
 
+  const fireInstant = () => airhorn.start({ loop: false });
+  let urlLaunchAt = null;
+  let coldLaunchSettled = false;
+
   if (location.hash === '#instant') {
-    airhorn.start({ loop: false });
+    fireInstant();
+    urlLaunchAt = performance.now();
   }
 
   window.addEventListener('hashchange', () => {
     if (location.hash === '#instant') {
-      airhorn.start({ loop: false });
+      fireInstant();
     }
   });
+
+  // Launching the installed app reuses this window when the manifest asks for
+  // focus-existing, and the URL does not change - so neither load nor hashchange
+  // fires and a second press of the shortcut used to do nothing at all
+  // (airhorn-hlg). The platform reports every launch through window.launchQueue,
+  // so consume it: a deliberate second press re-fires the deep link's action
+  // instead of being swallowed as a duplicate. In a browser without a launch
+  // queue a repeat launch emits no event in the page at all, so there is nothing
+  // honest to react to; the deep link still fires on load and on hashchange.
+  if (typeof window.launchQueue?.setConsumer === 'function') {
+    window.launchQueue.setConsumer((params = {}) => {
+      let hash = location.hash;
+      if (params.targetURL) {
+        try {
+          hash = new URL(params.targetURL, location.href).hash;
+        } catch {
+          return;
+        }
+      }
+      if (hash !== '#instant') return;
+      // A cold launch is reported through the queue as well, and the load handler
+      // has already served it: firing again starts a second, overlapping source,
+      // bumps the badge twice and tracks the event twice (airhorn-lw9). The
+      // platform delivers a cold launch's params immediately after setConsumer,
+      // so the first delivery within a moment of the load-time fire IS that
+      // launch; anything later is a genuine repeat press and does re-fire.
+      // (isPlaying() cannot be the test: the URL fire is still fetching and
+      // decoding the sample when the params arrive.)
+      const firstDelivery = !coldLaunchSettled;
+      coldLaunchSettled = true;
+      if (firstDelivery && urlLaunchAt !== null && performance.now() - urlLaunchAt < 500) {
+        return;
+      }
+      fireInstant();
+    });
+  }
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
