@@ -845,7 +845,9 @@ async function main() {
           : 'google-chrome');
 
   let chrome = null;
+  let profileDir = null;
   try {
+    profileDir = `/tmp/chrome-audio-parity-${Date.now()}`;
     chrome = spawn(
       chromeBin,
       [
@@ -853,11 +855,15 @@ async function main() {
         '--no-sandbox',
         '--disable-gpu',
         '--autoplay-policy=no-user-gesture-required',
+        // No crashpad handler outliving the browser (it is a shared-path
+        // process the reaper cannot attribute - airhorn-jx9/nn26).
+        '--disable-breakpad',
+        '--disable-crash-reporter',
         '--remote-debugging-port=0',
-        `--user-data-dir=/tmp/chrome-audio-parity-${Date.now()}`,
+        `--user-data-dir=${profileDir}`,
         'about:blank',
       ],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
+      { stdio: ['ignore', 'pipe', 'pipe'], detached: true },
     );
 
     let wsUrl = null;
@@ -956,7 +962,15 @@ async function main() {
     );
     if (check && !results.inParity) process.exitCode = 2;
   } finally {
-    if (chrome) chrome.kill('SIGTERM');
+    if (chrome) {
+      // Kill the GROUP before removing the profile: a main-only kill leaves
+      // renderers/cache children that recreate files after the removal
+      // (airhorn-jx9, airhorn-nn26; fleet lessons: signal the group).
+      try { process.kill(-chrome.pid, 'SIGKILL'); } catch {}
+      try { chrome.kill('SIGTERM'); } catch {}
+      // A dying child's final writeback can land during the rm walk - retry.
+      try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch {}
+    }
     server.close();
   }
 }
