@@ -124,6 +124,14 @@ async function launchChrome(extraFlags) {
   // fleet-gate's bound and any job-tree reaper send - reaches the whole tree;
   // SIGKILL runs no handler, so a detached launch outlived the kill.
 
+  // A spawn that never produced a process reports through the 'error' event,
+  // not a rejection: with no listener that is an uncaughtException, so it aborts
+  // the tool BEFORE any teardown and leaves the mkdtemp'd profile dir behind
+  // (airhorn-trj7). Raced against the handshake so a bad CHROME_BIN takes
+  // reapNow() like every other launch-window failure.
+  const spawnFailed = new Promise((_, reject) =>
+    chrome.once('error', (err) => reject(new Error(`chrome launch failed: ${err.message}`))));
+
   let wsUrl = null;
   let ws = null;
   // Hoisted so the early window (handshake, discovery, ws connect) can take
@@ -154,7 +162,7 @@ async function launchChrome(extraFlags) {
     }
   };
   try {
-    await new Promise((resolve, reject) => {
+    await Promise.race([spawnFailed, new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('Chrome timeout')), 15000);
       const onData = d => {
         const m = d.toString().match(/ws:\/\/[^\s]+/);
@@ -163,7 +171,7 @@ async function launchChrome(extraFlags) {
       chrome.stderr.on('data', onData);
       chrome.stdout.on('data', onData);
       chrome.on('exit', code => reject(new Error('Chrome exited early: ' + code)));
-    });
+    })]);
 
     const port = new URL(wsUrl).port;
     // Discovery is bounded like the handshake above: a DevTools endpoint that

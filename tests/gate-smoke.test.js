@@ -343,6 +343,34 @@ test('every tools script parses - recognised extensions at any depth (airhorn-7l
   assert.deepEqual(missingTools, [], `pinned tools scripts went missing from tools/: ${missingTools.join(', ')} - restore them or update this inventory deliberately`);
 });
 
+test('a launch that never starts fails labelled and leaves no profile behind (airhorn-trj7)', () => {
+  // No browser is started: a CHROME_BIN that does not exist makes spawn() report
+  // through the child's 'error' event, which with no listener is an
+  // uncaughtException - it aborts the tool before any teardown and leaves the
+  // profile dir mkdtemp'd for the launch behind. TMPDIR (and --out) are per-test
+  // so a concurrent lane's tool run cannot be mistaken for this one's leak, and
+  // so the probe never writes into the repo. One representative tool: the other
+  // two take the same two-line race, and only this one allocates the dir itself.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsm-launch-'));
+  try {
+    const res = spawnSync(process.execPath,
+      [path.join(root, 'tools', 'install-https-proof.mjs'), '--out', path.join(tmp, 'out')], {
+        encoding: 'utf8',
+        timeout: 60000,
+        env: { ...process.env, CHROME_BIN: path.join(tmp, 'no-such-chrome'), TMPDIR: tmp },
+      });
+    assert.equal(res.status, 1, `expected a labelled failure (rc 1), got ${res.status}: ${res.stderr}`);
+    assert.doesNotMatch(res.stderr, /Unhandled 'error' event/,
+      `a spawn error must route into the tool's own teardown, not abort it: ${res.stderr}`);
+    assert.match(res.stderr, /chrome launch failed: .*ENOENT/,
+      `the launch failure must be labelled: ${res.stderr}`);
+    const left = fs.readdirSync(tmp).filter((name) => name !== 'out');
+    assert.deepEqual(left, [], `the failed launch left ${JSON.stringify(left)} behind`);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('every script-tier suite is gated by a tests/support change (airhorn-dco)', () => {
   // The report hook is runner-injected into EVERY script-tier (*.test.mjs)
   // suite, so a hook edit can break any of them; the support row must name all
