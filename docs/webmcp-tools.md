@@ -121,9 +121,21 @@ healthy state.
 
 ## Results, refusals and rejections
 
-**Every call resolves.** A caller that sends nonsense gets a structured refusal, never
-an unhandled rejection. The shape is the horn's current state plus a code and a
-message:
+Two layers, and only one of them is this app's:
+
+- **The tool's `execute(input, {signal})`** never throws on bad input. It resolves
+  with a structured refusal: the horn's current state plus a code and a message.
+- **The platform's `document.modelContext.executeTool`** sits in front of it, and a
+  browser may refuse input it will not deliver at all — a string, a number, an array
+  where the schema says object — before `execute` is ever called. That refusal is the
+  platform's validation, not ours: it can reject, nothing has run, and there is no
+  structured result because our code never saw the call. The browser suite records
+  which layer said no (`platformRefused`) instead of assuming the tool was reached
+  (`tests/webmcp-browser.test.mjs`, the hostile-callers section).
+
+Treat both endings as "nothing happened": a rejection from the platform, or a
+resolution carrying a `code`. A tool-level refusal looks like this — the horn's
+current state plus a code and a message:
 
 ```json
 { "playing": false, "loop": false, "code": "invalid_input",
@@ -156,9 +168,10 @@ Two behaviours are worth calling out because they are choices, not accidents:
   normal single blast — unknown keys cannot change behaviour and cannot pollute
   prototypes.
 
-The **only** way a call rejects is cancellation: an aborted `AbortSignal` rejects with
-`AbortError` (or the signal's own `Error` reason). A call cancelled mid-start is
-silenced first, so cancellation cannot leave a looping horn behind.
+Within the tool itself the **only** rejection is cancellation: an aborted
+`AbortSignal` rejects with `AbortError` (or the signal's own `Error` reason). A call
+cancelled mid-start is silenced first, so cancellation cannot leave a looping horn
+behind.
 
 ## Invariants a caller can rely on
 
@@ -189,7 +202,8 @@ case names.
 | `stop_horn`/`get_horn_state` take no arguments | `stop_horn and get_horn_state ignore extra properties`, `the published schemas and descriptions match what the tools actually do` |
 | `get_horn_state` shape, and its degraded shape | `stop_horn silences the horn whatever the caller sends, and state is always readable`, `a broken horn instance yields structured errors, never rejections` |
 | `audio_unavailable` / `not_started` | `reports a structured error instead of throwing without Web Audio`, `invocation before the audio graph is ready still resolves` |
-| only cancellation rejects; cancelled mid-start is silenced | `honours a cancelled execution signal`, `an aborted call rejects and never starts the horn`, `a call cancelled mid-start is silenced instead of left looping` |
+| within the tool only cancellation rejects; cancelled mid-start is silenced | `honours a cancelled execution signal`, `an aborted call rejects and never starts the horn`, `a call cancelled mid-start is silenced instead of left looping` |
+| the platform may reject before the tool runs, and that is not a tool refusal | browser suite hostile-callers section: a non-object input is either refused by the tool (structured `invalid_input`) or refused by `executeTool` itself, recorded as `platformRefused` (airhorn-afh) |
 | no leaks (one `AudioContext`, one fetch, no surviving nodes) | `fuzzing the real Horn leaks no AudioContext, buffer sources or oscillators` |
 | no-op and no-throw without the API; abort unregisters | `is a silent no-op where WebMCP is unavailable`, `aborting the registration controller unregisters every tool` |
 | the flag and the native/stand-in distinction | `tests/webmcp-browser.test.mjs` (launch args `--enable-features=WebMCP,WebMCPTesting`, logs `source`) |
