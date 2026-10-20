@@ -18,6 +18,7 @@
   ],
   "src/webmcp.js": [
     "tests/webmcp.test.mjs",
+    "tests/webmcp-fuzz.test.mjs",
     "tests/webmcp-browser.test.mjs"
   ],
   "vite.config.js": [
