@@ -10,6 +10,8 @@
 # Do not reformat those lines. Additional loud lines that are NOT in the contract:
 #   fast-gate: pending: <suite>          (declared by a `~` row, file not landed yet; skipped, not counted)
 #   fast-gate: unmapped-suite: <suite>   (suite in the tree but not reachable from the map; exit 1)
+#   fast-gate: zero-suite: <path>        (changed file when 0 suites were selected; exit 1 unless
+#                                         FAST_GATE_ALLOW_ZERO=1, which prints ZERO-SUITE PASS)
 # The gate builds dist/ before running (browser suites serve it); a build failure exits 1.
 #
 # Usage:
@@ -18,9 +20,11 @@
 #   bash tools/fast-gate.sh --list              # print the suites it WOULD run, run nothing
 #   bash tools/fast-gate.sh --base <ref>        # compare against another base
 #   FAST_GATE_JOBS=2 bash tools/fast-gate.sh    # cap parallel suites
+#   FAST_GATE_ALLOW_ZERO=1 bash tools/fast-gate.sh  # bless a suite-free change (every file exempt)
 #
-# Exit codes: 0 = every selected suite passed (or nothing was affected); 1 = a suite failed, a mapped
-# suite is missing, or a changed file is unmapped. ANY non-zero is "unknown", never "green".
+# Exit codes: 0 = every selected suite passed (or nothing was affected, or a suite-free change was
+# explicitly acknowledged with FAST_GATE_ALLOW_ZERO=1); 1 = a suite failed, a mapped suite is missing,
+# a changed file is unmapped, or a non-empty change selected ZERO suites without the acknowledgement.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
@@ -224,17 +228,31 @@ fi
 
 mapfile -t SELECTED < <(printf '%s\n' ${SELECTED[@]+"${SELECTED[@]}"} | sed '/^$/d' | sort -u)
 
-if [ "${#SELECTED[@]}" -eq 0 ]; then
-  if [ "${#CHANGED[@]}" -eq 0 ]; then
-    echo "fast-gate: no changed files"
-  else
-    echo "fast-gate: PASS (0 suite(s), ${#CHANGED[@]} changed file(s), all ${EXEMPT_COUNT} exempt)"
-  fi
+# --list is a QUERY, not a verdict: it prints what WOULD run and exits 0, however empty - the
+# zero-suite rule below is about a verdict that reads green, and a listing reads as nothing.
+if [ "$LIST" -eq 1 ]; then
+  printf '%s\n' "${SELECTED[@]}"
   exit 0
 fi
 
-if [ "$LIST" -eq 1 ]; then
-  printf '%s\n' "${SELECTED[@]}"
+if [ "${#SELECTED[@]}" -eq 0 ]; then
+  if [ "${#CHANGED[@]}" -eq 0 ]; then
+    echo "fast-gate: no changed files"
+    exit 0
+  fi
+  # A non-empty change that selected NOTHING proves nothing: an over-broad `!` row (or a future
+  # map edit exempting a real source path) used to exit 0 here - a green verdict with no suite
+  # run (airhorn-n0jd). The exemption rows exist for genuinely suite-free files (docs, assets),
+  # so the honest case stays available - but as a deliberate, loud act, not a silent PASS.
+  if [ "${FAST_GATE_ALLOW_ZERO:-0}" != "1" ]; then
+    for f in ${CHANGED[@]+"${CHANGED[@]}"}; do echo "fast-gate: zero-suite: $f"; done
+    echo "fast-gate: FAIL - ${#CHANGED[@]} changed file(s) selected 0 suite(s): every one matched an" >&2
+    echo "fast-gate: exemption row, so no suite ran and this verdict cannot be green. If the change" >&2
+    echo "fast-gate: truly has no suite to run (docs, assets), re-run with FAST_GATE_ALLOW_ZERO=1;" >&2
+    echo "fast-gate: otherwise add or fix the map rows these files need." >&2
+    exit 1
+  fi
+  echo "fast-gate: ZERO-SUITE PASS (${#CHANGED[@]} changed file(s), all ${EXEMPT_COUNT} exempt; FAST_GATE_ALLOW_ZERO=1)"
   exit 0
 fi
 

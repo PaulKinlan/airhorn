@@ -248,6 +248,29 @@ test('the gate script parses (bash -n)', () => {
   execFileSync('bash', ['-n', gate]);
 });
 
+test('a change that selects ZERO suites fails loudly, green only by explicit acknowledgement (airhorn-n0jd)', () => {
+  // README.md matches the !*.md exemption row: no suite covers it. That used
+  // to exit 0 with a bare 'PASS (0 suite(s))' - so an over-broad `!` row (or a
+  // map edit exempting real source) could green a change that ran nothing.
+  // Now the verdict is FAIL unless the caller names the acknowledgement; the
+  // --list query keeps its exit-0 semantics (it is not a verdict).
+  const run = (args, env = {}) => spawnSync('bash', [gate, ...args], {
+    cwd: root, encoding: 'utf8', env: { ...process.env, ...env },
+  });
+  const loud = run(['--changed', 'README.md']);
+  assert.equal(loud.status, 1, `an exempt-only change must not read green: ${loud.stdout}`);
+  assert.ok(loud.stdout.includes('fast-gate: zero-suite: README.md'),
+    `the exempt file must be named: ${loud.stdout}`);
+  assert.ok(loud.stderr.includes('FAST_GATE_ALLOW_ZERO'),
+    `the failure must name the acknowledgement: ${loud.stderr}`);
+  const blessed = run(['--changed', 'README.md'], { FAST_GATE_ALLOW_ZERO: '1' });
+  assert.equal(blessed.status, 0, `the explicit acknowledgement must pass: ${blessed.stderr}`);
+  assert.ok(blessed.stdout.includes('ZERO-SUITE PASS'),
+    `the pass must be labelled, not a bare PASS: ${blessed.stdout}`);
+  const query = run(['--changed', 'README.md', '--list']);
+  assert.equal(query.status, 0, `--list is a query, not a verdict: ${query.stderr}`);
+});
+
 test('every tools script parses - recognised extensions at any depth (airhorn-7lm, airhorn-7z5, airhorn-h19)', () => {
   // Glob, not names (airhorn-v1n), and every RECOGNISED script extension,
   // not just .mjs (airhorn-h19: .cjs and .ts were unparseable, extensionless
