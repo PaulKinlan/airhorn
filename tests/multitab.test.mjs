@@ -259,15 +259,16 @@ async function run() {
     }
   };
 
+  const profileDir = fs.mkdtempSync('/tmp/airhorn-multitab-');
   const chrome = spawn(process.env.CHROME_BIN || 'google-chrome', [
     '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
     // Launching the app from a shortcut is a user gesture; the two-tab world
     // this suite models has the same audience (shortcuts suite, context A).
     '--autoplay-policy=no-user-gesture-required',
-    '--remote-debugging-port=0', `--user-data-dir=${fs.mkdtempSync('/tmp/airhorn-multitab-')}`,
+    '--remote-debugging-port=0', `--user-data-dir=${profileDir}`,
     '--disable-breakpad', '--disable-crash-reporter',
     'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
   let cdp = null;
   try {
@@ -680,7 +681,15 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
     console.log('\nALL MULTITAB COHERENCE CHECKS PASSED');
   } finally {
     try { cdp?.ws.close(); } catch { /* already gone */ }
+    // Kill the GROUP, not the launched pid: SIGKILL to the main chrome
+    // process orphaned renderers/cache children that kept writing the
+    // profile after the rmSync below (airhorn-jx9, fleet lessons: signal
+    // the group).
+    try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* group gone */ }
     try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
+    // Leave no profile dir behind: fleet-tmp-clean only reclaims marked
+    // paths, so an unremoved /tmp profile is retained forever (airhorn-jx9).
+    try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch { /* already gone */ }
     server.close();
   }
 }
