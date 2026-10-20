@@ -615,7 +615,18 @@ async function testBootWatchdog() {
     await evaluate(`window.__statusLog.length = 0; sessionStorage.setItem('__statusLog', '[]'); 1`);
     swBody = swV2;
     await evaluate(`navigator.serviceWorker.getRegistration().then(reg => reg.update())`);
-    await waitUntil(`window.__statusLog.some(m => /new version is ready/i.test(m))`, 10000, 'successful update to complete');
+    // Completion gates on the REGISTRATION's ground truth, not the page's
+    // announcement chain (airhorn-bogq, the airhorn-twlb diagnosis): this
+    // page has no controller at parse, so a controller existing at all means
+    // the v2 worker has installed, activated AND claimed - true however
+    // loaded the box is. The announcement is still observed below (and the
+    // false-failure check still polices it), but it no longer decides when
+    // the update "completed": a laggy announcer under load used to fail
+    // this case with the update fully done.
+    await waitUntil('!!navigator.serviceWorker.controller', 10000,
+      'the v2 worker to activate and claim the page (registration ground truth)');
+    const announcement = await evaluate(`window.__statusLog.filter(m => /new version is ready/i.test(m))`);
+    console.log('  swq: v2 active and claiming; announcement chain so far:', JSON.stringify(announcement));
     await new Promise(r => setTimeout(r, 1500)); // let the replaced worker settle
     const falseFailures = await evaluate(`window.__statusLog.filter(m => /could not update/i.test(m))`);
     if (falseFailures.length > 0) {
