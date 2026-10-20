@@ -953,16 +953,18 @@ async function run() {
       seq.push('Space repeat x4 while hidden');
       s = await state();
       if (s.horning !== false || s.pressed !== 'false') problems.push(`the hold restarted from repeats while the page was hidden (horning=${s.horning}, pressed=${s.pressed}) ${note()}`);
-      await spaceUp();
-      seq.push('Space up while hidden');
+      // No keyup here: a real tab switch loses it - that is the premise. The
+      // hold must have been retired by the hide itself, so after returning, a
+      // fresh press (repeat=false, promptly - inside the old 1s window)
+      // starts exactly one hold (airhorn-ay73, airhorn-5a5x, airhorn-mqpz).
       await browserSend('Target.closeTarget', { targetId: extra.targetId });
       await sleep(400);
       await evaluate(`document.querySelector('.horn').focus(); true`);
       await spaceDown();
-      seq.push('Space down (fresh after hide)');
+      seq.push('Space down (fresh, keyup was lost)');
       await sleep(200);
       s = await state();
-      if (s.horning !== true || s.pressed !== 'true') problems.push(`after hide + keyup the hold was stuck: a fresh hold did not start (horning=${s.horning}, pressed=${s.pressed}) ${note()}`);
+      if (s.horning !== true || s.pressed !== 'true') problems.push(`after a hide whose keyup was lost the hold was stuck or the fresh press was swallowed: a fresh hold did not start (horning=${s.horning}, pressed=${s.pressed}) ${note()}`);
       await spaceUp();
       await sleep(250);
 
