@@ -43,6 +43,35 @@
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
+
+// SIGKILL every process carrying this launch's --user-data-dir: the browser
+// and every child it forked all carry it, so one /proc read finds the whole
+// tree and the browser dies in the same pass as its children are found -
+// nothing can out-fork the cleanup. The second pass catches a child that
+// raced the first read. Synchronous so the error/signal paths can use it;
+// a no-op where /proc does not exist (airhorn-105n, the tools' copy of
+// tests/support/browser.mjs's sweepProfile).
+function sweepTree(profileDir) {
+  const marker = `--user-data-dir=${profileDir}`;
+  for (let pass = 0; pass < 2; pass += 1) {
+    let victims;
+    try {
+      victims = fs.readdirSync('/proc')
+        .filter((entry) => /^\d+$/.test(entry) && Number(entry) !== process.pid)
+        .filter((entry) => {
+          try { return fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8').includes(marker); } catch { return false; }
+        })
+        .map(Number);
+    } catch {
+      return;
+    }
+    if (victims.length === 0) return;
+    for (const pid of victims) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+  }
+}
+
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
@@ -844,9 +873,11 @@ installSignalExit(() => {
   if (!liveBrowser) return;
   const { chrome, profileDir } = liveBrowser;
   liveBrowser = null;
-  try { process.kill(-chrome.pid, 'SIGKILL'); } catch { /* already gone */ }
+  // Inside the signal-exit grace: sweep (sync, uninterruptible) then rm with
+  // a budget that fits, as airhorn-gau8 sized browser.mjs's close().
+  sweepTree(profileDir);
   try { chrome.kill('SIGTERM'); } catch { /* already gone */ }
-  try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* best effort */ }
+  try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
 });
 
 async function main() {
@@ -881,7 +912,12 @@ async function main() {
         `--user-data-dir=${profileDir}`,
         'about:blank',
       ],
-      { stdio: ['ignore', 'pipe', 'pipe'], detached: true },
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+      // NOT detached (airhorn-105n, the tools' copy of the acex fix): chrome
+      // must stay in the caller's process group so an ancestor group-kill -
+      // what fleet-gate's bound and any job-tree reaper send - reaches the
+      // whole tree; SIGKILL runs no handler, so a detached launch outlived
+      // the kill.
     );
 
     liveBrowser = { chrome, profileDir };
@@ -997,10 +1033,12 @@ async function main() {
   } finally {
     liveBrowser = null;
     if (chrome) {
-      // Kill the GROUP before removing the profile: a main-only kill leaves
-      // renderers/cache children that recreate files after the removal
-      // (airhorn-jx9, airhorn-nn26; fleet lessons: signal the group).
-      try { process.kill(-chrome.pid, 'SIGKILL'); } catch {}
+      // End every member of the launch before removing the profile: a
+      // main-only kill leaves renderers/cache children that recreate files
+      // after the removal (airhorn-jx9, airhorn-nn26). The sweep is the
+      // group-kill's replacement now that chrome is not its own group leader
+      // (airhorn-105n): same tree guarantee, no group semantics.
+      sweepTree(profileDir);
       try { chrome.kill('SIGTERM'); } catch {}
       // A dying child's final writeback can land during the rm walk - retry.
       try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch {}
