@@ -277,6 +277,33 @@ test('an interleaved play/stop/state storm leaves the horn stopped and consisten
   });
 });
 
+test('the shipped defaults are the documented ones: 20 starts per second', async () => {
+  // docs/webmcp-tools.md states the default rate limit and says a refusal
+  // reports the horn's CURRENT state. Both are asserted here, on the tool as
+  // createHornTools() builds it with no options - not on an injected limit,
+  // which would only prove the knob works.
+  const airhorn = createFakeAirHorn();
+  await withTools(airhorn, {}, async (modelContext) => {
+    const results = [];
+    for (let i = 0; i < 20; i += 1) {
+      results.push(await modelContext.executeTool('play_horn', { loop: true }));
+    }
+    assert.ok(results.every((r) => r.code === undefined), 'the first 20 starts in the window are admitted');
+    assert.equal(airhorn.state.starts, 20);
+
+    // The 21st is refused inside the same 1000 ms window - while the horn is
+    // still sounding, which is what makes "playing is the current state, not
+    // this call's outcome" observable.
+    const refused = await modelContext.executeTool('play_horn', { loop: true });
+    assert.equal(refused.code, 'rate_limited');
+    assert.match(refused.error, /20 starts per 1000ms/);
+    assert.equal(refused.playing, true, 'a refusal reports the horn as it is right now, which can be playing');
+    assert.equal(refused.loop, true);
+    assert.equal(airhorn.state.starts, 20, 'a refused call must not start anything');
+    assert.equal(airhorn.state.maxActive, 1, 'and it must not stack playback');
+  });
+});
+
 test('stop_horn is never rate limited and answers immediately during a play flood', async () => {
   const airhorn = createFakeAirHorn();
   await withTools(airhorn, { rateLimit: { max: 1, windowMs: 60_000 } }, async (modelContext) => {

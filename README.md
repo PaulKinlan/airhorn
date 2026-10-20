@@ -73,6 +73,11 @@ badge and analytics all stay correct):
 | `stop_horn()` | Silences it immediately |
 | `get_horn_state()` | Reports `playing`, `loop` and `hasAudioContext` |
 
+A call resolves to a result or a structured refusal (`{ playing, loop, code, error }`) —
+never an unhandled rejection — and bad input is refused rather than guessed at. The
+full contract (schemas, result and error shapes, annotations, rate limits, the loop
+seam between "one horn" and "always silence") is [docs/webmcp-tools.md](docs/webmcp-tools.md).
+
 Registration is a no-op in browsers without WebMCP, and a registration failure can
 never break the horn itself. The API is behind a flag in current Chrome:
 
@@ -96,6 +101,8 @@ npm run test:acceptance   # whole-product pass in one real browser
 - `tests/horn.test.js` — the `Horn` audio class (buffer loading, loop and stop, the
   synthesised fallback) against fake browser globals, with no browser or audio device;
 - `tests/webmcp.test.mjs` — the tool definitions and their wiring;
+- `tests/webmcp-fuzz.test.mjs` — hostile callers: wrong types, huge payloads, floods,
+  cancellation, and that the tools never stack audio or leak an `AudioContext`;
 - `tests/a11y.test.mjs` — accessibility tree, keyboard operation, focus ring;
 - `tests/sw-offline.test.mjs` — manifest, service worker activation and offline
   reload;
