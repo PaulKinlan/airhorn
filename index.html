@@ -33,15 +33,64 @@
     <meta name='twitter:description' content='The best and easiest Air Horn web app there is. No install just use it right away in your browser!'>
     <meta name='twitter:image' content='https://airhorner.com/images/touch/android-launchericon-192-192.png'>
     <meta name='twitter:creator' content='@paul_kinlan'>
-    <!-- Critical fallback (airhorn-zb0): the horn's whole affordance is CSS,
-         so with the stylesheet unavailable the button collapsed to 16x6, the
-         installer became a visible inert button and the visually-hidden prose
-         showed as body text. The rules mirror main.css and live in a layer
-         declared before main.css's own, so every main.css rule beats them
-         once the stylesheet loads (unlayered styles would win the cascade
-         forever - they would have pinned the installer hidden). -->
+    <!-- Critical fallback (airhorn-zb0), extended for the async stylesheet
+         (airhorn-c5e), geometry fixed per review finding airhorn-e18:
+         main.css loads non-render-blocking (media=print, swapped to all on
+         load) so first paint waits only for the HTML. That makes this inline
+         block the stylesheet for the first paint on every load, so it paints
+         the DESIGNED horn: tokens, centering, colours, and .inner as the sole
+         in-flow grid child of .horn (concentric 80% disc). The label is
+         absolutely positioned below the horn and hidden while the sheet is
+         in flight or loaded; if the sheet genuinely fails, its onerror adds
+         .stylesheet-failed and the label is revealed (airhorn-zb0's
+         labelled-unstyled contract; a no-JS browser cannot report a failed
+         sheet, there the aria-label still names the button). #installer is
+         out of flow so the pre-swap frame cannot reflow when the sheet
+         lands. Values here MUST stay identical to main.css's (the a11y and
+         resilience suites pin computed styles on both paths); the layer is
+         declared before main.css's own, so every main.css rule beats these
+         once it swaps in (unlayered styles would win the cascade forever -
+         they would have pinned the installer hidden). -->
     <style>
       @layer critical {
+        :root {
+          --page-bg: #2196f3;
+          --horn-bg: #f44336;
+          --horn-inner-bg: #b71c1c;
+          --horn-center-bg: #000;
+
+          @media (prefers-color-scheme: dark) {
+            --page-bg: #07131f;
+            --horn-bg: #d32f2f;
+            --horn-inner-bg: #7f0000;
+            --horn-center-bg: #050505;
+          }
+
+          @supports (color: light-dark(#000, #fff)) {
+            --page-bg: light-dark(#2196f3, #07131f);
+            --horn-bg: light-dark(#f44336, #d32f2f);
+            --horn-inner-bg: light-dark(#b71c1c, #7f0000);
+            --horn-center-bg: light-dark(#000, #050505);
+          }
+        }
+
+        html,
+        body {
+          block-size: 100%;
+        }
+
+        body {
+          margin: 0;
+          background-color: var(--page-bg);
+        }
+
+        #container,
+        #airhorn {
+          block-size: 100%;
+          display: grid;
+          place-items: center;
+        }
+
         .horn {
           inline-size: min(50vmin, 26rem);
           aspect-ratio: 1;
@@ -50,10 +99,49 @@
           margin: 0;
           padding: 0;
           border-radius: 50%;
+          display: grid;
+          place-items: center;
+          /* Anchor for the absolutely-positioned label below (airhorn-e18:
+             the label must never become a second grid row - that squashed
+             .inner into an ellipse at first paint). */
+          position: relative;
+          background-color: var(--horn-bg);
         }
 
         .horn-label {
           font: inherit;
+          /* Hidden during the async window: the designed horn speaks for
+             itself (the aria-label carries the name). Revealed only when
+             the sheet genuinely fails, via .stylesheet-failed set by the
+             link's onerror below. Absolutely positioned so, when revealed,
+             it sits under the horn instead of becoming a second grid row. */
+          display: none;
+          position: absolute;
+          top: 100%;
+          left: 0;
+          right: 0;
+          text-align: center;
+        }
+
+        .stylesheet-failed .horn-label {
+          display: block;
+        }
+
+        .inner {
+          inline-size: 80%;
+          block-size: 80%;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          background-color: var(--horn-inner-bg);
+        }
+
+        .center {
+          inline-size: 12.5%;
+          block-size: 12.5%;
+          border-radius: 50%;
+          background-color: var(--horn-center-bg);
+          opacity: 0.9;
         }
 
         .visually-hidden {
@@ -69,12 +157,22 @@
         }
 
         #installer:not(.available) {
+          /* Out of flow (airhorn-e18): in-flow, the hidden installer added
+             21px of scrollHeight that collapsed the moment main.css fixed
+             its position - a reflow on every first load. */
+          position: absolute;
+          top: 0;
+          inset-inline-end: 0;
           visibility: hidden;
           pointer-events: none;
         }
       }
     </style>
-    <link rel='stylesheet' href='/styles/main.css'>
+    <!-- Async stylesheet: fetched at low priority, swapped to screen media
+         on load. No JS (noscript) keeps the classic blocking link, since
+         without JS this inline critical block is all there is either way. -->
+    <link rel='stylesheet' href='/styles/main.css' media='print' onload="this.media='all'" onerror="document.documentElement.classList.add('stylesheet-failed')">
+    <noscript><link rel='stylesheet' href='/styles/main.css'></noscript>
     <link rel='preload' href='/sounds/airhorn.mp3' as='fetch' crossorigin>
   </head>
   <body>
