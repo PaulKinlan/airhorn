@@ -178,22 +178,76 @@ class AirHorn {
       setTimeout(() => { handledByPointerOrKey = false; }, 100);
     });
 
+    // A keyboard hold is sounding the horn (airhorn-ay73 state machine below).
     let pressing = false;
+    let heldKeyCode = null;        // the key we believe is physically held
+    let heldKeyLastSeen = 0;       // last keydown seen for it (repeats refresh)
+    let cancelledKey = null;       // a hold cancelled mid-hold: its repeat tail must not restart the horn
+    let cancelledKeyLastSeen = 0;
+
+    // Retire the hold. suppress=true marks the key so its repeat tail (the
+    // user may still physically hold it through a blur/tab-hide/Escape)
+    // cannot restart the horn; a normal keyup release does NOT suppress -
+    // the key is provably up, so the next keydown is a fresh press
+    // (airhorn-ay73).
+    const endHold = (suppress = false) => {
+      if (suppress && heldKeyCode !== null) {
+        cancelledKey = heldKeyCode;
+        cancelledKeyLastSeen = performance.now();
+      }
+      pressing = false;
+      heldKeyCode = null;
+      this.stop();
+      setTimeout(() => { handledByPointerOrKey = false; }, 100);
+    };
 
     this.#image.addEventListener('keydown', (e) => {
-      if (!pressing && ['Space', 'Enter'].includes(e.code)) {
-        e.preventDefault();
+      if (e.code === 'Escape') {
+        // Escape retires a held blast: the horn must stop and stay stopped
+        // through the key's repeat tail, not machine-gun back (airhorn-ay73).
+        if (pressing) endHold(true);
+        return;
+      }
+      if (!['Space', 'Enter'].includes(e.code)) return;
+      e.preventDefault();
+      const now = performance.now();
+      if (cancelledKey === e.code) {
+        // The hold on this key was cancelled (blur, tab-hide, Escape). Its OS
+        // repeat tail arrives within ~50ms steps, so a keydown more than a
+        // second after the last seen one is a genuinely new press.
+        if (now - cancelledKeyLastSeen < 1000) {
+          cancelledKeyLastSeen = now;
+          return;
+        }
+        cancelledKey = null;
+      }
+      if (!pressing) {
         handledByPointerOrKey = true;
         this.start({ loop: true });
         pressing = true;
+        heldKeyCode = e.code;
+        heldKeyLastSeen = now;
+      } else if (heldKeyCode === e.code) {
+        heldKeyLastSeen = now;
       }
     });
 
-    document.documentElement.addEventListener('keyup', () => {
-      if (pressing) {
+    document.documentElement.addEventListener('keyup', (e) => {
+      if (cancelledKey === e.code) cancelledKey = null;
+      if (pressing && heldKeyCode === e.code) endHold(false);
+    });
+    // Losing the control (focus moved) or the window (alt-tab) mid-hold means
+    // the keyup may never arrive here: retire the hold instead of sounding
+    // forever (airhorn-ay73).
+    const holdLost = () => { if (pressing) endHold(true); };
+    this.#image.addEventListener('blur', holdLost);
+    window.addEventListener('blur', holdLost);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
         this.stop();
-        pressing = false;
-        setTimeout(() => { handledByPointerOrKey = false; }, 100);
+        // The hold is retired too: repeats and the keyup can be lost while
+        // hidden, and neither may leave the hold armed (airhorn-ay73).
+        holdLost();
       }
     });
 
@@ -415,9 +469,7 @@ window.addEventListener('load', () => {
     });
   }
 
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      airhorn.stop();
-    }
-  });
+  // Tab-hide (visibilitychange -> hidden) stopping the horn - and retiring a
+  // keyboard hold whose keyup may never arrive - is wired in the AirHorn
+  // constructor, which owns the hold state.
 });
