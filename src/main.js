@@ -299,13 +299,31 @@ class AirHorn {
 
   // The "you looked at it again" acknowledgement (airhorn-7x7m): clear the
   // shared count and the OS badge so the badge never shows a total from a
-  // session nobody is looking at. No-op when storage is unavailable (the
-  // badge is then this tab's own per-tab counter) or nothing is owed.
+  // session nobody is looking at.
   #acknowledgeSharedBadgeCount() {
     const current = this.#readSharedBadgeCount();
-    if (current === null || current === 0) return;
+    if (current === null) {
+      // Storage unavailable: the shared count is unknowable, but the badge is
+      // still one per origin and this tab may have set it through the per-tab
+      // fallback. A look-transition is the same acknowledge any tab performs,
+      // so clear - a tab that cannot read storage must still be able to
+      // retire the badge it set itself, or no event in the app ever could
+      // (airhorn-0w1q).
+      this.#counter = 0;
+      navigator.clearAppBadge?.();
+      return;
+    }
+    if (current === 0) return;
     try { window.localStorage.removeItem(BADGE_COUNT_KEY); } catch {}
     navigator.clearAppBadge?.();
+  }
+
+  // Called from the launch consumer (module scope): a launch of the installed
+  // app is the user coming to look, so the badge is acknowledged there
+  // (airhorn-2eh8). A plain tab open never fires a launch, so the boot-time
+  // derive a second tab performs (airhorn-70k) is untouched.
+  acknowledgeSharedBadge() {
+    this.#acknowledgeSharedBadgeCount();
   }
 
   async #bumpSharedBadgeCount() {
@@ -389,6 +407,10 @@ window.addEventListener('load', () => {
   // honest to react to; the deep link still fires on load and on hashchange.
   if (typeof window.launchQueue?.setConsumer === 'function') {
     window.launchQueue.setConsumer((params = {}) => {
+      // The launch is the user coming to look, whatever the launch URL says,
+      // so acknowledge the badge before anything can early-return
+      // (airhorn-2eh8).
+      airhorn.acknowledgeSharedBadge();
       let hash = location.hash;
       if (params.targetURL) {
         try {

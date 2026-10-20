@@ -668,8 +668,61 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       const g2After = await G2.badge();
       assert(g2After.some((e) => e.fn === 'setAppBadge' && e.arg === 1),
         `the storage-blocked tab's own blast did not badge via the per-tab fallback: ${JSON.stringify(g2After)} (airhorn-danq)`);
+      // The badge the blocked tab set for itself is acknowledged when the
+      // user looks at it again (airhorn-0w1q): the OS badge is one per
+      // origin, so its look-transition is the same acknowledge any tab
+      // performs, and its fallback counter restarts.
+      const g2LogBefore = (await G2.badge()).length;
+      await send('Target.activateTarget', { targetId: B.targetId });
+      await waitUntil(async () => (await B.evaluate(`document.visibilityState`)) === 'visible', 5000);
+      await send('Target.activateTarget', { targetId: G2.targetId });
+      const g2Acked = await waitUntil(async () => {
+        const l = await G2.badge();
+        return l.length > g2LogBefore && l.slice(g2LogBefore).some((e) => e.fn === 'clearAppBadge') ? l : null;
+      }, 5000);
+      assert(g2Acked,
+        `the blocked-storage tab never acknowledged the badge it set itself (calls after its look-transition: ${JSON.stringify((await G2.badge()).slice(g2LogBefore))}) - ` +
+        `no event in the app can ever clear that badge (airhorn-0w1q)`);
+      await G2.clickHorn();
+      await waitUntil(async () => (await G2.hornState()).playing === false, 6000);
+      const g2Restart = await G2.badge();
+      assert(g2Restart.slice(-1).some((e) => e.fn === 'setAppBadge' && e.arg === 1),
+        `after its acknowledgement the blocked tab's next blast did not restart at 1: ${JSON.stringify(g2Restart)} (airhorn-0w1q)`);
       await closeTab(G2);
-      console.log('  storage-blocked tab booted, left the shared badge alone, and still badged its own blasts from one.');
+      console.log('  storage-blocked tab booted, left the shared badge alone, badged its own blasts from one, and acknowledged them when looked at again.');
+    }
+
+    /* -- H. a launch of the installed app acknowledges the badge (airhorn-2eh8) -- */
+    console.log('\n--- H. a launch of the installed app acknowledges the badge ---');
+    if (badgeApi) {
+      // A shared count exists (blast in the foreground tab B).
+      await B.clickHorn();
+      await waitUntil(async () => (await B.hornState()).playing === false, 6000);
+      const hCount = await B.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      assert(hCount > 0, 'a foreground blast did not advance the shared badge count');
+      // A cold launch: a fresh tab whose launch queue has a delivery queued
+      // BEFORE the app loads - the platform delivers a queued launch to
+      // setConsumer right at startup, which is the cold-launch path. The app
+      // must acknowledge the shared badge in that consumer: the launch is
+      // the user coming to look. A plain tab boot (sequence B's tab C) never
+      // fires a launch and still only derives (airhorn-70k).
+      const LQ = await openTab('LQ', `${origin}/`, { preScript: `
+        try {
+          Object.defineProperty(window, 'launchQueue', { configurable: true, value: { setConsumer(fn) { fn({}); } } });
+        } catch (e) { window.__lqStubError = String(e); }
+      ` });
+      await sleep(300);
+      const lqStub = await LQ.evaluate('window.__lqStubError || null');
+      assert(!lqStub, `could not queue a launch delivery in the test tab: ${lqStub}`);
+      const lqLog = await LQ.badge();
+      assert(lqLog.some((e) => e.fn === 'clearAppBadge'),
+        `a launch of the app did not acknowledge the shared badge: ${JSON.stringify(lqLog)} - ` +
+        `the cold launch displays yesterday's count with nothing clearing it (airhorn-2eh8)`);
+      const lqStorage = await LQ.evaluate(`window.localStorage.getItem('airhorn:blast-count')`);
+      assert(lqStorage === null,
+        `the launch did not clear the stored count (got ${JSON.stringify(lqStorage)}) (airhorn-2eh8)`);
+      await closeTab(LQ);
+      console.log('  the launch consumer acknowledged the badge; plain tab boots still only derive (airhorn-70k).');
     }
 
     /* -- I. two simultaneous bumps cannot lose an increment (airhorn-rqz1) -- */
