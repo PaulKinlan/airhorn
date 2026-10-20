@@ -402,6 +402,37 @@ test('an audit whose browser never starts reports a labelled ERROR row and keeps
   }
 });
 
+test('a tool holding a handle the peer will not close still exits, and its output survives (airhorn-s1wy)', () => {
+  // cache-growth's success path used to set process.exitCode and return, so a
+  // peer that swallows the ws close-frame kept the event loop alive after the
+  // run had PASSed and the process never exited. Driven as a child so a hang
+  // cannot hang the suite, and with no files so it cannot collide with a
+  // concurrent lane: the drained exit terminates the process, exitCode alone
+  // does not, and 200KB piped through the drain arrives whole (a bare
+  // process.exit drops the tail beyond the 64KB pipe buffer).
+  const held = 'setInterval(() => {}, 1000); ';
+  const drained = spawnSync(process.execPath,
+    ['--input-type=module', '-e', held + "process.stdout.write('', () => process.exit(0));"],
+    { encoding: 'utf8', timeout: 10000 });
+  assert.equal(drained.status, 0, `the drained exit must terminate the process: ${drained.error || drained.stderr}`);
+  const exitCodeOnly = spawnSync(process.execPath,
+    ['--input-type=module', '-e', held + 'process.exitCode = 0;'],
+    { encoding: 'utf8', timeout: 500 });
+  assert.equal(exitCodeOnly.signal, 'SIGTERM',
+    'exitCode alone must NOT terminate a held loop, or this pin proves nothing about the shape it replaced');
+  const big = spawnSync(process.execPath, ['--input-type=module', '-e',
+    held + "for (let i = 0; i < 200; i++) process.stdout.write('x'.repeat(1000) + '\\n'); " +
+    "process.stdout.write('', () => process.exit(0));"], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(big.stdout.length, 200200,
+    `a piped write must arrive whole before the drained exit fires; got ${big.stdout.length} of 200200`);
+  // And the tool itself must still carry that exit: the shape above is what a
+  // revert to exitCode-only would silently take away, and no assertion on the
+  // mechanism can see a regression in the tool's own tail.
+  const source = fs.readFileSync(path.join(root, 'tools', 'cache-growth.mjs'), 'utf8');
+  assert.match(source, /main\(\)\.then\(\(code\) => \{[\s\S]{0,1200}?process\.exit\(code\)/,
+    'cache-growth\'s success path must hard-exit (drained) - process.exitCode alone hangs on a swallowed close-frame');
+});
+
 test('every script-tier suite is gated by a tests/support change (airhorn-dco)', () => {
   // The report hook is runner-injected into EVERY script-tier (*.test.mjs)
   // suite, so a hook edit can break any of them; the support row must name all
