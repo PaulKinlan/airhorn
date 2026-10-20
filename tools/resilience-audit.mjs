@@ -23,33 +23,8 @@
  */
 
 import { spawn } from 'node:child_process';
+import { sweepTree } from './sweep-tree.mjs';
 
-// SIGKILL every process carrying this launch's --user-data-dir: the browser
-// and every child it forked all carry it, so one /proc read finds the whole
-// tree and the browser dies in the same pass as its children are found.
-// Synchronous so the failure path can use it; a no-op where /proc does not
-// exist (airhorn-e4im, the tools' copy of tests/support/browser.mjs's
-// sweepProfile).
-function sweepProfile(profileDir) {
-  const marker = `--user-data-dir=${profileDir}`;
-  for (let pass = 0; pass < 2; pass += 1) {
-    let victims;
-    try {
-      victims = fs.readdirSync('/proc')
-        .filter((entry) => /^\d+$/.test(entry) && Number(entry) !== process.pid)
-        .filter((entry) => {
-          try { return fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8').includes(marker); } catch { return false; }
-        })
-        .map(Number);
-    } catch {
-      return;
-    }
-    if (victims.length === 0) return;
-    for (const pid of victims) {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
-    }
-  }
-}
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -271,7 +246,7 @@ async function launchBrowser() {
   // by the caller (withBrowser's finally closes null). One teardown owns
   // them all.
   const fail = (err) => {
-    sweepProfile(profileDir);
+    sweepTree(profileDir);
     try { proc.kill('SIGKILL'); } catch { /* already gone */ }
     try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
     throw err;
@@ -314,7 +289,7 @@ async function closeBrowser(browser) {
   // to recreate files after the rm (airhorn-jx9, airhorn-nn26 - the same
   // race audio-parity's finally names), then the pid kill as belt and
   // braces.
-  sweepProfile(browser.profileDir);
+  sweepTree(browser.profileDir);
   try { browser.proc.kill('SIGKILL'); } catch { /* already dead */ }
   browser.cdp.close();
   try { fs.rmSync(browser.profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
