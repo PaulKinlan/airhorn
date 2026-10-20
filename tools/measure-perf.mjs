@@ -73,8 +73,17 @@ async function main() {
   });
 
   const chromePort = new URL(wsUrl).port;
-  const targetsRes = await fetch(`http://127.0.0.1:${chromePort}/json/list`);
-  const targets = await targetsRes.json();
+  // Discovery is bounded like the handshake above: a DevTools endpoint that
+  // accepts and never answers must reject into this tool's cleanup instead of
+  // parking it until undici's ~300s headers timeout (airhorn-9vg3).
+  let targets;
+  try {
+    const res = await fetch(`http://127.0.0.1:${chromePort}/json/list`, { signal: AbortSignal.timeout(10000) });
+    targets = await res.json();
+  } catch (err) {
+    if (err?.name === 'TimeoutError') throw new Error('DevTools discovery timeout: /json/list did not settle within 10000ms');
+    throw err;
+  }
   const pageWsUrl = targets.find(t => t.type === 'page').webSocketDebuggerUrl;
 
   const ws = new WebSocket(pageWsUrl);
