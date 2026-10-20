@@ -66,6 +66,26 @@ function assert(condition, message) {
 // output (airhorn-aos).
 const instrumentation = `
   window.__probe = { starts: 0, level: 0, peak: 0, states: [], errors: [] };
+  // Launch Handler API: headless Chrome does not expose window.launchQueue, so
+  // stand in for the platform's half - record the consumer the page registers
+  // and let the test fire launches the way the OS would. When the API is real,
+  // its source is recorded instead of faked.
+  const nativeLaunchQueue = typeof window.launchQueue?.setConsumer === 'function';
+  window.__launchQueueSource = nativeLaunchQueue ? 'native+stand-in' : 'stand-in';
+  try {
+    Object.defineProperty(window, 'launchQueue', {
+      configurable: true,
+      value: { setConsumer(fn) { window.__launchConsumer = fn; } },
+    });
+  } catch (err) {
+    window.__launchQueueError = String(err && err.message || err);
+  }
+  window.__fireLaunch = (targetURL) => {
+    if (typeof window.__launchConsumer !== 'function') {
+      throw new Error('the page never registered a launch consumer');
+    }
+    window.__launchConsumer({ targetURL, files: [] });
+  };
   window.__probe.reset = () => { window.__probe.level = 0; window.__probe.peak = 0; window.__probe.states.length = 0; };
   window.addEventListener('error', (e) => window.__probe.errors.push(e.message));
   window.addEventListener('unhandledrejection', (e) => window.__probe.errors.push(String(e.reason && e.reason.message || e.reason)));
@@ -246,6 +266,8 @@ async function launch({ autoplay, label }) {
       errors: window.__probe.errors.slice(),
       controlled: !!(navigator.serviceWorker && navigator.serviceWorker.controller),
       onLine: navigator.onLine,
+      status: (document.getElementById('app-status') || {}).textContent || '',
+      active: (document.activeElement && document.activeElement.className) || '',
     };
   })()`);
 
@@ -409,6 +431,31 @@ async function checkPromptAndShareable(base) {
       `after a same-URL navigation the horn is ${again.pressed}/${again.playing}, expected at rest`);
     console.log('  second launch on the identical URL is a no-op (focus-existing), horn at rest');
 
+    console.log('--- 4b. a repeat launch re-fires the deep link (airhorn-hlg) ---');
+    // The case the product call is about: the window is already on #instant, and
+    // a second press of the shortcut must fire again rather than be swallowed as
+    // a duplicate. The same-URL navigation above is a no-op; the launch queue is
+    // the signal that says "this was a real press".
+    const queue = await browser.evaluate('({ source: window.__launchQueueSource, hasConsumer: typeof window.__launchConsumer === "function" })');
+    assert(queue.hasConsumer, `the page registered no launch consumer, so a repeat launch cannot re-fire (launchQueue: ${queue.source})`);
+    const beforeLaunch = await browser.snapshot();
+    await browser.evaluate(`window.__probe.reset(); window.__fireLaunch(${JSON.stringify(base + '/#instant')}); 1`);
+    const relaunched = await browser.waitFor((s) => s.peak > 0.3, { label: 'the repeat launch to blast', timeout: 8000 });
+    assert(relaunched.starts > beforeLaunch.starts,
+      `a repeat launch did not start anything (starts ${beforeLaunch.starts} -> ${relaunched.starts})`);
+    assert(relaunched.pressed === 'true' && relaunched.playing === true,
+      `a repeat launch left the horn unpressed/unplaying (aria-pressed ${relaunched.pressed}, playing ${relaunched.playing})`);
+    assert(relaunched.hash === '#instant', `a repeat launch moved the URL to ${relaunched.href}`);
+    console.log(`  repeat launch blasted again (${queue.source} queue): starts ${beforeLaunch.starts} -> ${relaunched.starts}, peak ${relaunched.peak.toFixed(3)}`);
+
+    // A launch that is not the instant deep link must not sound the horn.
+    await browser.sleep(900);
+    await browser.evaluate(`window.__probe.reset(); window.__fireLaunch(${JSON.stringify(base + '/')}); 1`);
+    await browser.sleep(700);
+    const otherLaunch = await browser.snapshot();
+    assert(otherLaunch.peak === 0 && otherLaunch.starts === relaunched.starts,
+      `a launch of / sounded the horn (peak ${otherLaunch.peak.toFixed(4)}, starts ${otherLaunch.starts})`);
+
     console.log('--- 5. an unknown hash: nothing blasts, the horn still works ---');
     await browser.navigate('about:blank', { wait: 50 });
     await browser.navigate(`${base}/#nonsense`);
@@ -505,6 +552,15 @@ async function checkBlockedAutoplay(base) {
       console.log(`  this browser allowed audio without a gesture (ctx ${blocked.ctxState}); state-consistency trivially holds`);
     }
 
+    // Silence must not read as broken (airhorn-hlg): the page says what is
+    // wrong through its one polite live region, and the horn - a real button -
+    // is the focused next action.
+    assert(/tap/i.test(blocked.status),
+      `a blocked deep link said nothing: #app-status is ${JSON.stringify(blocked.status)}`);
+    assert(/horn/.test(blocked.active),
+      `the horn is not the focused next action after a blocked deep link (active element class ${JSON.stringify(blocked.active)})`);
+    console.log(`  announced ${JSON.stringify(blocked.status)} and focused the horn`);
+
     // And the first real press must still work - a silent deep link is a page
     // that has not been touched, not a broken one.
     const first = await browser.press(400);
@@ -512,7 +568,10 @@ async function checkBlockedAutoplay(base) {
       `the first press after a blocked deep link produced no sound (peak ${first.during.peak.toFixed(4)}, ctx ${first.during.ctxState})`);
     assert(first.during.pressed === 'true', 'the first press after a blocked deep link did not light the horn');
     assert(first.after.horning === false, 'the horn stayed lit after release');
-    console.log(`  first press played (peak ${first.during.peak.toFixed(3)}, ctx ${first.during.ctxState})`);
+    // The hint must not outlive the problem it described.
+    assert(!/tap/i.test(first.after.status),
+      `the "needs a tap" hint stayed after the horn played: ${JSON.stringify(first.after.status)}`);
+    console.log(`  first press played (peak ${first.during.peak.toFixed(3)}, ctx ${first.during.ctxState}) and cleared the hint`);
   } finally {
     await browser.close();
   }

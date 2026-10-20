@@ -50,7 +50,7 @@ claiming otherwise.
 | `AudioContext.state` | `suspended` | `suspended` |
 | sources scheduled | **1** (a delayed blast waiting for the next gesture anywhere on the page) | **0** |
 | measured peak | 0.000 (silent) | 0.000 (silent) |
-| first real press afterwards | plays (peak 0.678) — but the page had been lying until then | plays (peak 0.678) |
+| first real press afterwards | plays (peak 0.678) — but the page had been lying until then | plays (peak 0.678), and an announcement had already said a tap was needed |
 
 The two changes behind the right-hand column are small and both in the start path:
 
@@ -65,16 +65,28 @@ Because the WebMCP `play_horn` tool goes through the same `AirHorn.start()`, a b
 context now yields its documented `not_started` refusal (`{playing: false, code:
 "not_started"}`) rather than `{playing: true}` while silent.
 
-## Findings this produced (not defects of the shortcut itself)
+## The two UX gaps, now closed (`airhorn-hlg`)
 
-1. **A repeat launch does nothing.** With `launch_handler.client_mode:
-   focus-existing`, launching the shortcut while a window is already on `/#instant`
-   reuses that window and navigates it to the URL it is already on, which is a no-op:
-   no load, no `hashchange`, no blast (`starts` unchanged, horn at rest). One blast
-   per document. Options: accept and document, or `client_mode: navigate-existing`
-   (re-navigates the existing window — behaviour for an identical URL still needs
-   measuring), or drop `launch_handler` so every launch opens a fresh window.
-2. **No affordance when audio is blocked.** The page is now honest but silent; it
-   does not tell the user to touch the horn. A one-line visible hint (or an
-   announcement when a start is refused for `suspended`) would turn a dead-feeling
-   deep link into an obvious one.
+1. **A repeat launch re-fires the deep link.** `launch_handler.client_mode:
+   focus-existing` reuses the window and does not change the URL, so neither `load`
+   nor `hashchange` fires and the second press of the shortcut used to do nothing
+   (`starts` unchanged, horn at rest). The page now consumes
+   `window.launchQueue.setConsumer(...)`, which the platform fires for **every**
+   launch — including the ones that reuse a window — and re-fires the blast when the
+   launch's `targetURL` is `/#instant`. Verified with the platform's half substituted
+   (`__fireLaunch`), because an OS-level launch cannot be synthesised from a page:
+   `starts 1 -> 2`, `peak 0.554`, URL unchanged; a launch whose target is `/` sounds
+   nothing. Headless Chrome 155 does expose `window.launchQueue`, so the app's
+   consumer is registered against the real API and only the event is simulated.
+   A browser with no launch queue emits no event at all for a repeat launch, so there
+   is nothing honest to react to there; the deep link still fires on load and on
+   `hashchange`.
+2. **A blocked deep link now says so.** When the audio graph is suspended (autoplay
+   blocked) the start resolves without playing, and the app announces *"The horn needs
+   a tap to make a sound."* through the page's one polite live region (`#app-status`),
+   then focuses the horn — a real button — so the next action is obvious. The hint is
+   cleared as soon as a start actually plays, and never survives the problem it
+   described. A browser with no Web Audio gets a different, true sentence: *"This
+   browser cannot play the air horn."* Verified in the no-autoplay browser:
+   `#app-status` carries the hint, `document.activeElement` is the horn, the first
+   press plays (`peak 0.678`), and the hint is gone afterwards.

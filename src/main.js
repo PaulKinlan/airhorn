@@ -115,6 +115,7 @@ class AirHorn {
   #horn;
   #image;
   #counter = 0;
+  #announcedTapHint = false;
   #loop = false;
 
   constructor(root) {
@@ -182,10 +183,27 @@ class AirHorn {
     // audio graph suspended - take it back rather than claim a horn nobody can
     // hear (airhorn-x4l).
     started.then((ok) => {
-      if (ok === true || this.#horn.isPlaying()) return;
+      if (ok === true || this.#horn.isPlaying()) {
+        if (this.#announcedTapHint) {
+          this.#announcedTapHint = false;
+          window.__airhornAnnounce?.('');
+        }
+        return;
+      }
       this.#loop = false;
       this.#image.classList.remove('horning');
       this.#image.setAttribute('aria-pressed', 'false');
+      // Silence must not read as broken (airhorn-hlg). Either the graph is
+      // suspended until a gesture, or there is no Web Audio at all - say which,
+      // through the page's one polite live region, and put the user on the
+      // control that fixes it.
+      if (this.#horn.hasAudioContext()) {
+        window.__airhornAnnounce?.('The horn needs a tap to make a sound.');
+        this.#announcedTapHint = true;
+        this.#image.focus?.({ preventScroll: false });
+      } else {
+        window.__airhornAnnounce?.('This browser cannot play the air horn.');
+      }
     });
 
     this.#horn.onstopped = () => {
@@ -241,15 +259,41 @@ window.addEventListener('load', () => {
     // WebMCP is an enhancement: never let a registration failure break the horn.
   });
 
+  const fireInstant = () => airhorn.start({ loop: false });
+
   if (location.hash === '#instant') {
-    airhorn.start({ loop: false });
+    fireInstant();
   }
 
   window.addEventListener('hashchange', () => {
     if (location.hash === '#instant') {
-      airhorn.start({ loop: false });
+      fireInstant();
     }
   });
+
+  // Launching the installed app reuses this window when the manifest asks for
+  // focus-existing, and the URL does not change - so neither load nor hashchange
+  // fires and a second press of the shortcut used to do nothing at all
+  // (airhorn-hlg). The platform reports every launch through window.launchQueue,
+  // so consume it: a deliberate second press re-fires the deep link's action
+  // instead of being swallowed as a duplicate. In a browser without a launch
+  // queue a repeat launch emits no event in the page at all, so there is nothing
+  // honest to react to; the deep link still fires on load and on hashchange.
+  if (typeof window.launchQueue?.setConsumer === 'function') {
+    window.launchQueue.setConsumer((params = {}) => {
+      let hash = location.hash;
+      if (params.targetURL) {
+        try {
+          hash = new URL(params.targetURL, location.href).hash;
+        } catch {
+          return;
+        }
+      }
+      if (hash === '#instant') {
+        fireInstant();
+      }
+    });
+  }
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
