@@ -107,7 +107,7 @@ static handler (which is what makes a missing file a 404 instead of an HTML 200)
 
 | Lever | What it is | Reach | Notes |
 | --- | --- | --- | --- |
-| **A. Traffic switch** | re-point the origin at the stored V1 deployment (`gcloud app versions migrate`) | every request, in seconds | atomic, byte-exact, reversible; the primary lever |
+| **A. Traffic switch** | re-point the origin at the stored V1 deployment (`gcloud app services set-traffic … --splits=<version>=1`) | every request, in seconds | byte-exact, reversible; the primary lever. Use `set-traffic`: `gcloud app versions migrate` is documented as *gradual*, so it is the wrong tool when you need the old version *now* |
 | **B. Deployed artifact** | the bytes at the origin root | as A | only relevant if you deploy by uploading files (static host / rsync); never rebuild V1 |
 | **C. Edge cache / CDN invalidation** | purging cached responses | up to `max-age` | measured `max-age=10` on today's origin: **nothing to purge**, wait 10 s. Only becomes a real step if V2 ships somewhere with longer TTLs |
 | **D. The service worker on devices** | the copy of `sw.js` already installed in every browser that visited | **not revocable** | A–C cannot touch it. The only lever is the bytes served at `https://airhorner.com/sw.js`, and they are read on the device's next load. §4–§6 |
@@ -205,7 +205,7 @@ while IFS= read -r path; do
   mkdir -p "$(dirname "$path")"
   curl -sS --compressed --fail -o "$path" "https://airhorner.com/${path// /%20}"
 done < /tmp/v1-paths.txt
-# verify: every file against the manifest in §Appendix (see the awk in §10)
+# verify before you trust it: §10 check (b) (run from the repo, not from the archive)
 ```
 
 Two properties were measured for this archive: the origin is byte-stable (two fetches of
@@ -240,6 +240,9 @@ window is over.
 
 ### Step 2 — switch traffic (seconds)
 
+**One switch, to one named version. Never a second command that re-targets a different
+version** — that is how an R2 rollback silently turns into an R1 one.
+
 ```bash
 # PRODUCTION ONLY — not run here
 # R1 deployment directory = the archived V1 tree (its contents sit at the root, because the
@@ -253,12 +256,25 @@ window is over.
 #   - { url: /(.+),          static_files: \1,              upload: (.+),                secure: always }
 gcloud app deploy app.yaml --version v1-rollback --no-promote
 # preview on the version URL first; note that hostname is a DIFFERENT origin, so the
-# service worker being exercised there is not the one airhorner.com uses
-gcloud app versions migrate v1-rollback --service=default --quiet   # or: <v1-version-id> for R2
+# service worker being exercised there is not the one airhorner.com uses.
+# Then pick ONE of the two switches below - they target different versions:
+#
+#   R1 - the rollback deployment just uploaded (archived V1 + the §6 worker):
 gcloud app services set-traffic default --splits=v1-rollback=1 --quiet
+#
+#   R2 - the plain V1 deployment already on the host (no build, no upload):
+# gcloud app services set-traffic default --splits=<v1-version-id>=1 --quiet
+#
+# `set-traffic` sends ALL traffic to the named version in one step. `gcloud app versions
+# migrate <version>` is documented as a GRADUAL shift (it ramps traffic), so it is not the
+# command to reach for in an incident - if you use it, watch the split until it reaches 1.
+#
+# INSTANT is not the same as ALL DEVICES: see §4 - the origin can be V1 in seconds while a
+# device that never loads the page again is still on V2.
 ```
 
-If V2 ships on a static host instead, the same two operations, by host:
+If V2 ships on a static host instead, one operation per host (re-promote the previous
+deployment, or upload the archived tree), plus a purge only if that host caches HTML:
 
 ```bash
 # PRODUCTION ONLY — not run here. Exact syntax varies by CLI version; check --help first.
@@ -437,17 +453,43 @@ google-chrome --user-data-dir=/tmp/profile-that-had-v2 https://airhorner.com/
 54 files, 2,909,540 bytes, fetched from `https://airhorner.com/` with `curl --compressed`
 (see §5 Step 0), each fetched twice with identical hashes. This table is the verification
 oracle for a restore: `sha256` is of the file as served (decompressed), `content-type` is
-what the origin sends and what a static restore must send again.
+what the origin sends and what a static restore must send again. The archive at
+`~/airhorn-v1-artifact/` carries the same rows as `MANIFEST.tsv`, which is what check (a)
+below reads; check (b) reads this table. Both exit non-zero on any mismatch.
+
+Both checks below **fail closed**: they exit non-zero on a missing file or a hash
+mismatch, so a broken archive cannot reach a deploy. Run one of them, not neither.
 
 ```bash
-# verify an archive against the table below (run inside the archive directory)
-awk -F'|' '{p=$2; h=$3; gsub(/^ +| +$/,"",p); gsub(/^ +| +$/,"",h);
-            if (length(h)==64) print p"\t"h}' ROLLBACK.md > /tmp/v1-want.tsv
-while IFS=$'\t' read -r p want; do
-  got=$(sha256sum "$p" 2>/dev/null | cut -d' ' -f1)
-  [ "$got" = "$want" ] && echo "ok   $p" || echo "FAIL $p"
-done < /tmp/v1-want.tsv | grep -c '^ok'    # expect 52
+# (a) inside the archive: SHA256SUMS is what was written when it was made, MANIFEST.tsv is
+#     the same data as the table below in path<TAB>sha256<TAB>bytes<TAB>type form.
+cd ~/airhorn-v1-artifact
+sha256sum -c SHA256SUMS                      # 55 lines: 54 live files + rollback-overlay/sw.js
+awk -F'\t' '!/^#/ && NF>=3 {print $2"\t"$1}' MANIFEST.tsv |   # ...then the manifest, per file
+while IFS=$'\t' read -r want p; do
+  got=$(sha256sum "live/$p" 2>/dev/null | cut -d' ' -f1)
+  [ "$got" = "$want" ] || { echo "MISMATCH: $p" >&2; exit 1; }
+done || { echo "ARCHIVE INCOMPLETE OR CORRUPT - do not deploy" >&2; exit 1; }
+echo "archive verified: $(grep -vc '^#' MANIFEST.tsv) files"
 ```
+
+```bash
+# (b) from a checkout of this repo, checking the table below against an archive made
+#     beside it (this is the form that does not need MANIFEST.tsv). Run it HERE, not in the
+#     archive: ROLLBACK.md lives in the repo, and an archive does not carry it.
+awk -F'|' '{p=$2; h=$3; gsub(/^ +| +$/,"",p); gsub(/^ +| +$/,"",h);
+            if (length(h)==64) print p"\t"h}' ROLLBACK.md |
+while IFS=$'\t' read -r p want; do
+  got=$(sha256sum "$HOME/airhorn-v1-artifact/live/$p" 2>/dev/null | cut -d' ' -f1)
+  [ "$got" = "$want" ] || { echo "MISMATCH: $p" >&2; exit 1; }
+done || { echo "ARCHIVE DOES NOT MATCH THIS TABLE - do not deploy" >&2; exit 1; }
+echo "table verified: $(grep -c '| [0-9a-f]\{64\} |' ROLLBACK.md) files"
+```
+
+The table itself is the reviewable copy of the manifest (54 rows, one per live file); the
+archive's `MANIFEST.tsv` is the machine-readable one. If they ever disagree, the archive is
+wrong and the table is right — the table was generated from the same two-fetch-verified
+mirror the archive holds.
 
 | path | sha256 | bytes | content-type |
 | --- | --- | ---: | --- |
