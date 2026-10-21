@@ -228,9 +228,15 @@
     }
 
     /* No motion: the press still reads clearly (the raised edge collapses and
-       the inner ring darkens), it just stops vibrating. */
+       the inner ring darkens), it just stops vibrating. The .inner disc has
+       its own background-color transition for the press/release swap, so it
+       needs its own none (airhorn-1jrc: it was still timed at 0.2s). */
     @media (prefers-reduced-motion: reduce) {
       transition: none;
+
+      & .inner {
+        transition: none;
+      }
 
       &:is(.horning, [aria-pressed='true']) {
         animation: none;
@@ -371,6 +377,16 @@
       outline: 3px solid currentColor;
       outline-offset: 3px;
     }
+  }
+}
+
+/* A reduced-motion user asked for no transitions, so NONE may keep running:
+   with the horn and installer covered inside their layers, the boot-alert
+   button's hover transition was the one left on the page (airhorn-1jrc).
+   The hover still changes colour - it just does so instantly. */
+@media (prefers-reduced-motion: reduce) {
+  .boot-alert .alert-button {
+    transition: none;
   }
 }
 
