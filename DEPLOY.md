@@ -68,9 +68,12 @@ document is stale — not the pack.
   `/usr/bin/google-chrome`, override with `CHROME_BIN`. Without it those steps
   fail non-zero; nothing in steps 1–3 needs a browser.
 - **A rollback plan, made before you publish.** Read [ROLLBACK.md](ROLLBACK.md): archive the
-  current live artifact (the deployed bytes, not a rebuild - V1 cannot be rebuilt from this
-  repo) and confirm the previous deployment stays retrievable. The origin is the easy part;
-  the service worker already on visitors' devices is the part a revert cannot reach.
+  current live artifact - the deployed bytes, not a rebuild. A rebuild of the V1 tip does
+  work, and it still gives you a near-miss: 49 of the 54 live files byte-identically, plus an
+  `sw.js` whose version string production never had, an `index.html` without production's
+  analytics block, and no `images/screenshots/*` at all. Then confirm the previous deployment
+  stays retrievable. The origin is the easy part; the service worker already on visitors'
+  devices is the part a revert cannot reach.
 - **A green test gate.** Publishing is gated on `npm test` (builds `dist/`
   first, then runs every `tests/**/*.test.{js,mjs}` in one serial sweep) being
   green for the commit you are shipping. This document does not quote a test

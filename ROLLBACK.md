@@ -60,7 +60,7 @@ archived deployment, and it is the only thing that puts production back exactly.
 
 | | V1 (live) | V2 (`dist/`, this tree) |
 | --- | --- | --- |
-| Files at the origin root | 52 | 26 |
+| Files served | 54 | 26 |
 | Paths | `/scripts/*`, `/images/icons/*`, `/images/touch/*`, `/sounds/{MP3,WAV}/*` | `/assets/index-<hash>.js`, `/images/*`, `/sounds/airhorn.mp3` |
 | `sw.js` | hand-written, `version = "0.6.20"`, stable text | build-stamped by the Vite plugin: `version = "2.0.0-<buildhash>"` |
 | SW caches | `airhorner-0.6.20` | `airhorner-2.0.0-<buildhash>` + `horn-integrity-2.0.0-<buildhash>` |
@@ -118,7 +118,7 @@ device can still be sitting on V2 afterwards.
 ## 4. What a stale service worker does to visitors after a rollback — measured
 
 Six drills, each a fresh Chrome profile, a loopback server, V2's real `dist/`, and the
-**real live V1 tree** (the 52 mirrored files, hashes in §Appendix) as the rollback
+**real live V1 tree** (the 54 mirrored files, hashes in §Appendix) as the rollback
 target. "Reload" is a plain navigation with no scripted `registration.update()` — what a
 returning visitor does.
 
