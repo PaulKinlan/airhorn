@@ -379,18 +379,23 @@ async function main() {
   // profile AND its cert/server temp dir stay in /tmp with no process left to
   // remove them - nothing inside a dead process can clean that up (airhorn-9gao,
   // measured: 2 profile dirs + 17 cert temp dirs from killed runs). The next run
-  // sweeps them with the shared reap helper, which only removes a dir that no
-  // live process names and that is older than the launch window. Both artefacts
-  // are made under this one prefix so the sweep can never match a caller's own
-  // --out evidence dir.
-  const { swept } = sweepStaleProfiles('chrome-https-proof-');
+  // sweeps them with the shared reap helper.
+  //
+  // What may be swept is the exact mkdtemp shape this tool creates, and never a
+  // caller's --out (airhorn-13xr): a bare prefix is a name a caller can choose
+  // too, and `--out /tmp/chrome-https-proof-evidence` used to be deleted with its
+  // content. The helper still only removes a dir no live process names and that
+  // is older than the launch window, on top of these two.
+  const { swept } = sweepStaleProfiles('chrome-https-proof-', {
+    pattern: /^chrome-https-proof-(?:tmp-)?[A-Za-z0-9]{6}$/, // node's mkdtemp alphabet
+    exclude: [outDir],
+  });
   if (swept.length) {
     console.log(`install-https-proof: swept ${swept.length} chrome-https-proof-* dir(s) left by a killed earlier run: ${swept.join(', ')}`);
   }
   fs.mkdirSync(outDir, { recursive: true });
   // The cert/server temp dir shares the profile's owned prefix (chrome-https-
-  // proof-*) so one stale sweep covers both, and so a caller's --out directory
-  // can never be mistaken for this tool's litter.
+  // proof-*) so one stale sweep covers both, under the same mkdtemp shape.
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-https-proof-tmp-'));
   let serverHttp = null;
   let serverHttps = null;

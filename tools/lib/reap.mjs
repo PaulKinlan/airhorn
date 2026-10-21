@@ -102,10 +102,21 @@ export function sweepProfile(profileDir) {
  * can be attributed, so nothing is removed); any other /proc failure is printed
  * and nothing is swept, rather than guessing.
  *
+ * What counts as ours is deliberately narrow (airhorn-13xr): a prefix alone is
+ * a NAME a caller can also choose - `--out /tmp/chrome-https-proof-evidence`
+ * matched it, and an aged evidence dir was swept with its content. So the
+ * caller passes `pattern` (the exact mkdtemp shape this tool creates, random
+ * suffix and all) and `exclude` (paths it knows are not litter, e.g. its own
+ * --out), and a name must satisfy both the pattern and not be excluded. The
+ * default - anything under the prefix - is for a caller whose whole prefix is
+ * genuinely private to it.
+ *
  * Returns what it did: { swept: [names], kept: [{ dir, why }] }, so the caller
  * can say what it cleaned instead of reporting silence either way.
  */
-export function sweepStaleProfiles(prefix, { graceMs = 5000, tmpdir = os.tmpdir(), now = Date.now() } = {}) {
+export function sweepStaleProfiles(prefix, {
+  graceMs = 5000, tmpdir = os.tmpdir(), now = Date.now(), pattern = null, exclude = [],
+} = {}) {
   const cmdlines = [];
   try {
     for (const entry of fs.readdirSync('/proc')) {
@@ -125,9 +136,18 @@ export function sweepStaleProfiles(prefix, { graceMs = 5000, tmpdir = os.tmpdir(
 
   const swept = [];
   const kept = [];
+  const excluded = new Set(exclude.map((entry) => path.resolve(entry)));
   for (const name of names) {
     if (!name.startsWith(prefix)) continue;
     const dir = path.join(tmpdir, name);
+    if (pattern && !pattern.test(name)) {
+      kept.push({ dir: name, why: 'not the shape this tool creates' });
+      continue;
+    }
+    if (excluded.has(path.resolve(dir))) {
+      kept.push({ dir: name, why: 'the caller owns it' });
+      continue;
+    }
     let stat;
     try { stat = fs.lstatSync(dir); } catch { continue; } // already gone
     if (!stat.isDirectory()) continue;

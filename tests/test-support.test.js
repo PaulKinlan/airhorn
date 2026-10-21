@@ -461,3 +461,34 @@ test('a profile left by a SIGKILLed run is swept, a live or brand-new one is not
     fs.rmSync(tmpdir, { recursive: true, force: true });
   }
 });
+
+test('a caller-owned --out dir under the sweep prefix is never swept (airhorn-13xr)', async () => {
+  // A prefix is a name a caller can choose too: `--out /tmp/chrome-https-proof-
+  // evidence` matched the sweep and lost its content. Only the exact mkdtemp
+  // shape the tool itself creates may be swept, and an explicit exclude always
+  // wins - even when a caller's name happens to look like that shape.
+  const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), `reapshape-${process.pid}-`));
+  const litter = path.join(tmpdir, 'chrome-https-proof-a1B2c3');
+  const certTemp = path.join(tmpdir, 'chrome-https-proof-tmp-z9Y8x7');
+  const evidence = path.join(tmpdir, 'chrome-https-proof-evidence');
+  const shapedEvidence = path.join(tmpdir, 'chrome-https-proof-q4W5e6');
+  for (const dir of [litter, certTemp, evidence, shapedEvidence]) fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(shapedEvidence, 'keep-me.txt'), 'precious');
+  const old = new Date(Date.now() - 10 * 60 * 1000);
+  for (const dir of [litter, certTemp, evidence, shapedEvidence]) fs.utimesSync(dir, old, old);
+  try {
+    const { sweepStaleProfiles } = await import(REAP);
+    const result = sweepStaleProfiles('chrome-https-proof-', {
+      tmpdir,
+      pattern: /^chrome-https-proof-(?:tmp-)?[A-Za-z0-9]{6}$/,
+      exclude: [shapedEvidence],
+    });
+    assert.deepEqual(result.swept.sort(), ['chrome-https-proof-a1B2c3', 'chrome-https-proof-tmp-z9Y8x7'],
+      `only the mkdtemp-shaped litter may be swept: ${JSON.stringify(result)}`);
+    assert.ok(fs.existsSync(evidence), 'a longer name is not the shape this tool creates');
+    assert.equal(fs.readFileSync(path.join(shapedEvidence, 'keep-me.txt'), 'utf8'), 'precious',
+      'an excluded --out must survive even when its name matches the mkdtemp shape');
+  } finally {
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+  }
+});
