@@ -40,8 +40,14 @@
  * of the navigation's own work. It landed between ~0.5s and ~2s after the page was
  * ready in every drill here, so a fact dump taken shortly after the load sees the
  * pre-check page and reports "the rollback did not happen". The first version of this
- * tool did exactly that and produced a confident, wrong answer; navigate() now waits
- * SETTLE_MS and records each check's latency (printed in the report).
+ * tool did exactly that and produced a confident, wrong answer; navigate() now waits for
+ * the check as an event (bounded), waits for the handover to settle, and records every
+ * latency in the report, so a loaded machine takes longer instead of reporting a false
+ * MISMATCH.
+ *
+ * AND: redirect its output to a file; never pipe a run into `head`/`tail`. A closed
+ * pipe used to kill the process mid-drill and leave its Chrome running (airhorn-68vi);
+ * every exit path — return, signal, timeout, closed pipe — now reaps through one hook.
  */
 
 import http from 'node:http';
@@ -69,9 +75,13 @@ const MIME = {
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// How long to wait after a navigation for the update check the rollback depends on.
-// Measured, not guessed: see the latency stats in the report.
-const SETTLE_MS = 2500;
+// How long to wait after a navigation for the update check the rollback depends on,
+// and then for its handover. Both are bounded events, not sleeps: the check landed
+// 170-2,172 ms after a ready page here (median ~1.9 s), so CHECK_WAIT_MS is set well
+// clear of the slowest observed read, and a drill on a loaded box simply takes longer
+// instead of reporting a false MISMATCH (airhorn-68vi).
+const CHECK_WAIT_MS = 10000;
+const HANDOVER_WAIT_MS = 8000;
 
 // ---------------------------------------------------------------------------
 // The mutable origin. One server, one port: a rollback is `state.origin = 'v1'`
@@ -118,6 +128,68 @@ const server = http.createServer((req, res) => {
     return serve(res, V1_LIVE, urlPath);
   }
   return send404(res);
+});
+
+// ---------------------------------------------------------------------------
+// Lifecycle — no browser outlives this process (airhorn-68vi)
+//
+// Returning normally was the only path that reaped a browser, and that is not
+// the only way this tool dies. Measured on 2026-10-21: a drill run piped into
+// `| head -20` lost its stdout, died on EPIPE mid-drill, skipped withProfile's
+// finally, and left a 13-process, 1.2 GB Chrome plus its 158 MB profile for 45
+// minutes until the reaper killed it. The same applies to SIGTERM/SIGINT and to
+// a wedged wait. So every handle is registered here and every exit path goes
+// through reapAll(), including a truncated pipe.
+//
+// Never pipe a run into `head`: redirect to a file and read the file. That is
+// the fleet's standing lesson, and this is what ignoring it costs.
+// ---------------------------------------------------------------------------
+const liveHandles = new Set();
+
+function trackHandle(reapSync) {
+  const handle = { reapSync };
+  liveHandles.add(handle);
+  return () => liveHandles.delete(handle);
+}
+
+let reaped = false;
+function reapAll() {
+  if (reaped) return;
+  reaped = true;
+  for (const handle of liveHandles) {
+    try { handle.reapSync(); } catch { /* best effort */ }
+  }
+  liveHandles.clear();
+  try { server.close(); } catch { /* not listening */ }
+}
+
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => {
+    console.error(`rollback-rehearsal: ${signal} — reaping browsers before exit`);
+    reapAll();
+    process.removeAllListeners(signal);
+    process.kill(process.pid, signal);
+  });
+}
+process.on('exit', reapAll);
+
+// A closed pipe is an exit path: take it THROUGH the exit hook instead of dying
+// with an unhandled EPIPE and leaving the browser behind.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (err) => {
+    if (err && err.code === 'EPIPE') { reapAll(); process.exit(0); }
+  });
+}
+process.on('uncaughtException', (err) => {
+  if (err && err.code === 'EPIPE') { reapAll(); process.exit(0); }
+  reapAll();
+  console.error(err);
+  process.exit(2);
+});
+process.on('unhandledRejection', (err) => {
+  reapAll();
+  console.error(err);
+  process.exit(2);
 });
 
 // ---------------------------------------------------------------------------
@@ -264,27 +336,73 @@ const v1CachePresent = (f) => f.caches.some((k) => k === 'airhorner-0.6.20');
 // `apple-mobile-web-app-status-bar-style`, which contains "app-status".
 const v1CacheShell = (f) => (f.shellByCache && f.shellByCache['airhorner-0.6.20']) || { v1: false, v2: false };
 
-async function navigate(page, url, { reload = false } = {}) {
+// The page signature used to notice that a handover happened (the worker's
+// controllerchange reload replaces the document: V2's shell is ~17 kB with
+// #app-status, V1's is ~3.5 kB with a main.min.js script tag).
+const PAGE_SIG = `(() => {
+  const b = document.body ? document.body.innerHTML.length : -1;
+  const shell = document.querySelector('#app-status') ? 'v2' : (document.querySelector('script[src*="main.min.js"]') ? 'v1' : '?');
+  return b + ':' + shell + ':' + document.readyState;
+})()`;
+
+// Wait until the page stops changing for a moment. Event-driven on purpose: a
+// fixed sleep is a machine-speed assumption, and on a loaded box it read the
+// page BEFORE the V1 worker had activated and reported a false MISMATCH on
+// drill A (measured 2026-10-21, 3 mismatches in one run that a quiet box passed).
+async function waitForDomSettled(page, maxMs, quietMs = 800) {
+  let prev = null;
+  let stableSince = Date.now();
+  const deadline = Date.now() + maxMs;
+  for (;;) {
+    const sig = await page.evaluate(PAGE_SIG).catch(() => 'no-document');
+    if (sig !== prev) { prev = sig; stableSince = Date.now(); }
+    else if (Date.now() - stableSince >= quietMs) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep2(100);
+  }
+}
+
+// Wait, bounded, for the browser to re-read /sw.js. Returns the request's
+// latency relative to the navigation, or null if none arrived.
+async function waitForCheck(from, maxMs) {
+  const deadline = Date.now() + maxMs;
+  for (;;) {
+    const hit = state.requests.slice(from).find((r) => r.path === '/sw.js');
+    if (hit) return hit;
+    if (Date.now() >= deadline) return null;
+    await sleep2(50);
+  }
+}
+
+async function navigate(page, url, { reload = false, expectCheck = true, expectHorn = true } = {}) {
   const from = state.requests.length;
   const startedAt = Date.now();
   if (reload) await page.send('Page.reload', {});
   else await page.send('Page.navigate', { url });
-  // A served page is "ready" when the horn is in the DOM. An error page never
-  // is, so this returns false rather than throwing (drill F offline).
-  const ok = await waitFor(page, `document.readyState === 'complete' && !!document.querySelector('.horn')`, 12000);
-  // THE SETTLE MATTERS: the browser's worker update check is not part of the
-  // navigation's own work - it landed up to a couple of seconds AFTER the page
-  // was ready and interactive in every drill here. Reading the page 400ms after
-  // the load (the first version of this tool) concluded "no check happened" and
-  // was simply measuring too early; see the latency numbers in the report.
-  await sleep2(SETTLE_MS);
-  const check = state.requests.slice(from).find((r) => r.path === '/sw.js');
-  if (check) navTimings.push({ startedAt, latencyMs: check.at - startedAt, origin: check.origin });
+  // A served page is "ready" when the horn is in the DOM (or, for the steps that
+  // deliberately destroy the origin, when the error page has finished loading).
+  const ok = await waitFor(page, expectHorn
+    ? `document.readyState === 'complete' && !!document.querySelector('.horn')`
+    : `document.readyState === 'complete'`, 12000);
+
+  let check = null;
+  if (expectCheck) {
+    // The browser's worker update check is NOT part of the navigation's work: it
+    // landed 170-2,172 ms AFTER a ready page in this harness (median ~1.9 s over
+    // 35 reads). Waiting for it as an event, rather than for a duration, is what
+    // keeps the drills independent of how loaded the machine is.
+    check = await waitForCheck(from, CHECK_WAIT_MS);
+    if (check) navTimings.push({ startedAt, latencyMs: check.at - startedAt, origin: check.origin });
+    // The handover after the check (install → activate → claim → the page's own
+    // controllerchange reload) also takes time, and all of it is observable.
+    await waitForDomSettled(page, HANDOVER_WAIT_MS);
+  }
+
   if (process.env.REHEARSAL_DEBUG) {
     const seen = state.requests.slice(from);
     console.log(`  DEBUG navigate(${reload ? 'reload' : url}) origin=${state.origin} -> ${seen.length} requests: ` +
       (seen.map((r) => `${r.path}@${r.origin}`).join(' ') || '(none)') +
-      (check ? `  [update check arrived ${check.at - startedAt}ms after the navigation began]` : '  [no /sw.js read]'));
+      (check ? `  [update check ${check.at - startedAt}ms after the navigation began]` : '  [no /sw.js read]'));
   }
   return ok;
 }
@@ -292,9 +410,11 @@ async function navigate(page, url, { reload = false } = {}) {
 async function openSecondTab(browser, url) {
   const res = await fetch(`http://127.0.0.1:${browser.port}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
   const target = await res.json();
+  const from = state.requests.length;
   const page = await connect(target.webSocketDebuggerUrl);
   await waitFor(page, `document.readyState === 'complete' && !!document.querySelector('.horn')`, 12000);
-  await sleep2(SETTLE_MS); // the same update-check window as navigate()
+  await waitForCheck(from, CHECK_WAIT_MS);
+  await waitForDomSettled(page, HANDOVER_WAIT_MS);
   return page;
 }
 
@@ -340,13 +460,19 @@ async function launchPersistent(profileDir, label) {
   const target = list.find((t) => t.type === 'page');
   const page = await connect(target.webSocketDebuggerUrl);
   const browser = { port };
+  const reapSync = () => {
+    page.close();
+    try { chrome.kill('SIGTERM'); } catch { /* already gone */ }
+    try { killTree(chrome.pid); } catch { /* already gone */ }
+    try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch { /* best effort */ }
+  };
+  const untrack = trackHandle(reapSync);
   return {
     browser,
     page,
     async close() {
-      page.close();
-      try { chrome.kill('SIGTERM'); } catch { /* already gone */ }
-      try { killTree(chrome.pid); } catch { /* already gone */ }
+      reapSync();
+      untrack();
       await sleep2(300);
     },
   };
@@ -354,12 +480,15 @@ async function launchPersistent(profileDir, label) {
 
 async function withProfile(label, fn) {
   const browser = await launchBrowser({ label: `rehearsal-${label}`, timeoutMs: 20000 });
+  // killNow() is the helper's SYNCHRONOUS reap (killTree + profile rm), so it is
+  // safe inside an exit hook; close() does the same work and then awaits tidiness.
+  const untrack = trackHandle(() => browser.killNow());
   const page = await connect(browser.pageWsUrl);
   try {
     return await fn(page, browser);
   } finally {
     page.close();
-    await browser.close();
+    try { await browser.close(); } finally { untrack(); }
   }
 }
 
@@ -420,7 +549,7 @@ const drills = {
         f2.v2Shell === true && f2.controlled === true);
 
       state.down = true;
-      const rendered = await navigate(page, `${ORIGIN()}/`, { reload: true });
+      const rendered = await navigate(page, `${ORIGIN()}/`, { reload: true, expectCheck: false, expectHorn: false });
       f = await readFacts(page).catch(() => null);
       recordFacts(drill, 'offline', f || { error: 'no document' });
       state.down = false;
@@ -572,14 +701,14 @@ const drills = {
 
       // The stated cost: offline support is off while this worker is deployed.
       state.down = true;
-      const rendered = await navigate(page, `${ORIGIN()}/`, { reload: true });
+      const rendered = await navigate(page, `${ORIGIN()}/`, { reload: true, expectCheck: false, expectHorn: false });
       const offlineFacts = await readFacts(page).catch(() => null);
       recordFacts(drill, 'offline', offlineFacts || { error: 'no document' });
       state.down = false;
       check(drill, 'R1: offline is off, as §6 says it is',
         '§6: "offline support is off for everyone while this is deployed and every load is a network load"',
-        `rendered=${rendered} ${offlineFacts ? `v1Shell=${offlineFacts.v1Shell} v2Shell=${offlineFacts.v2Shell}` : 'chrome error page (no document)'}`,
-        rendered === false);
+        `app document rendered=${!!offlineFacts} (.horn=${offlineFacts ? true : false}); browser error page=${offlineFacts === null}`,
+        offlineFacts === null);
       await navigate(page, `${ORIGIN()}/`, { reload: true });
       f = await readFacts(page);
       recordFacts(drill, 'back-online', f);
@@ -743,11 +872,20 @@ async function main() {
 
   const wanted = process.argv.slice(2).filter((a) => !a.startsWith('-'));
   const names = wanted.length ? wanted : Object.keys(drills);
+  // A drill that wedges must not hold a browser forever: time it out, and let
+  // the exit hook reap what it holds (REHEARSAL_DRILL_TIMEOUT_MS overrides).
+  const drillTimeoutMs = Number(process.env.REHEARSAL_DRILL_TIMEOUT_MS || 240000);
   try {
     for (const name of names) {
       if (!drills[name]) { console.error(`unknown drill: ${name} (have: ${Object.keys(drills).join(', ')})`); process.exit(2); }
       console.log(`\n=== drill ${name} ===`);
-      await drills[name]();
+      await Promise.race([
+        drills[name](),
+        new Promise((_, reject) => {
+          const timer = setTimeout(() => reject(new Error(`drill ${name} exceeded ${drillTimeoutMs}ms — see REHEARSAL_DRILL_TIMEOUT_MS`)), drillTimeoutMs);
+          timer.unref?.();
+        }),
+      ]);
       // Reset both the origin and the offline/missing switches between drills.
       state.origin = 'v2';
       state.down = false;
@@ -756,7 +894,7 @@ async function main() {
       state.requests = [];
     }
   } finally {
-    server.close();
+    reapAll();
   }
 
   const mismatches = results.filter((r) => r.expected !== null && !r.ok);
@@ -781,6 +919,6 @@ async function main() {
 
 main().catch((err) => {
   console.error(err);
-  try { server.close(); } catch { /* already closed */ }
+  reapAll();
   process.exit(2);
 });
