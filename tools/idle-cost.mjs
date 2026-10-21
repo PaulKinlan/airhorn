@@ -278,14 +278,24 @@ async function main() {
       const after = { perf: await metrics(), cpu: await rendererCpu(), counters: await counters() };
       const task = after.perf.TaskDuration - before.perf.TaskDuration;
       const script = after.perf.ScriptDuration - before.perf.ScriptDuration;
-      const cpu = cpuDelta(before.cpu, after.cpu);
+      const cpu = rendererValid ? (after.cpu.get(pageAfter) - before.cpu.get(pageBefore)) : 0;
       // A delta over ids missing from either sample is not a delta: summing
       // "whatever renderers exist" once produced a NEGATIVE figure, and a phase
       // whose page renderer was replaced mid-window reads as a suspiciously idle
-      // 0.02%. Report the comparable count and mark the sample instead of
-      // publishing a number that looks like a measurement.
+      // 0.02%. Requiring the two whole SETS to match was too strict - Chrome's
+      // process list fluctuates by an idle helper, so every phase came back
+      // unmeasured - so this identifies the page's renderer instead: in a
+      // single-page browser it is the renderer with the largest cpuTime, and the
+      // delta is published only when that SAME process is present in both samples.
+      const busiest = (map) => {
+        let best = null; let bestCpu = -Infinity;
+        for (const [processId, cpuTime] of map) if (cpuTime > bestCpu) { bestCpu = cpuTime; best = processId; }
+        return best;
+      };
+      const pageBefore = busiest(before.cpu);
+      const pageAfter = busiest(after.cpu);
       const comparable = [...after.cpu.keys()].filter((id) => before.cpu.has(id)).length;
-      const rendererValid = comparable > 0 && after.cpu.size >= before.cpu.size;
+      const rendererValid = pageBefore !== null && pageBefore === pageAfter;
       const resourcesBefore = await evaluate(`performance.getEntriesByType('resource').length`);
       after.counters.resourceEntries = 0;
       before.counters.resourceEntries = 0;
