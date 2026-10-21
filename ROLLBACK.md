@@ -136,6 +136,15 @@ V2 page twice (so its worker controls), then swap the served tree, reload, and r
 `caches.keys()` plus `caches.match('/')`'s body for `Press and hold to sound the air horn`
 (V2) versus `class=horn role=button` (V1).
 
+**Wait for the update check — it is not part of the navigation.** Measured during the full
+rehearsal of this document (2026-10-21, Chrome 155, 36 visits): the browser read `/sw.js`
+96–2,120 ms *after* the page was ready, median ≈1.9 s. Every drill above, and every claim
+about a device being "released on its next visit", is about that later read, so a fact dump
+taken as soon as the page paints sees the *pre-check* page and reports that the rollback
+did nothing. Wait ~2.5 s per visit (and if the tab is closed inside that window, do not
+assume the check ran). `node tools/rollback-rehearsal.mjs` runs these drills with that
+wait built in; see §9.
+
 ### The 24-hour question
 
 Chrome's documented behaviour is that navigation-triggered update checks are throttled to
@@ -143,9 +152,12 @@ one per 24 hours. **That throttle did not appear in any drill here** — `/sw.js
 requested on every reload in every scenario, including when the page being served was
 V1's. Both pages call `navigator.serviceWorker.register('/sw.js', { scope: '/' })` on load,
 which is the likely reason, but a day-old registration could not be reproduced on this VM.
-Treat "the device is released on its next visit" as the measured case and "up to 24 hours"
-as the documented worst case; plan for neither being guaranteed. **Non-Chromium engines
-were not tested at all** (no WebKit or Gecko on this VM — see
+The end-to-end rehearsal re-measured it and agrees: a plain reload, a typed navigation, a
+second tab, and a browser restart on the same profile each made the browser read `/sw.js`
+again (and an explicit `registration.update()` does too, though no page in either version
+calls it). Treat "the device is released on its next visit" as the measured case and "up to
+24 hours" as the documented worst case; plan for neither being guaranteed. **Non-Chromium
+engines were not tested at all** (no WebKit or Gecko on this VM — see
 [EVIDENCE-LIMITS.md](EVIDENCE-LIMITS.md) §1), and Safari's update cadence for
 home-screen additions is its own story.
 
@@ -213,18 +225,36 @@ tar -xzf "$tarball" -C "$HOME/airhorn-v1-artifact"
 
 To re-fetch it **from production** instead (this is also how you check that the live site is
 still serving the archived bytes), run this from a checkout of this repo - it locates
-`ROLLBACK.md` itself, so there is nothing to edit:
+`ROLLBACK.md` itself, so there is nothing to edit. **It downloads into a scratch directory,
+never into the archive**: the archive is the rollback target, so a check that overwrote it
+would destroy the thing it is checking before it knows whether the origin has drifted (an
+earlier version of this recipe did exactly that).
 
 ```bash
 repo=$(git rev-parse --show-toplevel)          # run from the checkout, before the cd
-mkdir -p ~/airhorn-v1-artifact && cd ~/airhorn-v1-artifact
+scratch=$(mktemp -d)                           # NOT ~/airhorn-v1-artifact: see above
 awk -F'|' '{p=$2; h=$3; gsub(/^ +| +$/, "", p); gsub(/^ +| +$/, "", h);
-            if (length(h)==64) print p}' "$repo/ROLLBACK.md" > paths.txt
+            if (length(h)==64) print p}' "$repo/ROLLBACK.md" > "$scratch/paths.txt"
 while IFS= read -r path; do
-  mkdir -p "live/$(dirname "$path")"          # inside live/, because that is where -o writes
-  curl -sS --compressed --fail -o "live/$path" "https://airhorner.com/${path// /%20}"
-done < paths.txt
-echo "downloaded $(wc -l < paths.txt) files into ./live - now run section 10 check (b)"
+  mkdir -p "$scratch/live/$(dirname "$path")"   # inside live/, because that is where -o writes
+  curl -sS --compressed --fail -o "$scratch/live/$path" "https://airhorner.com/${path// /%20}"
+done < "$scratch/paths.txt"
+# section 10 check (b), against the scratch copy: a non-zero exit means the origin drifted.
+# (It is inlined here so the check cannot be skipped by the download looking plausible.)
+( set -euo pipefail
+  files=54
+  rows=$(grep -c '| [0-9a-f]\{64\} |' "$repo/ROLLBACK.md")
+  [ "$rows" -eq "$files" ] || { echo "this table has $rows rows, expected $files" >&2; exit 1; }
+  awk -F'|' '{p=$2; h=$3; gsub(/^ +| +$/, "", p); gsub(/^ +| +$/, "", h);
+              if (length(h)==64) print p"\t"h}' "$repo/ROLLBACK.md" |
+  while IFS=$'\t' read -r p want; do
+    got=$(sha256sum "$scratch/live/$p" 2>/dev/null | cut -d' ' -f1 || true)
+    [ "$got" = "$want" ] || { echo "MISMATCH: $p" >&2; exit 1; }
+  done
+  echo "production still serves the archived V1 bytes"
+)
+# Only if that passed and you want a fresh local copy:
+#   rm -rf ~/airhorn-v1-artifact/live && cp -a "$scratch/live" ~/airhorn-v1-artifact/live
 ```
 
 The re-fetch writes `live/` only; `MANIFEST.tsv`, `SHA256SUMS` and the overlay worker come
@@ -414,6 +444,23 @@ google-chrome --user-data-dir="$(mktemp -d)" --no-first-run https://airhorner.co
 # Expect the V1 horn: full-screen red horn, press-and-hold sounds, no WebMCP tools in the console.
 ```
 
+**Wait for the update check before concluding anything.** The browser does not read
+`/sw.js` as part of the navigation: measured during the rehearsal of this document, the
+check landed 96–2,120 ms *after* the page was ready (median ≈1.9 s, 36 visits). Look at the
+tab inside that window and it still shows V2 — the same trap as reading the origin before
+`max-age` in Step 3, one layer down. If you want the rollback to land now rather than on the
+next natural check, force the read the same way a returning visit makes it:
+
+```js
+// DevTools console, on the device's page — the check a returning visit performs ~2 s after load
+navigator.serviceWorker.getRegistration().then(r => r.update())
+```
+
+DevTools → Application → Service Workers → *Update on reload* is the same lever for a
+reload loop, and *Bypass for network* takes the worker out of the navigation (measured: it
+did **not** produce an update check, so do not use it to test a rollback). None of these
+exist for a real user's device: the origin has no way to force a check.
+
 And, critically, **a profile that had V2** (this is where a rollback that looks perfect at
 the origin is invisible to users):
 
@@ -424,6 +471,8 @@ google-chrome --user-data-dir=/tmp/profile-that-had-v2 https://airhorner.com/
 # Cache Storage: airhorner-2.0.0-* / horn-integrity-2.0.0-* must be gone with the §6 worker,
 # and the page must be V1. If it still renders V2, you are looking at drill E:
 # ship the §6 worker (it is the only lever) and re-check on the next load.
+# If it still renders V2 *and* the caches are unchanged, look again after the check has
+# had its ~2 s (or force it with the console line above) before calling it a failure.
 ```
 
 ## 8. What is lost, and what is not
@@ -474,6 +523,30 @@ google-chrome --user-data-dir=/tmp/profile-that-had-v2 https://airhorner.com/
 - **The V1 mirror is an archive, not a build.** It reproduces what the origin serves today
   (verified byte-for-byte, twice); it cannot be regenerated from git, and it will drift if
   anything (including an emergency `sw.js` patch) is ever published to V1.
+
+### The procedure itself has been rehearsed (2026-10-21)
+
+`tools/rollback-rehearsal.mjs` executes this document rather than describing it: one mutable
+loopback origin (so a traffic switch is a variable flip, not a deploy) serving V2's `dist/`,
+the archived V1 tree, or the archived tree plus §6's worker; one persistent Chrome profile
+per scenario, so "a device that had V2" is the same device after the switch. It asserts the
+claims above one at a time and prints the §4/§5 sentence each check is testing.
+
+What it found: **all 42 documented claims reproduced**, R1/R2/R3 and drills A–F included
+(first reload included, for A, B, F and R3). Two things were wrong with the *procedure*, not
+the browser, and are fixed above:
+
+- the re-fetch recipe in §5 Step 0 used to download **over the archive of record** before
+  comparing it, so a check could destroy the rollback target it was checking;
+- every device-side verification in §7 read the page before the worker update check had
+  run. The check is not part of the navigation: 96–2,120 ms after a ready page, median
+  ≈1.9 s (36 visits). Sampling earlier reports V2 and looks like a failed rollback.
+
+It does not upgrade the limits above: this is still headless Chrome 155 on loopback, and no
+production command was run. Production *reads* were refreshed during the same rehearsal —
+all 54 files were re-fetched from `https://airhorner.com/` and still match §10's table, and
+both acquisition recipes in §5 Step 0 were executed as written (each yields 54 files; the
+tarball's `live/` is byte-identical to the archive's).
 
 ## 10. Appendix — the V1 artifact manifest (recorded 2026-10-21)
 
