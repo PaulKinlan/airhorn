@@ -190,6 +190,24 @@ async function testBootWatchdog() {
     }
   };
 
+  // The same poll for an expression whose VALUE IS A PROMISE. waitUntil's
+  // plain evaluate cannot be used for these: a pending promise is a truthy
+  // object, so it would pass on the first poll without the answer arriving.
+  const waitForAwait = async (expression, timeoutMs, label) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      let value;
+      try {
+        value = await evaluateAwaited(expression);
+        if (value) return value;
+      } catch {}
+      if (Date.now() > deadline) {
+        throw new Error(`Timed out after ${timeoutMs}ms waiting for: ${label} (last value: ${value})`);
+      }
+      await new Promise(r => setTimeout(r, 100));
+    }
+  };
+
   const shot = async (name) => {
     const res = await send('Page.captureScreenshot', { format: 'png' });
     const file = path.join(EVIDENCE_DIR, `${name}.png`);
@@ -214,6 +232,24 @@ async function testBootWatchdog() {
         // the observer once the DOM has it.
         window.__hadControllerAtParse = !!navigator.serviceWorker.controller;
         window.__statusLog = JSON.parse(sessionStorage.getItem('__statusLog') || '[]');
+        // The v2 generation announces its own activation ("sw-v2-active"), and
+        // case 10 gates on that announcement. Record it from document START, in
+        // a fresh window per navigation, so the announcement can never be
+        // posted into a void: attaching the listener after reg.update() lost it
+        // whenever the page's own boot registration (index.html) was the
+        // generation that installed v2 - the page installs /sw.js itself, so on
+        // a loaded box its fetch can land after the suite publishes the v2 body
+        // and activate before the test is listening (airhorn-ye54: server-side
+        // request logs show the failing signature [v1, v2, v2] - the page's own
+        // v2 install plus the update's v2 fetch - against [v1, v1, v2] for the
+        // 1.0-1.2s passes; forced 3/3 by publishing v2 before the navigation,
+        // and never once the boot registration had settled).
+        window.__v2active = false;
+        if (navigator.serviceWorker) {
+          navigator.serviceWorker.addEventListener('message', (e) => {
+            if (e.data === 'sw-v2-active') window.__v2active = true;
+          });
+        }
         const hookRegion = () => {
           const region = document.getElementById('app-status');
           if (!region) return;
@@ -650,6 +686,18 @@ async function testBootWatchdog() {
     // update happening at all (airhorn-0p88 / airhorn-tuuq R1,
     // mutation-verified: swBody = swV1 here still passed green).
     await evaluate(`window.__statusLog.length = 0; sessionStorage.setItem('__statusLog', '[]'); 1`);
+    // Publish the v2 body only once the page's OWN boot registration has
+    // settled. index.html registers /sw.js itself, so a bootstrap fetch that
+    // returns after `swBody = swV2` makes the PAGE the installer of the v2
+    // generation: it then announces itself from its own activate, this test's
+    // reg.update() below finds nothing to install, and the wait had nothing to
+    // hear (airhorn-ye54). Settling first means the only way v2 can exist is
+    // the update this case asks for.
+    await waitForAwait(
+      `navigator.serviceWorker.getRegistration()
+        .then(r => !!r && !!r.active && !r.installing && !r.waiting)
+        .catch(() => false)`,
+      10000, 'the boot registration to settle before publishing v2');
     swBody = swV2;
     await evaluate(`navigator.serviceWorker.getRegistration().then(reg => reg.update())`);
     // Completion gates on a VERSION-TRUE signal from the v2 worker itself:
@@ -658,9 +706,10 @@ async function testBootWatchdog() {
     // self-registers swV1 during boot, so a controller exists before the
     // update is even requested (airhorn-j72n) - and the announcement chain
     // cannot be the gate - its latency tracks box load (airhorn-bogq,
-    // airhorn-twlb). The announcement is still observed and logged, and the
-    // swq false-failure check still polices its copy.
-    await evaluate(`window.__v2active = false; navigator.serviceWorker.addEventListener('message', (e) => { if (e.data === 'sw-v2-active') window.__v2active = true; }); 1`);
+    // airhorn-twlb). The listener lives in the document-start script above, so
+    // it exists before any generation can announce itself (airhorn-ye54); the
+    // announcement is still observed and logged, and the swq false-failure
+    // check still polices its copy.
     await waitUntil('window.__v2active', 10000,
       'the v2 worker itself to report active and claiming (version-true ground truth)');
     const announcement = await evaluate(`window.__statusLog.filter(m => /new version is ready/i.test(m))`);
