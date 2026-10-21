@@ -185,9 +185,10 @@ serve `dist/` with something that 404s properly:
 python3 -m http.server 8099 -d dist     # 127.0.0.1:8099, real 404s, correct MIME types
 ```
 
-(`README.md`'s `deno run --allow-net --allow-read --allow-env --allow-run=git
-server.ts` does the same on :8000; it was not exercised in this dry run because
-port 8000 was already occupied on the dry-run host.)
+(`README.md`'s `deno run --allow-net --allow-read=dist,package.json
+--allow-env=PORT,APP_VERSION,GIT_COMMIT,COMMIT_SHA,BUILD_TIMESTAMP
+--allow-run=git server.ts` does the same on :8000; it was not exercised in this
+dry run because port 8000 was already occupied on the dry-run host.)
 
 ### GET /health — the running build, in one request
 
@@ -200,8 +201,10 @@ this):
 {"status":"ok","version":"2.0.0","commit":"e28e1dd","buildTimestamp":"2026-10-21T19:00:22.962Z"}
 ```
 
-Stamp a deployment by setting env vars at build/upload time and granting the
-server read access to them:
+Stamp a deployment by setting env vars at build/upload time. Stamped values are
+read before any fallback is attempted, so this recipe runs **no git at all**: it
+grants no `--allow-run`, and the extra capabilities it holds beyond the listener
+are read access to `dist/` and `package.json` and the named env vars.
 
 ```bash
 APP_VERSION="$(node -p 'require("./package.json").version')" \
@@ -209,15 +212,20 @@ GIT_COMMIT="$(git rev-parse --short HEAD)" \
 BUILD_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" \
 deno run --allow-net --allow-read=dist,package.json \
   --allow-env=PORT,APP_VERSION,GIT_COMMIT,COMMIT_SHA,BUILD_TIMESTAMP \
-  --allow-run=git server.ts
+  server.ts
 ```
+
+`tests/docs-recipe.test.mjs` runs this recipe exactly as printed (and README.md's
+two) on every gate run, so the flags and the prose cannot part company.
 
 - `APP_VERSION` — overrides the version reported; falls back to the
   `package.json` sitting next to `server.ts`, then `"unknown"`.
-- `GIT_COMMIT` (or `COMMIT_SHA`) — the short commit sha; falls back to **one**
-  `git rev-parse --short HEAD` call at startup (needs `--allow-run=git`), then
-  `"unknown"`. A deployment that ships only `dist/` reports `"unknown"` unless
-  the env var is set — that is truthful, not an error.
+- `GIT_COMMIT` (or `COMMIT_SHA`) — the short commit sha; the stamp above sets
+  it, so a stamped run needs no git execution. **Unset**, it falls back to **one**
+  `git rev-parse --short HEAD` call at startup — that fallback is what needs
+  `--allow-run=git` — and then to `"unknown"`. A deployment that ships only
+  `dist/` reports `"unknown"` unless the env var is set — that is truthful, not
+  an error.
 - `BUILD_TIMESTAMP` — ISO-8601; falls back to the server's start time, so an
   unstamped deploy still reports something fresh rather than a lie.
 - `PORT` — listener override; the default stays 8000. Anything that is not an

@@ -67,9 +67,11 @@ That exact command line is exercised as written by `tests/docs-recipe.test.mjs`,
 the recipe and the permissions `server.ts` asks for cannot drift apart again.
 
 `"unknown"` is a truthful answer, not an error — a host that ships only `dist/` has
-no `.git` to ask. Where you would rather not grant the flag, stamp the value at build
-time instead: [DEPLOY.md](DEPLOY.md) sets `APP_VERSION`, `GIT_COMMIT` and
-`BUILD_TIMESTAMP` and runs without `--allow-run=git`.
+no `.git` to ask. Where you would rather not grant git execution at all, stamp the
+value at build time instead: [DEPLOY.md](DEPLOY.md)'s deployment recipe sets
+`APP_VERSION`, `GIT_COMMIT` and `BUILD_TIMESTAMP` and runs `server.ts` with **no
+`--allow-run`** — a stamped value is read before the git fallback is ever reached,
+and `tests/docs-recipe.test.mjs` runs that recipe as printed, too.
 
 The server also exposes **`GET /health`**: unauthenticated JSON describing the
 running build — `{"status":"ok","version":"2.0.0","commit":"<short sha>",
