@@ -256,13 +256,6 @@ async function main() {
       }
       return perProcess;
     };
-    const cpuDelta = (before, after) => {
-      let total = 0;
-      for (const [processId, cpuTime] of after) {
-        if (before.has(processId)) total += cpuTime - before.get(processId);
-      }
-      return total;
-    };
     const counters = () => evaluate('JSON.parse(JSON.stringify(window.__idle))');
 
     /*
@@ -278,7 +271,6 @@ async function main() {
       const after = { perf: await metrics(), cpu: await rendererCpu(), counters: await counters() };
       const task = after.perf.TaskDuration - before.perf.TaskDuration;
       const script = after.perf.ScriptDuration - before.perf.ScriptDuration;
-      const cpu = rendererValid ? (after.cpu.get(pageAfter) - before.cpu.get(pageBefore)) : 0;
       // A delta over ids missing from either sample is not a delta: summing
       // "whatever renderers exist" once produced a NEGATIVE figure, and a phase
       // whose page renderer was replaced mid-window reads as a suspiciously idle
@@ -307,7 +299,9 @@ async function main() {
         seconds: Number(elapsed.toFixed(2)),
         mainThreadCpuPct: Number(((task / elapsed) * 100).toFixed(3)),
         mainThreadScriptPct: Number(((script / elapsed) * 100).toFixed(3)),
-        rendererCpuPct: rendererValid ? Number(((cpu / elapsed) * 100).toFixed(3)) : null,
+        rendererCpuPct: rendererValid
+          ? Number((((after.cpu.get(pageAfter) - before.cpu.get(pageBefore)) / elapsed) * 100).toFixed(3))
+          : null,
         rendererProcesses: comparable,
         rafs: delta('rafs'),
         intervalTicks: delta('intervalTicks'),
