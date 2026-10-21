@@ -39,17 +39,37 @@ const SYNTH_BLAST_S = 0.9;
 const SYNTH_FREQUENCIES = [715, 1441, 2156];
 const SYNTH_OSC_TYPE = 'triangle';
 
+/*
+ * How long the context stays running after the last sound ends (airhorn-1umb).
+ *
+ * A running-but-SILENT AudioContext is not free: measured on this VM it costs
+ * ~0.7% of one core in the renderer, and it keeps paying it while the page is
+ * hidden (tools/idle-cost.mjs: A 0.05% with no context, B 0.80% running, C 0.10%
+ * suspended, D 0.75% running while hidden). Suspending it when the horn is idle
+ * takes the whole page back to the counters it has at first load: no timers, no
+ * animation frames, no network.
+ *
+ * It is a short grace rather than immediate so a rapid second honk stays on the
+ * already-running graph; resuming costs a few milliseconds and the next press
+ * pays it (start() resumes before scheduling anything).
+ */
+const IDLE_SUSPEND_MS = 300;
+
 export class Horn {
   #audioCtx = null;
   #bufferPromise = null;
   #sources = new Set();
   #synths = new Set();
   #pendingStarts = new Set();
+  #suspendTimer = null;
+  #suspendGeneration = 0;
+  #idleSuspendMs = IDLE_SUSPEND_MS;
   #audioSrc;
   #usingFallback = false;
 
-  constructor({ audioSrc = '/sounds/airhorn.mp3', audioContext = null } = {}) {
+  constructor({ audioSrc = '/sounds/airhorn.mp3', audioContext = null, idleSuspendMs = IDLE_SUSPEND_MS } = {}) {
     this.#audioSrc = audioSrc;
+    this.#idleSuspendMs = idleSuspendMs;
     if (audioContext) {
       this.#audioCtx = audioContext;
     } else {
@@ -76,6 +96,46 @@ export class Horn {
 
   get usingFallback() {
     return this.#usingFallback;
+  }
+
+  /*
+   * Everything that ends a sound funnels through here: tell the app, then start
+   * the idle countdown that releases the audio hardware (airhorn-1umb).
+   */
+  #notifyStopped() {
+    this.onstopped();
+    this.#armIdleSuspend();
+  }
+
+  // Arms and re-arms share this: bumping the generation makes a timer that has
+  // already fired a no-op, so two ends in quick succession cannot double-suspend.
+  #releaseIdleSuspend() {
+    this.#suspendGeneration += 1;
+    if (this.#suspendTimer !== null) {
+      clearTimeout(this.#suspendTimer);
+      this.#suspendTimer = null;
+    }
+  }
+
+  #armIdleSuspend() {
+    const ctx = this.#audioCtx;
+    // No suspend method (or no context at all): nothing to release.
+    if (!ctx || typeof ctx.suspend !== 'function') return;
+    this.#releaseIdleSuspend();
+    const generation = this.#suspendGeneration;
+    this.#suspendTimer = setTimeout(() => {
+      this.#suspendTimer = null;
+      if (generation !== this.#suspendGeneration) return;
+      // start() adds its operation to #pendingStarts synchronously, before its
+      // first await, so this check cannot be overtaken by a press that has
+      // already begun - the context is only released when the horn is genuinely
+      // idle. Suspending mid-start would silence a blast the app reports.
+      if (this.#pendingStarts.size > 0 || this.isPlaying()) return;
+      if (ctx.state !== 'running') return;
+      try {
+        Promise.resolve(ctx.suspend()).catch(() => {});
+      } catch {}
+    }, this.#idleSuspendMs);
   }
 
   async #loadBuffer() {
@@ -190,7 +250,7 @@ export class Horn {
     source.onended = () => {
       this.#sources.delete(source);
       if (!this.isPlaying()) {
-        this.onstopped();
+        this.#notifyStopped();
       }
     };
     source.start(0);
@@ -255,7 +315,7 @@ export class Horn {
       try { masterGain.disconnect(); } catch {}
       this.#synths.delete(synthHandle);
       if (!this.isPlaying()) {
-        this.onstopped();
+        this.#notifyStopped();
       }
     };
 
