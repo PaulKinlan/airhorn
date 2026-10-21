@@ -194,19 +194,42 @@ installs (manifest 200, all 12 icons **and** both screenshots resolve, worker ac
 `airhorner-0.6.20` holds its 8 precached paths), and survives an offline reload with the
 origin destroyed.
 
-To re-create or re-verify it, the recipe (read-only against production):
+To get a copy on a fresh machine, either form works and neither needs the old toolchain:
 
 ```bash
-# On any machine with network access. Read-only against the live site.
+# (i) from the branch in this repo (no network beyond your git remote):
+ARCHIVE="${ARCHIVE:-$HOME/airhorn-v1-artifact}" && mkdir -p "$ARCHIVE"
+git fetch origin fleet/live-v0.6.20-archive
+git archive origin/fleet/live-v0.6.20-archive archive/live-v0.6.20 \
+  | tar -x -C "$ARCHIVE" --strip-components=2
+find "$ARCHIVE/live" -type f | wc -l          # 54
+
+# (ii) or from the checksummed tarball kept outside the repo (verify it where it sits:
+#      the .sha256 names the file, so no path juggling and no "~" inside a quoted string):
+tarball="$HOME/airhorn-v1-artifact/airhorner-live-v0.6.20-2026-10-21.tar.gz"
+( cd "$(dirname "$tarball")" && sha256sum -c "$(basename "$tarball").sha256" )
+tar -xzf "$tarball" -C "$HOME/airhorn-v1-artifact"
+```
+
+To re-fetch it **from production** instead (this is also how you check that the live site is
+still serving the archived bytes), run this from a checkout of this repo - it locates
+`ROLLBACK.md` itself, so there is nothing to edit:
+
+```bash
+repo=$(git rev-parse --show-toplevel)          # run from the checkout, before the cd
 mkdir -p ~/airhorn-v1-artifact && cd ~/airhorn-v1-artifact
 awk -F'|' '{p=$2; h=$3; gsub(/^ +| +$/, "", p); gsub(/^ +| +$/, "", h);
-            if (length(h)==64) print p}' /path/to/ROLLBACK.md > /tmp/v1-paths.txt   # §Appendix, 54 paths
+            if (length(h)==64) print p}' "$repo/ROLLBACK.md" > paths.txt
 while IFS= read -r path; do
-  mkdir -p "$(dirname "$path")"
-  curl -sS --compressed --fail -o "$path" "https://airhorner.com/${path// /%20}"
-done < /tmp/v1-paths.txt
-# verify before you trust it: §10 check (b) (run from the repo, not from the archive)
+  mkdir -p "live/$(dirname "$path")"          # inside live/, because that is where -o writes
+  curl -sS --compressed --fail -o "live/$path" "https://airhorner.com/${path// /%20}"
+done < paths.txt
+echo "downloaded $(wc -l < paths.txt) files into ./live - now run section 10 check (b)"
 ```
+
+The re-fetch writes `live/` only; `MANIFEST.tsv`, `SHA256SUMS` and the overlay worker come
+from (i) or (ii), and `section 10 check (a)` needs them. `section 10 check (b)` verifies a
+re-fetch against the table in this file.
 
 Two properties were measured for this archive: the origin is byte-stable (two fetches of
 all 54 files matched), and `curl --compressed` is required — without it four files
