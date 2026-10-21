@@ -4,7 +4,8 @@
   "tests/a11y.test.mjs",
   "tests/webmcp-browser.test.mjs",
   "tests/resilience-ui.test.mjs",
-  "tests/keyboard.test.mjs"
+  "tests/keyboard.test.mjs",
+  "tests/screenreader.test.mjs"
  ],
  "src/horn.js": [
   "tests/horn.test.js",
@@ -18,7 +19,8 @@
   "tests/webmcp-browser.test.mjs",
   "tests/resilience-ui.test.mjs",
   "tests/shortcuts.test.mjs",
-  "tests/keyboard.test.mjs"
+  "tests/keyboard.test.mjs",
+  "tests/screenreader.test.mjs"
  ],
  "src/webmcp.js": [
   "tests/webmcp.test.mjs",
@@ -76,6 +78,7 @@
   "tests/resilience-ui.test.mjs",
   "tests/shortcuts.test.mjs",
   "tests/multitab.test.mjs",
-  "tests/keyboard.test.mjs"
+  "tests/keyboard.test.mjs",
+  "tests/screenreader.test.mjs"
  ]
 }
