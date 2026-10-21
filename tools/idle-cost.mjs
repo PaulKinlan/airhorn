@@ -279,6 +279,13 @@ async function main() {
       const task = after.perf.TaskDuration - before.perf.TaskDuration;
       const script = after.perf.ScriptDuration - before.perf.ScriptDuration;
       const cpu = cpuDelta(before.cpu, after.cpu);
+      // A delta over ids missing from either sample is not a delta: summing
+      // "whatever renderers exist" once produced a NEGATIVE figure, and a phase
+      // whose page renderer was replaced mid-window reads as a suspiciously idle
+      // 0.02%. Report the comparable count and mark the sample instead of
+      // publishing a number that looks like a measurement.
+      const comparable = [...after.cpu.keys()].filter((id) => before.cpu.has(id)).length;
+      const rendererValid = comparable > 0 && after.cpu.size >= before.cpu.size;
       const resourcesBefore = await evaluate(`performance.getEntriesByType('resource').length`);
       after.counters.resourceEntries = 0;
       before.counters.resourceEntries = 0;
@@ -290,7 +297,8 @@ async function main() {
         seconds: Number(elapsed.toFixed(2)),
         mainThreadCpuPct: Number(((task / elapsed) * 100).toFixed(3)),
         mainThreadScriptPct: Number(((script / elapsed) * 100).toFixed(3)),
-        rendererCpuPct: Number(((cpu / elapsed) * 100).toFixed(3)),
+        rendererCpuPct: rendererValid ? Number(((cpu / elapsed) * 100).toFixed(3)) : null,
+        rendererProcesses: comparable,
         rafs: delta('rafs'),
         intervalTicks: delta('intervalTicks'),
         intervalsCreated: delta('intervalsCreated'),
@@ -366,6 +374,12 @@ async function main() {
     const hidden = await evaluate(`(() => {
       // Stand-in for the platform hiding the tab: the app's listeners read
       // document.hidden/visibilityState, and headless cannot background itself.
+      // Keep the native accessors so the foreground phase can put them back:
+      // deleting the property would remove it entirely, not restore it.
+      window.__idleNativeVisibility = {
+        hidden: Object.getOwnPropertyDescriptor(Document.prototype, 'hidden'),
+        visibilityState: Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState'),
+      };
       Object.defineProperty(Document.prototype, 'visibilityState', { configurable: true, get: () => 'hidden' });
       Object.defineProperty(Document.prototype, 'hidden', { configurable: true, get: () => true });
       document.dispatchEvent(new Event('visibilitychange'));
@@ -400,8 +414,11 @@ async function main() {
     // ------------------------------------------------------------------ E
     // Back to the foreground, as the installed app does when the user returns.
     const foregrounded = await evaluate(`(() => {
-      delete Document.prototype.visibilityState;
-      delete Document.prototype.hidden;
+      const native = window.__idleNativeVisibility || {};
+      for (const [name, descriptor] of Object.entries(native)) {
+        if (descriptor) Object.defineProperty(Document.prototype, name, descriptor);
+        else delete Document.prototype[name];
+      }
       document.dispatchEvent(new Event('visibilitychange'));
       return { hidden: document.hidden, visibility: document.visibilityState };
     })()`);
@@ -424,10 +441,17 @@ async function main() {
     report.errors = (await counters()).errors;
     report.budgets = BUDGET;
     const byNameForCost = (name) => report.phases.find((p) => p.phase.startsWith(name));
+    const describeRenderer = (phase) => (phase.rendererCpuPct === null
+      ? `unmeasured (only ${phase.rendererProcesses} renderer process comparable across the window)`
+      : `${phase.rendererCpuPct}% over ${phase.rendererProcesses} process(es)`);
+    const b = byNameForCost('B');
+    const c = byNameForCost('C');
+    const rendererSound = b.rendererCpuPct !== null && c.rendererCpuPct !== null;
     report.costOfRunningContext = {
-      mainThreadPct: Number((byNameForCost('B').mainThreadCpuPct - byNameForCost('C').mainThreadCpuPct).toFixed(3)),
-      rendererPct: Number((byNameForCost('B').rendererCpuPct - byNameForCost('C').rendererCpuPct).toFixed(3)),
-      note: 'B minus C: what a running-but-silent AudioContext costs on this box, in % of one core',
+      mainThreadPct: Number((b.mainThreadCpuPct - c.mainThreadCpuPct).toFixed(3)),
+      rendererPct: rendererSound ? Number((b.rendererCpuPct - c.rendererCpuPct).toFixed(3)) : null,
+      note: 'B minus C: what a running-but-silent AudioContext costs on this box, in % of one core'
+        + (rendererSound ? '' : ' (renderer side unmeasured: a renderer process was not comparable across a window)'),
     };
 
     const byName = (name) => report.phases.find((p) => p.phase.startsWith(name));
@@ -436,14 +460,14 @@ async function main() {
         what: 'A pristine idle: nothing scheduled and no network, main thread < budget',
         pass: byName('A').mainThreadCpuPct < BUDGET.pristineIdle && byName('A').rafs === 0
           && byName('A').intervalTicks === 0 && byName('A').fetches === 0 && byName('A').resourceEntries === 0,
-        measured: `${byName('A').mainThreadCpuPct}% main thread, renderer ${byName('A').rendererCpuPct}%, ` +
+        measured: `${byName('A').mainThreadCpuPct}% main thread, renderer ${describeRenderer(byName('A'))}, ` +
           `${byName('A').rafs} rAF, ${byName('A').intervalTicks} interval ticks, ${byName('A').fetches} fetches, ` +
           `${byName('A').resourceEntries} resource entries`,
       },
       {
         what: 'B after a blast: silent page still under budget',
         pass: byName('B').mainThreadCpuPct < BUDGET.afterBlastIdle && byName('B').intervalTicks === 0,
-        measured: `${byName('B').mainThreadCpuPct}% main thread, renderer ${byName('B').rendererCpuPct}%`,
+        measured: `${byName('B').mainThreadCpuPct}% main thread, renderer ${describeRenderer(byName('B'))}`,
       },
       {
         what: 'E foregrounded: the return path is quiet and the horn still works',
