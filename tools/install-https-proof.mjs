@@ -38,7 +38,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-import { sweepProfile } from './lib/reap.mjs';
+import { sweepProfile, sweepStaleProfiles } from './lib/reap.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 // The bound-kill handler (airhorn-y6mi): this is the one tool of the four that
@@ -374,8 +374,29 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
 
 async function main() {
   if (!fs.existsSync(distDir)) throw new Error('dist/ does not exist. Run `npm run build` first.');
+  // A SIGKILLed run (a fleet-gate/queue bound, the reaper, the OOM killer) runs
+  // neither installSignalExit's handler nor the finally below, so its chrome
+  // profile AND its cert/server temp dir stay in /tmp with no process left to
+  // remove them - nothing inside a dead process can clean that up (airhorn-9gao,
+  // measured: 2 profile dirs + 17 cert temp dirs from killed runs). The next run
+  // sweeps them with the shared reap helper.
+  //
+  // What may be swept is the exact mkdtemp shape this tool creates, and never a
+  // caller's --out (airhorn-13xr): a bare prefix is a name a caller can choose
+  // too, and `--out /tmp/chrome-https-proof-evidence` used to be deleted with its
+  // content. The helper still only removes a dir no live process names and that
+  // is older than the launch window, on top of these two.
+  const { swept } = sweepStaleProfiles('chrome-https-proof-', {
+    pattern: /^chrome-https-proof-(?:tmp-)?[A-Za-z0-9]{6}$/, // node's mkdtemp alphabet
+    exclude: [outDir],
+  });
+  if (swept.length) {
+    console.log(`install-https-proof: swept ${swept.length} chrome-https-proof-* dir(s) left by a killed earlier run: ${swept.join(', ')}`);
+  }
   fs.mkdirSync(outDir, { recursive: true });
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'https-proof-'));
+  // The cert/server temp dir shares the profile's owned prefix (chrome-https-
+  // proof-*) so one stale sweep covers both, under the same mkdtemp shape.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-https-proof-tmp-'));
   let serverHttp = null;
   let serverHttps = null;
   let cdp = null;

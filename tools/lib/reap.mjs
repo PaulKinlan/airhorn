@@ -18,8 +18,19 @@
  * carries `--user-data-dir=<dir>` while one still names the profile dir on its
  * command line, chrome's argv has drifted, nothing is reaped, and the sweep now
  * says so instead of leaving an orphan tree in silence (airhorn-qum7).
+ *
+ * Stale-profile sweep (airhorn-9gao): sweepProfile cleans up a launch the
+ * process still owns - it runs in the finally or the signal handler. A SIGKILL
+ * (a fleet-gate bound, the reaper, the OOM killer) runs neither, so the profile
+ * DIR stays in /tmp with no process left to remove it. Nothing inside a dead
+ * process can fix that; the next run does, and sweepStaleProfiles is that pass.
+ * It shares this module's premise - a process that names a dir owns it - and
+ * adds an age guard for the window between mkdtemp and chrome appearing in
+ * /proc, so a concurrent launch cannot have its profile removed from under it.
  */
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 /*
  * SIGKILL every process whose command line carries this launch's unique
@@ -74,5 +85,87 @@ export function sweepProfile(profileDir) {
       try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
     }
   }
+}
+
+/*
+ * Remove the profile dirs a KILLED earlier run of the same tool left behind.
+ *
+ * The premise is the same one sweepProfile uses, read the other way round: a
+ * dir that NO live process names is nobody's, and a dir one does name is left
+ * alone. Two guards keep that safe:
+ *   - live:  the owner may be in the ~ms window between mkdtemp and chrome's
+ *            argv showing up in /proc, so a named dir is never removed;
+ *   - fresh: anything touched within `graceMs` is kept for the same window,
+ *            which also means two tools starting at once cannot sweep each
+ *            other's brand-new profile.
+ * A /proc-less host is the documented no-op sweepProfile already has (nothing
+ * can be attributed, so nothing is removed); any other /proc failure is printed
+ * and nothing is swept, rather than guessing.
+ *
+ * What counts as ours is deliberately narrow (airhorn-13xr): a prefix alone is
+ * a NAME a caller can also choose - `--out /tmp/chrome-https-proof-evidence`
+ * matched it, and an aged evidence dir was swept with its content. So the
+ * caller passes `pattern` (the exact mkdtemp shape this tool creates, random
+ * suffix and all) and `exclude` (paths it knows are not litter, e.g. its own
+ * --out), and a name must satisfy both the pattern and not be excluded. The
+ * default - anything under the prefix - is for a caller whose whole prefix is
+ * genuinely private to it.
+ *
+ * Returns what it did: { swept: [names], kept: [{ dir, why }] }, so the caller
+ * can say what it cleaned instead of reporting silence either way.
+ */
+export function sweepStaleProfiles(prefix, {
+  graceMs = 5000, tmpdir = os.tmpdir(), now = Date.now(), pattern = null, exclude = [],
+} = {}) {
+  const cmdlines = [];
+  try {
+    for (const entry of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(entry)) continue;
+      const pid = Number(entry);
+      if (pid === process.pid) continue;
+      try { cmdlines.push(fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8')); } catch { /* exited mid-scan */ }
+    }
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { swept: [], kept: [] }; // no /proc (non-Linux): documented no-op
+    console.error(`reap: /proc scan failed (${err?.message ?? err}); no stale profile dirs were swept`);
+    return { swept: [], kept: [] };
+  }
+
+  let names;
+  try { names = fs.readdirSync(tmpdir); } catch { return { swept: [], kept: [] }; }
+
+  const swept = [];
+  const kept = [];
+  const excluded = new Set(exclude.map((entry) => path.resolve(entry)));
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const dir = path.join(tmpdir, name);
+    if (pattern && !pattern.test(name)) {
+      kept.push({ dir: name, why: 'not the shape this tool creates' });
+      continue;
+    }
+    if (excluded.has(path.resolve(dir))) {
+      kept.push({ dir: name, why: 'the caller owns it' });
+      continue;
+    }
+    let stat;
+    try { stat = fs.lstatSync(dir); } catch { continue; } // already gone
+    if (!stat.isDirectory()) continue;
+    if (cmdlines.some((line) => line.includes(dir))) {
+      kept.push({ dir: name, why: 'a live process names it' });
+      continue;
+    }
+    if (now - stat.mtimeMs <= graceMs) {
+      kept.push({ dir: name, why: 'inside the launch window' });
+      continue;
+    }
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+      swept.push(name);
+    } catch (err) {
+      kept.push({ dir: name, why: `rm failed: ${err?.message ?? err}` });
+    }
+  }
+  return { swept, kept };
 }
 

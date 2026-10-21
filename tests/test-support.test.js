@@ -431,3 +431,64 @@ test('the same sweep still kills everything that carries the marker, silently (a
     try { standIn.kill('SIGKILL'); } catch { /* already gone */ }
   }
 });
+
+test('a profile left by a SIGKILLed run is swept, a live or brand-new one is not (airhorn-9gao)', async () => {
+  // A KILLED run runs neither the finally nor the signal handler, so its
+  // profile dir survives with no process to remove it; the next run's stale
+  // sweep is the only thing that can. The tmpdir is the test's own, so the
+  // sweep cannot see - or remove - a real tool's profile.
+  const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), `reapstale-${process.pid}-`));
+  const stale = path.join(tmpdir, 'chrome-https-proof-stale');
+  const fresh = path.join(tmpdir, 'chrome-https-proof-fresh');
+  const live = path.join(tmpdir, 'chrome-https-proof-live');
+  for (const dir of [stale, fresh, live]) fs.mkdirSync(dir);
+  const old = new Date(Date.now() - 10 * 60 * 1000);
+  fs.utimesSync(stale, old, old);
+  fs.utimesSync(live, old, old);
+  const standIn = spawnStandIn([live]); // a live process (a chrome) names this profile
+  try {
+    await new Promise((r) => setTimeout(r, 300)); // let the stand-in exec
+    const { sweepStaleProfiles } = await import(REAP);
+    const result = sweepStaleProfiles('chrome-https-proof-', { tmpdir });
+    assert.deepEqual(result.swept, ['chrome-https-proof-stale'],
+      `only the unreferenced, aged dir may be swept: ${JSON.stringify(result)}`);
+    assert.ok(!fs.existsSync(stale), 'the stale dir must be gone from disk');
+    assert.ok(fs.existsSync(fresh), 'a dir inside the launch window must be left alone');
+    assert.ok(fs.existsSync(live), 'a dir a live process names must be left alone');
+    assert.ok(isAlive(standIn.pid), 'the sweep is a directory sweep - it must not touch processes');
+  } finally {
+    try { standIn.kill('SIGKILL'); } catch { /* already gone */ }
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+  }
+});
+
+test('a caller-owned --out dir under the sweep prefix is never swept (airhorn-13xr)', async () => {
+  // A prefix is a name a caller can choose too: `--out /tmp/chrome-https-proof-
+  // evidence` matched the sweep and lost its content. Only the exact mkdtemp
+  // shape the tool itself creates may be swept, and an explicit exclude always
+  // wins - even when a caller's name happens to look like that shape.
+  const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), `reapshape-${process.pid}-`));
+  const litter = path.join(tmpdir, 'chrome-https-proof-a1B2c3');
+  const certTemp = path.join(tmpdir, 'chrome-https-proof-tmp-z9Y8x7');
+  const evidence = path.join(tmpdir, 'chrome-https-proof-evidence');
+  const shapedEvidence = path.join(tmpdir, 'chrome-https-proof-q4W5e6');
+  for (const dir of [litter, certTemp, evidence, shapedEvidence]) fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(shapedEvidence, 'keep-me.txt'), 'precious');
+  const old = new Date(Date.now() - 10 * 60 * 1000);
+  for (const dir of [litter, certTemp, evidence, shapedEvidence]) fs.utimesSync(dir, old, old);
+  try {
+    const { sweepStaleProfiles } = await import(REAP);
+    const result = sweepStaleProfiles('chrome-https-proof-', {
+      tmpdir,
+      pattern: /^chrome-https-proof-(?:tmp-)?[A-Za-z0-9]{6}$/,
+      exclude: [shapedEvidence],
+    });
+    assert.deepEqual(result.swept.sort(), ['chrome-https-proof-a1B2c3', 'chrome-https-proof-tmp-z9Y8x7'],
+      `only the mkdtemp-shaped litter may be swept: ${JSON.stringify(result)}`);
+    assert.ok(fs.existsSync(evidence), 'a longer name is not the shape this tool creates');
+    assert.equal(fs.readFileSync(path.join(shapedEvidence, 'keep-me.txt'), 'utf8'), 'precious',
+      'an excluded --out must survive even when its name matches the mkdtemp shape');
+  } finally {
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+  }
+});
