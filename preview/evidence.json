@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-10-20T21:34:20.863Z",
-  "url": "http://127.0.0.1:40939/",
+  "generatedAt": "2026-10-21T18:57:21.924Z",
+  "url": "http://127.0.0.1:35703/",
   "chrome": "/usr/bin/google-chrome",
   "publishedFiles": [
     {
@@ -9,9 +9,9 @@
       "gzipBytes": 239
     },
     {
-      "path": "/assets/index-C81EVIwm.js",
-      "bytes": 16657,
-      "gzipBytes": 5820
+      "path": "/assets/index-DnPLElpu.js",
+      "bytes": 17061,
+      "gzipBytes": 5960
     },
     {
       "path": "/favicon.ico",
@@ -105,8 +105,8 @@
     },
     {
       "path": "/index.html",
-      "bytes": 17170,
-      "gzipBytes": 5600
+      "bytes": 21170,
+      "gzipBytes": 6648
     },
     {
       "path": "/manifest.json",
@@ -125,19 +125,19 @@
     },
     {
       "path": "/styles/main.css",
-      "bytes": 11879,
-      "gzipBytes": 4023
+      "bytes": 15431,
+      "gzipBytes": 5087
     },
     {
       "path": "/sw.js",
       "bytes": 9441,
-      "gzipBytes": 3705
+      "gzipBytes": 3702
     }
   ],
   "publishedTotals": {
     "files": 26,
-    "bytes": 244741,
-    "gzipBytes": 183085
+    "bytes": 252697,
+    "gzipBytes": 185334
   },
   "captures": [
     "horn-light.png",
@@ -164,7 +164,7 @@
   },
   "installability": {
     "secureContext": true,
-    "manifestLink": "http://127.0.0.1:40939/manifest.json",
+    "manifestLink": "http://127.0.0.1:35703/manifest.json",
     "manifest": {
       "name": "The Air Horner",
       "short_name": "Airhorner",
@@ -248,7 +248,7 @@
     "has512Icon": true,
     "hasMaskable": true,
     "serviceWorker": {
-      "scriptURL": "http://127.0.0.1:40939/sw.js",
+      "scriptURL": "http://127.0.0.1:35703/sw.js",
       "state": "activated"
     },
     "swHasFetchHandler": true,
