@@ -457,33 +457,50 @@ what the origin sends and what a static restore must send again. The archive at
 `~/airhorn-v1-artifact/` carries the same rows as `MANIFEST.tsv`, which is what check (a)
 below reads; check (b) reads this table. Both exit non-zero on any mismatch.
 
-Both checks below **fail closed**: they exit non-zero on a missing file or a hash
-mismatch, so a broken archive cannot reach a deploy. Run one of them, not neither.
+Both checks below **fail closed**: each runs in its own subshell under `set -euo pipefail`,
+asserts the expected number of rows *before* checking anything, and exits non-zero on a
+missing file, a bad hash, a truncated manifest or an empty one. Run one of them, not neither.
+(A bare `sha256sum -c` whose exit code nobody reads is not a check: it prints FAILED and
+carries on, and an empty manifest makes a per-file loop do nothing and "succeed".)
 
 ```bash
-# (a) inside the archive: SHA256SUMS is what was written when it was made, MANIFEST.tsv is
+# (a) inside the archive: SHA256SUMS is what was written when it was made; MANIFEST.tsv is
 #     the same data as the table below in path<TAB>sha256<TAB>bytes<TAB>type form.
-cd ~/airhorn-v1-artifact
-sha256sum -c SHA256SUMS                      # 55 lines: 54 live files + rollback-overlay/sw.js
-awk -F'\t' '!/^#/ && NF>=3 {print $2"\t"$1}' MANIFEST.tsv |   # ...then the manifest, per file
-while IFS=$'\t' read -r want p; do
-  got=$(sha256sum "live/$p" 2>/dev/null | cut -d' ' -f1)
-  [ "$got" = "$want" ] || { echo "MISMATCH: $p" >&2; exit 1; }
-done || { echo "ARCHIVE INCOMPLETE OR CORRUPT - do not deploy" >&2; exit 1; }
-echo "archive verified: $(grep -vc '^#' MANIFEST.tsv) files"
+( set -euo pipefail
+  cd ~/airhorn-v1-artifact
+  files=54 signers=55
+  rows=$(grep -vc '^#' MANIFEST.tsv 2>/dev/null || true)
+  [ "$rows" -eq "$files" ] || { echo "MANIFEST.tsv has ${rows:-0} rows, expected $files - do not deploy" >&2; exit 1; }
+  listed=$(grep -vc '^#' SHA256SUMS 2>/dev/null || true)
+  [ "$listed" -eq "$signers" ] || { echo "SHA256SUMS has ${listed:-0} entries, expected $signers - do not deploy" >&2; exit 1; }
+  sha256sum -c --quiet SHA256SUMS || { echo "SHA256SUMS FAILED - do not deploy" >&2; exit 1; }
+  awk -F'\t' '!/^#/ && NF>=3 {print $2"\t"$1}' MANIFEST.tsv |
+  while IFS=$'\t' read -r want p; do
+    got=$(sha256sum "live/$p" 2>/dev/null | cut -d' ' -f1 || true)
+    [ "$got" = "$want" ] || { echo "MISMATCH: $p - do not deploy" >&2; exit 1; }
+  done
+  echo "archive verified: $files live files (+ the rollback overlay)"
+)
 ```
 
 ```bash
-# (b) from a checkout of this repo, checking the table below against an archive made
-#     beside it (this is the form that does not need MANIFEST.tsv). Run it HERE, not in the
-#     archive: ROLLBACK.md lives in the repo, and an archive does not carry it.
-awk -F'|' '{p=$2; h=$3; gsub(/^ +| +$/,"",p); gsub(/^ +| +$/,"",h);
-            if (length(h)==64) print p"\t"h}' ROLLBACK.md |
-while IFS=$'\t' read -r p want; do
-  got=$(sha256sum "$HOME/airhorn-v1-artifact/live/$p" 2>/dev/null | cut -d' ' -f1)
-  [ "$got" = "$want" ] || { echo "MISMATCH: $p" >&2; exit 1; }
-done || { echo "ARCHIVE DOES NOT MATCH THIS TABLE - do not deploy" >&2; exit 1; }
-echo "table verified: $(grep -c '| [0-9a-f]\{64\} |' ROLLBACK.md) files"
+# (b) from a checkout of this repo, checking the table below against an archive made beside
+#     it (the form that does not need MANIFEST.tsv). Run it HERE, not in the archive:
+#     ROLLBACK.md lives in the repo and an archive does not carry it. Pass the archive path
+#     as $1 if it is not the default.
+( set -euo pipefail
+  archive="${1:-$HOME/airhorn-v1-artifact}"
+  files=54
+  rows=$(grep -c '| [0-9a-f]\{64\} |' ROLLBACK.md)
+  [ "$rows" -eq "$files" ] || { echo "this table has $rows rows, expected $files" >&2; exit 1; }
+  awk -F'|' '{p=$2; h=$3; gsub(/^ +| +$/,"",p); gsub(/^ +| +$/,"",h);
+              if (length(h)==64) print p"\t"h}' ROLLBACK.md |
+  while IFS=$'\t' read -r p want; do
+    got=$(sha256sum "$archive/live/$p" 2>/dev/null | cut -d' ' -f1 || true)
+    [ "$got" = "$want" ] || { echo "MISMATCH: $p - do not deploy" >&2; exit 1; }
+  done
+  echo "table verified: $rows files against $archive"
+)
 ```
 
 The table itself is the reviewable copy of the manifest (54 rows, one per live file); the
