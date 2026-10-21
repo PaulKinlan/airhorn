@@ -807,3 +807,120 @@ test('the fallback voice keeps the measured parity with the sample (airhorn-u7s)
     globalThis.fetch = originalFetch;
   }
 });
+
+/*
+ * Idle cost (airhorn-1umb). A running-but-silent AudioContext costs ~0.7% of one
+ * core measured on this VM, and it keeps paying it while the page is hidden, so
+ * the horn releases the context once it has been idle for IDLE_SUSPEND_MS:
+ * suspending is what takes an idle page back to the counters it has at first load.
+ *
+ * The fake context gains a state and a suspend() spy; the tests lower
+ * idleSuspendMs so the countdown is observable without slowing the suite.
+ */
+class ReleasableAudioContext extends FakeAudioContext {
+  state = 'running';
+  suspendCalls = 0;
+
+  async resume() {
+    this.resumed = true;
+    this.state = 'running';
+  }
+
+  async suspend() {
+    this.suspendCalls += 1;
+    this.state = 'suspended';
+  }
+}
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('idle release: the context is suspended once the blast has rung out', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(32) });
+  try {
+    const ctx = new ReleasableAudioContext();
+    const horn = new Horn({ audioContext: ctx, idleSuspendMs: 20 });
+    await horn.start();
+    assert.equal(ctx.state, 'running');
+    horn.stop();
+    // The fake source ends only when it is told to; a real one ends at the end of
+    // the sample, which is the moment the idle countdown starts.
+    ctx.sources.at(-1).stop();
+    await wait(120);
+    assert.equal(ctx.suspendCalls, 1, 'a silent, idle horn must release the audio context');
+    assert.equal(ctx.state, 'suspended');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// A slow resume is what makes the guard observable: the press is still IN FLIGHT
+// when the idle countdown fires, which is exactly the race this must not lose.
+class SlowResumeContext extends ReleasableAudioContext {
+  async resume() {
+    await wait(40);
+    this.resumed = true;
+    this.state = 'running';
+  }
+}
+
+test('idle release: a press inside the grace window is never suspended under', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(32) });
+  try {
+    const ctx = new SlowResumeContext();
+    const horn = new Horn({ audioContext: ctx, idleSuspendMs: 15 });
+    await horn.start();
+    horn.stop();
+    ctx.sources.at(-1).stop();
+    // Still inside the countdown when this press begins, and its resume takes
+    // longer than the countdown: without the pending-start guard the context is
+    // suspended underneath a press that is about to schedule audio into it.
+    const second = horn.start();
+    await wait(120);
+    assert.equal(await second, true, 'the press that overlapped the countdown must still sound');
+    assert.equal(ctx.suspendCalls, 0, 'the context must not be released while a start is in flight');
+    assert.equal(horn.isPlaying(), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('idle release: never suspends while a sound is still in flight', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(32) });
+  try {
+    const ctx = new ReleasableAudioContext();
+    const horn = new Horn({ audioContext: ctx, idleSuspendMs: 20 });
+    await horn.start({ loop: true });
+    // A looping horn never reaches the idle countdown, however long it runs.
+    await wait(140);
+    assert.equal(horn.isPlaying(), true);
+    assert.equal(ctx.suspendCalls, 0, 'a looping horn must keep its context running');
+    horn.stop({ immediate: true });
+    await wait(200);
+    assert.equal(horn.isPlaying(), false);
+    assert.equal(ctx.suspendCalls, 1, 'the release must still happen once the loop stops');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('idle release: the next press resumes the suspended context', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(32) });
+  try {
+    const ctx = new ReleasableAudioContext();
+    const horn = new Horn({ audioContext: ctx, idleSuspendMs: 20 });
+    await horn.start();
+    horn.stop();
+    ctx.sources.at(-1).stop();
+    await wait(120);
+    assert.equal(ctx.state, 'suspended', 'setup: the context must be released before this assertion means anything');
+    const started = await horn.start();
+    assert.equal(started, true, 'a press after an idle release must still sound the horn');
+    assert.equal(ctx.state, 'running');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
