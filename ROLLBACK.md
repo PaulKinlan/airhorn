@@ -342,6 +342,7 @@ instead, at `/sw.js` in the rollback deployment, and nothing else changes:
 ```js
 // Rollback worker for airhorner.com — bead airhorn-xuta, plan in ROLLBACK.md §6.
 // Job: get the poisoned caches off the device and then stay out of the way.
+// This file is NOT part of live production. Deploy it only as part of a rollback (R1).
 self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
 
 self.addEventListener('activate', event => event.waitUntil((async () => {
