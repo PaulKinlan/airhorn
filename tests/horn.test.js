@@ -759,6 +759,186 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
   }
 });
 
+/*
+ * Stuck-honk regression guard (airhorn-slmt): a pointer hold must be
+ * releasable by EVERY path the platform gives, and a non-primary press must
+ * never start one. Four defects made the horn sound forever:
+ *   1. pointerdown had no e.button guard, so a RIGHT click started a loop
+ *      whose release is a contextmenu, not a pointerup;
+ *   2. window blur only retired KEYBOARD holds, so a pointer hold survived
+ *      alt-tab and its pointerup went to the newly focused window;
+ *   3. no contextmenu listener stopped the hold;
+ *   4. pointerup/pointercancel were bound to documentElement, missing
+ *      releases delivered at window level.
+ * Each case below fails on the old code and passes on the fix.
+ */
+test('browser verification: right-click never starts the horn, and blur/contextmenu/window-level release retire a pointer hold (airhorn-slmt)', async () => {
+  const http = await import('node:http');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const { launchBrowser } = await import('./support/browser.mjs');
+
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const distDir = path.join(__dirname, '../dist');
+  if (!fs.existsSync(distDir)) {
+    throw new Error('dist directory does not exist. Run vite build first.');
+  }
+
+  let server = null;
+  let browser = null;
+  let ws = null;
+
+  try {
+    const mimeTypes = {
+      '.html': 'text/html',
+      '.js': 'application/javascript',
+      '.css': 'text/css',
+      '.json': 'application/json',
+      '.png': 'image/png',
+      '.svg': 'image/svg+xml',
+      '.mp3': 'audio/mpeg',
+      '.ico': 'image/x-icon',
+    };
+    server = http.createServer((req, res) => {
+      const reqUrl = req.url.split('?')[0];
+      if (reqUrl === '/sw.js') {
+        res.writeHead(200, { 'Content-Type': 'application/javascript', 'Service-Worker-Allowed': '/' });
+        res.end('// No-op SW for test\nself.addEventListener("install", () => self.skipWaiting());\nself.addEventListener("activate", () => self.clients.claim());');
+        return;
+      }
+      const filePath = path.join(distDir, reqUrl === '/' ? 'index.html' : reqUrl);
+      if (!fs.existsSync(filePath)) { res.writeHead(404); res.end('Not found'); return; }
+      res.writeHead(200, { 'Content-Type': mimeTypes[path.extname(filePath)] || 'application/octet-stream', 'Service-Worker-Allowed': '/' });
+      fs.createReadStream(filePath).pipe(res);
+    });
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const port = server.address().port;
+
+    browser = await launchBrowser({ autoplay: true, label: 'horn-stuck', timeoutMs: 10000 });
+    ws = new WebSocket(browser.pageWsUrl);
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('WebSocket onopen timeout')), 5000);
+      ws.onopen = () => { clearTimeout(timeout); resolve(); };
+      ws.onerror = (e) => { clearTimeout(timeout); reject(e); };
+    });
+
+    let msgId = 1;
+    const pending = new Map();
+    const consoleErrors = [];
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') {
+        consoleErrors.push(msg.params.args?.map(a => a.value).join(' '));
+      }
+      if (msg.method === 'Runtime.exceptionThrown') {
+        const details = msg.params.exceptionDetails;
+        consoleErrors.push(details?.exception?.description || details?.text || 'Uncaught exception');
+      }
+      if (msg.id && pending.has(msg.id)) {
+        const { resolve, reject } = pending.get(msg.id);
+        pending.delete(msg.id);
+        if (msg.error) reject(new Error(msg.error.message));
+        else resolve(msg.result);
+      }
+    };
+    const send = (method, params = {}) => {
+      const id = msgId++;
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        ws.send(JSON.stringify({ id, method, params }));
+      });
+    };
+
+    await send('Page.enable');
+    await send('Runtime.enable');
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+
+    const evaluate = async (expression) =>
+      (await send('Runtime.evaluate', { expression, returnByValue: true })).result.value;
+    const state = () => evaluate(`(() => ({
+      booted: !!window.__airhorn,
+      playing: !!window.__airhorn?.isPlaying(),
+      horning: document.querySelector('.horn')?.classList.contains('horning') ?? null,
+      pressed: document.querySelector('.horn')?.getAttribute('aria-pressed') ?? null
+    }))()`);
+    // No fixed sleeps for state transitions: poll until the predicate holds.
+    const waitFor = async (predicate, what, tries = 50) => {
+      for (let i = 0; i < tries; i++) {
+        const s = await state();
+        if (predicate(s)) return s;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      throw new Error(`Timed out waiting for ${what}; last state ${JSON.stringify(await state())}`);
+    };
+
+    await waitFor(s => s.booted, 'boot');
+
+    const pressPrimary = () => evaluate(
+      `document.querySelector('.horn').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 })), true`
+    );
+
+    // Case 1: a RIGHT-click must not start the horn at all. Its release is a
+    // contextmenu, so on the old code the loop it started never ended.
+    await evaluate(`document.querySelector('.horn').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 2 })), true`);
+    await evaluate(`document.querySelector('.horn').dispatchEvent(new Event('contextmenu', { bubbles: true, cancelable: true })), true`);
+    // Give a wrongly-started loop time to prove it is playing (fetch + decode
+    // of the sample), rather than reading state before it could start.
+    await new Promise(r => setTimeout(r, 800));
+    const afterRightClick = await state();
+    assert.equal(afterRightClick.playing, false, 'a right-click pointerdown must not start the horn');
+    assert.equal(afterRightClick.horning, false, 'a right-click must not light the pressed state');
+    assert.equal(afterRightClick.pressed, 'false', 'aria-pressed must stay false after a right-click');
+
+    // Case 2: a pointer hold must be retired when the WINDOW loses focus -
+    // its pointerup is then delivered to whatever got focus, not to the page.
+    await pressPrimary();
+    await waitFor(s => s.playing, 'horn to sound after primary press');
+    await evaluate(`window.dispatchEvent(new Event('blur')), true`);
+    const afterBlur = await waitFor(s => !s.playing && !s.horning, 'horn to stop on window blur');
+    assert.equal(afterBlur.playing, false, 'window blur must release a pointer hold');
+    assert.equal(afterBlur.horning, false, 'window blur must clear the pressed state');
+
+    // Case 3: a contextmenu mid-hold (long-press menu, or the release half of
+    // any secondary gesture) must stop the horn.
+    await pressPrimary();
+    await waitFor(s => s.playing, 'horn to sound for the contextmenu case');
+    await evaluate(`document.querySelector('.horn').dispatchEvent(new Event('contextmenu', { bubbles: true, cancelable: true })), true`);
+    const afterContextmenu = await waitFor(s => !s.playing && !s.horning, 'horn to stop on contextmenu');
+    assert.equal(afterContextmenu.playing, false, 'contextmenu must release a pointer hold');
+
+    // Case 4: a release delivered at WINDOW level must end the hold. Bound to
+    // documentElement, the listener never saw it.
+    await pressPrimary();
+    await waitFor(s => s.playing, 'horn to sound for the window-level pointerup case');
+    await evaluate(`window.dispatchEvent(new PointerEvent('pointerup')), true`);
+    const afterWindowPointerup = await waitFor(s => !s.playing && !s.horning, 'horn to stop on window-level pointerup');
+    assert.equal(afterWindowPointerup.playing, false, 'a window-level pointerup must release the hold');
+
+    // Case 5: same for pointercancel at window level.
+    await pressPrimary();
+    await waitFor(s => s.playing, 'horn to sound for the window-level pointercancel case');
+    await evaluate(`window.dispatchEvent(new PointerEvent('pointercancel')), true`);
+    const afterWindowPointercancel = await waitFor(s => !s.playing && !s.horning, 'horn to stop on window-level pointercancel');
+    assert.equal(afterWindowPointercancel.playing, false, 'a window-level pointercancel must release the hold');
+
+    // Non-regression: a normal primary press + documentElement-bubbling
+    // pointerup still behaves like a tap-hold (the release path every
+    // existing suite drives).
+    await pressPrimary();
+    await waitFor(s => s.playing, 'horn to sound for the ordinary release case');
+    await evaluate(`document.documentElement.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })), true`);
+    const afterOrdinaryRelease = await waitFor(s => !s.horning, 'horn to settle after an ordinary release');
+    assert.equal(afterOrdinaryRelease.horning, false, 'an ordinary press/release still ends the hold');
+
+    assert.deepEqual(consoleErrors, [], 'No uncaught exceptions or console errors during the stuck-honk cases');
+  } finally {
+    if (ws) { try { ws.close(); } catch {} }
+    if (browser) { await browser.close(); }
+    if (server) { server.close(); }
+  }
+});
+
 test('the fallback voice keeps the measured parity with the sample (airhorn-u7s)', async () => {
   // These five values are not style: they are what makes the synthesised blast
   // measure like the recording (pitch, loudness, length, attack, brightness).

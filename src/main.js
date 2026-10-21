@@ -164,20 +164,28 @@ class AirHorn {
     let handledByPointerOrKey = false;
 
     this.#image.addEventListener('pointerdown', (e) => {
+      // Only the primary button holds the horn. A right-click's release is a
+      // contextmenu, not a pointerup, so without this guard the loop it
+      // started was never released and the horn sounded forever
+      // (airhorn-slmt).
+      if (e.button !== 0) return;
       e.preventDefault();
       handledByPointerOrKey = true;
       this.start({ loop: true });
     });
 
-    document.documentElement.addEventListener('pointerup', () => {
+    // The release listeners live on window, not documentElement: a release
+    // delivered at window level must still retire the hold (airhorn-slmt).
+    const releasePointerHold = () => {
       this.stop();
       setTimeout(() => { handledByPointerOrKey = false; }, 100);
-    });
-
-    document.documentElement.addEventListener('pointercancel', () => {
-      this.stop();
-      setTimeout(() => { handledByPointerOrKey = false; }, 100);
-    });
+    };
+    window.addEventListener('pointerup', releasePointerHold);
+    window.addEventListener('pointercancel', releasePointerHold);
+    // A context menu opening mid-hold (long-press menu, or the release half
+    // of a secondary-button gesture) is not followed by a pointerup, so
+    // without this the horn kept sounding behind the menu (airhorn-slmt).
+    window.addEventListener('contextmenu', () => this.stop());
 
     // A keyboard hold is sounding the horn (airhorn-ay73 state machine below).
     let pressing = false;
@@ -236,7 +244,12 @@ class AirHorn {
     // forever (airhorn-ay73).
     const holdLost = () => { if (pressing) endHold(true); };
     this.#image.addEventListener('blur', holdLost);
-    window.addEventListener('blur', holdLost);
+    // Losing the WINDOW (alt-tab) mid-hold means the pointerup may never
+    // arrive either: stop a POINTER hold unconditionally, not just retire a
+    // keyboard one - a looping horn whose release event went to the newly
+    // focused window sounded forever (airhorn-slmt). stop() on an idle horn
+    // is a no-op, and endHold's own stop keeps the keyboard path unchanged.
+    window.addEventListener('blur', () => { this.stop(); holdLost(); });
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
         this.stop();
