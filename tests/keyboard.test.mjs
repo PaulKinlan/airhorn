@@ -686,12 +686,33 @@ async function run() {
     const retryRatio = assertFocusRing(retryNow, 'boot failure → watchdog focuses Try again (programmatic focus, no prior keyboard input)');
     // Tabbing off Try again must not strand the keyboard: the banner page still
     // has the horn behind it, and whatever Tab reaches must be a visible stop.
-    const retryTab = await tab();
-    if (retryTab.tag !== 'BODY') assertFocusRing(retryTab, 'Tab from Try again (the banner page keeps tabbing)');
-    // Focus order on this page is horn -> Try again (the install control never
-    // became available), so Tab from the horn is the way back.
-    const backToRetry = await tab();
-    assert(backToRetry.id === 'boot-retry', `boot failure: Tab from the horn reached ${describeStop(backToRetry)}, not Try again`);
+    // Try again is the LAST focusable stop on this page (horn -> Try again; the
+    // install control never became available), so one of these two wraps gets
+    // the keyboard back to it - and which one Chrome does is not stable
+    // (airhorn-vpui):
+    //     retry -> horn -> retry                 (wraps inside the document)
+    //     retry -> <body> -> horn -> retry       (steps out of the document first)
+    // Both are fine for a keyboard user, so neither count is asserted - this
+    // suite used to demand the two-Tab shape and went red for it on tree
+    // 38301fb6, in a full gate, after the SAME tree had passed the fast gate
+    // (the change under it only deleted CSS for a display:none span). What must
+    // hold is asserted instead: every control stop on the way is visible, the
+    // wrap never strands focus, and the cycle does come back to Try again.
+    const retryJourney = [];
+    let backToRetry = null;
+    while (retryJourney.length < 3 && !backToRetry) {
+      const stop = await tab();
+      retryJourney.push(stop);
+      if (stop && stop.tag !== 'BODY') {
+        assertFocusRing(stop, `Tab ${retryJourney.length} after Try again (the banner page keeps tabbing)`);
+      }
+      if (stop && stop.id === 'boot-retry') backToRetry = stop;
+    }
+    assert(
+      backToRetry,
+      `boot failure: three Tabs from Try again never came back to it (${retryJourney.map(describeStop).join(' -> ')}) - the page strands the keyboard`
+    );
+    console.log(`  Try again -> ${retryJourney.map((s) => (s && s.tag === 'BODY' ? 'out of document' : (s && (s.cls || s.id || s.tag)))).join(' -> ')} (${retryJourney.length} Tab(s))`);
     await hold('Enter');
     await release('Enter');
     const reloaded = await (async () => {
