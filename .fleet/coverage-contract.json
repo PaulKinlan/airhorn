@@ -34,7 +34,8 @@
   "tests/webmcp-browser.test.mjs"
  ],
  "server.ts": [
-  "tests/gate-smoke.test.js"
+  "tests/gate-smoke.test.js",
+  "tests/health.test.mjs"
  ],
  "public/sw.js": [
   "tests/sw-offline.test.mjs",
@@ -83,6 +84,11 @@
   "tests/keyboard.test.mjs",
   "tests/screenreader.test.mjs",
   "tests/visual-overrides.test.mjs",
-  "tests/reflow-zoom.test.mjs"
+  "tests/reflow-zoom.test.mjs",
+  "tests/health.test.mjs",
+  "tests/docs-recipe.test.mjs"
+ ],
+ "README.md": [
+  "tests/docs-recipe.test.mjs"
  ]
 }
