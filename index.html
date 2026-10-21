@@ -256,10 +256,21 @@
           booted = true;
           clearTimeout(backstop);
           // A late bundle retires the notice: the page was wrong to claim the
-          // horn was dead, so take it back (airhorn-duj).
+          // horn was dead, so take it back (airhorn-duj). The banner took focus
+          // when it appeared, so it has to hand focus on when it goes - a bare
+          // retry.blur() dropped focus to <body> and left a keyboard user who
+          // was waiting on "Try again" with no focus position at all, their
+          // next Tab restarting from the top of the document (airhorn-bjk1).
+          // Same rule the installer's focus restoration already follows: hand
+          // it to the control that now works, and only if the banner still had
+          // it (never steal focus the user has already moved).
           if (banner && !banner.hidden) {
             banner.hidden = true;
-            if (retry) retry.blur();
+            if (retry) {
+              var horn = document.querySelector('.horn');
+              if (document.activeElement === retry && horn) horn.focus();
+              else retry.blur();
+            }
           }
         };
 
