@@ -17,7 +17,10 @@
  *        anywhere on the page;
  *      - every transitioned element reports a zero-duration transition,
  *        including the boot-alert button (its hover transition was the one
- *        the original reduced-motion blocks missed - airhorn-1jrc).
+ *        the original reduced-motion blocks missed - airhorn-1jrc);
+ *      - a DOCUMENT-WIDE census (not a selector whitelist, airhorn-epbq):
+ *        any element declaring a timed transition or animation under reduce
+ *        fails, so a future element cannot rot in unnoticed.
  *
  * Evidence screenshots are written to /tmp/airhorn-visual-overrides/<sha>-<stamp>/
  * but the assertions never depend on them.
@@ -237,7 +240,7 @@ async function run() {
     const alert = await evaluate(`(() => {
       const card = getComputedStyle(document.querySelector('.boot-alert'));
       return {
-        borderStyle: card.borderTopStyle, borderWidth: card.borderTopWidth,
+        borderStyle: card.borderTopStyle, borderWidth: card.borderTopWidth, borderColor: card.borderTopColor,
         bg: card.backgroundColor, ink: card.color,
         display: card.display, visibility: card.visibility,
       };
@@ -245,15 +248,24 @@ async function run() {
     if (alert.display === 'none' || alert.visibility !== 'visible') {
       throw new Error(`Forced colors: boot-alert card not rendered: ${JSON.stringify(alert)}`);
     }
-    if (!isPainted(alert.borderStyle, alert.borderWidth) || !isOpaque(alert.borderColor)) {
-      throw new Error(`Forced colors: boot-alert card boundary not painted/opaque: ${JSON.stringify(alert)}`);
+    if (!isPainted(alert.borderStyle, alert.borderWidth)) {
+      throw new Error(`Forced colors: boot-alert card boundary not painted: ${JSON.stringify(alert)}`);
+    }
+    // borderColor IS returned by the probe, so these two are live checks
+    // (airhorn-1ir4: it used to read a property the probe never returned, so
+    // isOpaque(undefined) was always true - an assertion that could not fail).
+    if (!isOpaque(alert.borderColor)) {
+      throw new Error(`Forced colors: boot-alert card boundary fully transparent: ${alert.borderColor}`);
+    }
+    if (alert.borderColor === alert.bg) {
+      throw new Error(`Forced colors: boot-alert boundary colour identical to its background (no visible edge): ${alert.borderColor}`);
     }
     if (alert.bg === alert.ink) {
       throw new Error(`Forced colors: boot-alert ink identical to its background (text invisible): ${alert.bg}`);
     }
     await shot('4-forced-colors-alert.png');
     await evaluate(`document.getElementById('boot-failure').hidden = true; true`);
-    console.log(`Forced colors alert card: border painted, ink ${alert.ink} differs from bg ${alert.bg}`);
+    console.log(`Forced colors alert card: border ${alert.borderColor} differs from bg ${alert.bg}, ink differs too`);
 
     /* ----------------- 2. prefers-reduced-motion: reduce -------------------- */
     await setFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
@@ -262,9 +274,12 @@ async function run() {
       throw new Error('reduced-motion emulation not applied: matchMedia reports no override');
     }
 
-    // 2a. Every transitioned element reports zero-duration transitions. The
-    // alert button is the regression pin: its hover transition survived the
-    // original reduced-motion blocks (airhorn-1jrc).
+    // 2a. Named regression pins, kept for readable failure messages: every
+    // element that ever carried a transition must report zero-duration now.
+    // The alert button is the pin for the hover transition the original
+    // reduced-motion blocks missed (airhorn-1jrc). The census in 2a-bis
+    // (airhorn-epbq) subsumes these but fails with a raw offender dump; these
+    // fail naming the contract.
     const transitions = await evaluate(`(() => {
       const pick = (sel) => {
         const el = document.querySelector(sel);
@@ -286,7 +301,34 @@ async function run() {
         throw new Error(`reduced motion: ${name} still declares a timed transition (durations ${t.durations.join(', ')})`);
       }
     }
-    console.log('Reduced motion: all transition durations are 0s, including .boot-alert .alert-button');
+    console.log('Reduced motion: all named transition durations are 0s, including .boot-alert .alert-button');
+
+    // 2a-bis. Document-wide census (airhorn-epbq): the named pins above are a
+    // whitelist - a NEW element with a live transition under reduce passed
+    // green (proven by the reviewer with #app-status). Sweep every element:
+    // any computed transition with a timed duration and a non-none property,
+    // or any non-none timed animation, is a defect - wherever it appears.
+    const motionDecls = await evaluate(`(() => {
+      const describe = (el) => el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') +
+        (el.className && typeof el.className === 'string' && el.className.trim()
+          ? '.' + el.className.trim().split(/\\s+/).join('.') : '');
+      const timed = (list) => String(list).split(',').some((d) => parseFloat(d) > 0);
+      const offenders = [];
+      for (const el of document.querySelectorAll('*')) {
+        const cs = getComputedStyle(el);
+        if (cs.transitionProperty !== 'none' && timed(cs.transitionDuration)) {
+          offenders.push({ el: describe(el), kind: 'transition', property: cs.transitionProperty, durations: cs.transitionDuration });
+        }
+        if (cs.animationName !== 'none' && timed(cs.animationDuration)) {
+          offenders.push({ el: describe(el), kind: 'animation', name: cs.animationName, durations: cs.animationDuration });
+        }
+      }
+      return offenders;
+    })()`);
+    if (motionDecls.length > 0) {
+      throw new Error(`reduced motion: ${motionDecls.length} element(s) still declare timed motion: ${JSON.stringify(motionDecls)}`);
+    }
+    console.log('Reduced motion: document-wide census clean - no element declares timed motion');
 
     // 2b. While the horn is sounding, NOTHING on the page animates. Focus is
     // still on the horn; hold Space. (A Tab here would move to the installer
