@@ -250,6 +250,30 @@ async function testBootWatchdog() {
             if (e.data === 'sw-v2-active') window.__v2active = true;
           });
         }
+        // Case 7 asserts that the unstyled horn RESPONDS. The attribute it used
+        // to read is owned by the app and is not a stable state there:
+        // main.js sets aria-pressed optimistically and RETRACTS it when the
+        // audio start does not complete, and whether it completes is decided by
+        // main.js's own 100ms race with AudioContext.resume() - which is what a
+        // loaded box changes (airhorn-ye54: the slmt-only union gate lost this
+        // wait at 3s while idle runs, and 5 runs of the slmt-only tree, saw
+        // 'true' in 9-34ms; under load the tap hint appeared and the first
+        // sample moved to 46-83ms). Record the transition from document start
+        // so the assertion is about the event that happened, never about a
+        // sample landing inside a window the app owns.
+        window.__pressedLog = [];
+        const hookHorn = () => {
+          const horn = document.querySelector('.horn');
+          if (!horn) return false;
+          window.__pressedLog.push(horn.getAttribute('aria-pressed'));
+          new MutationObserver(() => {
+            window.__pressedLog.push(horn.getAttribute('aria-pressed'));
+          }).observe(horn, { attributes: true, attributeFilter: ['aria-pressed'] });
+          return true;
+        };
+        if (!hookHorn()) {
+          document.addEventListener('DOMContentLoaded', hookHorn);
+        }
         const hookRegion = () => {
           const region = document.getElementById('app-status');
           if (!region) return;
@@ -546,10 +570,25 @@ async function testBootWatchdog() {
     }
     if (!unstyled.labelBelowHorn) throw new Error(`label inside the horn body pre-swap: ${JSON.stringify(unstyled)}`);
     if (!unstyled.installerOutOfFlowRule) throw new Error(`critical layer no longer takes the unavailable installer out of flow: ${JSON.stringify(unstyled)}`);
-    // And the unstyled horn still sounds: the failure this replaces was a
-    // page that looked broken but passed a naive usability check.
-    await evaluate(`document.querySelector('.horn').click()`);
-    await waitUntil(`document.querySelector('.horn').getAttribute('aria-pressed') === 'true'`, 3000, 'unstyled horn to sound');
+    // And the unstyled horn still responds: the failure this replaces was a
+    // page that looked broken but passed a naive usability check. The press is
+    // a TRUSTED one (Input.dispatchMouseEvent), not element.click(): a
+    // synthetic click carries no user activation, so the audio graph may stay
+    // suspended, main.js honestly retracts the pressed state, and whether that
+    // retraction beats this wait's first sample is a function of box load -
+    // not of the unstyled page working (airhorn-ye54). The wait reads the
+    // document-start record of the transition, so no sample can miss it.
+    const hornBox = await evaluate(`(() => {
+      const r = document.querySelector('.horn').getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hornBox.x, y: hornBox.y, button: 'left', clickCount: 1 });
+    await waitUntil(`window.__pressedLog.includes('true')`, 3000, 'unstyled horn to respond to a trusted press');
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hornBox.x, y: hornBox.y, button: 'left', clickCount: 1 });
+    // The release must retire the hold - the record carries the transition, so
+    // this cannot be missed by a slow sample either.
+    await waitUntil(`window.__pressedLog.lastIndexOf('false') > window.__pressedLog.lastIndexOf('true')`,
+      3000, 'release to retire the unstyled hold');
     // airhorn-5yv: the critical fallback hides the installer, but must not
     // lock install away in the very mode it protects - once the prompt is
     // available the button is reachable even unstyled.
