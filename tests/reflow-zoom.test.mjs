@@ -14,8 +14,14 @@
  *     regressing silently), measured on html and body;
  *   - the horn is fully in the viewport and pressable with a real pointer
  *     event (pressed state flips);
- *   - the live region, filled with a long announcement, stays inside the
- *     viewport and does not overflow its own box;
+ *   - the live region, filled with a long announcement, either stays inside
+ *     the viewport and does not overflow its own box, or is sr-only by
+ *     design (airhorn-985r: a live region does not have to be painted);
+ *   - NO element anywhere clips or horizontally scrolls its text inside a
+ *     clipping/scroll container (airhorn-jw7w: a card's bounding box being
+ *     in the viewport proves nothing about its CONTENT - the boot-alert
+ *     mutant with overflow:hidden + white-space:nowrap hid 259px of update
+ *     text at 320px while every box-level check stayed green);
  *   - the install affordance, forced available, stays on-screen and is the
  *     topmost element at its own centre (nothing covers it);
  *   - the boot-alert card stays inside the viewport.
@@ -178,7 +184,7 @@ async function run() {
       if (overflow.htmlOverflow > 1 || overflow.bodyOverflow > 1) {
         throw new Error(
           `${label}: HORIZONTAL OVERFLOW - html.scrollWidth ${overflow.htmlScrollWidth} / ` +
-          `body.scrollWidth ${overflow.bodyOverflow} vs innerWidth ${overflow.innerWidth} ` +
+          `body.scrollWidth ${overflow.bodyScrollWidth} vs innerWidth ${overflow.innerWidth} ` +
           `(html +${overflow.htmlOverflow}px, body +${overflow.bodyOverflow}px) - ` +
           `WCAG 1.4.10 requires no two-dimensional scrolling at this width`
         );
@@ -214,9 +220,14 @@ async function run() {
       await shot(`${shotPrefix}-pressed.png`);
       console.log(`${label}: horn visible (${hornGeom.width}x${hornGeom.height}) and press toggles at (${hornGeom.centreX},${hornGeom.centreY})`);
 
-      // 3. Live region: a long announcement must stay in the viewport and in
-      // its own box (airhorn-xaxg: nobody had checked the announcement path
-      // at narrow widths).
+      // 3. Live region: a long announcement must reach users. Two shapes are
+      // legitimate (airhorn-985r): the app's current painted card (then it
+      // must be inside the viewport and not overflow its own box), or a
+      // permanently sr-only region (clip-path inset is the standard sr-only
+      // pattern and fully WCAG-conforming - a live region does not have to be
+      // painted, so requiring visibility here would block a correct a11y
+      // refactor). What is NEVER legitimate is a painted region outside the
+      // viewport or overflowing its container.
       await evaluate(`(() => {
         const el = document.getElementById('app-status');
         el.textContent = ${JSON.stringify(LONG_ANNOUNCEMENT)};
@@ -228,26 +239,31 @@ async function run() {
         const r = el.getBoundingClientRect();
         const cs = getComputedStyle(el);
         return {
-          hidden: cs.clipPath !== 'none' || cs.position === 'absolute',
+          // sr-only by design: clipped to nothing by its own clip-path (the
+          // .visually-hidden / :empty pattern). Distinguished from being
+          // clipped by an ANCESTOR's overflow, which loses the announcement
+          // box without intent.
+          srOnly: cs.clipPath !== 'none',
           inViewport: r.x >= -1 && r.y >= -1 && r.right <= window.innerWidth + 1 && r.bottom <= window.innerHeight + 1,
           internalOverflowX: el.scrollWidth - el.clientWidth,
           internalOverflowY: el.scrollHeight - el.clientHeight,
           rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
         };
       })()`);
-      if (liveGeom.hidden) {
-        throw new Error(`${label}: live region still visually hidden while announcing: ${JSON.stringify(liveGeom)}`);
-      }
-      if (!liveGeom.inViewport) {
-        throw new Error(`${label}: live region outside the viewport while announcing: ${JSON.stringify(liveGeom)}`);
-      }
-      if (liveGeom.internalOverflowX > 1 || liveGeom.internalOverflowY > 1) {
-        throw new Error(
+      if (liveGeom.srOnly) {
+        console.log(`${label}: live region is sr-only by design (clip-path inset) - announced without painting, bounds checks not applicable`);
+      } else {
+        if (!liveGeom.inViewport) {
+          throw new Error(`${label}: live region outside the viewport while announcing: ${JSON.stringify(liveGeom)}`);
+        }
+        if (liveGeom.internalOverflowX > 1 || liveGeom.internalOverflowY > 1) {
+          throw new Error(
           `${label}: live region text overflows its container by ` +
           `${liveGeom.internalOverflowX}x${liveGeom.internalOverflowY}px: ${JSON.stringify(liveGeom.rect)}`
         );
       }
-      console.log(`${label}: live region announcement in viewport, no container overflow ${JSON.stringify(liveGeom.rect)}`);
+        console.log(`${label}: live region announcement in viewport, no container overflow ${JSON.stringify(liveGeom.rect)}`);
+      }
 
       // 4. Install affordance reachable: forced available, on-screen, and the
       // topmost element at its centre.
@@ -285,8 +301,48 @@ async function run() {
       if (!alertGeom.inViewport) {
         throw new Error(`${label}: boot-alert card outside the viewport: ${JSON.stringify(alertGeom.rect)}`);
       }
-      await evaluate(`document.getElementById('boot-failure').hidden = true; document.getElementById('app-status').textContent = ''; document.getElementById('installer').classList.remove('available'); true`);
       console.log(`${label}: boot-alert card in viewport ${JSON.stringify(alertGeom.rect)}`);
+
+      // 6. Content census (airhorn-jw7w): box checks above prove a container
+      // is PLACED well, not that its CONTENT is readable. An element that
+      // clips (hidden/clip) or scrolls (auto/scroll) its own content while
+      // the content exceeds the box hides text with no document-level
+      // overflow signal. Sweep every element with all surfaces revealed:
+      // any non-sr-only element whose content exceeds its box on an axis it
+      // clips or scrolls is a defect. (overflow:visible is NOT flagged: the
+      // spill paints, stays readable, and the document-level check 1 governs
+      // it. clip-path'd elements are sr-only by design - airhorn-985r.)
+      const clipped = await evaluate(`(() => {
+        const describe = (el) => el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') +
+          (el.className && typeof el.className === 'string' && el.className.trim()
+            ? '.' + el.className.trim().split(/\\s+/).join('.') : '');
+        const clipsOrScrolls = (v) => ['hidden', 'clip', 'auto', 'scroll', 'overlay'].includes(v);
+        const offenders = [];
+        for (const el of document.querySelectorAll('*')) {
+          const cs = getComputedStyle(el);
+          if (cs.clipPath !== 'none') continue;
+          if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+          if (el.clientWidth === 0 && el.clientHeight === 0) continue;
+          const overX = el.scrollWidth - el.clientWidth;
+          const overY = el.scrollHeight - el.clientHeight;
+          if (clipsOrScrolls(cs.overflowX) && overX > 2) {
+            offenders.push({ el: describe(el), axis: 'x', overPx: overX, overflow: cs.overflowX });
+          }
+          if (clipsOrScrolls(cs.overflowY) && overY > 2) {
+            offenders.push({ el: describe(el), axis: 'y', overPx: overY, overflow: cs.overflowY });
+          }
+        }
+        return offenders;
+      })()`);
+      if (clipped.length > 0) {
+        throw new Error(
+          `${label}: ${clipped.length} element(s) clip or scroll their own content ` +
+          `(text unreadable / in-container horizontal scrolling - WCAG 1.4.10): ${JSON.stringify(clipped)}`
+        );
+      }
+      console.log(`${label}: content census clean - no element clips or scrolls its own text`);
+
+      await evaluate(`document.getElementById('boot-failure').hidden = true; document.getElementById('app-status').textContent = ''; document.getElementById('installer').classList.remove('available'); true`);
     };
 
     /* ---------------- config 1: 320x640, default text ---------------------- */
