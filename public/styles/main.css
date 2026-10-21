@@ -207,14 +207,12 @@
     display: grid;
     place-items: center;
 
-    /* The fallback label exists for the unstyled experience (the critical
-       block in index.html); with the stylesheet the drawn horn speaks for
-       itself and the accessible name comes from aria-label. */
+    /* The fallback label exists only for the unstyled experience (the critical
+       block in index.html, where its heading-tier typography renders under
+       .stylesheet-failed). With the stylesheet loaded the drawn horn speaks
+       for itself and the accessible name comes from aria-label, so this label
+       stays permanently hidden here (airhorn-m2tt). */
     & .horn-label {
-      font-family: var(--font-sans);
-      font-size: var(--font-size-heading);
-      font-weight: var(--font-weight-semibold);
-      line-height: var(--line-height-snug);
       display: none;
     }
     background-color: var(--horn-bg);
