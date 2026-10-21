@@ -185,9 +185,9 @@ serve `dist/` with something that 404s properly:
 python3 -m http.server 8099 -d dist     # 127.0.0.1:8099, real 404s, correct MIME types
 ```
 
-(`README.md`'s `deno run --allow-net --allow-read server.ts` does the same on
-:8000; it was not exercised in this dry run because port 8000 was already
-occupied on the dry-run host.)
+(`README.md`'s `deno run --allow-net --allow-read --allow-env --allow-run=git
+server.ts` does the same on :8000; it was not exercised in this dry run because
+port 8000 was already occupied on the dry-run host.)
 
 ### GET /health — the running build, in one request
 
@@ -219,7 +219,9 @@ deno run --allow-net --allow-read --allow-env --allow-run=git server.ts
 - `BUILD_TIMESTAMP` — ISO-8601; falls back to the server's start time, so an
   unstamped deploy still reports something fresh rather than a lie.
 - `PORT` — listener override; the default stays 8000. Anything that is not an
-  integer 0–65535 refuses to start rather than silently moving ports.
+  integer 0–65535 refuses to start rather than silently moving ports. Like the
+  three stamps above it is read through `--allow-env`: a runbook line that drops
+  that flag ignores `PORT` and listens on 8000 anyway (README.md's flag table).
 
 The other static servers in this runbook (`vite preview`, `python3 -m
 http.server`) do not serve `/health` — it is a feature of `server.ts`, the

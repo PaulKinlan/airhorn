@@ -41,18 +41,35 @@ worker's scope is `/` — with any static file server, for example
 `npx serve dist`, or the Deno server in `server.ts`:
 
 ```bash
-deno run --allow-net --allow-read server.ts   # serves dist/ on port 8000
+deno run --allow-net --allow-read --allow-env --allow-run=git server.ts
+
+PORT=9000 deno run --allow-net --allow-read --allow-env --allow-run=git server.ts
 ```
 
-`PORT` overrides the port (`PORT=9000 deno run --allow-net --allow-read server.ts`),
-which matters on hosts where 8000 is taken. The server also exposes **`GET /health`**:
-unauthenticated JSON describing the running build — `{"status":"ok","version":"2.0.0",
-"commit":"<short sha>","buildTimestamp":"<ISO-8601>"}`. Each value is resolved once
-at startup with a build/deploy-time override and a safe fallback (`APP_VERSION` →
-package.json → `"unknown"`; `GIT_COMMIT` → one `git rev-parse --short HEAD` →
-`"unknown"`; `BUILD_TIMESTAMP` → server start time), so the route never blocks and
-never errors. See [DEPLOY.md](DEPLOY.md) for stamping a deployment; `tests/health.test.mjs`
-pins the contract.
+The first line serves `dist/` on port 8000; the second moves the listener, which
+matters on hosts where 8000 is taken. Each flag earns its place, and leaving one out
+changes what you get rather than failing loudly:
+
+| Flag | What it buys | Left out |
+| --- | --- | --- |
+| `--allow-net` | the listener itself | nothing to connect to |
+| `--allow-read` | `dist/`, and `package.json`'s `version` | no app; `version` is `"unknown"` |
+| `--allow-env` | `PORT` and the build stamps | `PORT` is **ignored** — it still listens on 8000 |
+| `--allow-run=git` | `commit`, read from this checkout | `commit` is `"unknown"` |
+
+`"unknown"` is a truthful answer, not an error — a host that ships only `dist/` has
+no `.git` to ask. Where you would rather not grant the flag, stamp the value at build
+time instead: [DEPLOY.md](DEPLOY.md) sets `APP_VERSION`, `GIT_COMMIT` and
+`BUILD_TIMESTAMP` and runs without `--allow-run=git`.
+
+The server also exposes **`GET /health`**: unauthenticated JSON describing the
+running build — `{"status":"ok","version":"2.0.0","commit":"<short sha>",
+"buildTimestamp":"<ISO-8601>"}`. Each value is resolved once at startup with a
+build/deploy-time override and a safe fallback (`APP_VERSION` → package.json →
+`"unknown"`; `GIT_COMMIT` → one `git rev-parse --short HEAD` → `"unknown"`;
+`BUILD_TIMESTAMP` → server start time), so the route never blocks and never errors;
+`curl -s localhost:8000/health` is the one-line proof of a deployment.
+`tests/health.test.mjs` pins the contract.
 
 ## Offline and updates
 
