@@ -57,6 +57,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser, chromeBin, killTree } from '../tests/support/browser.mjs';
+import { sweepProfile } from './lib/reap.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -463,6 +464,10 @@ async function launchPersistent(profileDir, label) {
   const reapSync = () => {
     page.close();
     try { chrome.kill('SIGTERM'); } catch { /* already gone */ }
+    // killTree walks ppid, which misses a child that was reparented when the
+    // browser died first; the marker sweep finds chrome's children by their
+    // own command line instead (the same pass tests/support/browser.mjs uses).
+    try { sweepProfile(profileDir); } catch { /* /proc-less: killTree below is the fallback */ }
     try { killTree(chrome.pid); } catch { /* already gone */ }
     try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch { /* best effort */ }
   };
