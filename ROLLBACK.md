@@ -6,7 +6,7 @@ up, this says how to take it down, in what order, and exactly how far the undo r
 
 The short version, because it is not the obvious one:
 
-1. **The origin is easy.** V1 is a 52-file static tree (2,859,760 B) served by a Google
+1. **The origin is easy.** V1 is a 54-file static tree (2,909,540 B) served by a Google
    front end with `cache-control: public, max-age=10` on every file, including
    `/sw.js`. Nothing needs purging; a revert is visible everywhere within 10 seconds.
 2. **The service worker is the only part that can outlive the revert**, and it does so
@@ -16,10 +16,15 @@ The short version, because it is not the obvious one:
    `max-age=10` window is still fresh. The device then shows V2 forever, with a V1 worker
    in control, and nothing self-heals. That is the risk worth planning for, and §6 has
    the escape hatch that cannot be poisoned.
-3. **V1 cannot be rebuilt from git.** Of the 52 live files, **22 differ** from the
-   V1 tip in this repo (`563bdc3`) — built JS, minified HTML/CSS, re-compressed PNGs, and
-   `sw.js` is `0.6.20` on the origin versus `0.6.18` in git. `dist/` was gitignored at V1.
-   The rollback artifact is therefore **the deployed bytes**, not a commit.
+3. **Production is not any commit in this repo, and no build of it is production.**
+   Building the V1 tip (`563bdc3`, `npm ci` + `npx gulp` on Node 24) reproduces **49 of the
+   54 live files byte-identically** — including `scripts/main.min.js`, `styles/main.css` and
+   all 15 images, so even the gulp/`imagemin` output is reproducible. It does not reproduce
+   `sw.js` (production says `0.6.20`; that string exists in **no** commit), `index.html`
+   (production carries an Analytics/`interestCohort` block and a different `origin-trial`
+   token) or `manifest.json` (production adds two screenshots), and it contains neither
+   screenshot file. So **the rollback target is the deployed bytes, archived — not a
+   checkout.** A V2 deploy destroys the only easy path back unless that archive exists.
 
 Every number here was observed on this VM on 2026-10-21 (Chrome 155 headless, Node
 24.22.0, a loopback server) unless it says **PRODUCTION ONLY** — those commands need the
@@ -37,16 +42,19 @@ Read-only probes against the live origin, 2026-10-21:
 | `/sw.js` | 1,505 B, `content-type: application/javascript`, `const version = "0.6.20"`, cache `airhorner-0.6.20` |
 | Unknown paths | 404 (`/no-such-path-xyz` → 404) — **no SPA fallback**, so a wrong path fails loudly |
 | V2-only paths | `/assets/index-C81EVIwm.js` → 404: V2 is not deployed |
-| Published tree | **52 files, 2,859,760 B**, all 200; byte-identical across two fetches (no gzip instability when fetched with `curl --compressed`) |
-| vs `git@563bdc3` (V1 tip) | **22 of 52 differ** (see §Appendix): `index.html`, `styles/main.css`, `scripts/*`, all 16 PNGs, `sw.js` (0.6.20 vs 0.6.18) |
+| Published tree | **54 files, 2,909,540 B**, all 200; byte-identical across two fetches (no gzip instability when fetched with `curl --compressed`) |
+| Reproducible from `git@563bdc3` (V1 tip) | **49 of 54**, byte-identical, by `npm ci` + `npx gulp` (measured on Node 24) |
+| NOT reproducible from any commit | `sw.js` (`0.6.20` exists in no commit), `index.html` (Analytics/`interestCohort` block + a different `origin-trial` token), `manifest.json` (adds 2 screenshots), and those 2 screenshots (`/images/screenshots/1-360x640.png`, `2-360x640.png`) — paths no commit contains |
+| Archive of record | `~/airhorn-v1-artifact/` (outside this repo): `live/` = these 54 files, `cannot-regenerate/` = the 5 above with hashes, `SHA256SUMS` (55 entries), verified by serving it and driving it in Chrome (§5 Step 0) |
 | `.well-known/assetlinks.json` | 300 B, byte-identical in V1 and in V2's `dist/` — no Android deep-link change either way |
 
-Why the 22-file delta matters: V1's build was `gulp` (`gulpfile.babel.js` at `563bdc3`,
-gulp 4 + rollup + babel + `gulp-imagemin`), and `dist/` is in V1's `.gitignore`. So the
-deployed tree is a build product that this repo cannot reproduce byte-for-byte (and
-should not try to — rebuilding it during an incident adds a toolchain to the critical
-path). **The rollback artifact must be the stored deployment or an archive of the live
-origin, never a rebuild.**
+Why this matters: V1's build was `gulp` (`gulpfile.babel.js` at `563bdc3`: gulp 4 + rollup +
+babel + `gulp-imagemin`) into `dist/`, which V1's `.gitignore` excludes. That pipeline *does*
+still run (measured: ~50 s, exit 0, on Node 24), so a rebuild is a fallback that gives you a
+**working** V1 — 49/54 exact, with the differences being an expired `origin-trial` token, an
+analytics snippet and a manifest field. It is not a rollback: it is a different deployment
+whose `sw.js` version string nobody can predict from the repo. **The rollback artifact is the
+archived deployment, and it is the only thing that puts production back exactly.**
 
 ## 2. What V2 changes at the origin
 
@@ -157,16 +165,42 @@ home-screen additions is its own story.
 
 ## 5. The order of operations
 
-### Step 0 — before anything is deployed: archive the artifact (runnable today)
+### Step 0 — the archive: it now exists, and it is the rollback target
 
-This is the step that makes the rollback a ten-second operation instead of a rebuild of a
-2019 gulp pipeline. It has not been done: nothing in this repo holds V1's built tree.
+**Revert means redeploying the archived live bytes, not `git checkout`.** Production is not
+any commit here (§1), so a checkout gives you a near-miss, and `sw.js` — the one file that
+decides whether installed devices ever see the revert — would come back with a version
+string production never had.
+
+**A V2 deploy destroys the only easy path back unless this archive exists.** Once `dist/` is
+at the origin, the V1 tree is gone from the live host; the only copies are whatever was
+archived beforehand plus the host's own stored deployment. Do not deploy V2 before both of
+those are confirmed.
+
+The archive of record, made 2026-10-21 and verified:
+
+```
+~/airhorn-v1-artifact/
+  live/                 54 files, 2,909,540 B — production, byte-for-byte
+  cannot-regenerate/    sw.js, index.html, manifest.json, 2 screenshot PNGs + hashes and why
+  rollback-overlay/     sw.js — the §6 worker (NOT production; rollback use only)
+  SHA256SUMS            55 entries; `sha256sum -c SHA256SUMS` passes
+```
+
+It was verified the way it will be used, not by inspection: served on a loopback origin with
+production's own `cache-control: public, max-age=10`, then driven in headless Chrome 155 —
+boots (`.horn[role=button]`, styles applied), works (press-and-hold flips `aria-pressed`),
+installs (manifest 200, all 12 icons **and** both screenshots resolve, worker activates,
+`airhorner-0.6.20` holds its 8 precached paths), and survives an offline reload with the
+origin destroyed.
+
+To re-create or re-verify it, the recipe (read-only against production):
 
 ```bash
 # On any machine with network access. Read-only against the live site.
 mkdir -p ~/airhorn-v1-artifact && cd ~/airhorn-v1-artifact
 awk -F'|' '{p=$2; h=$3; gsub(/^ +| +$/, "", p); gsub(/^ +| +$/, "", h);
-            if (length(h)==64) print p}' /path/to/ROLLBACK.md > /tmp/v1-paths.txt   # §Appendix, 52 paths
+            if (length(h)==64) print p}' /path/to/ROLLBACK.md > /tmp/v1-paths.txt   # §Appendix, 54 paths
 while IFS= read -r path; do
   mkdir -p "$(dirname "$path")"
   curl -sS --compressed --fail -o "$path" "https://airhorner.com/${path// /%20}"
@@ -175,7 +209,7 @@ done < /tmp/v1-paths.txt
 ```
 
 Two properties were measured for this archive: the origin is byte-stable (two fetches of
-all 52 files matched), and `curl --compressed` is required — without it four files
+all 54 files matched), and `curl --compressed` is required — without it four files
 (`sw.js`, `styles/main.css`, `scripts/comlink.global.js`, `assetlinks.json`) sometimes
 arrive gzip-encoded and every hash disagrees.
 
@@ -400,7 +434,7 @@ google-chrome --user-data-dir=/tmp/profile-that-had-v2 https://airhorner.com/
 
 ## 10. Appendix — the V1 artifact manifest (recorded 2026-10-21)
 
-52 files, 2,859,760 bytes, fetched from `https://airhorner.com/` with `curl --compressed`
+54 files, 2,909,540 bytes, fetched from `https://airhorner.com/` with `curl --compressed`
 (see §5 Step 0), each fetched twice with identical hashes. This table is the verification
 oracle for a restore: `sha256` is of the file as served (decompressed), `content-type` is
 what the origin sends and what a static restore must send again.
@@ -427,6 +461,8 @@ done < /tmp/v1-want.tsv | grep -c '^ok'    # expect 52
 | images/icons/icons.ttf | d5f0843e95ba84f830b0a012e00272a640dff31175b122786db318fea8f87097 | 3364 | font/ttf |
 | images/icons/icons.woff | a9fd3f3a92fff6743aa87e8441ae2d9b232f38230256519622d8e456c7f3d996 | 2292 | font/woff |
 | images/icons/icons.woff2 | b194d2a2af64e9b032246b2d7bd9fc0c2bee28d79a48175ce7d69885f0e24363 | 1572 | font/woff2 |
+| images/screenshots/1-360x640.png | 488c15bb07df4095163ab056a39c1bb06e607236b8bc26e0ada2fa468a0cfcdd | 34182 | image/png |
+| images/screenshots/2-360x640.png | fc2f86213564de2106c1dd22be2576372e305b62da912036ecc421e16c0aedb8 | 15598 | image/png |
 | images/touch/Airhorner-maskable.svg | 82b79d258a731f64a623d39e09921958b7ff3305bed0fef5c2a276a82d51da03 | 488 | image/svg+xml |
 | images/touch/Airhorner.sketch | c56dde069040a4b3f2b0a18b79988ac1626eeaf1615cbdb8feb1a4412f191888 | 32768 | application/octet-stream |
 | images/touch/android-launchericon-144-144.png | 9a7ee4ebc11eb9861bb7d96ad339f5b72b3fc9d30a8abf3d084e9f91782e4110 | 5193 | image/png |
@@ -470,4 +506,4 @@ done < /tmp/v1-want.tsv | grep -c '^ok'    # expect 52
 | styles/main.css | 49573f8efbb3052682fbddfaf1fa6ce016c5f1e594f104c9809dc870cea766ac | 1944 | text/css |
 | sw.js | f0fec11cc08e51206257a00fe157e6d7b660b0158580aaa2939d5c874aa56075 | 1505 | application/javascript |
 
-**Total: 52 files, 2859760 bytes.**
+**Total: 54 files, 2909540 bytes.**
