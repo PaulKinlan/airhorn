@@ -44,7 +44,7 @@ Read-only probes against the live origin, 2026-10-21:
 | V2-only paths | `/assets/index-C81EVIwm.js` → 404: V2 is not deployed |
 | Published tree | **54 files, 2,909,540 B**, all 200; byte-identical across two fetches (no gzip instability when fetched with `curl --compressed`) |
 | Reproducible from `git@563bdc3` (V1 tip) | **49 of 54**, byte-identical, by `npm ci` + `npx gulp` (measured on Node 24) |
-| NOT reproducible from any commit | `sw.js` (`0.6.20` exists in no commit), `index.html` (Analytics/`interestCohort` block + a different `origin-trial` token), `manifest.json` (adds 2 screenshots), and those 2 screenshots (`/images/screenshots/1-360x640.png`, `2-360x640.png`) — paths no commit contains |
+| NOT reproducible from any commit | `sw.js` (`0.6.20` exists in no commit), `index.html` (Analytics/`interestCohort` block + a different `origin-trial` token), `manifest.json` (production ships 2 screenshot entries the committed `app/manifest.json` does not have — the committed one has 12 icons and no screenshots at all), and those 2 screenshots (`/images/screenshots/1-360x640.png`, `2-360x640.png`) — paths no commit contains |
 | Archive of record | `~/airhorn-v1-artifact/` (outside this repo): `live/` = these 54 files, `cannot-regenerate/` = the 5 above with hashes, `SHA256SUMS` (55 entries), verified by serving it and driving it in Chrome (§5 Step 0) |
 | `.well-known/assetlinks.json` | 300 B, byte-identical in V1 and in V2's `dist/` — no Android deep-link change either way |
 
@@ -65,7 +65,7 @@ archived deployment, and it is the only thing that puts production back exactly.
 | `sw.js` | hand-written, `version = "0.6.20"`, stable text | build-stamped by the Vite plugin: `version = "2.0.0-<buildhash>"` |
 | SW caches | `airhorner-0.6.20` | `airhorner-2.0.0-<buildhash>` + `horn-integrity-2.0.0-<buildhash>` |
 | SW fetch strategy | cache-first for every same-origin GET, network fallback, **no integrity check, no pruning on activate** | verified-bytes cache hit first (navigations get the cached shell), bounded network waits, activate deletes every other `airhorner-*` / `horn-integrity-*` |
-| `manifest.json` | 2,218 B | 2,980 B (adds `id`, screenshots, *Instant Blast* shortcut) |
+| `manifest.json` | 2,218 B, 10 keys | 2,980 B, 14 keys: adds `id`, `categories`, `launch_handler` and an *Instant Blast* shortcut; its 2 screenshots point at different files (`screenshot-wide/-narrow`) |
 
 A traffic switch to a V1 deployment restores that tree **atomically** — a deployment
 serves only its own files, so there is no way to end up with V2's `index.html` next to
