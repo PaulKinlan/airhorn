@@ -384,17 +384,20 @@ Origin first (`max-age=10`, so repeat after `sleep 11` if the first read is susp
 curl -sSI https://airhorner.com/sw.js | grep -iE 'cache-control|content-type|expires'
 #   public, max-age=10 · application/javascript · expires +10s
 
-curl -sS https://airhorner.com/sw.js | grep -m1 'const version'
+# --compressed on every body fetch: this origin sometimes returns gzip without being asked
+# for it, and an un-decompressed body makes grep report "binary file matches" and print
+# nothing - which looks like "no version string" rather than "curl did not decode".
+curl -sS --compressed https://airhorner.com/sw.js | grep -m1 -a 'const version'
 #   V1:        const version = "0.6.20";
 #   rollback worker: no version line at all (it holds no cache) — check for its marker comment
 #   still V2:  const version = "2.0.0-<buildhash>"   ← the rollback has not reached this POP
 
-curl -sS https://airhorner.com/ | grep -c 'Press and hold to sound the air horn'   # V1 → 0
-curl -sS https://airhorner.com/ | grep -c 'role=button'                            # V1 → 1
-curl -sS https://airhorner.com/scripts/main.min.js -o /dev/null -w '%{http_code}\n' # V1 → 200
-curl -sS https://airhorner.com/assets/index-C81EVIwm.js -o /dev/null -w '%{http_code}\n' # V2 gone → 404
-curl -sS https://airhorner.com/.well-known/assetlinks.json | head -c 60              # unchanged JSON
-curl -sS https://airhorner.com/no-such-path-xyz -o /dev/null -w '%{http_code}\n'     # 404 (no SPA fallback)
+curl -sS --compressed https://airhorner.com/ | grep -c 'Press and hold to sound the air horn'   # V1 → 0
+curl -sS --compressed https://airhorner.com/ | grep -c 'role=button'                            # V1 → 1
+curl -sS --compressed https://airhorner.com/scripts/main.min.js -o /dev/null -w '%{http_code}\n' # V1 → 200
+curl -sS --compressed https://airhorner.com/assets/index-C81EVIwm.js -o /dev/null -w '%{http_code}\n' # V2's bundle → 404
+curl -sS --compressed https://airhorner.com/.well-known/assetlinks.json | head -c 60              # JSON, unchanged
+curl -sS --compressed https://airhorner.com/no-such-path-xyz -o /dev/null -w '%{http_code}\n'     # 404 (no SPA fallback)
 ```
 
 A cache-buster (`.../sw.js?cb=$(date +%s)`) proves what the *origin* holds; it does not
