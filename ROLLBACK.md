@@ -44,7 +44,7 @@ Read-only probes against the live origin, 2026-10-21:
 | V2-only paths | `/assets/index-C81EVIwm.js` → 404: V2 is not deployed |
 | Published tree | **54 files, 2,909,540 B**, all 200; byte-identical across two fetches (no gzip instability when fetched with `curl --compressed`) |
 | Reproducible from `git@563bdc3` (V1 tip) | **49 of 54**, byte-identical, by `npm ci` + `npx gulp` (measured on Node 24) |
-| NOT reproducible from any commit | `sw.js` (`0.6.20` exists in no commit), `index.html` (Analytics/`interestCohort` block + a different `origin-trial` token), `manifest.json` (production ships 2 screenshot entries the committed `app/manifest.json` does not have — the committed one has 12 icons and no screenshots at all), and those 2 screenshots (`/images/screenshots/1-360x640.png`, `2-360x640.png`) — paths no commit contains |
+| NOT reproducible from any commit | `sw.js` (`0.6.20` exists in no commit), `index.html` (Analytics/`interestCohort` block + a different `origin-trial` token), `manifest.json` (production ships 2 screenshot entries the manifest at the V1 tip — `app/manifest.json` @ `563bdc3`, 12 icons, no screenshots — does not have; this tree's `public/manifest.json` ships 2 different ones, `screenshot-wide`/-`narrow`), and those 2 screenshots (`/images/screenshots/1-360x640.png`, `2-360x640.png`) — paths no commit contains |
 | Archive of record | `~/airhorn-v1-artifact/` (outside this repo): `live/` = these 54 files, `cannot-regenerate/` = the 5 above with hashes, `SHA256SUMS` (55 entries), verified by serving it and driving it in Chrome (§5 Step 0) |
 | `.well-known/assetlinks.json` | 300 B, byte-identical in V1 and in V2's `dist/` — no Android deep-link change either way |
 

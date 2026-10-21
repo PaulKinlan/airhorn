@@ -128,7 +128,7 @@ transforming...
 ✓ 6 modules transformed.
 rendering chunks...
 computing gzip size...
-dist/index.html                16.48 kB │ gzip: 5.36 kB
+dist/index.html                17.17 kB │ gzip: 5.61 kB
 dist/assets/index-C81EVIwm.js  16.66 kB │ gzip: 5.82 kB
 ✓ built in 222ms
 ```
@@ -139,7 +139,7 @@ the tree rather than the log:
 
 ```bash
 find dist -type f | wc -l                                  # -> 26
-find dist -type f -printf '%s\n' | awk '{s+=$1} END{print s}'   # -> 244049
+find dist -type f -printf '%s\n' | awk '{s+=$1} END{print s}'   # -> 244741
 find dist -type f | grep -E 'assetlinks|sw\.js|manifest'   # the three files worth eyeballing
 grep -m1 'const version' dist/sw.js                        # -> const version = "2.0.0-<buildhash>";
 ```
