@@ -190,6 +190,24 @@ async function testBootWatchdog() {
     }
   };
 
+  // The same poll for an expression whose VALUE IS A PROMISE. waitUntil's
+  // plain evaluate cannot be used for these: a pending promise is a truthy
+  // object, so it would pass on the first poll without the answer arriving.
+  const waitForAwait = async (expression, timeoutMs, label) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      let value;
+      try {
+        value = await evaluateAwaited(expression);
+        if (value) return value;
+      } catch {}
+      if (Date.now() > deadline) {
+        throw new Error(`Timed out after ${timeoutMs}ms waiting for: ${label} (last value: ${value})`);
+      }
+      await new Promise(r => setTimeout(r, 100));
+    }
+  };
+
   const shot = async (name) => {
     const res = await send('Page.captureScreenshot', { format: 'png' });
     const file = path.join(EVIDENCE_DIR, `${name}.png`);
@@ -214,6 +232,48 @@ async function testBootWatchdog() {
         // the observer once the DOM has it.
         window.__hadControllerAtParse = !!navigator.serviceWorker.controller;
         window.__statusLog = JSON.parse(sessionStorage.getItem('__statusLog') || '[]');
+        // The v2 generation announces its own activation ("sw-v2-active"), and
+        // case 10 gates on that announcement. Record it from document START, in
+        // a fresh window per navigation, so the announcement can never be
+        // posted into a void: attaching the listener after reg.update() lost it
+        // whenever the page's own boot registration (index.html) was the
+        // generation that installed v2 - the page installs /sw.js itself, so on
+        // a loaded box its fetch can land after the suite publishes the v2 body
+        // and activate before the test is listening (airhorn-ye54: server-side
+        // request logs show the failing signature [v1, v2, v2] - the page's own
+        // v2 install plus the update's v2 fetch - against [v1, v1, v2] for the
+        // 1.0-1.2s passes; forced 3/3 by publishing v2 before the navigation,
+        // and never once the boot registration had settled).
+        window.__v2active = false;
+        if (navigator.serviceWorker) {
+          navigator.serviceWorker.addEventListener('message', (e) => {
+            if (e.data === 'sw-v2-active') window.__v2active = true;
+          });
+        }
+        // Case 7 asserts that the unstyled horn RESPONDS. The attribute it used
+        // to read is owned by the app and is not a stable state there:
+        // main.js sets aria-pressed optimistically and RETRACTS it when the
+        // audio start does not complete, and whether it completes is decided by
+        // main.js's own 100ms race with AudioContext.resume() - which is what a
+        // loaded box changes (airhorn-ye54: the slmt-only union gate lost this
+        // wait at 3s while idle runs, and 5 runs of the slmt-only tree, saw
+        // 'true' in 9-34ms; under load the tap hint appeared and the first
+        // sample moved to 46-83ms). Record the transition from document start
+        // so the assertion is about the event that happened, never about a
+        // sample landing inside a window the app owns.
+        window.__pressedLog = [];
+        const hookHorn = () => {
+          const horn = document.querySelector('.horn');
+          if (!horn) return false;
+          window.__pressedLog.push(horn.getAttribute('aria-pressed'));
+          new MutationObserver(() => {
+            window.__pressedLog.push(horn.getAttribute('aria-pressed'));
+          }).observe(horn, { attributes: true, attributeFilter: ['aria-pressed'] });
+          return true;
+        };
+        if (!hookHorn()) {
+          document.addEventListener('DOMContentLoaded', hookHorn);
+        }
         const hookRegion = () => {
           const region = document.getElementById('app-status');
           if (!region) return;
@@ -510,10 +570,25 @@ async function testBootWatchdog() {
     }
     if (!unstyled.labelBelowHorn) throw new Error(`label inside the horn body pre-swap: ${JSON.stringify(unstyled)}`);
     if (!unstyled.installerOutOfFlowRule) throw new Error(`critical layer no longer takes the unavailable installer out of flow: ${JSON.stringify(unstyled)}`);
-    // And the unstyled horn still sounds: the failure this replaces was a
-    // page that looked broken but passed a naive usability check.
-    await evaluate(`document.querySelector('.horn').click()`);
-    await waitUntil(`document.querySelector('.horn').getAttribute('aria-pressed') === 'true'`, 3000, 'unstyled horn to sound');
+    // And the unstyled horn still responds: the failure this replaces was a
+    // page that looked broken but passed a naive usability check. The press is
+    // a TRUSTED one (Input.dispatchMouseEvent), not element.click(): a
+    // synthetic click carries no user activation, so the audio graph may stay
+    // suspended, main.js honestly retracts the pressed state, and whether that
+    // retraction beats this wait's first sample is a function of box load -
+    // not of the unstyled page working (airhorn-ye54). The wait reads the
+    // document-start record of the transition, so no sample can miss it.
+    const hornBox = await evaluate(`(() => {
+      const r = document.querySelector('.horn').getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hornBox.x, y: hornBox.y, button: 'left', clickCount: 1 });
+    await waitUntil(`window.__pressedLog.includes('true')`, 3000, 'unstyled horn to respond to a trusted press');
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hornBox.x, y: hornBox.y, button: 'left', clickCount: 1 });
+    // The release must retire the hold - the record carries the transition, so
+    // this cannot be missed by a slow sample either.
+    await waitUntil(`window.__pressedLog.lastIndexOf('false') > window.__pressedLog.lastIndexOf('true')`,
+      3000, 'release to retire the unstyled hold');
     // airhorn-5yv: the critical fallback hides the installer, but must not
     // lock install away in the very mode it protects - once the prompt is
     // available the button is reachable even unstyled.
@@ -650,6 +725,18 @@ async function testBootWatchdog() {
     // update happening at all (airhorn-0p88 / airhorn-tuuq R1,
     // mutation-verified: swBody = swV1 here still passed green).
     await evaluate(`window.__statusLog.length = 0; sessionStorage.setItem('__statusLog', '[]'); 1`);
+    // Publish the v2 body only once the page's OWN boot registration has
+    // settled. index.html registers /sw.js itself, so a bootstrap fetch that
+    // returns after `swBody = swV2` makes the PAGE the installer of the v2
+    // generation: it then announces itself from its own activate, this test's
+    // reg.update() below finds nothing to install, and the wait had nothing to
+    // hear (airhorn-ye54). Settling first means the only way v2 can exist is
+    // the update this case asks for.
+    await waitForAwait(
+      `navigator.serviceWorker.getRegistration()
+        .then(r => !!r && !!r.active && !r.installing && !r.waiting)
+        .catch(() => false)`,
+      10000, 'the boot registration to settle before publishing v2');
     swBody = swV2;
     await evaluate(`navigator.serviceWorker.getRegistration().then(reg => reg.update())`);
     // Completion gates on a VERSION-TRUE signal from the v2 worker itself:
@@ -658,9 +745,10 @@ async function testBootWatchdog() {
     // self-registers swV1 during boot, so a controller exists before the
     // update is even requested (airhorn-j72n) - and the announcement chain
     // cannot be the gate - its latency tracks box load (airhorn-bogq,
-    // airhorn-twlb). The announcement is still observed and logged, and the
-    // swq false-failure check still polices its copy.
-    await evaluate(`window.__v2active = false; navigator.serviceWorker.addEventListener('message', (e) => { if (e.data === 'sw-v2-active') window.__v2active = true; }); 1`);
+    // airhorn-twlb). The listener lives in the document-start script above, so
+    // it exists before any generation can announce itself (airhorn-ye54); the
+    // announcement is still observed and logged, and the swq false-failure
+    // check still polices its copy.
     await waitUntil('window.__v2active', 10000,
       'the v2 worker itself to report active and claiming (version-true ground truth)');
     const announcement = await evaluate(`window.__statusLog.filter(m => /new version is ready/i.test(m))`);
