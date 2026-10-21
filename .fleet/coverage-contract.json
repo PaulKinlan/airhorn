@@ -85,6 +85,10 @@
   "tests/screenreader.test.mjs",
   "tests/visual-overrides.test.mjs",
   "tests/reflow-zoom.test.mjs",
-  "tests/health.test.mjs"
+  "tests/health.test.mjs",
+  "tests/docs-recipe.test.mjs"
+ ],
+ "README.md": [
+  "tests/docs-recipe.test.mjs"
  ]
 }

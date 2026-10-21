@@ -41,21 +41,30 @@ worker's scope is `/` — with any static file server, for example
 `npx serve dist`, or the Deno server in `server.ts`:
 
 ```bash
-deno run --allow-net --allow-read --allow-env --allow-run=git server.ts
+deno run --allow-net --allow-read=dist,package.json \
+  --allow-env=PORT,APP_VERSION,GIT_COMMIT,COMMIT_SHA,BUILD_TIMESTAMP \
+  --allow-run=git server.ts
 
-PORT=9000 deno run --allow-net --allow-read --allow-env --allow-run=git server.ts
+PORT=9000 deno run --allow-net --allow-read=dist,package.json \
+  --allow-env=PORT,APP_VERSION,GIT_COMMIT,COMMIT_SHA,BUILD_TIMESTAMP \
+  --allow-run=git server.ts
 ```
 
 The first line serves `dist/` on port 8000; the second moves the listener, which
-matters on hosts where 8000 is taken. Each flag earns its place, and leaving one out
-changes what you get rather than failing loudly:
+matters on hosts where 8000 is taken. Every grant is scoped to what the server
+actually touches — it listens on a public port, so "read the whole filesystem" is
+not a reasonable default. Each flag earns its place, and leaving one out changes what
+you get rather than failing loudly:
 
 | Flag | What it buys | Left out |
 | --- | --- | --- |
 | `--allow-net` | the listener itself | nothing to connect to |
-| `--allow-read` | `dist/`, and `package.json`'s `version` | no app; `version` is `"unknown"` |
-| `--allow-env` | `PORT` and the build stamps | `PORT` is **ignored** — it still listens on 8000 |
+| `--allow-read=dist,package.json` | `dist/`, and `package.json`'s `version` | no app; `version` is `"unknown"` |
+| `--allow-env=…` | `PORT` and the five build stamps | `PORT` is **ignored** — it still listens on 8000 |
 | `--allow-run=git` | `commit`, read from this checkout | `commit` is `"unknown"` |
+
+That exact command line is exercised as written by `tests/docs-recipe.test.mjs`, so
+the recipe and the permissions `server.ts` asks for cannot drift apart again.
 
 `"unknown"` is a truthful answer, not an error — a host that ships only `dist/` has
 no `.git` to ask. Where you would rather not grant the flag, stamp the value at build

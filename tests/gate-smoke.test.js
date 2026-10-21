@@ -249,25 +249,29 @@ test('the gate script parses (bash -n)', () => {
 });
 
 test('a change that selects ZERO suites fails loudly, green only by explicit acknowledgement (airhorn-n0jd)', () => {
-  // README.md matches the !*.md exemption row: no suite covers it. That used
+  // CONTRIBUTING.md matches the !*.md exemption row: no suite covers it. (README.md
+  // used to be the example; it now selects tests/docs-recipe.test.mjs because its
+  // Deno recipe is documented behaviour - airhorn-x86p.) That used
   // to exit 0 with a bare 'PASS (0 suite(s))' - so an over-broad `!` row (or a
   // map edit exempting real source) could green a change that ran nothing.
   // Now the verdict is FAIL unless the caller names the acknowledgement; the
   // --list query keeps its exit-0 semantics (it is not a verdict).
+  const exemptOnly = 'CONTRIBUTING.md';
+  assert.ok(fs.existsSync(path.join(root, exemptOnly)), `selector input ${exemptOnly} is missing from the tree`);
   const run = (args, env = {}) => spawnSync('bash', [gate, ...args], {
     cwd: root, encoding: 'utf8', env: { ...process.env, ...env },
   });
-  const loud = run(['--changed', 'README.md']);
+  const loud = run(['--changed', exemptOnly]);
   assert.equal(loud.status, 1, `an exempt-only change must not read green: ${loud.stdout}`);
-  assert.ok(loud.stdout.includes('fast-gate: zero-suite: README.md (exempt)'),
+  assert.ok(loud.stdout.includes(`fast-gate: zero-suite: ${exemptOnly} (exempt)`),
     `the exempt file must be named with its reason: ${loud.stdout}`);
   assert.ok(loud.stderr.includes('FAST_GATE_ALLOW_ZERO'),
     `the failure must name the acknowledgement: ${loud.stderr}`);
-  const blessed = run(['--changed', 'README.md'], { FAST_GATE_ALLOW_ZERO: '1' });
+  const blessed = run(['--changed', exemptOnly], { FAST_GATE_ALLOW_ZERO: '1' });
   assert.equal(blessed.status, 0, `the explicit acknowledgement must pass: ${blessed.stderr}`);
   assert.ok(blessed.stdout.includes('ZERO-SUITE PASS'),
     `the pass must be labelled, not a bare PASS: ${blessed.stdout}`);
-  const query = run(['--changed', 'README.md', '--list']);
+  const query = run(['--changed', exemptOnly, '--list']);
   assert.equal(query.status, 0, `--list is a query, not a verdict: ${query.stderr}`);
 });
 

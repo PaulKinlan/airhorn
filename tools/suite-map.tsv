@@ -102,6 +102,11 @@ tests/multitab.test.mjs	tests/multitab.test.mjs
 ~test/webmcp.test.mjs	test/webmcp.test.mjs
 ~test/webmcp-browser.test.mjs	test/webmcp-browser.test.mjs
 ~test/resilience-ui.test.mjs	test/resilience-ui.test.mjs
+# The README's Deno recipe is documented BEHAVIOUR, not prose: tests/docs-recipe.test.mjs
+# runs the exact command README.md prints, so a permission server.ts grows (or a flag the
+# docs lose) turns the gate red instead of shipping inert instructions (airhorn-x86p).
+# Prose is still exempt below; this prose is the operator's command line.
+README.md	tests/docs-recipe.test.mjs
 # Static assets and prose carry no behaviour; no suite covers them.
 !*.md
 !LICENSE
@@ -133,4 +138,4 @@ tests/acceptance.mjs	tests/acceptance.mjs
 tests/support/browser.mjs	tests/test-support.test.js
 tests/support/signal-exit.mjs	tests/test-support.test.js
 tests/test-support.test.js	tests/test-support.test.js
-tests/support/**	tests/a11y.test.mjs tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs tests/shortcuts.test.mjs tests/multitab.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs tests/health.test.mjs
+tests/support/**	tests/a11y.test.mjs tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs tests/shortcuts.test.mjs tests/multitab.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs tests/health.test.mjs tests/docs-recipe.test.mjs

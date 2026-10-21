@@ -207,7 +207,9 @@ server read access to them:
 APP_VERSION="$(node -p 'require("./package.json").version')" \
 GIT_COMMIT="$(git rev-parse --short HEAD)" \
 BUILD_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" \
-deno run --allow-net --allow-read --allow-env --allow-run=git server.ts
+deno run --allow-net --allow-read=dist,package.json \
+  --allow-env=PORT,APP_VERSION,GIT_COMMIT,COMMIT_SHA,BUILD_TIMESTAMP \
+  --allow-run=git server.ts
 ```
 
 - `APP_VERSION` — overrides the version reported; falls back to the
