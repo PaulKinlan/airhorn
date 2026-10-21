@@ -364,6 +364,16 @@ async function launch({ label = 'keyboard' } = {}) {
     await sleep(80);
     return evaluate('window.__kbFocus()');
   };
+  // main.css is fetched non-render-blocking (index.html swaps its media on load),
+  // so a ring assertion can run against an unstyled frame: it measured a 1px UA
+  // outline on a 71x21 unstyled Try-again button in a fast-gate run on a loaded
+  // box. Wait for the sheet itself, using a property that is NOT the thing under
+  // test (the card's radius; the critical inline block styles .horn, not
+  // .boot-alert), so the wait cannot mask a missing focus ring.
+  const stylesheetApplied = () => evaluate(`(() => {
+    const card = document.querySelector('.boot-alert');
+    return !!card && getComputedStyle(card).borderTopLeftRadius !== '0px';
+  })()`);
   const setOffline = (offline) => send('Network.emulateNetworkConditions', {
     offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1,
   });
@@ -388,7 +398,7 @@ async function launch({ label = 'keyboard' } = {}) {
     await browser.close();
   };
 
-  return { send, evaluate, snapshot, waitFor, hold, release, tab, key, focus, setOffline, offerInstall, sleep, close, handle };
+  return { send, evaluate, snapshot, waitFor, hold, release, tab, key, focus, setOffline, offerInstall, stylesheetApplied, sleep, close, handle };
 }
 
 // A blast must not double-fire: a hold is one start on the sample voice, or
@@ -407,11 +417,12 @@ async function run() {
   let app = null;
   try {
     app = await launch();
-    const { send, evaluate, snapshot, waitFor, hold, release, tab, key, focus, setOffline, offerInstall, sleep } = app;
+    const { send, evaluate, snapshot, waitFor, hold, release, tab, key, focus, setOffline, offerInstall, stylesheetApplied, sleep } = app;
     const base = `http://127.0.0.1:${port}/`;
 
     await send('Page.navigate', { url: base });
     await waitFor((s) => s.booted, { label: 'the app to boot (window.__airhorn)', timeout: 15000 });
+    await waitFor(() => stylesheetApplied(), { label: 'the stylesheet to be applied', timeout: 15000 });
     await sleep(300);
 
     // ---------------------------------------------------------------- case 1
@@ -630,6 +641,7 @@ async function run() {
       timeout: 20000,
     });
     assert(banner.active && banner.active.id === 'boot-retry', `boot failure: focus is on ${describeStop(banner.active)}, not the Try again button`);
+    await waitFor(() => stylesheetApplied(), { label: 'the stylesheet on the boot-failure page', timeout: 15000 });
     const retryRatio = assertFocusRing(banner.active, 'boot failure → watchdog focuses Try again (programmatic focus, no prior keyboard input)');
     // Tabbing off Try again must not strand the keyboard: the banner page still
     // has the horn behind it, and whatever Tab reaches must be a visible stop.
