@@ -12,8 +12,10 @@
  *      fallbacks work without any build-time injection;
  *   3. build-time injection wins: APP_VERSION / GIT_COMMIT / BUILD_TIMESTAMP
  *      are echoed verbatim, so CI can stamp a deploy without editing code;
- *   4. resolution happens ONCE: a second GET is byte-identical to the first
- *      (no git call, no clock read per request — the cheap-under-load promise);
+ *   4. resolution happens ONCE: the body is fixed at startup, so it survives a
+ *      second GET byte-identically AND still reports the old sha after the
+ *      checkout's HEAD moves under the running server (a per-request
+ *      `git rev-parse` would report the new one) — the cheap-under-load promise;
  *   5. the route did not break the server it sits on: HEAD/POST behave, and
  *      the static app still serves.
  *
@@ -28,6 +30,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -66,10 +69,12 @@ function childEnv(overrides = {}) {
 
 // Start the real server; resolve { url, wait, kill } once it prints its port.
 // Every wait is bounded so a wedged server fails the case instead of the gate.
-function startServer(overrides = {}, readyTimeoutMs = 30000) {
+// `where` runs a *copy* of server.ts in another directory: it resolves its
+// commit from import.meta.dirname, so the copy reports that directory's git.
+function startServer(overrides = {}, readyTimeoutMs = 30000, where = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(deno, ['run', '--no-prompt', '--allow-net', '--allow-read', '--allow-env', '--allow-run=git', serverTs], {
-      cwd: root,
+    const child = spawn(deno, ['run', '--no-prompt', '--allow-net', '--allow-read', '--allow-env', '--allow-run=git', where.serverFile ?? serverTs], {
+      cwd: where.cwd ?? root,
       env: childEnv(overrides),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -136,8 +141,11 @@ test('GET /health on the real deno server: shape, truth, cheapness', async (t) =
     assert.ok(Math.abs(Date.now() - ts) < 5 * 60 * 1000,
       `buildTimestamp falls back to server start time, got ${body.buildTimestamp}`);
 
-    // Resolved ONCE at startup: the second answer is byte-identical — no git
-    // call, no clock read, no re-serialization per request.
+    // A repeated GET is byte-identical. That alone is NOT proof of "resolved
+    // once" — a per-request `git rev-parse` would also return the same sha. The
+    // case below moves the checkout under a running server, where a per-request
+    // resolution and a startup snapshot must disagree; this is just the cheap
+    // shape check.
     const again = await srv.fetch('/health');
     assert.equal(await again.text(), JSON.stringify(body), 'a repeated GET must be byte-identical');
 
@@ -145,6 +153,64 @@ test('GET /health on the real deno server: shape, truth, cheapness', async (t) =
       'no extra fields: the endpoint carries no secrets');
   } finally {
     await srv.kill();
+  }
+});
+
+test('resolution happens once: /health holds its snapshot while the checkout moves', async (t) => {
+  if (!deno) return t.skip('deno is not installed on this machine; /health is served by server.ts');
+  try {
+    execFileSync('git', ['--version'], { stdio: 'ignore' });
+  } catch {
+    return t.skip('git is not installed on this machine; the commit fallback needs it too');
+  }
+
+  // A throwaway root with its own .git and a copy of server.ts, so this case can
+  // rewrite HEAD between two requests. A snapshot taken at startup keeps saying
+  // the old sha; a per-request `git rev-parse` would report the new one.
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'airhorn-health-once-'));
+  const scratchServer = path.join(scratch, 'server.ts');
+  const git = (...args) => execFileSync('git', [
+    '-c', 'user.email=health-test@example.invalid',
+    '-c', 'user.name=health test',
+    '-c', 'commit.gpgsign=false',
+    ...args,
+  ], { cwd: scratch, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  const headSha = () => execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: scratch, encoding: 'utf8' }).trim();
+
+  try {
+    fs.copyFileSync(serverTs, scratchServer);
+    // A version this case can recognise: proof the copy is what is running, not
+    // the repo checkout that happens to be sitting beside it.
+    fs.writeFileSync(path.join(scratch, 'package.json'), JSON.stringify({ version: '0.0.0-scratch-root' }));
+    git('init', '-q', '-b', 'main');
+    git('commit', '-q', '--allow-empty', '-m', 'first');
+    const before = headSha();
+
+    const srv = await startServer({}, 30000, { cwd: scratch, serverFile: scratchServer });
+    try {
+      const first = await srv.fetch('/health');
+      assert.equal(first.status, 200);
+      const firstText = await first.text();
+      const body = JSON.parse(firstText);
+      assert.equal(body.version, '0.0.0-scratch-root', 'the copy in the throwaway root is what served this');
+      assert.equal(body.commit, before, 'commit comes from the git in that root');
+
+      // Move the checkout under the running server.
+      git('commit', '-q', '--allow-empty', '-m', 'second');
+      const after = headSha();
+      assert.notEqual(after, before,
+        'instrument check: the checkout must really have moved, or this case proves nothing');
+
+      const second = await srv.fetch('/health');
+      const secondText = await second.text();
+      assert.equal(secondText, firstText, 'the served body is fixed at startup, not re-derived per request');
+      assert.equal(JSON.parse(secondText).commit, before,
+        `a per-request resolution would now report ${after}; /health must still report ${before}`);
+    } finally {
+      await srv.kill();
+    }
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
   }
 });
 
