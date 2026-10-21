@@ -36,6 +36,9 @@ package-lock.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs test
 # tools smoke suite's esbuild parse (airhorn-1ye) and by the health suite, which
 # drives the real deno server's /health endpoint on an ephemeral port (airhorn-uexx).
 server.ts	tests/gate-smoke.test.js tests/health.test.mjs
+# deno.lock pins what the deno server imports (jsr:@std/http, the serveDir dep);
+# the suite that actually boots the server under deno is its honest coverage.
+deno.lock	tests/health.test.mjs
 # tools/* is covered by a REAL smoke suite: the gate's own selection contract
 # plus syntax checks of the scripts it names (airhorn-1ye).
 tools/*	tests/gate-smoke.test.js
