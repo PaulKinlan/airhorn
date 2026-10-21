@@ -733,6 +733,32 @@ async function run() {
     const retiredRatio = assertFocusRing(retired.active, 'late bundle retires the notice → focus handed to the horn');
     console.log(`  notice retired, focus handed to the horn with a ${retiredRatio.toFixed(2)}:1 ring`);
 
+    // --------------------------------------------------------------- case 12
+    console.log('--- 12. the recovery control keeps its indicator when the stylesheet NEVER loads ---');
+    // The unstyled window is not hypothetical: it is the path a failed bundle and
+    // a slow sheet share. The ring there comes from the inline critical block, so
+    // this blocks main.css outright and asserts the >=2px indicator on the
+    // control the watchdog focuses.
+    await send('Network.setBlockedURLs', { urls: ['*/assets/*.js', '*/src/main.js', '*/styles/*.css'] });
+    await send('Page.reload');
+    const unstyledBanner = await waitFor((s) => s.banner && s.banner.hidden === false, {
+      label: 'the boot-failure banner with the stylesheet blocked',
+      timeout: 20000,
+    });
+    assert(unstyledBanner.active && unstyledBanner.active.id === 'boot-retry',
+      `stylesheet blocked: focus is on ${describeStop(unstyledBanner.active)}, not Try again`);
+    // Prove this really is the unstyled path - a pin on the sheet, not on the ring.
+    const cardRadius = await evaluate(`getComputedStyle(document.querySelector('.boot-alert')).borderTopLeftRadius`);
+    assert(cardRadius === '0px',
+      `expected the stylesheet-blocked path but the alert card has border-radius ${cardRadius} - main.css got through, so this case proves nothing`);
+    const unstyledRetry = await evaluate('window.__kbFocus()');
+    const criticalRatio = assertFocusRing(unstyledRetry, 'boot failure with the stylesheet blocked → Try again');
+    const unstyledWidth = await evaluate(`getComputedStyle(document.getElementById('boot-retry')).outlineWidth`);
+    assert(parseFloat(unstyledWidth) >= 2,
+      `stylesheet blocked: Try again paints a ${unstyledWidth} ring - the critical block's indicator is not in effect`);
+    await send('Network.setBlockedURLs', { urls: [] });
+    console.log(`  sheet blocked, card unstyled (radius ${cardRadius}): Try again keeps a ${unstyledWidth} ring at ${criticalRatio.toFixed(2)}:1`);
+
     console.log('ALL KEYBOARD JOURNEY CHECKS PASSED');
   } finally {
     if (app) await app.close();

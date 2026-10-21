@@ -361,8 +361,14 @@
       background-color: color-mix(in oklab, var(--install-bg), #fff 12%);
     }
 
-    &:focus-visible {
-      outline: 3px solid var(--alert-ink);
+    /* :focus as well as :focus-visible (airhorn-bjk1): the boot watchdog moves
+       focus here itself, and the recovery control must show where focus went
+       on the failure path - the one place this button exists. currentColor
+       rather than --alert-ink so the inline critical block can declare the
+       SAME rule for the window before this sheet lands (unstyled, the UA's
+       black text on white; here, near-white on the dark card). */
+    &:is(:focus, :focus-visible) {
+      outline: 3px solid currentColor;
       outline-offset: 3px;
     }
   }
