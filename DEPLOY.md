@@ -67,6 +67,10 @@ document is stale — not the pack.
 - **Chrome on the machine** for steps 4–6: the tools default to
   `/usr/bin/google-chrome`, override with `CHROME_BIN`. Without it those steps
   fail non-zero; nothing in steps 1–3 needs a browser.
+- **A rollback plan, made before you publish.** Read [ROLLBACK.md](ROLLBACK.md): archive the
+  current live artifact (the deployed bytes, not a rebuild - V1 cannot be rebuilt from this
+  repo) and confirm the previous deployment stays retrievable. The origin is the easy part;
+  the service worker already on visitors' devices is the part a revert cannot reach.
 - **A green test gate.** Publishing is gated on `npm test` (builds `dist/`
   first, then runs every `tests/**/*.test.{js,mjs}` in one serial sweep) being
   green for the commit you are shipping. This document does not quote a test
