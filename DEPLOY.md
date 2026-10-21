@@ -314,6 +314,56 @@ requirement in step 7, and it is still not a real CA chain:
 WebAPK generation remain unproven here
 ([EVIDENCE-LIMITS.md](EVIDENCE-LIMITS.md) §3).
 
+## Step 6b — measurement (optional, OFF by default, not part of this deploy)
+
+**V2 ships no analytics, deliberately, and that is the state this plan publishes.** The
+block V2 replaces was already dead, so nothing that reports anywhere is lost:
+
+- Production's only tracking is Universal Analytics — `ga('create', 'UA-59325548-2',
+  'auto')` with a pageview. Google stopped processing standard UA hits on **2023-07-01**
+  (the data was deleted 2024-07-01). The tag still loads and still sends a `j/collect`
+  request (measured against the live origin on 2026-10-21), but it counts nothing.
+- The one extra dimension it recorded, `document.interestCohort()`, cannot work: the live
+  page's `origin-trial` token decodes to
+  `{"origin":"https://airhorner.com:443","feature":"InterestCohortAPI","expiry":1626220799}`
+  — expired **2021-07-13** — and the FLoC/InterestCohort API it enabled is gone from
+  Chrome (`'interestCohort' in document` is `false` in Chrome 155, measured). The page has
+  therefore always sent `dimension1 = "Not Available"`.
+
+**If you want measurement, add a GA4 snippet with your own measurement ID before you
+publish** — it is the one thing in this list that must happen before the upload:
+
+1. Put the snippet in the **source** `index.html` (so a rebuild keeps it) or in
+   `dist/index.html` if you are publishing a prebuilt tree without rebuilding, with your
+   own `G-…` ID:
+
+   ```html
+   <script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
+   <script>
+     window.dataLayer = window.dataLayer || [];
+     function gtag(){dataLayer.push(arguments);}
+     gtag('js', new Date());
+     gtag('config', 'G-XXXXXXXXXX');
+   </script>
+   ```
+
+2. Nothing else is needed: V2 already calls `gtag('event', …)` in four places —
+   `horn_play`, `install_available`, `app_installed`, `install_prompt_result` (the
+   `trackEvent()` helper in `src/main.js`, a no-op while `gtag` is undefined) — so those
+   events light up immediately. Adding it to the source changes the build hash, so the
+   worker version changes with it, which is expected; pasting it into a prebuilt
+   `dist/index.html` instead leaves the worker version string alone, which is harmless
+   (the shell is precached by URL and its bytes are re-recorded on install).
+3. Do **not** restore the old UA snippet or the `interestCohort` block. Neither can report
+   anything, and the second is what the expired token existed for.
+
+**This is a privacy and ownership decision for Paul, not a deployment default.**
+`airhorner.com` is his public demo: whether it is measured at all — and with which property,
+consent story and retention — is his call, and "no analytics" is the standing state. Do not
+add tracking to the live site without an explicit decision; the pre-deploy comparison that
+decided this is recorded on bead `airhorn-s478` (V2's `index.html` against the live one,
+field by field).
+
 ## Step 7 — publish **PRODUCTION ONLY**
 
 Not run in this dry run: nothing below was executed, and no DNS, hosting or
@@ -376,6 +426,11 @@ Then in a desktop Chrome, on the live origin:
   renders and sounds, with the "No connection" banner.
 - Application → **Manifest**: name, icons, screenshots, no installability
   warning. The **Install** button appears in-page within a few seconds.
+- **No analytics is expected**, because V2 ships none: no request to
+  `googletagmanager.com` or `google-analytics.com` should appear in the Network panel. If
+  you added the optional GA4 snippet in step 6b, expect instead exactly one
+  `gtag/js` load and its collect requests — and if you did *not* add it, a `j/collect`
+  request is a sign that an old build (or a host-side injection) is still being served.
 - **Lighthouse: attempted, environment-incompatible — recorded, not hidden.**
   `npx lighthouse https://<origin>/ --view` (needs network for `npx`) is the
   only way to get a synthetic score, and the one thing here that could not be
