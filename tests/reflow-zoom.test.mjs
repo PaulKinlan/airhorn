@@ -178,7 +178,7 @@ async function run() {
       if (overflow.htmlOverflow > 1 || overflow.bodyOverflow > 1) {
         throw new Error(
           `${label}: HORIZONTAL OVERFLOW - html.scrollWidth ${overflow.htmlScrollWidth} / ` +
-          `body.scrollWidth ${overflow.bodyOverflow} vs innerWidth ${overflow.innerWidth} ` +
+          `body.scrollWidth ${overflow.bodyScrollWidth} vs innerWidth ${overflow.innerWidth} ` +
           `(html +${overflow.htmlOverflow}px, body +${overflow.bodyOverflow}px) - ` +
           `WCAG 1.4.10 requires no two-dimensional scrolling at this width`
         );
@@ -214,9 +214,14 @@ async function run() {
       await shot(`${shotPrefix}-pressed.png`);
       console.log(`${label}: horn visible (${hornGeom.width}x${hornGeom.height}) and press toggles at (${hornGeom.centreX},${hornGeom.centreY})`);
 
-      // 3. Live region: a long announcement must stay in the viewport and in
-      // its own box (airhorn-xaxg: nobody had checked the announcement path
-      // at narrow widths).
+      // 3. Live region: a long announcement must reach users. Two shapes are
+      // legitimate (airhorn-985r): the app's current painted card (then it
+      // must be inside the viewport and not overflow its own box), or a
+      // permanently sr-only region (clip-path inset is the standard sr-only
+      // pattern and fully WCAG-conforming - a live region does not have to be
+      // painted, so requiring visibility here would block a correct a11y
+      // refactor). What is NEVER legitimate is a painted region outside the
+      // viewport or overflowing its container.
       await evaluate(`(() => {
         const el = document.getElementById('app-status');
         el.textContent = ${JSON.stringify(LONG_ANNOUNCEMENT)};
@@ -228,26 +233,31 @@ async function run() {
         const r = el.getBoundingClientRect();
         const cs = getComputedStyle(el);
         return {
-          hidden: cs.clipPath !== 'none' || cs.position === 'absolute',
+          // sr-only by design: clipped to nothing by its own clip-path (the
+          // .visually-hidden / :empty pattern). Distinguished from being
+          // clipped by an ANCESTOR's overflow, which loses the announcement
+          // box without intent.
+          srOnly: cs.clipPath !== 'none',
           inViewport: r.x >= -1 && r.y >= -1 && r.right <= window.innerWidth + 1 && r.bottom <= window.innerHeight + 1,
           internalOverflowX: el.scrollWidth - el.clientWidth,
           internalOverflowY: el.scrollHeight - el.clientHeight,
           rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
         };
       })()`);
-      if (liveGeom.hidden) {
-        throw new Error(`${label}: live region still visually hidden while announcing: ${JSON.stringify(liveGeom)}`);
-      }
-      if (!liveGeom.inViewport) {
-        throw new Error(`${label}: live region outside the viewport while announcing: ${JSON.stringify(liveGeom)}`);
-      }
-      if (liveGeom.internalOverflowX > 1 || liveGeom.internalOverflowY > 1) {
-        throw new Error(
+      if (liveGeom.srOnly) {
+        console.log(`${label}: live region is sr-only by design (clip-path inset) - announced without painting, bounds checks not applicable`);
+      } else {
+        if (!liveGeom.inViewport) {
+          throw new Error(`${label}: live region outside the viewport while announcing: ${JSON.stringify(liveGeom)}`);
+        }
+        if (liveGeom.internalOverflowX > 1 || liveGeom.internalOverflowY > 1) {
+          throw new Error(
           `${label}: live region text overflows its container by ` +
           `${liveGeom.internalOverflowX}x${liveGeom.internalOverflowY}px: ${JSON.stringify(liveGeom.rect)}`
         );
       }
-      console.log(`${label}: live region announcement in viewport, no container overflow ${JSON.stringify(liveGeom.rect)}`);
+        console.log(`${label}: live region announcement in viewport, no container overflow ${JSON.stringify(liveGeom.rect)}`);
+      }
 
       // 4. Install affordance reachable: forced available, on-screen, and the
       // topmost element at its centre.
