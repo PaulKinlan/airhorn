@@ -26,9 +26,16 @@
  *      - all painted elements resolve to the unified modern system font stack;
  *      - active painted hierarchy holds: body (16px) > button (15px) > caption (14px);
  *      - button weight (500) > body/caption (400) with proportional line-heights;
+ *      - the caption tier PAINTS: #app-status is a 1px box while it has nothing
+ *        to say, so the asserted caption was only ever measured on a box that is
+ *        not on screen. The app's own offline announcement is fired through its
+ *        real listener and the caption is asserted to grow, and captured in the
+ *        active-hierarchy screenshot (airhorn-7q0x);
  *      - fallback heading tier (.horn-label under .stylesheet-failed) paints with
  *        computed heading scale (20px / 600 weight);
- *      - dead typography rules on .horn-label in main.css are eliminated.
+ *      - dead typography rules on .horn-label in main.css are eliminated - pinned
+ *        at the source, because a painted-element census cannot see declarations
+ *        on a display: none element come back (airhorn-xfkf).
  *
  * Evidence screenshots are written to /tmp/airhorn-visual-overrides/<sha>-<stamp>/
  * but the assertions never depend on them.
@@ -119,8 +126,17 @@ async function run() {
       }
       return r.result.value;
     };
-    const shot = async (name) => {
-      const r = await send('Page.captureScreenshot', { format: 'png' });
+    const shot = async (name, { fullPage = false } = {}) => {
+      const params = { format: 'png' };
+      if (fullPage) {
+        // The status caption sits after a full-height horn, so it is below the
+        // fold: a viewport capture cannot show the tier the shot is named for.
+        const metrics = await send('Page.getLayoutMetrics');
+        const size = metrics.cssContentSize || metrics.contentSize;
+        params.captureBeyondViewport = true;
+        params.clip = { x: 0, y: 0, width: Math.ceil(size.width), height: Math.ceil(size.height), scale: 1 };
+      }
+      const r = await send('Page.captureScreenshot', params);
       fs.writeFileSync(path.join(evidenceDir, name), Buffer.from(r.data, 'base64'));
     };
     // Real key paths (Input domain), not element.focus()/dispatchEvent:
@@ -376,7 +392,6 @@ async function run() {
     await evaluate(`(() => {
       document.getElementById('boot-failure').hidden = false;
       document.getElementById('installer').classList.add('available');
-      document.getElementById('app-status').textContent = 'Live status announcement';
     })()`);
     await sleep(200);
 
@@ -456,7 +471,96 @@ async function run() {
     }
     console.log('Active painted weights verified: button (500) > body/caption (400)');
 
-    await shot('6-typography-active-hierarchy.png');
+    // The caption tier's element is #app-status, which is deliberately a 1px
+    // absolute box until it has something to say - so its font-size above was
+    // read off a box that is not on screen, and the capture this suite took for
+    // the hierarchy showed only the boot-failure card: no caption tier at all.
+    // Put the app in the state where those two tiers really do paint, through
+    // the app's OWN listeners (a stand-in beforeinstallprompt, which is what
+    // Chrome fires and the a11y suite walks too, and the window 'offline' event
+    // src/main.js announces from), then prove they paint and capture that
+    // state (airhorn-7q0x).
+    const liveState = await evaluate(`(() => {
+      window.dispatchEvent(Object.assign(new Event('beforeinstallprompt'), {
+        prompt() {},
+        userChoice: Promise.resolve({ outcome: 'dismissed' }),
+      }));
+      window.dispatchEvent(new Event('offline'));
+      // The live app, not the boot-failure card case 1d revealed to measure it:
+      // the two states are mutually exclusive in reality (a dead bundle cannot
+      // announce anything), so measuring them together must not be photographed
+      // together.
+      document.getElementById('boot-failure').hidden = true;
+      const pick = (sel) => {
+        const el = document.querySelector(sel);
+        const cs = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        return {
+          text: (el.textContent || '').trim(),
+          fontSize: cs.fontSize,
+          fontWeight: cs.fontWeight,
+          disabled: !!el.disabled,
+          display: cs.display,
+          width: r.width,
+          height: r.height,
+        };
+      };
+      return { caption: pick('#app-status'), install: pick('#installer .button') };
+    })()`);
+    const captionPainted = liveState.caption;
+    if (!captionPainted.text) {
+      throw new Error('caption tier: the app announced nothing on the offline event, so the caption tier cannot be shown to paint');
+    }
+    if (!(captionPainted.width > 4 && captionPainted.height > 4)) {
+      throw new Error(`caption tier: #app-status holds ${JSON.stringify(captionPainted.text)} but is still a ${captionPainted.width}x${captionPainted.height} box - the caption does not paint`);
+    }
+    if (px(captionPainted.fontSize) !== captionSize || captionPainted.fontWeight !== '400') {
+      throw new Error(`caption tier: painted caption is ${captionPainted.fontSize}/${captionPainted.fontWeight} (expected ${captionSize}px/400)`);
+    }
+    // ... and the control whose tier it is hierarchy-compared against is on
+    // screen too, so the screenshot contains both painted tiers, not a comparison
+    // between a painted element and a hidden one.
+    if (liveState.install.disabled || !(liveState.install.width > 4 && liveState.install.height > 4)) {
+      throw new Error(`active hierarchy: the install control is not a live painted control in the captured state: ${JSON.stringify(liveState.install)}`);
+    }
+    console.log(`Caption tier verified PAINTED: "${captionPainted.text}" at ${captionPainted.fontSize}/${captionPainted.fontWeight} in a ${Math.round(captionPainted.width)}x${Math.round(captionPainted.height)} box, next to the ${liveState.install.fontSize}/${liveState.install.fontWeight} install control`);
+
+    await shot('6-typography-live-tiers.png', { fullPage: true });
+    // Back to the normal, silent state: no announcement in the region, no install
+    // offer, so later sections measure the app as a user first sees it.
+    await evaluate(`(() => {
+      window.dispatchEvent(new Event('online'));
+      document.getElementById('app-status').textContent = '';
+      document.getElementById('installer').classList.remove('available');
+      document.querySelector('#installer button').disabled = true;
+    })()`);
+    await sleep(100);
+
+    // 3a-pin. The dead declarations themselves are the regression (airhorn-xfkf).
+    // .horn-label is display: none whenever main.css applies, so a font-family,
+    // font-size, font-weight or line-height on that selector can never paint -
+    // and it cannot be caught by measuring painted elements, because the element
+    // it would paint on is hidden. One commit deleted exactly that block and a
+    // later one could put it back with every assertion here still green, so pin
+    // the source: the rule may hide the label and nothing else.
+    const mainCss = fs.readFileSync(path.join(__dirname, '../public/styles/main.css'), 'utf8');
+    const hornLabelBlock = /&\s*\.horn-label\s*\{([^}]*)\}/.exec(mainCss);
+    if (!hornLabelBlock) {
+      throw new Error('main.css has no `& .horn-label` rule any more; if the rule moved, move this pin with it');
+    }
+    const hornLabelDeclarations = hornLabelBlock[1]
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split(';')
+      .map((declaration) => declaration.trim())
+      .filter(Boolean);
+    const deadTypography = hornLabelDeclarations.filter((declaration) => /^(font|line-height)/i.test(declaration));
+    if (deadTypography.length) {
+      throw new Error(`main.css \`& .horn-label\` declares typography that can never paint (the rule is display: none): ${deadTypography.join(', ')}`);
+    }
+    if (!hornLabelDeclarations.some((declaration) => /^display:\s*none$/i.test(declaration))) {
+      throw new Error(`main.css \`& .horn-label\` must stay display: none with the stylesheet active, got: ${hornLabelDeclarations.join('; ')}`);
+    }
+    console.log(`Dead .horn-label typography pinned at the source: main.css declares only ${hornLabelDeclarations.join('; ')}`);
 
     // 3b. Fallback heading tier: verify .horn-label where it ACTUALLY renders
     // (when main.css is blocked or failed, triggering .stylesheet-failed).
