@@ -84,6 +84,34 @@
       --alert-edge: light-dark(transparent, #1b3a57);
     }
 
+    /* Modern system typography stack:
+       Zero-network-dependency stack prioritizing native OS UI fonts:
+       - system-ui: Standard modern CSS system font keyword (W3C CSS Fonts 4)
+       - -apple-system, BlinkMacSystemFont: macOS / iOS San Francisco
+       - 'Segoe UI': Windows system UI font
+       - Roboto: Android / ChromeOS system font
+       - 'Helvetica Neue', Arial: Universal high-quality platform fallbacks
+       - sans-serif: Guaranteed generic family fallback */
+    --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+
+    /* Typographic scale (rem-based to honor user root text size settings) */
+    --font-size-display: 2rem;
+    --font-size-heading: 1.25rem;
+    --font-size-body: 1rem;
+    --font-size-button: 0.9375rem;
+    --font-size-caption: 0.875rem;
+
+    /* Line height scale (unitless for proportional font-size scaling) */
+    --line-height-tight: 1.2;
+    --line-height-snug: 1.35;
+    --line-height-normal: 1.5;
+
+    /* Font weight scale */
+    --font-weight-regular: 400;
+    --font-weight-medium: 500;
+    --font-weight-semibold: 600;
+    --font-weight-bold: 700;
+
     /* Tells the UA (scrollbars, form controls, canvas) which schemes we paint,
        so the OS dark preference is honoured before the first paint. */
     color-scheme: light dark;
@@ -99,11 +127,30 @@
   body {
     margin: 0;
     background-color: var(--page-bg);
+    font-family: var(--font-sans);
+    font-size: var(--font-size-body);
+    font-weight: var(--font-weight-regular);
+    line-height: var(--line-height-normal);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
     /* Pressing and holding the horn must not start a pull-to-refresh. */
     overscroll-behavior: none;
     /* Replaces the old `* { user-select: none }`: the property inherits, so
        setting it once here covers the whole page. */
     user-select: none;
+  }
+
+  h1 {
+    font-size: var(--font-size-display);
+    font-weight: var(--font-weight-bold);
+    line-height: var(--line-height-tight);
+    margin: 0;
+  }
+
+  button {
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
   }
 
   #container {
@@ -164,6 +211,10 @@
        block in index.html); with the stylesheet the drawn horn speaks for
        itself and the accessible name comes from aria-label. */
     & .horn-label {
+      font-family: var(--font-sans);
+      font-size: var(--font-size-heading);
+      font-weight: var(--font-weight-semibold);
+      line-height: var(--line-height-snug);
       display: none;
     }
     background-color: var(--horn-bg);
@@ -287,7 +338,10 @@
       border-radius: 0.5rem;
       background-color: var(--install-bg);
       color: var(--install-ink);
-      font: inherit;
+      font-family: inherit;
+      font-size: var(--font-size-button);
+      font-weight: var(--font-weight-medium);
+      line-height: var(--line-height-tight);
       cursor: pointer;
       touch-action: manipulation;
       transition: background-color 0.2s ease-out;
@@ -333,7 +387,7 @@
   border: 1px solid var(--alert-edge);
   border-radius: 0.5rem;
   box-shadow: 0 4px 16px rgb(0 0 0 / 35%);
-  font-size: 0.95rem;
+  font-family: var(--font-sans);
   z-index: 10;
 }
 
@@ -341,6 +395,8 @@
   display: grid;
   gap: 0.75rem;
   justify-items: start;
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-normal);
 
   /* This card sets display itself, so the UA's [hidden] rule would lose the
      cascade without this: the banner must actually disappear when hidden. */
@@ -350,6 +406,10 @@
 
   & p {
     margin: 0;
+    font-size: var(--font-size-body);
+    font-weight: var(--font-weight-regular);
+    line-height: var(--line-height-normal);
+    overflow-wrap: break-word;
   }
 
   & .alert-button {
@@ -358,7 +418,10 @@
     border-radius: 0.5rem;
     background-color: var(--install-bg);
     color: var(--install-ink);
-    font: inherit;
+    font-family: inherit;
+    font-size: var(--font-size-button);
+    font-weight: var(--font-weight-medium);
+    line-height: var(--line-height-tight);
     cursor: pointer;
     touch-action: manipulation;
     transition: background-color 0.2s ease-out;
@@ -396,7 +459,10 @@
    to say, so the normal case stays silent on screen too. */
 #app-status {
   padding: 0.625rem 1rem;
-  font-size: 0.9rem;
+  font-size: var(--font-size-caption);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--line-height-snug);
+  overflow-wrap: break-word;
 
   &:empty {
     position: absolute;

@@ -9,6 +9,7 @@
     <meta http-equiv='X-UA-Compatible' content='IE=edge'>
     <meta name='description' content='An Air horn. Probably the best air horn web app there is.'>
     <meta name='viewport' content='width=device-width, initial-scale=1'>
+    <meta name='text-scale' content='scale'>
     <link rel='canonical' href='https://airhorner.com/'>
     <link rel='manifest' href='/manifest.json'>
     <meta name='mobile-web-app-capable' content='yes'>
@@ -72,6 +73,23 @@
             --horn-inner-bg: light-dark(#b71c1c, #7f0000);
             --horn-center-bg: light-dark(#000, #050505);
           }
+
+          /* Modern system typography stack & scale tokens (airhorn-fonts):
+             values match main.css exactly so pre-swap first paint shares the
+             same metrics and hierarchy as the full stylesheet. */
+          --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+          --font-size-display: 2rem;
+          --font-size-heading: 1.25rem;
+          --font-size-body: 1rem;
+          --font-size-button: 0.9375rem;
+          --font-size-caption: 0.875rem;
+          --line-height-tight: 1.2;
+          --line-height-snug: 1.35;
+          --line-height-normal: 1.5;
+          --font-weight-regular: 400;
+          --font-weight-medium: 500;
+          --font-weight-semibold: 600;
+          --font-weight-bold: 700;
         }
 
         html,
@@ -82,6 +100,18 @@
         body {
           margin: 0;
           background-color: var(--page-bg);
+          font-family: var(--font-sans);
+          font-size: var(--font-size-body);
+          font-weight: var(--font-weight-regular);
+          line-height: var(--line-height-normal);
+          -webkit-font-smoothing: antialiased;
+          -moz-osx-font-smoothing: grayscale;
+        }
+
+        h1 {
+          font-size: var(--font-size-display);
+          font-weight: var(--font-weight-bold);
+          line-height: var(--line-height-tight);
         }
 
         #container {
@@ -113,6 +143,8 @@
           border: 0;
           margin: 0;
           padding: 0;
+          font: inherit;
+          color: inherit;
           border-radius: 50%;
           display: grid;
           place-items: center;
@@ -124,7 +156,10 @@
         }
 
         .horn-label {
-          font: inherit;
+          font-family: var(--font-sans);
+          font-size: var(--font-size-heading);
+          font-weight: var(--font-weight-semibold);
+          line-height: var(--line-height-snug);
           /* Hidden during the async window: the designed horn speaks for
              itself (the aria-label carries the name). Revealed only when
              the sheet genuinely fails, via .stylesheet-failed set by the
@@ -182,6 +217,25 @@
           pointer-events: none;
         }
 
+        #installer .button {
+          font-family: var(--font-sans);
+          font-size: var(--font-size-button);
+          font-weight: var(--font-weight-medium);
+          line-height: var(--line-height-tight);
+        }
+
+        .boot-alert {
+          font-family: var(--font-sans);
+          font-size: var(--font-size-body);
+          line-height: var(--line-height-normal);
+        }
+
+        #app-status {
+          font-family: var(--font-sans);
+          font-size: var(--font-size-caption);
+          line-height: var(--line-height-snug);
+        }
+
         /* The recovery control's focus ring (airhorn-bjk1): the boot watchdog
            reveals the banner and focuses this button ITSELF, so its indicator
            must not depend on main.css still being in flight. main.css is
@@ -193,6 +247,13 @@
            page, and once main.css lands it is near-white on the dark card.
            Values MUST stay identical to main.css's .alert-button rule (the
            a11y and resilience suites pin computed styles on both paths). */
+        .alert-button {
+          font-family: var(--font-sans);
+          font-size: var(--font-size-button);
+          font-weight: var(--font-weight-medium);
+          line-height: var(--line-height-tight);
+        }
+
         .alert-button:is(:focus, :focus-visible) {
           outline: 3px solid currentColor;
           outline-offset: 3px;
