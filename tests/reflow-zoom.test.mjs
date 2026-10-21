@@ -14,8 +14,14 @@
  *     regressing silently), measured on html and body;
  *   - the horn is fully in the viewport and pressable with a real pointer
  *     event (pressed state flips);
- *   - the live region, filled with a long announcement, stays inside the
- *     viewport and does not overflow its own box;
+ *   - the live region, filled with a long announcement, either stays inside
+ *     the viewport and does not overflow its own box, or is sr-only by
+ *     design (airhorn-985r: a live region does not have to be painted);
+ *   - NO element anywhere clips or horizontally scrolls its text inside a
+ *     clipping/scroll container (airhorn-jw7w: a card's bounding box being
+ *     in the viewport proves nothing about its CONTENT - the boot-alert
+ *     mutant with overflow:hidden + white-space:nowrap hid 259px of update
+ *     text at 320px while every box-level check stayed green);
  *   - the install affordance, forced available, stays on-screen and is the
  *     topmost element at its own centre (nothing covers it);
  *   - the boot-alert card stays inside the viewport.
@@ -295,8 +301,48 @@ async function run() {
       if (!alertGeom.inViewport) {
         throw new Error(`${label}: boot-alert card outside the viewport: ${JSON.stringify(alertGeom.rect)}`);
       }
-      await evaluate(`document.getElementById('boot-failure').hidden = true; document.getElementById('app-status').textContent = ''; document.getElementById('installer').classList.remove('available'); true`);
       console.log(`${label}: boot-alert card in viewport ${JSON.stringify(alertGeom.rect)}`);
+
+      // 6. Content census (airhorn-jw7w): box checks above prove a container
+      // is PLACED well, not that its CONTENT is readable. An element that
+      // clips (hidden/clip) or scrolls (auto/scroll) its own content while
+      // the content exceeds the box hides text with no document-level
+      // overflow signal. Sweep every element with all surfaces revealed:
+      // any non-sr-only element whose content exceeds its box on an axis it
+      // clips or scrolls is a defect. (overflow:visible is NOT flagged: the
+      // spill paints, stays readable, and the document-level check 1 governs
+      // it. clip-path'd elements are sr-only by design - airhorn-985r.)
+      const clipped = await evaluate(`(() => {
+        const describe = (el) => el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') +
+          (el.className && typeof el.className === 'string' && el.className.trim()
+            ? '.' + el.className.trim().split(/\\s+/).join('.') : '');
+        const clipsOrScrolls = (v) => ['hidden', 'clip', 'auto', 'scroll', 'overlay'].includes(v);
+        const offenders = [];
+        for (const el of document.querySelectorAll('*')) {
+          const cs = getComputedStyle(el);
+          if (cs.clipPath !== 'none') continue;
+          if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+          if (el.clientWidth === 0 && el.clientHeight === 0) continue;
+          const overX = el.scrollWidth - el.clientWidth;
+          const overY = el.scrollHeight - el.clientHeight;
+          if (clipsOrScrolls(cs.overflowX) && overX > 2) {
+            offenders.push({ el: describe(el), axis: 'x', overPx: overX, overflow: cs.overflowX });
+          }
+          if (clipsOrScrolls(cs.overflowY) && overY > 2) {
+            offenders.push({ el: describe(el), axis: 'y', overPx: overY, overflow: cs.overflowY });
+          }
+        }
+        return offenders;
+      })()`);
+      if (clipped.length > 0) {
+        throw new Error(
+          `${label}: ${clipped.length} element(s) clip or scroll their own content ` +
+          `(text unreadable / in-container horizontal scrolling - WCAG 1.4.10): ${JSON.stringify(clipped)}`
+        );
+      }
+      console.log(`${label}: content census clean - no element clips or scrolls its own text`);
+
+      await evaluate(`document.getElementById('boot-failure').hidden = true; document.getElementById('app-status').textContent = ''; document.getElementById('installer').classList.remove('available'); true`);
     };
 
     /* ---------------- config 1: 320x640, default text ---------------------- */
