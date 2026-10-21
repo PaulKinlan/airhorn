@@ -57,10 +57,11 @@ public/scripts/**	tests/a11y.test.mjs test/a11y.test.mjs
 # The stylesheet is behaviour, not decoration: the a11y suite pins computed
 # styles and the horn's >=3:1 boundary ring, the keyboard suite asserts the
 # focus rings it paints are a visible 3:1 indicator (airhorn-bjk1), and
-# visual-overrides (airhorn-1jrc) pins the forced-colors and reduced-motion
-# contracts. Leaving public/styles/** to the !public/** exemption meant a
-# focus-ring change landed with zero coverage.
-public/styles/**	tests/a11y.test.mjs tests/keyboard.test.mjs tests/visual-overrides.test.mjs
+# visual-overrides (airhorn-1jrc) pins forced-colors and reduced-motion;
+# reflow-zoom (airhorn-xaxg) pins no horizontal overflow at 320px / 200% text,
+# horn pressability, and reachable affordances. Leaving public/styles/** to
+# the !public/** exemption meant a focus-ring change landed with zero coverage.
+public/styles/**	tests/a11y.test.mjs tests/keyboard.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs
 # Suite self-rows: the reverse check (every tree suite reachable from the map) reads these.
 # Plural-spelling suites exist on master; the singular test/ spellings are declared pending.
 # .fleet/coverage-contract.json restates the source-path mapping for the fleet's independent
@@ -79,6 +80,7 @@ tests/webmcp-browser.test.mjs	tests/webmcp-browser.test.mjs
 tests/webmcp-fuzz.test.mjs	tests/webmcp-fuzz.test.mjs
 tests/resilience-ui.test.mjs	tests/resilience-ui.test.mjs
 tests/visual-overrides.test.mjs	tests/visual-overrides.test.mjs
+tests/reflow-zoom.test.mjs	tests/reflow-zoom.test.mjs
 tests/shortcuts.test.mjs	tests/shortcuts.test.mjs
 tests/keyboard.test.mjs	tests/keyboard.test.mjs
 tests/screenreader.test.mjs	tests/screenreader.test.mjs
@@ -125,4 +127,4 @@ tests/acceptance.mjs	tests/acceptance.mjs
 tests/support/browser.mjs	tests/test-support.test.js
 tests/support/signal-exit.mjs	tests/test-support.test.js
 tests/test-support.test.js	tests/test-support.test.js
-tests/support/**	tests/a11y.test.mjs tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs tests/shortcuts.test.mjs tests/multitab.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs tests/visual-overrides.test.mjs
+tests/support/**	tests/a11y.test.mjs tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs tests/shortcuts.test.mjs tests/multitab.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs
