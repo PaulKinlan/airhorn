@@ -51,7 +51,8 @@
  ],
  "public/styles/**": [
   "tests/a11y.test.mjs",
-  "tests/keyboard.test.mjs"
+  "tests/keyboard.test.mjs",
+  "tests/visual-overrides.test.mjs"
  ],
  "tools/*": [
   "tests/gate-smoke.test.js"
@@ -79,6 +80,7 @@
   "tests/shortcuts.test.mjs",
   "tests/multitab.test.mjs",
   "tests/keyboard.test.mjs",
-  "tests/screenreader.test.mjs"
+  "tests/screenreader.test.mjs",
+  "tests/visual-overrides.test.mjs"
  ]
 }
