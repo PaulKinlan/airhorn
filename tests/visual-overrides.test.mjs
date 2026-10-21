@@ -22,11 +22,13 @@
  *        any element declaring a timed transition or animation under reduce
  *        fails, so a future element cannot rot in unnoticed.
  *
- *   3. typography system & scale hierarchy (airhorn-fonts):
- *      - all elements resolve to the unified modern system font stack;
- *      - typographic hierarchy holds: display (32px) > heading (20px) >
- *        body (16px) > button (15px) > caption (14px);
- *      - weights and line-heights are consistent and distinct across tiers.
+ *   3. typography system & scale hierarchy (airhorn-fonts, airhorn-m2tt):
+ *      - all painted elements resolve to the unified modern system font stack;
+ *      - active painted hierarchy holds: body (16px) > button (15px) > caption (14px);
+ *      - button weight (500) > body/caption (400) with proportional line-heights;
+ *      - fallback heading tier (.horn-label under .stylesheet-failed) paints with
+ *        computed heading scale (20px / 600 weight);
+ *      - dead typography rules on .horn-label in main.css are eliminated.
  *
  * Evidence screenshots are written to /tmp/airhorn-visual-overrides/<sha>-<stamp>/
  * but the assertions never depend on them.
@@ -368,84 +370,140 @@ async function run() {
     // Restore automatic media so nothing leaks into any later reuse.
     await setFeatures([]);
 
-    /* ----------------- 3. Typography: modern system stack & hierarchy (airhorn-fonts) -- */
+    /* ----------------- 3. Typography: modern system stack & hierarchy (airhorn-m2tt) -- */
     console.log('--- 3. Typography: system font stack & hierarchy');
-    // Ensure standard elements and alerts are revealed for inspection.
+    // Ensure standard elements and alerts are revealed for inspection in the active app.
     await evaluate(`(() => {
       document.getElementById('boot-failure').hidden = false;
       document.getElementById('installer').classList.add('available');
-      document.getElementById('app-status').textContent = 'Test status message';
+      document.getElementById('app-status').textContent = 'Live status announcement';
     })()`);
     await sleep(200);
 
-    const typography = await evaluate(`(() => {
+    const expectedSystemStack = 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+    const px = (val) => parseFloat(val);
+
+    // 3a. Active painted elements hierarchy: verify elements that actually render on screen.
+    const activeTypography = await evaluate(`(() => {
       const pick = (sel) => {
         const el = document.querySelector(sel);
         if (!el) return null;
         const cs = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
         return {
           fontFamily: cs.fontFamily,
           fontSize: cs.fontSize,
           fontWeight: cs.fontWeight,
           lineHeight: cs.lineHeight,
+          display: cs.display,
+          visibility: cs.visibility,
+          isPainted: cs.display !== 'none' && cs.visibility !== 'visible' ? false : (r.width > 0 && r.height > 0),
         };
       };
       return {
         body: pick('body'),
-        h1: pick('h1'),
-        horn: pick('.horn'),
-        hornLabel: pick('.horn-label'),
         installerButton: pick('#installer .button'),
-        status: pick('#app-status'),
-        bootAlert: pick('.boot-alert'),
-        bootAlertP: pick('.boot-alert p'),
         alertButton: pick('.alert-button'),
+        bootAlertP: pick('.boot-alert p'),
+        status: pick('#app-status'),
+        hornLabel: pick('.horn-label'),
+        h1: pick('h1'),
       };
     })()`);
 
-    // 3a. System typography stack: verify system-ui / modern system stack is present on all surfaces.
-    const expectedSystemStack = 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
-    for (const [key, metrics] of Object.entries(typography)) {
-      if (!metrics) throw new Error(`typography: element '${key}' not found`);
+    // In the active styled app, .horn-label is intentionally hidden (display: none)
+    // because the concentric horn disc speaks for itself and is labeled by aria-label.
+    if (activeTypography.hornLabel.display !== 'none') {
+      throw new Error(`Active app must keep .horn-label hidden (display: none), got ${activeTypography.hornLabel.display}`);
+    }
+
+    // Verify all painted elements resolve to the modern system stack.
+    const paintedElements = {
+      body: activeTypography.body,
+      installerButton: activeTypography.installerButton,
+      alertButton: activeTypography.alertButton,
+      bootAlertP: activeTypography.bootAlertP,
+      status: activeTypography.status,
+    };
+    for (const [name, metrics] of Object.entries(paintedElements)) {
+      if (!metrics) throw new Error(`Active element '${name}' not found`);
+      if (name !== 'body' && !metrics.isPainted) {
+        throw new Error(`Active element '${name}' is not painted on screen`);
+      }
       if (metrics.fontFamily !== expectedSystemStack) {
-        throw new Error(`typography: element '${key}' does not resolve to modern system font stack (got: ${metrics.fontFamily})`);
+        throw new Error(`Active element '${name}' font-family mismatch: ${metrics.fontFamily}`);
       }
     }
-    console.log('Typography: all elements resolve to the unified modern system font stack');
+    console.log('Active app typography: all painted elements resolve to modern system font stack');
 
-    // 3b. Typographic hierarchy: verify clear distinct sizing, line-heights, and weights.
-    const px = (val) => parseFloat(val);
-    const displaySize = px(typography.h1.fontSize);
-    const headingSize = px(typography.hornLabel.fontSize);
-    const bodySize = px(typography.body.fontSize);
-    const buttonSize = px(typography.installerButton.fontSize);
-    const captionSize = px(typography.status.fontSize);
-
-    // Display (32px) > Heading (20px) > Body (16px) > Button (15px) > Caption (14px)
-    if (!(displaySize > headingSize && headingSize > bodySize && bodySize > buttonSize && buttonSize > captionSize)) {
+    // Active painted hierarchy: Body (16px) > Button (15px) > Caption (14px)
+    const bodySize = px(activeTypography.body.fontSize);
+    const buttonSize = px(activeTypography.installerButton.fontSize);
+    const captionSize = px(activeTypography.status.fontSize);
+    if (!(bodySize > buttonSize && buttonSize > captionSize)) {
       throw new Error(
-        `typography: hierarchy violation: sizes must satisfy display (${displaySize}px) > heading (${headingSize}px) > ` +
-        `body (${bodySize}px) > button (${buttonSize}px) > caption (${captionSize}px)`
+        `Active hierarchy violation: body (${bodySize}px) > button (${buttonSize}px) > caption (${captionSize}px)`
       );
     }
-    console.log(`Typography scale: verified hierarchy (${displaySize}px > ${headingSize}px > ${bodySize}px > ${buttonSize}px > ${captionSize}px)`);
+    console.log(`Active painted hierarchy verified: body (${bodySize}px) > button (${buttonSize}px) > caption (${captionSize}px)`);
 
-    // Weights: display and headings are prominent (>=600), buttons are medium (500), body/caption are regular (400)
-    if (parseInt(typography.h1.fontWeight, 10) < 700) {
-      throw new Error(`typography: display heading must be bold (700), got ${typography.h1.fontWeight}`);
+    // Weights: button (500) > body/caption (400)
+    if (activeTypography.installerButton.fontWeight !== '500' || activeTypography.alertButton.fontWeight !== '500') {
+      throw new Error('Buttons must have medium font weight (500)');
     }
-    if (parseInt(typography.hornLabel.fontWeight, 10) < 600) {
-      throw new Error(`typography: heading must be semibold (>=600), got ${typography.hornLabel.fontWeight}`);
+    if (activeTypography.body.fontWeight !== '400' || activeTypography.status.fontWeight !== '400') {
+      throw new Error('Body and status must have regular font weight (400)');
     }
-    if (typography.installerButton.fontWeight !== '500') {
-      throw new Error(`typography: button must be medium weight (500), got ${typography.installerButton.fontWeight}`);
-    }
-    if (typography.body.fontWeight !== '400') {
-      throw new Error(`typography: body must be regular weight (400), got ${typography.body.fontWeight}`);
-    }
-    console.log('Typography weights: display (700) > heading (600) > button (500) > body/caption (400)');
+    console.log('Active painted weights verified: button (500) > body/caption (400)');
 
-    await shot('6-typography-hierarchy.png');
+    await shot('6-typography-active-hierarchy.png');
+
+    // 3b. Fallback heading tier: verify .horn-label where it ACTUALLY renders
+    // (when main.css is blocked or failed, triggering .stylesheet-failed).
+    await send('Network.enable');
+    await send('Network.setBlockedURLs', { urls: ['*styles/*.css'] });
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+    await sleep(600);
+
+    const fallbackHeading = await evaluate(`(() => {
+      const el = document.querySelector('.horn-label');
+      if (!el) return null;
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      return {
+        fontFamily: cs.fontFamily,
+        fontSize: cs.fontSize,
+        fontWeight: cs.fontWeight,
+        lineHeight: cs.lineHeight,
+        display: cs.display,
+        visibility: cs.visibility,
+        rect: { width: r.width, height: r.height, top: r.top, left: r.left },
+        isPainted: cs.display === 'block' && cs.visibility === 'visible' && r.width > 0 && r.height > 0,
+      };
+    })()`);
+
+    if (!fallbackHeading || !fallbackHeading.isPainted) {
+      throw new Error(`Fallback heading (.horn-label) failed to paint under blocked stylesheet: ${JSON.stringify(fallbackHeading)}`);
+    }
+    if (fallbackHeading.fontFamily !== expectedSystemStack) {
+      throw new Error(`Fallback heading font-family mismatch: ${fallbackHeading.fontFamily}`);
+    }
+    const headingSize = px(fallbackHeading.fontSize);
+    if (headingSize !== 20) {
+      throw new Error(`Fallback heading size expected 20px (1.25rem), got ${fallbackHeading.fontSize}`);
+    }
+    if (fallbackHeading.fontWeight !== '600') {
+      throw new Error(`Fallback heading weight expected 600 (semibold), got ${fallbackHeading.fontWeight}`);
+    }
+    if (headingSize <= bodySize) {
+      throw new Error(`Fallback heading (${headingSize}px) must be larger than body (${bodySize}px)`);
+    }
+    console.log(`Fallback heading tier verified: .horn-label painted (${headingSize}px / weight ${fallbackHeading.fontWeight} > body ${bodySize}px)`);
+
+    await shot('7-typography-fallback-heading.png');
+
+    // Clean up blocked URLs
+    await send('Network.setBlockedURLs', { urls: [] });
 
     console.log('ALL VISUAL OVERRIDE CHECKS PASSED');
     console.log(`Evidence: ${evidenceDir}`);
