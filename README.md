@@ -44,6 +44,16 @@ worker's scope is `/` — with any static file server, for example
 deno run --allow-net --allow-read server.ts   # serves dist/ on port 8000
 ```
 
+`PORT` overrides the port (`PORT=9000 deno run --allow-net --allow-read server.ts`),
+which matters on hosts where 8000 is taken. The server also exposes **`GET /health`**:
+unauthenticated JSON describing the running build — `{"status":"ok","version":"2.0.0",
+"commit":"<short sha>","buildTimestamp":"<ISO-8601>"}`. Each value is resolved once
+at startup with a build/deploy-time override and a safe fallback (`APP_VERSION` →
+package.json → `"unknown"`; `GIT_COMMIT` → one `git rev-parse --short HEAD` →
+`"unknown"`; `BUILD_TIMESTAMP` → server start time), so the route never blocks and
+never errors. See [DEPLOY.md](DEPLOY.md) for stamping a deployment; `tests/health.test.mjs`
+pins the contract.
+
 ## Offline and updates
 
 `public/sw.js` precaches `/`, `/index.html`, `/styles/main.css` and

@@ -34,7 +34,8 @@
   "tests/webmcp-browser.test.mjs"
  ],
  "server.ts": [
-  "tests/gate-smoke.test.js"
+  "tests/gate-smoke.test.js",
+  "tests/health.test.mjs"
  ],
  "public/sw.js": [
   "tests/sw-offline.test.mjs",

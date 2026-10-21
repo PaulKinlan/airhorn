@@ -189,6 +189,42 @@ python3 -m http.server 8099 -d dist     # 127.0.0.1:8099, real 404s, correct MIM
 :8000; it was not exercised in this dry run because port 8000 was already
 occupied on the dry-run host.)
 
+### GET /health — the running build, in one request
+
+The Deno server answers `GET /health` (and `HEAD`) with unauthenticated JSON —
+no cookies, no secrets, resolved **once at startup** so the route stays cheap
+under load (a repeat request is byte-identical; `tests/health.test.mjs` pins
+this):
+
+```json
+{"status":"ok","version":"2.0.0","commit":"e28e1dd","buildTimestamp":"2026-10-21T19:00:22.962Z"}
+```
+
+Stamp a deployment by setting env vars at build/upload time and granting the
+server read access to them:
+
+```bash
+APP_VERSION="$(node -p 'require("./package.json").version')" \
+GIT_COMMIT="$(git rev-parse --short HEAD)" \
+BUILD_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" \
+deno run --allow-net --allow-read --allow-env --allow-run=git server.ts
+```
+
+- `APP_VERSION` — overrides the version reported; falls back to the
+  `package.json` sitting next to `server.ts`, then `"unknown"`.
+- `GIT_COMMIT` (or `COMMIT_SHA`) — the short commit sha; falls back to **one**
+  `git rev-parse --short HEAD` call at startup (needs `--allow-run=git`), then
+  `"unknown"`. A deployment that ships only `dist/` reports `"unknown"` unless
+  the env var is set — that is truthful, not an error.
+- `BUILD_TIMESTAMP` — ISO-8601; falls back to the server's start time, so an
+  unstamped deploy still reports something fresh rather than a lie.
+- `PORT` — listener override; the default stays 8000. Anything that is not an
+  integer 0–65535 refuses to start rather than silently moving ports.
+
+The other static servers in this runbook (`vite preview`, `python3 -m
+http.server`) do not serve `/health` — it is a feature of `server.ts`, the
+server shaped like the production origin.
+
 ### Headers, as measured — and what production must send instead
 
 Measured with `curl -sSI` against `npm run preview` (vite 6.4.1):

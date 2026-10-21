@@ -33,8 +33,9 @@ vite.config.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/s
 package.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
 package-lock.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
 # server.ts (dev server, TypeScript outside the bundle graph) is covered by the
-# tools smoke suite's esbuild parse (airhorn-1ye).
-server.ts	tests/gate-smoke.test.js
+# tools smoke suite's esbuild parse (airhorn-1ye) and by the health suite, which
+# drives the real deno server's /health endpoint on an ephemeral port (airhorn-uexx).
+server.ts	tests/gate-smoke.test.js tests/health.test.mjs
 # tools/* is covered by a REAL smoke suite: the gate's own selection contract
 # plus syntax checks of the scripts it names (airhorn-1ye).
 tools/*	tests/gate-smoke.test.js
@@ -84,6 +85,8 @@ tests/reflow-zoom.test.mjs	tests/reflow-zoom.test.mjs
 tests/shortcuts.test.mjs	tests/shortcuts.test.mjs
 tests/keyboard.test.mjs	tests/keyboard.test.mjs
 tests/screenreader.test.mjs	tests/screenreader.test.mjs
+# health (airhorn-uexx) spawns the real deno server; PORT=0 keeps it off any fixed port.
+tests/health.test.mjs	tests/health.test.mjs
 # multitab (airhorn-dae) is deliberately NOT on the source rows: it is the
 # whole-app two-tab coherence story (two Chromium tabs + an SW update), ~10s,
 # and putting it on src/main.js or index.html would re-pay that on the
