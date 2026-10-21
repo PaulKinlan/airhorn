@@ -56,9 +56,24 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+// KEYBOARD_CSS_DELAY_MS serves /styles/main.css late. The suite's stylesheet wait
+// exists because main.css is non-render-blocking, and a fast local box never
+// shows the race: with the delay this file reproduces, on demand, the in-gate
+// failure that first proved the wait was needed (and, later, that it was being
+// ignored - the ring was measured from a snapshot taken before it).
+const CSS_DELAY_MS = Number(process.env.KEYBOARD_CSS_DELAY_MS || 0);
+
 function startServer() {
   const server = http.createServer((req, res) => {
     let filePath = path.join(DIST, req.url === '/' ? 'index.html' : req.url.split('?')[0]);
+    if (CSS_DELAY_MS > 0 && req.url.startsWith('/styles/')) {
+      setTimeout(() => {
+        if (!fs.existsSync(filePath)) { res.writeHead(404); res.end('Not found'); return; }
+        res.writeHead(200, { 'Content-Type': 'text/css' });
+        fs.createReadStream(filePath).pipe(res);
+      }, CSS_DELAY_MS);
+      return;
+    }
     if (!fs.existsSync(filePath)) {
       res.writeHead(404);
       res.end('Not found');
@@ -132,7 +147,11 @@ function assertFocusRing(stop, label) {
     `${where} shows no focus indicator (outline-style: ${stop.outlineStyle})`
   );
   const width = parseFloat(stop.outlineWidth);
-  assert(Number.isFinite(width) && width >= 2, `${where} focus ring is ${stop.outlineWidth} wide (need >= 2px to read as an indicator)`);
+  // Name the mechanism in the failure: a 1px width means only a permanent
+  // boundary ring is painted, and whether the element matched :focus-visible is
+  // what decides if that is a missing indicator or a focus-state problem.
+  assert(Number.isFinite(width) && width >= 2, `${where} focus ring is ${stop.outlineWidth} wide (need >= 2px to read as an indicator); `
+    + `:focus-visible=${stop.focusVisible}, outline=${stop.outlineStyle} ${stop.outlineWidth} ${stop.outlineColor}`);
   assert(alphaOf(stop.outlineColor) > 0, `${where} focus ring colour ${stop.outlineColor} is fully transparent`);
   assert(stop.ringBehind, `${where} has no opaque background behind its focus ring; cannot prove the ring is visible`);
   const ratio = contrastRatio(stop.outlineColor, stop.ringBehind);
@@ -366,14 +385,30 @@ async function launch({ label = 'keyboard' } = {}) {
   };
   // main.css is fetched non-render-blocking (index.html swaps its media on load),
   // so a ring assertion can run against an unstyled frame: it measured a 1px UA
-  // outline on a 71x21 unstyled Try-again button in a fast-gate run on a loaded
-  // box. Wait for the sheet itself, using a property that is NOT the thing under
+  // outline on a 71x21 unstyled Try-again button in a gate run on a loaded box.
+  //
+  // Two ways this wait was written wrongly before it worked, both caught by
+  // KEYBOARD_CSS_DELAY_MS:
+  //   1. the ring was asserted from a snapshot taken BEFORE the wait;
+  //   2. waitFor() above takes a SNAPSHOT and hands it to its predicate, so a
+  //      predicate like `() => stylesheetApplied()` ignores that argument and
+  //      returns a Promise - truthy - and the "wait" returned on its first pass.
+  // Hence its own evaluate-based loop, and a sentinel that is NOT the thing under
   // test (the card's radius; the critical inline block styles .horn, not
   // .boot-alert), so the wait cannot mask a missing focus ring.
-  const stylesheetApplied = () => evaluate(`(() => {
-    const card = document.querySelector('.boot-alert');
-    return !!card && getComputedStyle(card).borderTopLeftRadius !== '0px';
-  })()`);
+  const waitForStylesheet = async (label) => {
+    const deadline = Date.now() + 15000;
+    let observed = null;
+    while (Date.now() < deadline) {
+      observed = await evaluate(`(() => {
+        const card = document.querySelector('.boot-alert');
+        return card ? getComputedStyle(card).borderTopLeftRadius : null;
+      })()`);
+      if (observed && observed !== '0px') return observed;
+      await sleep(50);
+    }
+    throw new Error(`${label}: main.css never applied (last .boot-alert border-radius ${JSON.stringify(observed)}) - every ring assertion after this would measure the unstyled frame`);
+  };
   const setOffline = (offline) => send('Network.emulateNetworkConditions', {
     offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1,
   });
@@ -398,7 +433,7 @@ async function launch({ label = 'keyboard' } = {}) {
     await browser.close();
   };
 
-  return { send, evaluate, snapshot, waitFor, hold, release, tab, key, focus, setOffline, offerInstall, stylesheetApplied, sleep, close, handle };
+  return { send, evaluate, snapshot, waitFor, waitForStylesheet, hold, release, tab, key, focus, setOffline, offerInstall, sleep, close, handle };
 }
 
 // A blast must not double-fire: a hold is one start on the sample voice, or
@@ -417,12 +452,12 @@ async function run() {
   let app = null;
   try {
     app = await launch();
-    const { send, evaluate, snapshot, waitFor, hold, release, tab, key, focus, setOffline, offerInstall, stylesheetApplied, sleep } = app;
+    const { send, evaluate, snapshot, waitFor, waitForStylesheet, hold, release, tab, key, focus, setOffline, offerInstall, sleep } = app;
     const base = `http://127.0.0.1:${port}/`;
 
     await send('Page.navigate', { url: base });
     await waitFor((s) => s.booted, { label: 'the app to boot (window.__airhorn)', timeout: 15000 });
-    await waitFor(() => stylesheetApplied(), { label: 'the stylesheet to be applied', timeout: 15000 });
+    await waitForStylesheet('the stylesheet to be applied');
     await sleep(300);
 
     // ---------------------------------------------------------------- case 1
@@ -641,8 +676,14 @@ async function run() {
       timeout: 20000,
     });
     assert(banner.active && banner.active.id === 'boot-retry', `boot failure: focus is on ${describeStop(banner.active)}, not the Try again button`);
-    await waitFor(() => stylesheetApplied(), { label: 'the stylesheet on the boot-failure page', timeout: 15000 });
-    const retryRatio = assertFocusRing(banner.active, 'boot failure → watchdog focuses Try again (programmatic focus, no prior keyboard input)');
+    await waitForStylesheet('the stylesheet on the boot-failure page');
+    // RE-READ the focused element: `banner.active` was snapshotted before the
+    // sheet landed, so asserting on it measured the unstyled frame anyway - the
+    // wait was decorative and the gate went red twice for it. Whatever is
+    // asserted has to come from a read taken AFTER the wait.
+    const retryNow = await evaluate('window.__kbFocus()');
+    assert(retryNow.id === 'boot-retry', `boot failure: focus moved to ${describeStop(retryNow)} while the stylesheet loaded`);
+    const retryRatio = assertFocusRing(retryNow, 'boot failure → watchdog focuses Try again (programmatic focus, no prior keyboard input)');
     // Tabbing off Try again must not strand the keyboard: the banner page still
     // has the horn behind it, and whatever Tab reaches must be a visible stop.
     const retryTab = await tab();
@@ -670,6 +711,12 @@ async function run() {
       timeout: 20000,
     });
     assert(bannerAgain.active && bannerAgain.active.id === 'boot-retry', `retry reload: focus is on ${describeStop(bannerAgain.active)}, not Try again`);
+    // Case 10's Enter reloaded the page, so THIS is a different document with its
+    // own stylesheet fetch in flight. The horn's 218.5px size does not prove the
+    // sheet landed - the inline critical block sets that too, and without main.css
+    // the focus ring is the UA's 1px `auto` outline. Wait on the sheet again
+    // (KEYBOARD_CSS_DELAY_MS is what exposed this).
+    await waitForStylesheet('the stylesheet on the page the retry reloaded');
     // Stand in for the bundle that arrives after the watchdog gave up (the 12s
     // backstop path): that is exactly what src/main.js calls once the app is
     // usable, and calling it is the same as the late bundle doing so - the
