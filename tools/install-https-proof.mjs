@@ -152,7 +152,10 @@ async function openBrowser(extraFlags) {
   const cleanup = () => {
     liveBrowser = null;
     try { ws?.close(); } catch {}
-    browser.close();
+    // Not awaited: every caller of cleanup() is a finally or a signal path. The
+    // teardown is synchronous before close()'s first await, so the reap is done
+    // either way - the catch only stops a late rejection escaping the caller.
+    browser.close().catch(() => { /* teardown is best-effort by design */ });
   };
   const reapNow = () => {
     liveBrowser = null;

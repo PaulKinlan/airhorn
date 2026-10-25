@@ -125,8 +125,9 @@ async function openBrowser(extraFlags = []) {
     try { ws?.close(); } catch {}
     // close() reaps SYNCHRONOUSLY (marker sweep, tree kill, profile rm) before
     // its first await, so a caller that does not await cleanup still gets the
-    // full teardown - which is how every caller here uses it.
-    browser.close();
+    // full teardown - which is how every caller here uses it. The catch only
+    // stops a late rejection escaping that caller.
+    browser.close().catch(() => { /* teardown is best-effort by design */ });
   };
 
   let msgId = 1;
