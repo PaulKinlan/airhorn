@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deriveCoverageContract, formatCoverageContract } from '../tools/derive-coverage-contract.mjs';
+import { deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites } from '../tools/derive-coverage-contract.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tool = path.join(root, 'tools', 'derive-coverage-contract.mjs');
@@ -78,6 +78,32 @@ src/foo.js\ttests/a.test.js\ttests/b.test.js
   assert.deepEqual(contract, {
     'src/foo.js': ['tests/a.test.js', 'tests/b.test.js'],
   });
+});
+
+test('extractPendingSuites handles multiple tabs in ~ row (airhorn-56dj)', () => {
+  const tsv = `
+~tests/a.test.js\ttests/a.test.js\ttests/b.test.js
+`;
+  const pending = extractPendingSuites(tsv);
+  assert.ok(pending.has('tests/a.test.js'));
+  assert.ok(pending.has('tests/b.test.js'));
+});
+
+test('deriveCoverageContract handles self-row that also names pending suite (airhorn-56dj)', () => {
+  const tsv = `
+src/extra.js\tsrc/extra.js test/notyet.test.mjs
+`;
+  const contract = deriveCoverageContract(tsv, { existsFn: () => false });
+  assert.equal(contract['src/extra.js'], undefined);
+});
+
+test('deriveMapOpinion returns Map with normalized wildcard keys (airhorn-56dj)', () => {
+  const tsv = `
+tools/lib/**\ttests/test-support.test.js
+`;
+  const opinion = deriveMapOpinion(tsv);
+  assert.ok(opinion.has('tools/lib/*'));
+  assert.deepEqual(opinion.get('tools/lib/*'), new Set(['tests/test-support.test.js']));
 });
 
 test('deriveCoverageContract ignores self-rows', () => {

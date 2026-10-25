@@ -23,10 +23,11 @@ export function extractPendingSuites(tsvText) {
   for (const line of tsvText.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
-    const [pattern, suitesStr = ''] = trimmed.split('\t');
-    const pat = pattern ? pattern.trim() : '';
+    const parts = trimmed.split('\t');
+    const pat = parts[0] ? parts[0].trim() : '';
     if (pat.startsWith('~')) {
-      for (const s of suitesStr.trim().split(/\s+/).filter(Boolean)) {
+      const suiteTokens = parts.slice(1).join(' ').trim().split(/\s+/).filter(Boolean);
+      for (const s of suiteTokens) {
         pendingDeclared.add(s);
       }
     }
@@ -51,8 +52,8 @@ export function isPendingSuite(suite, pendingDeclared, fileExists) {
  * - Deduplicates suites while preserving order
  * - Accumulates multiple rows for the same pattern additively
  */
-export function deriveCoverageContract(tsvText, { root = DEFAULT_ROOT, existsFn } = {}) {
-  const fileExists = existsFn || ((relPath) => fs.existsSync(path.join(root, relPath)));
+export function deriveCoverageContract(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
+  const fileExists = existsFn || fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
   const pendingDeclared = extractPendingSuites(tsvText);
 
   const contract = {};
@@ -77,6 +78,20 @@ export function deriveCoverageContract(tsvText, { root = DEFAULT_ROOT, existsFn 
     }
   }
   return contract;
+}
+
+/**
+ * Derives the map opinion as a Map of pattern -> Set of active suites,
+ * normalizing wildcard patterns (/** -> /*).
+ */
+export function deriveMapOpinion(tsvText, options = {}) {
+  const contract = deriveCoverageContract(tsvText, options);
+  const out = new Map();
+  for (const [pattern, suites] of Object.entries(contract)) {
+    const key = pattern.replace(/\/\*\*$/, '/*');
+    out.set(key, new Set(suites));
+  }
+  return out;
 }
 
 export function formatCoverageContract(contract) {
