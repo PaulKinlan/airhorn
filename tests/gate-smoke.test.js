@@ -142,6 +142,8 @@ test('a page change selects the page suites', () => {
   // WebMCP registration). Behavioural coverage moved to the concern rows below.
   const input = 'src/main.js';
   assert.ok(fs.existsSync(path.join(root, input)), `selector input ${input} is missing from the tree`);
+  // One real selector run, then both directions are read off it: `--list` costs
+  // ~0.5 s, and this suite is on the tools/* row.
   const suites = listFor(input);
   for (const s of ['tests/modules.test.js', 'tests/webmcp-browser.test.mjs', 'tests/resilience-ui.test.mjs']) {
     assert.ok(suites.includes(s), `src/main.js must select ${s}, got ${JSON.stringify(suites)}`);
@@ -153,25 +155,34 @@ test('a page change selects the page suites', () => {
 });
 
 test('the split gives every concern its own row, and the gate cost tracks blast radius (airhorn-1l04)', () => {
+  // Read the map the way the gate does (parseSuiteMap, the same parser the
+  // contract drift check uses) instead of spawning `fast-gate.sh --list` once
+  // per path: this suite is itself on the tools/* row, and each spawn costs
+  // ~0.5 s, so a dozen shell-outs here is a tax on every tools change for an
+  // opinion the map already holds. The SELECTOR is exercised for real by the
+  // page-change test above; this one is about the rows.
+  const byPattern = new Map(parseSuiteMap().map(({ pattern, suites }) => [pattern, suites]));
+  const selectorsFor = (file) => byPattern.get(file) || [];
+
   // Every module under src/ is mapped: a new module with no row would make the
   // fast gate report 'unmapped' - loud, but only once someone edited it. This is
   // the cheap direction of the same check, at rest.
   const modules = fs.readdirSync(path.join(root, 'src')).filter((f) => f.endsWith('.js')).sort();
   assert.ok(modules.length >= 8, `src/ must hold the split modules, found ${JSON.stringify(modules)}`);
-  const unmapped = modules.filter((f) => listFor(`src/${f}`).length === 0);
+  const unmapped = modules.filter((f) => selectorsFor(`src/${f}`).length === 0);
   assert.deepEqual(unmapped, [], `these src modules select no suite: ${unmapped.join(', ')}`);
 
   // The point of the split, as a measurable: a concern-only change runs its own
   // suites, not the eight the single module used to select. These two are the
   // narrowest concerns - a badge fix and a deep-link fix - and both must stay
   // off the horn's interaction suites.
-  const badge = listFor('src/badge.js');
+  const badge = selectorsFor('src/badge.js');
   assert.ok(badge.includes('tests/multitab.test.mjs'),
     `a badge change must run multitab, got ${JSON.stringify(badge)}`);
   for (const s of ['tests/keyboard.test.mjs', 'tests/horn.test.js', 'tests/a11y.test.mjs', 'tests/shortcuts.test.mjs']) {
     assert.ok(!badge.includes(s), `a badge change must not run ${s}, got ${JSON.stringify(badge)}`);
   }
-  const launch = listFor('src/launch.js');
+  const launch = selectorsFor('src/launch.js');
   assert.ok(launch.includes('tests/shortcuts.test.mjs'),
     `a deep-link change must run shortcuts, got ${JSON.stringify(launch)}`);
   for (const s of ['tests/horn.test.js', 'tests/a11y.test.mjs', 'tests/resilience-ui.test.mjs']) {
@@ -181,7 +192,7 @@ test('the split gives every concern its own row, and the gate cost tracks blast 
   // And the concerns that share a signal are not accidentally duplicated: the
   // structural suite is the only thing every module row has in common.
   for (const m of ['src/input.js', 'src/badge.js', 'src/launch.js', 'src/install.js', 'src/status.js', 'src/analytics.js']) {
-    assert.ok(listFor(m).includes('tests/modules.test.js'), `${m} must be pinned by the structural suite`);
+    assert.ok(selectorsFor(m).includes('tests/modules.test.js'), `${m} must be pinned by the structural suite`);
   }
 });
 
