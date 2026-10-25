@@ -12,13 +12,58 @@
 # restated in .fleet/coverage-contract.json — the oracle skips self-rows, so naming one there reads as
 # "the contract places this path, the map does not" and fails tests/gate-smoke.test.js (airhorn-x4l).
 src/horn.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/shortcuts.test.mjs
-src/main.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-failover.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs tests/shortcuts.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs
+# THE SPLIT (airhorn-1l04). src/main.js is a composition root now; each concern lives in its own
+# module and carries the suites that would catch a regression IN THAT CONCERN. The rows below are
+# the honest owners, which is the whole point: a badge change runs two suites instead of eight.
+#
+# src/main.js itself is deliberately narrow, and it is the one row where that is a COST decision
+# rather than a coverage opinion - the same trade as index.html's sw-failover exclusion above.
+# tests/modules.test.js pins the wiring at the source: every binder is called, with the target and
+# handles main.js must pass, and no behaviour may creep back in (a regression that drops or
+# mis-addresses a binding fails there, in ~0.1s, with no browser). What structure cannot see is the
+# runtime composition contract - the boot marker the watchdog depends on (resilience-ui) and the
+# WebMCP registration this module performs (webmcp-browser) - so those two run here. Everything
+# else main.js does is call a module, and that module's row owns the behaviour.
+src/main.js	tests/modules.test.js tests/resilience-ui.test.mjs test/resilience-ui.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
+# The horn's state (press/release, the pressed claim and its retraction, the tap hint) is asserted
+# by every suite that says the app works, because it IS the app: a broken pressed state is a broken
+# page. This row is therefore wide on purpose and is the honest answer, not a leftover - the win of
+# the split is that a change to a CONCERN no longer lands here. multitab is deliberately absent,
+# exactly as it is on every other source row: the per-file suites already assert pressed-state
+# honesty, and its cross-tab story is badge.js's to own (see that row).
+src/airhorn.js	tests/modules.test.js tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/reflow-zoom.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs
+# Pointer + keyboard semantics (P0 airhorn-slmt / airhorn-ay73). The suites that press the horn with
+# REAL input events and assert what a hold does: horn.test.js pins the right-click and release
+# guards, keyboard the hold/Escape/blur retire, screenreader the AX state while held, a11y and
+# visual-overrides the keyboard path, reflow-zoom the pointer press.
+src/input.js	tests/modules.test.js tests/horn.test.js tests/keyboard.test.mjs tests/a11y.test.mjs test/a11y.test.mjs tests/screenreader.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs
+# The badge is app-wide state across tabs, and multitab is its only owner: it asserts the shared
+# total (4 blasts in two tabs read 4), the fresh-tab derive and the acknowledge-on-look. Nothing
+# else in the tree tests those, which is why multitab is named here and on no other source row.
+# webmcp-browser asserts the other entry point - a tool call badges with a real number.
+src/badge.js	tests/modules.test.js tests/multitab.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
+# The install affordance: a11y asserts the accepted/cancelled announcement through the app's one
+# voice, keyboard the focus restoration, resilience-ui the blocked-CSS honest control, reflow-zoom
+# that the affordance stays on-screen and topmost.
+src/install.js	tests/modules.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/keyboard.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs tests/reflow-zoom.test.mjs
+# Deep links and launches: shortcuts is THE #instant suite (load, hashchange, the launch-queue
+# repeat press and the cold-launch dedupe), multitab asserts the launch-time badge acknowledge.
+src/launch.js	tests/modules.test.js tests/shortcuts.test.mjs tests/multitab.test.mjs
+# The connection notice. Five suites each assert the same copy in their own scenario: screenreader
+# through the AX tree, keyboard through the offline flip without a focus move, multitab once per
+# open tab, resilience-ui on drop/restore, visual-overrides that the caption tier actually paints.
+src/status.js	tests/modules.test.js tests/screenreader.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs tests/visual-overrides.test.mjs
+# gtag is only present when a page loads the analytics snippet, and no browser suite asserts an
+# analytics call. tests/modules.test.js unit-tests trackEvent in both directions instead.
+src/analytics.js	tests/modules.test.js
 src/webmcp.js	tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
 # sw-failover is NOT on the index.html row (airhorn-iwf): it is the worker's
-# end-to-end upgrade story (public/sw.js + src/main.js messaging), the page's
+# end-to-end failure story (public/sw.js: lie-fi, quota-denied upgrade), the page's
 # markup is already asserted by horn, a11y and resilience-ui, and putting the
 # 14s SW-update suite on the most frequently edited file left a worst-case fast
-# gate at ~60s with no headroom.
+# gate at ~60s with no headroom. Since the split it is not on a src/ row either,
+# because no page module owns worker code - the registration handler is inline in
+# index.html, and resilience-ui asserts the copy that handler authors.
 #
 # The page DOES author one thing sw-failover asserted - the lost-upgrade
 # announcement, in the inline registration handler next to #app-status - so
@@ -93,13 +138,20 @@ tests/keyboard.test.mjs	tests/keyboard.test.mjs
 tests/screenreader.test.mjs	tests/screenreader.test.mjs
 # health (airhorn-uexx) spawns the real deno server; PORT=0 keeps it off any fixed port.
 tests/health.test.mjs	tests/health.test.mjs
-# multitab (airhorn-dae) is deliberately NOT on the source rows: it is the
-# whole-app two-tab coherence story (two Chromium tabs + an SW update), ~10s,
-# and putting it on src/main.js or index.html would re-pay that on the
+# multitab (airhorn-dae) is deliberately NOT on the behaviour-wide source rows: it
+# is the whole-app two-tab coherence story (two Chromium tabs + an SW update), ~10s,
+# and putting it on index.html or src/airhorn.js would re-pay that on the
 # most-edited files for signal the per-file suites already carry - the same
 # cost decision as keeping sw-failover off index.html (airhorn-iwf). A change
 # to the suite runs the suite; the cross-tab assertions travel with it.
+# It IS on src/badge.js (airhorn-1l04), which is the exception that proves the
+# rule: nothing else in the tree asserts the shared cross-tab count, so leaving it
+# off there would have left that module ungated rather than cheaper.
 tests/multitab.test.mjs	tests/multitab.test.mjs
+# The split's structural suite (airhorn-1l04): the module graph, the composition
+# root's wiring, and the exported entry points. Browser-free, ~0.1s, and named on
+# every module row so the split's shape cannot rot back into one module.
+tests/modules.test.js	tests/modules.test.js
 ~test/a11y.test.mjs	test/a11y.test.mjs
 ~test/sw-offline.test.mjs	test/sw-offline.test.mjs
 ~test/webmcp.test.mjs	test/webmcp.test.mjs
