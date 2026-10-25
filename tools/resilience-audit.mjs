@@ -22,12 +22,12 @@
  * Evidence: $RESILIENCE_OUT or /tmp/airhorn-resilience/<sha>-<timestamp>/
  */
 
-import { spawn } from 'node:child_process';
+
 // The one profile-marker sweep (airhorn-mgcl, ported from fleet/leaks b6e44fb):
 // the fifth local copy is gone - ENOENT-only silence, stderr warning otherwise,
 // and the shared module's three passes include the fork-race pass this copy
 // had lost.
-import { sweepProfile } from './lib/reap.mjs';
+import { launchChrome } from './lib/chrome.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -38,7 +38,6 @@ import { makeRenderModel } from './render-model.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, '../dist');
-const CHROME = process.env.CHROME_BIN || '/usr/bin/google-chrome';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const MIME = {
@@ -230,75 +229,38 @@ class Cdp {
 }
 
 async function launchBrowser() {
-  const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'airhorn-resilience-'));
-  const proc = spawn(CHROME, [
-    '--headless=new',
-    '--no-sandbox',
-    '--disable-gpu',
-    '--disable-dev-shm-usage',
-    '--no-first-run',
-    '--autoplay-policy=no-user-gesture-required',
-    '--remote-debugging-port=0',
-    `--user-data-dir=${profileDir}`,
-    'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
-
-  // Self-cleaning launch window (airhorn-e4im): every failure after the spawn
-  // - stderr that never arrives, chrome dying early, a connect that never
-  // opens - used to throw out of here with proc and profileDir unreachable
-  // by the caller (withBrowser's finally closes null). One teardown owns
-  // them all.
-  const fail = (err) => {
-    sweepProfile(profileDir);
-    try { proc.kill('SIGKILL'); } catch { /* already gone */ }
-    try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
-    throw err;
-  };
-
-  // A spawn that never produced a process reports through the 'error' event,
-  // not a rejection - and a missing CHROME_BIN is the ordinary case, since the
-  // default path does not exist on a machine without Chrome. With no listener
-  // that is an uncaughtException: it aborts the audit before fail() can run and
-  // leaves the launch profile behind, where the header promises a labelled
-  // result for every scenario (airhorn-r5me). Raced against the handshake so it
-  // takes the same fail() teardown as the ws-silent and exits-early shapes.
-  const spawnFailed = new Promise((_, reject) => proc.once('error', (err) =>
-    reject(new Error(`chrome launch failed: ${err.message}`))));
-
+  // One launcher owns the browser, its process tree and its profile
+  // (airhorn-2po9). discoverPage:false is this audit's shape: it attaches CDP
+  // sessions to targets it creates, so there is no pre-made page to discover
+  // and no /json/list fetch to bound. The startup bound, the process group, the
+  // tree kill and the profile rm are the launcher's.
+  const handle = await launchChrome({
+    label: 'resilience',
+    autoplay: true,
+    extraFlags: ['--no-first-run'],
+    timeoutMs: 20000,
+    discoverPage: false,
+  });
   try {
-    const wsUrl = await Promise.race([spawnFailed, new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('chrome launch timeout')), 20000);
-      proc.stderr.on('data', (d) => {
-        const m = d.toString().match(/ws:\/\/\S+/);
-        if (m) {
-          clearTimeout(timer);
-          resolve(m[0]);
-        }
-      });
-      proc.on('exit', (code) => {
-        clearTimeout(timer);
-        reject(new Error(`chrome exited early (${code})`));
-      });
-    })]);
-
-    const cdp = await Cdp.connect(wsUrl);
-    return { proc, cdp, profileDir };
+    const cdp = await Cdp.connect(handle.browserWsUrl);
+    return { handle, cdp };
   } catch (err) {
-    return fail(err);
+    // The socket never opened, so nothing downstream owns this launch
+    // (airhorn-e4im's teardown, now the launcher's).
+    await handle.close();
+    throw err;
   }
 }
 
 async function closeBrowser(browser) {
   if (!browser) return;
   try { await browser.cdp.send('Browser.close'); } catch { /* already dead */ }
-  // The sweep ends renderers/cache children a main-only kill leaves behind
-  // to recreate files after the rm (airhorn-jx9, airhorn-nn26 - the same
-  // race audio-parity's finally names), then the pid kill as belt and
-  // braces.
-  sweepProfile(browser.profileDir);
-  try { browser.proc.kill('SIGKILL'); } catch { /* already dead */ }
   browser.cdp.close();
-  try { fs.rmSync(browser.profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
+  // close() is the launcher's one teardown: the marker sweep ends the
+  // renderers/cache children a main-only kill leaves behind to recreate files
+  // after the rm (airhorn-jx9, airhorn-nn26), then the pid kill as belt and
+  // braces, then the rm with its retries - all before its first await.
+  await browser.handle.close();
 }
 
 /* ----------------------------------------------------- page instrumentation */
