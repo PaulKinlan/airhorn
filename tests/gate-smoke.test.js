@@ -673,6 +673,16 @@ test('the tools parse fails on a symlinked broken script and passes a valid one 
   fs.cpSync(defaultToolsDir, tmpToolsDir, { recursive: true });
   const probeName = `zz-symlink-probe-${crypto.randomBytes(4).toString('hex')}.mjs`;
   const link = path.join(tmpToolsDir, probeName);
+  // The child re-runs ONLY the tests this pin is about (airhorn-3wnr): the
+  // tools-parse test, which is the one that reads GSM_TOOLS_ROOT, plus this pin
+  // itself so its guard skip stays visible. Two reasons, both measured:
+  //   - COST: the child used to run the whole suite, and this pin runs it three
+  //     times (broken, valid, dangling) - ~36-78 s of gate-smoke's runtime, i.e.
+  //     roughly half of it, on a suite that every tools/ change pays for.
+  //   - HONESTY: a child that runs everything fails for reasons that have
+  //     nothing to do with symlinks (a tree without dist/, or any other flaky
+  //     test), so the pin read red for the wrong thing.
+  const CHILD_TESTS = '^(every tools script parses|the tools parse fails)';
   const runSelf = () => {
     // Strip the runner's NODE_TEST_CONTEXT: a child node --test that inherits
     // it believes it is a managed test child, writes nothing and exits 0 -
@@ -684,15 +694,23 @@ test('the tools parse fails on a symlinked broken script and passes a valid one 
       GSM_TOOLS_ROOT: tmpToolsDir,
     };
     delete childEnv.NODE_TEST_CONTEXT;
-    const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', path.join(root, 'tests', 'gate-smoke.test.js')], {
-      cwd: root, encoding: 'utf8',
-      env: childEnv,
-    });
+    const r = spawnSync(process.execPath,
+      ['--test', '--test-reporter=tap', `--test-name-pattern=${CHILD_TESTS}`, path.join(root, 'tests', 'gate-smoke.test.js')], {
+        cwd: root, encoding: 'utf8',
+        env: childEnv,
+      });
     const out = `${r.stdout || ''}${r.stderr || ''}`;
     // The child MUST have skipped this pin via the guard pairing
     // (airhorn-5os): a green child that RAN its own pin would be
     // recursion, and a guard that never engages is invisible.
     assert.ok(/# SKIP[-\s]*self-invocation guard/.test(out), `the pin child must report the guard skip: ${out.slice(0, 200)}`);
+    // And it must be SCOPED (airhorn-3wnr): the tools-parse test ran for real,
+    // and the rest of gate-smoke did not. Without this, a later edit that drops
+    // the name pattern silently restores the triple cost.
+    assert.ok(/ok \d+ - every tools script parses/.test(out),
+      `the child must run the tools-parse test: ${out.slice(0, 400)}`);
+    assert.ok(!out.includes('a change that selects ZERO suites'),
+      `the child must not run the rest of gate-smoke (it would pay gate-smoke three times - airhorn-3wnr): ${out.slice(0, 400)}`);
     const lines = out.split('\n').filter((l) => /not ok|pass |fail |SyntaxError|Error/.test(l)).slice(0, 6).join(' || ');
     return { status: r.status, out, tail: `err=${r.error ? r.error.code : 'none'} ${lines}` };
   };
@@ -709,7 +727,7 @@ test('the tools parse fails on a symlinked broken script and passes a valid one 
     fs.rmSync(link, { force: true });
     fs.symlinkSync(path.join(tmp, 'valid.mjs'), link);
     const validRun = runSelf();
-    assert.equal(validRun.status, 0, `with a VALID symlink the whole child suite must stay green - this leg also asserts the child self-skipped, so any other failing test reports here too: ${validRun.tail}`);
+    assert.equal(validRun.status, 0, `with a VALID symlink the child tools-parse test must stay green: ${validRun.tail}`);
     assert.ok(!validRun.out.includes('tools/tools/'), `valid leg must not contain doubled prefix: ${validRun.out.slice(0, 300)}`);
 
     // Dangling: the resolution must fail LOUDLY, not silently skip - a
