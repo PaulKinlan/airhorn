@@ -2,7 +2,8 @@
  * tests/docs-recipe.test.mjs — the documented Deno recipes are run as written
  * (airhorn-x86p, airhorn-o1l1)
  *
- * README.md tells an operator how to serve dist/, and DEPLOY.md tells them how to
+ * README.md tells an operator how to serve dist/, and docs/runbooks/DEPLOY.md tells
+ * them how to
  * stamp a deployment. Both print a `deno run ... server.ts` command, and its flags
  * are the ONLY thing standing between them and a silently wrong server: server.ts
  * reads PORT and the build stamps through permission-guarded env reads and
@@ -84,7 +85,10 @@ function documentedRecipes(text) {
   return lines.filter((line) => /\bdeno run\b/.test(line) && /\bserver\.ts\b/.test(line));
 }
 
-const DOCS = ['README.md', 'DEPLOY.md'].map((name) => ({
+// The runbooks moved under docs/runbooks/ (airhorn-alze); the recipe that is RUN,
+// not quoted, is still DEPLOY.md's, so its path is here and its command is executed
+// as printed from the repo root, exactly as an operator would.
+const DOCS = ['README.md', 'docs/runbooks/DEPLOY.md'].map((name) => ({
   name,
   recipes: documentedRecipes(fs.readFileSync(path.join(root, name), 'utf8')),
 }));

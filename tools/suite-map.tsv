@@ -107,6 +107,11 @@ tests/multitab.test.mjs	tests/multitab.test.mjs
 # docs lose) turns the gate red instead of shipping inert instructions (airhorn-x86p).
 # Prose is still exempt below; this prose is the operator's command line.
 README.md	tests/docs-recipe.test.mjs
+# The same holds for the deployment runbook after airhorn-alze moved it under
+# docs/runbooks/: it carries the STAMPED `deno run ... server.ts` recipe that
+# tests/docs-recipe.test.mjs executes, so a change to it must run that suite rather
+# than fall through to the `!*.md` exemption below (a row always beats an exemption).
+docs/runbooks/DEPLOY.md	tests/docs-recipe.test.mjs
 # Static assets and prose carry no behaviour; no suite covers them.
 !*.md
 !LICENSE

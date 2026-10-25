@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /*
- * tools/rollback-rehearsal.mjs — execute ROLLBACK.md's undo procedure for real,
+ * tools/rollback-rehearsal.mjs — execute docs/runbooks/ROLLBACK.md's undo procedure for real,
  * locally, and report every place the document and the browser disagree
  * (bead airhorn-cxim).
  *
- * ROLLBACK.md's §4 drills were measured for the plan; nothing had ever run the
+ * docs/runbooks/ROLLBACK.md's §4 drills were measured for the plan; nothing had ever run the
  * §5 order of operations end to end, as a procedure. This tool does exactly
  * that: one mutable origin (a "traffic switch" is a variable flip, not a
  * deploy), one persistent Chrome profile per scenario (so "a device that had
@@ -25,7 +25,7 @@
  *   node tools/rollback-rehearsal.mjs              # every drill
  *   node tools/rollback-rehearsal.mjs baseline A E F   # selected drills
  *
- * Drills (ROLLBACK.md references in the labels):
+ * Drills (docs/runbooks/ROLLBACK.md references in the labels):
  *   baseline  §5 Step 0 / §7: V2 installs, controls, reload, second tab, offline
  *   A         §4 A  R2 rollback, device's HTTP cache COLD   -> V1 on the first reload?
  *   E         §4 E  R2 rollback inside max-age (worst case) -> wedged on V2; then R3 frees it
@@ -106,7 +106,7 @@ function serve(res, root, urlPath, relOverride = null) {
   const ext = path.extname(file);
   const headers = {
     'content-type': MIME[ext] || 'application/octet-stream',
-    // Production's measured header (ROLLBACK.md §1/§2), on every file incl. /sw.js.
+    // Production's measured header (docs/runbooks/ROLLBACK.md §1/§2), on every file incl. /sw.js.
     'cache-control': (rel === 'sw.js' && state.swCacheControl) || 'public, max-age=10',
   };
   if (rel === 'sw.js') headers['service-worker-allowed'] = '/';
@@ -205,7 +205,7 @@ const navTimings = [];
 function check(drill, step, expected, actual, ok, note = '') {
   results.push({ drill, step, expected, actual, ok, note });
   const mark = ok ? 'MATCH   ' : 'MISMATCH';
-  console.log(`${mark} [${drill}] ${step}\n           ROLLBACK.md says: ${expected}\n           observed:         ${actual}${note ? `\n           note:             ${note}` : ''}`);
+  console.log(`${mark} [${drill}] ${step}\n           docs/runbooks/ROLLBACK.md says: ${expected}\n           observed:         ${actual}${note ? `\n           note:             ${note}` : ''}`);
 }
 
 function note(drill, step, actual) {
@@ -859,7 +859,7 @@ const drills = {
 async function main() {
   for (const [label, dir] of [['dist/', DIST], ['archive live/', V1_LIVE], ['§6 overlay', OVERLAY]]) {
     if (!fs.existsSync(dir)) {
-      console.error(`missing ${label} at ${dir}` + (label === 'dist/' ? ' — run npm run build' : ' — see ROLLBACK.md §5 Step 0'));
+      console.error(`missing ${label} at ${dir}` + (label === 'dist/' ? ' — run npm run build' : ' — see docs/runbooks/ROLLBACK.md §5 Step 0'));
       process.exit(2);
     }
   }
