@@ -18,6 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeRenderModel } from '../tools/render-model.mjs';
 import { READ_STATE } from '../tools/resilience-audit.mjs';
+import { deriveCoverageContract, formatCoverageContract } from '../tools/derive-coverage-contract.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const gate = path.join(root, 'tools', 'fast-gate.sh');
@@ -230,6 +231,24 @@ test('every suite the contract names exists (airhorn-ona)', () => {
   }
   assert.deepEqual(typos, [], `contract entries spell test/ for suites that exist under tests/ - fix the spelling: ${typos.join(', ')}`);
   assert.deepEqual(missing, [], `the contract names suites that are not in the tree: ${missing.join(', ')}`);
+});
+
+test('the fleet coverage contract is fresh and derived from tools/suite-map.tsv (airhorn-y7mx)', () => {
+  const committed = fs.readFileSync(contractPath, 'utf8');
+  const tsv = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
+  const generated = formatCoverageContract(deriveCoverageContract(tsv));
+  assert.equal(committed, generated,
+    'the coverage contract does not match the generated output from tools/suite-map.tsv. Run node tools/derive-coverage-contract.mjs to regenerate.');
+});
+
+test('the freshness guard fails when the contract is hand-edited (airhorn-y7mx)', () => {
+  const tsv = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
+  const generated = formatCoverageContract(deriveCoverageContract(tsv));
+  const handEdited = generated.replace('tests/horn.test.js', 'tests/tampered.test.js');
+  assert.notEqual(handEdited, generated, 'mutation must differ');
+  assert.throws(() => {
+    assert.equal(handEdited, generated);
+  }, /AssertionError/);
 });
 
 test('an audit-tool change selects this suite (the tools/* row is real)', () => {
