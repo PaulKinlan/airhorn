@@ -17,11 +17,29 @@ import { fileURLToPath } from 'node:url';
  * Derives the coverage contract object from the TSV content.
  * - Filters out comments (#) and empty lines
  * - Excludes exemption rows (!), pending suite rows (~), and self-rows
- * - Filters out pending suite spellings (test/)
+ * - Filters out pending suites declared via ~ rows until they exist on disk (airhorn-u42y)
  * - Deduplicates suites while preserving order
  * - Accumulates multiple rows for the same pattern additively
  */
-export function deriveCoverageContract(tsvText) {
+export function deriveCoverageContract(tsvText, { root = process.cwd(), existsFn } = {}) {
+  const fileExists = existsFn || ((relPath) => fs.existsSync(path.join(root, relPath)));
+
+  // Identify all suites declared pending by `~` rows
+  const pendingDeclared = new Set();
+  for (const line of tsvText.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const [pattern, suitesStr = ''] = trimmed.split('\t');
+    const pat = pattern ? pattern.trim() : '';
+    if (pat.startsWith('~')) {
+      for (const s of suitesStr.trim().split(/\s+/).filter(Boolean)) {
+        pendingDeclared.add(s);
+      }
+    }
+  }
+
+  const isPending = (suite) => (suite.startsWith('test/') || pendingDeclared.has(suite)) && !fileExists(suite);
+
   const contract = {};
   for (const line of tsvText.split('\n')) {
     const trimmed = line.trim();
@@ -30,13 +48,13 @@ export function deriveCoverageContract(tsvText) {
     const pat = pattern ? pattern.trim() : '';
     if (!pat || pat.startsWith('!') || pat.startsWith('~')) continue;
     const suites = suitesStr.trim().split(/\s+/).filter(Boolean);
-    const nonPending = suites.filter((s) => !s.startsWith('test/'));
-    if (nonPending.length > 0 && nonPending.every((s) => s === pat)) continue;
-    if (nonPending.length > 0) {
+    const activeSuites = suites.filter((s) => !isPending(s));
+    if (activeSuites.length > 0 && activeSuites.every((s) => s === pat)) continue;
+    if (activeSuites.length > 0) {
       if (!contract[pat]) {
         contract[pat] = [];
       }
-      for (const s of nonPending) {
+      for (const s of activeSuites) {
         if (!contract[pat].includes(s)) {
           contract[pat].push(s);
         }

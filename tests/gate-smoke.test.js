@@ -83,7 +83,7 @@ const readContract = () => JSON.parse(fs.readFileSync(contractPath, 'utf8'));
 // `**` and `*` are the same opinion spelled differently by the two files; the
 // oracle treats both as "everything under this directory".
 const normPattern = (p) => p.replace(/\/\*\*$/, '/*');
-const isPendingSpelling = (suite) => suite.startsWith('test/');
+const isPendingSpelling = (suite) => suite.startsWith('test/') && !fs.existsSync(path.join(root, suite));
 
 // The rows the contract restates: every path the map places, exemptions (`!`)
 // and pending suites (`~`) aside. A row that names only itself

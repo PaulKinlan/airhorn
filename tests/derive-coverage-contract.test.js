@@ -45,6 +45,20 @@ src/foo.js\ttests/foo.test.js
   });
 });
 
+test('deriveCoverageContract includes alternate test/ suite once it lands on disk (airhorn-u42y)', () => {
+  const tsv = `
+~test/a11y.test.mjs\ttest/a11y.test.mjs
+src/horn.js\ttests/horn.test.js test/a11y.test.mjs
+`;
+  // While absent on disk, pending suite is omitted:
+  const withoutLanded = deriveCoverageContract(tsv, { existsFn: () => false });
+  assert.deepEqual(withoutLanded['src/horn.js'], ['tests/horn.test.js']);
+
+  // Once landed on disk, pending suite becomes active and is included:
+  const withLanded = deriveCoverageContract(tsv, { existsFn: (p) => p === 'test/a11y.test.mjs' });
+  assert.deepEqual(withLanded['src/horn.js'], ['tests/horn.test.js', 'test/a11y.test.mjs']);
+});
+
 test('deriveCoverageContract ignores self-rows', () => {
   const tsv = `
 tests/horn.test.js\ttests/horn.test.js
