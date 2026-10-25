@@ -47,13 +47,14 @@
  * Exits 0 only when every check passes; report.json + a screenshot are the evidence.
  */
 
-import { spawn, execSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { quiescenceProbe, waitForQuiescence } from '../tests/support/quiescence.mjs';
+import { connectPage, launchChrome } from './lib/chrome.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -366,70 +367,15 @@ async function main() {
   const port = server.address().port;
   const url = `http://127.0.0.1:${port}`;
 
-  const chromeBin = process.env.CHROME_BIN ||
-    (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
-    fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' :
-    fs.existsSync('/usr/bin/chromium-browser') ? '/usr/bin/chromium-browser' : 'google-chrome');
-
-  const profileDir = `/tmp/chrome-cache-growth-profile-${Date.now()}`;
-  let chrome = null;
+  // One launcher owns chrome, its process tree and its profile (airhorn-2po9):
+  // the flag family, the startup bound, /json/list discovery and the page ws
+  // bound all live in tools/lib/chrome.mjs.
+  let browser = null;
   let ws = null;
 
   try {
-    chrome = spawn(chromeBin, [
-      '--headless=new',
-      '--no-sandbox',
-      '--disable-gpu',
-      '--autoplay-policy=no-user-gesture-required',
-      '--remote-debugging-port=0',
-      `--user-data-dir=${profileDir}`,
-      'about:blank',
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
-
-    let wsUrl = null;
-    const stderrLines = [];
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(
-        () => reject(new Error(`Chrome start timeout: ${stderrLines.join('\n')}`)), 20000,
-      );
-      chrome.stderr.on('data', (data) => {
-        const text = data.toString();
-        stderrLines.push(text);
-        const match = text.match(/ws:\/\/[^\s]+/);
-        if (match) {
-          wsUrl = match[0];
-          clearTimeout(timeout);
-          resolve();
-        }
-      });
-      chrome.on('error', (err) => { clearTimeout(timeout); reject(err); });
-      chrome.on('exit', (code) => {
-        clearTimeout(timeout);
-        reject(new Error(`Chrome exited early (${code}): ${stderrLines.join('\n')}`));
-      });
-    });
-
-    const chromePort = new URL(wsUrl).port;
-    // Discovery is bounded like the handshake above: a DevTools endpoint that
-    // accepts and never answers must reject into this tool's cleanup instead
-    // of parking it until undici's ~300s headers timeout (airhorn-9vg3).
-    let targets;
-    try {
-      targets = await (await fetch(`http://127.0.0.1:${chromePort}/json/list`, { signal: AbortSignal.timeout(20000) })).json();
-    } catch (err) {
-      if (err?.name === 'TimeoutError') throw new Error('DevTools discovery timeout: /json/list did not settle within 20000ms');
-      throw err;
-    }
-    const pageTarget = targets.find((target) => target.type === 'page');
-    ws = new WebSocket(pageTarget.webSocketDebuggerUrl);
-    // Bounded like discovery above: a peer that answers /json/list but never
-    // completes the ws upgrade must reject into the cleanup instead of parking
-    // the tool with its launch alive (airhorn-doek).
-    await new Promise((resolve, reject) => {
-      const bound = setTimeout(() => reject(new Error('DevTools ws handshake timeout: the page socket never opened within 20000ms')), 20000);
-      ws.onopen = () => { clearTimeout(bound); resolve(); };
-      ws.onerror = (err) => { clearTimeout(bound); reject(err instanceof Error ? err : new Error('DevTools ws handshake failed: the page socket errored')); };
-    });
+    browser = await launchChrome({ label: 'cache-growth-profile', autoplay: true, timeoutMs: 20000, discoveryMs: 20000 });
+    ws = await connectPage(browser, { label: 'cache-growth-profile', timeoutMs: 20000 });
 
     let msgId = 1;
     const pending = new Map();
@@ -818,11 +764,11 @@ async function main() {
     return summary.pass ? 0 : 1;
   } finally {
     try { if (ws) ws.close(); } catch {}
-    try { if (chrome) chrome.kill('SIGTERM'); } catch {}
-    await sleep(300);
-    try { if (chrome && chrome.exitCode === null) chrome.kill('SIGKILL'); } catch {}
     await new Promise((resolve) => server.close(resolve));
-    fs.rmSync(profileDir, { recursive: true, force: true });
+    // The handle's teardown is the launcher's: marker sweep, tree kill, profile
+    // rm - and the rm runs before its first await, so the writeback race that
+    // recreates Default/ after a bare rm cannot happen (airhorn-5xqi).
+    if (browser) await browser.close();
     fs.rmSync(workRoot, { recursive: true, force: true });
   }
 }

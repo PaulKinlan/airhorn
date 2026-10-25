@@ -1,25 +1,22 @@
-import { spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
-import { sweepProfile } from './lib/reap.mjs';
+import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
 
 // The teardown below lives in a try/finally, which a bound-kill (fleet-gate's
 // SIGTERM, a job-tree reaper, Ctrl-C) never reaches - so the chrome tree and its
 // /tmp profile survived the kill (airhorn-dpua, the tools' copy of the gap
-// airhorn-4vfn closed for the suites). Register the live launch and do the same
-// sweep + removal synchronously inside the handler's grace.
+// airhorn-4vfn closed for the suites). Register the live launch and reap it
+// synchronously inside the handler's grace: the handle's killNow() is the
+// launcher's own sweep + tree kill + profile rm (airhorn-2po9).
 let liveBrowser = null;
 installSignalExit(() => {
-  if (!liveBrowser) return;
-  const { chrome, profileDir } = liveBrowser;
+  const browser = liveBrowser;
   liveBrowser = null;
-  sweepProfile(profileDir);
-  try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
-  try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
+  browser?.killNow();
 });
 
 
@@ -64,79 +61,20 @@ async function main() {
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
 
-  const chromeBin = process.env.CHROME_BIN ||
-    (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
-    fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : 'google-chrome');
-
-  const profileDir = '/tmp/chrome-perf-profile-' + Date.now();
-  const chrome = spawn(chromeBin, [
-    '--headless=new',
-    '--no-sandbox',
-    '--disable-gpu',
-    '--remote-debugging-port=0',
-    `--user-data-dir=${profileDir}`,
-    'about:blank'
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
-  // NOT detached (airhorn-105n, the tools' copy of the acex fix): chrome must
-  // stay in the caller's process group so an ancestor group-kill - what
-  // fleet-gate's bound and any job-tree reaper send - reaches the whole tree;
-  // SIGKILL runs no handler, so a detached launch outlived the kill.
-  liveBrowser = { chrome, profileDir };
-
-  // A spawn that never produced a process reports through the 'error' event,
-  // not a rejection: with no listener that is an uncaughtException, so it aborts
-  // the tool BEFORE the teardown below can run (airhorn-trj7). Raced against the
-  // handshake so a bad CHROME_BIN takes the same cleanup as every other
-  // launch-window failure.
-  const spawnFailed = new Promise((_, reject) =>
-    chrome.once('error', (err) => reject(new Error(`chrome launch failed: ${err.message}`))));
-
-  let wsUrl = null;
-  let ws = null;
-  // The early window (handshake, discovery, ws connect) sits before the try
-  // whose finally reaps, so a failure there used to throw with chrome and its
-  // profile alive (airhorn-51lr). Route it into the same teardown.
+  // One launcher owns chrome, its process tree and its profile (airhorn-2po9):
+  // the flags, the startup bound, /json/list discovery and the page ws bound
+  // are all tools/lib/chrome.mjs's, and both the bound-kill hook above and the
+  // finally below reap the same handle.
+  const browser = await launchChrome({ label: 'perf-profile', timeoutMs: 10000, discoveryMs: 10000 });
+  liveBrowser = browser;
+  let ws;
   try {
-    await Promise.race([spawnFailed, new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Chrome timeout')), 10000);
-      chrome.stderr.on('data', (d) => {
-        const match = d.toString().match(/ws:\/\/[^\s]+/);
-        if (match) {
-          wsUrl = match[0];
-          clearTimeout(timeout);
-          resolve();
-        }
-      });
-    })]);
-
-    const chromePort = new URL(wsUrl).port;
-    // Discovery is bounded like the handshake above: a DevTools endpoint that
-    // accepts and never answers must reject into this tool's cleanup instead of
-    // parking it until undici's ~300s headers timeout (airhorn-9vg3).
-    let targets;
-    try {
-      const res = await fetch(`http://127.0.0.1:${chromePort}/json/list`, { signal: AbortSignal.timeout(10000) });
-      targets = await res.json();
-    } catch (err) {
-      if (err?.name === 'TimeoutError') throw new Error('DevTools discovery timeout: /json/list did not settle within 10000ms');
-      throw err;
-    }
-    const pageWsUrl = targets.find(t => t.type === 'page').webSocketDebuggerUrl;
-
-    ws = new WebSocket(pageWsUrl);
-    // Bounded like discovery above: a peer that answers /json/list but never
-    // completes the ws upgrade must reject into the cleanup instead of parking
-    // the tool with its launch alive (airhorn-doek).
-    await new Promise((resolve, reject) => {
-      const bound = setTimeout(() => reject(new Error('DevTools ws handshake timeout: the page socket never opened within 10000ms')), 10000);
-      ws.onopen = () => { clearTimeout(bound); resolve(); };
-      ws.onerror = () => { clearTimeout(bound); reject(new Error('DevTools ws handshake failed: the page socket errored')); };
-    });
+    ws = await connectPage(browser, { label: 'perf-profile', timeoutMs: 10000 });
   } catch (err) {
+    // The socket never opened, so nothing downstream owns this launch: stop the
+    // signal hook reaching a handle that is already being reaped here.
     liveBrowser = null;
-    sweepProfile(profileDir);
-    try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
-    try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* best effort */ }
+    await browser.close();
     throw err;
   }
 
@@ -388,7 +326,7 @@ async function main() {
     }
 
     console.log('=== Performance Measurement Report ===');
-    console.log(`Tooling: Google Chrome Headless (${chromeBin}) via CDP WebSocket`);
+    console.log(`Tooling: Google Chrome Headless (${chromeBin()}) via CDP WebSocket`);
     // The conditions belong IN the report, not only next to it (airhorn-qons):
     // the checked-in preview/CWV-report.txt is quoted as perf evidence, and a
     // reader who sees only these lines has to be able to tell that this is not
@@ -434,10 +372,8 @@ async function main() {
     // child carries the marker, so one /proc read kills the writers - then remove
     // with the retries the failure path above already had.
     liveBrowser = null;
-    sweepProfile(profileDir);
-    try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
     server.close();
-    try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* best effort */ }
+    await browser.close();
   }
 }
 
