@@ -23,7 +23,8 @@
 #   bash tools/fast-gate.sh --changed src/a.js  # repeatable; bypasses git entirely
 #   bash tools/fast-gate.sh --list              # print the suites it WOULD run, run nothing
 #   bash tools/fast-gate.sh --base <ref>        # compare against another base
-#   FAST_GATE_JOBS=2 bash tools/fast-gate.sh    # cap parallel suites
+#   FAST_GATE_JOBS=1 bash tools/fast-gate.sh    # serial: one suite at a time
+#                                                # (fallback when gate.conf sets none: one per core)
 #   FAST_GATE_ALLOW_ZERO=1 bash tools/fast-gate.sh  # bless a suite-free change (every ignored file:
 #                                                #   an exemption row or a deleted suite)
 #
@@ -46,7 +47,25 @@ _ENV_FAST=${FAST_GATE_RUNNER-}
 [ -f "$CONF" ] && . "$CONF"
 [ -n "$_ENV_FAST" ] && FAST_GATE_RUNNER=$_ENV_FAST
 FAST_GATE_RUNNER=${FAST_GATE_RUNNER:-node --test}
-JOBS=${FAST_GATE_JOBS:-4}
+# Parallelism FALLBACK: one suite per core. This value only applies to a tree
+# with no tools/gate.conf - this repo pins FAST_GATE_JOBS=1 there on purpose,
+# because its browser suites each launch a headless Chrome and the fleet rule is
+# one at a time per VM (see gate.conf). The fallback used to be a flat 4, which
+# is arbitrary: on a 2-core host that is twice the CPUs, and it is not a number
+# any measurement ever chose. A CPU-bound suite set should size to the cores it
+# has; a repo whose suites are not CPU-bound (or that must not run two browsers)
+# states its own value in gate.conf, as this one does.
+# NOTE for whoever reaches for parallelism to make a wide change pass: a flat
+# TIME bound on a serial gate is a function of how many suites were selected, so
+# raising parallelism trades bound-timeout for a rule violation. Measured on
+# 2026-10-25: the full suite is serial and its 268 s total is the sum of its
+# suites (multitab 22.8 s, shortcuts 17.9 s, resilience-ui 16.9 s, sw-failover
+# 16.0 s ...), i.e. the work is additive and a wide blast radius needs a bound
+# derived from the selection, not a parallel scheduler (airhorn-kbhg).
+CORES=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+case $CORES in ''|*[!0-9]*|0) CORES=4 ;; esac
+JOBS=${FAST_GATE_JOBS:-$CORES}
+case $JOBS in ''|*[!0-9]*|0) JOBS=$CORES ;; esac
 # Suites report in two tiers (airhorn-n00). node:test suites already give per-case
 # names through TAP; the assert-script suites narrate and exit, so they are run
 # directly with a preload hook that records their narration as timed cases and
