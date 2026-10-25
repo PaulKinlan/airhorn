@@ -67,18 +67,6 @@ const listFor = (changed) =>
 // cannot read a TSV. Two hand-maintained copies of one opinion drift - they did
 // (airhorn-ona: index.html still named the failover suite, src/main.js was
 // missing it) - so the drift is now a test instead of a comment asking politely.
-const parseSuiteMap = (text = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8')) => {
-  const rows = [];
-  for (const raw of text.split('\n')) {
-    if (!raw.trim() || raw.trimStart().startsWith('#')) continue;
-    const parts = raw.split('\t');
-    const pattern = parts[0] ? parts[0].trim() : '';
-    const suites = parts.slice(1).join(' ').trim().split(/\s+/).filter(Boolean);
-    rows.push({ pattern, suites });
-  }
-  return rows;
-};
-
 const contractPath = path.join(root, '.fleet', 'coverage-contract.json');
 const readContract = () => JSON.parse(fs.readFileSync(contractPath, 'utf8'));
 
@@ -94,28 +82,13 @@ const isPendingSpelling = (suite) => isPendingSuite(suite, defaultPendingDeclare
 // gate-smoke and derive-coverage-contract never disagree (airhorn-56dj).
 const CONTRACT_EXEMPT_EXT = new Set(['.json', '.md', '.txt', '.lock', '.png', '.svg', '.jpg']);
 
-const mapOpinion = (tsvInput = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8')) => {
-  const tsvText = typeof tsvInput === 'string'
-    ? tsvInput
-    : (Array.isArray(tsvInput)
-        ? tsvInput.map((r) => `${r.pattern}\t${r.suites.join(' ')}`).join('\n')
-        : fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8'));
-  return deriveMapOpinion(tsvText, { root });
-};
-
 // Every disagreement, in both directions: a suite the contract over-names makes
 // the oracle report a truthful PARTIAL as a false one, and a suite it UNDER-names
 // is a blind spot the oracle cannot see (it reports KNOWN while a covering suite
 // never ran). Prose/data paths (package.json, *.md) are compared when the
 // contract names them, but not required: the oracle exempts those extensions
 // itself, so a missing entry costs nothing there.
-const contractDrift = (contract, tsvInput = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8')) => {
-  const tsvText = typeof tsvInput === 'string'
-    ? tsvInput
-    : (Array.isArray(tsvInput)
-        ? tsvInput.map((r) => `${r.pattern}\t${r.suites.join(' ')}`).join('\n')
-        : fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8'));
-
+const contractDrift = (contract, tsvText = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8')) => {
   const pendingDeclared = extractPendingSuites(tsvText);
   const fileExists = (rel) => fs.existsSync(path.join(root, rel));
   const isPending = (suite) => isPendingSuite(suite, pendingDeclared, fileExists);
