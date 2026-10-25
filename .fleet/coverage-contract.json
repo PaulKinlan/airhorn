@@ -57,6 +57,9 @@
  "tools/*": [
   "tests/gate-smoke.test.js"
  ],
+ "tools/derive-coverage-contract.mjs": [
+  "tests/derive-coverage-contract.test.js"
+ ],
  "tools/lib/**": [
   "tests/test-support.test.js"
  ],

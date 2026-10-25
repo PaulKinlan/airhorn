@@ -42,6 +42,9 @@ deno.lock	tests/health.test.mjs
 # tools/* is covered by a REAL smoke suite: the gate's own selection contract
 # plus syntax checks of the scripts it names (airhorn-1ye).
 tools/*	tests/gate-smoke.test.js
+# tools/derive-coverage-contract.mjs is covered by its own unit suite as well
+# as the tools/* gate-smoke check (airhorn-1qw6).
+tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
 # tools/lib/** is the shared runtime the tools import (reap.mjs is the profile
 # marker sweep). It is NOT matched by `tools/*`, which does not cross a slash, so
 # a change to it used to select zero suites - a shared helper with no owner.

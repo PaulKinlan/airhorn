@@ -59,6 +59,27 @@ src/horn.js\ttests/horn.test.js test/a11y.test.mjs
   assert.deepEqual(withLanded['src/horn.js'], ['tests/horn.test.js', 'test/a11y.test.mjs']);
 });
 
+test('deriveCoverageContract ignores ~ declared plural pending suites while absent (airhorn-x0xr)', () => {
+  const tsv = `
+~tests/newsuite.test.mjs\ttests/newsuite.test.mjs
+src/foo.js\ttests/newsuite.test.mjs tests/foo.test.js
+`;
+  const contract = deriveCoverageContract(tsv, { existsFn: () => false });
+  assert.deepEqual(contract, {
+    'src/foo.js': ['tests/foo.test.js'],
+  });
+});
+
+test('deriveCoverageContract handles multiple tabs in row (airhorn-x0xr)', () => {
+  const tsv = `
+src/foo.js\ttests/a.test.js\ttests/b.test.js
+`;
+  const contract = deriveCoverageContract(tsv, { existsFn: () => true });
+  assert.deepEqual(contract, {
+    'src/foo.js': ['tests/a.test.js', 'tests/b.test.js'],
+  });
+});
+
 test('deriveCoverageContract ignores self-rows', () => {
   const tsv = `
 tests/horn.test.js\ttests/horn.test.js

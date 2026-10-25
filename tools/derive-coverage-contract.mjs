@@ -13,18 +13,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/**
- * Derives the coverage contract object from the TSV content.
- * - Filters out comments (#) and empty lines
- * - Excludes exemption rows (!), pending suite rows (~), and self-rows
- * - Filters out pending suites declared via ~ rows until they exist on disk (airhorn-u42y)
- * - Deduplicates suites while preserving order
- * - Accumulates multiple rows for the same pattern additively
- */
-export function deriveCoverageContract(tsvText, { root = process.cwd(), existsFn } = {}) {
-  const fileExists = existsFn || ((relPath) => fs.existsSync(path.join(root, relPath)));
+const DEFAULT_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-  // Identify all suites declared pending by `~` rows
+/**
+ * Extracts all suite paths declared pending via ~ rows.
+ */
+export function extractPendingSuites(tsvText) {
   const pendingDeclared = new Set();
   for (const line of tsvText.split('\n')) {
     const trimmed = line.trim();
@@ -37,18 +31,39 @@ export function deriveCoverageContract(tsvText, { root = process.cwd(), existsFn
       }
     }
   }
+  return pendingDeclared;
+}
 
-  const isPending = (suite) => (suite.startsWith('test/') || pendingDeclared.has(suite)) && !fileExists(suite);
+/**
+ * Checks whether a suite is currently pending (declared pending or test/ spelling,
+ * and absent from disk).
+ */
+export function isPendingSuite(suite, pendingDeclared, fileExists) {
+  return (suite.startsWith('test/') || pendingDeclared.has(suite)) && !fileExists(suite);
+}
+
+/**
+ * Derives the coverage contract object from the TSV content.
+ * - Filters out comments (#) and empty lines
+ * - Excludes exemption rows (!), pending suite rows (~), and self-rows
+ * - Filters out pending suites declared via ~ rows until they exist on disk (airhorn-u42y, airhorn-x0xr)
+ * - Resolves file presence against repo root regardless of process.cwd() (airhorn-xxqq)
+ * - Deduplicates suites while preserving order
+ * - Accumulates multiple rows for the same pattern additively
+ */
+export function deriveCoverageContract(tsvText, { root = DEFAULT_ROOT, existsFn } = {}) {
+  const fileExists = existsFn || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  const pendingDeclared = extractPendingSuites(tsvText);
 
   const contract = {};
   for (const line of tsvText.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
-    const [pattern, suitesStr = ''] = trimmed.split('\t');
-    const pat = pattern ? pattern.trim() : '';
+    const parts = trimmed.split('\t');
+    const pat = parts[0] ? parts[0].trim() : '';
     if (!pat || pat.startsWith('!') || pat.startsWith('~')) continue;
-    const suites = suitesStr.trim().split(/\s+/).filter(Boolean);
-    const activeSuites = suites.filter((s) => !isPending(s));
+    const suites = parts.slice(1).join(' ').trim().split(/\s+/).filter(Boolean);
+    const activeSuites = suites.filter((s) => !isPendingSuite(s, pendingDeclared, fileExists));
     if (activeSuites.length > 0 && activeSuites.every((s) => s === pat)) continue;
     if (activeSuites.length > 0) {
       if (!contract[pat]) {
@@ -69,12 +84,12 @@ export function formatCoverageContract(contract) {
 }
 
 export function main(args = process.argv.slice(2)) {
-  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const root = DEFAULT_ROOT;
   const tsvPath = path.join(root, 'tools', 'suite-map.tsv');
   const contractPath = path.join(root, '.fleet', 'coverage-contract.json');
 
   const tsvText = fs.readFileSync(tsvPath, 'utf8');
-  const derived = deriveCoverageContract(tsvText);
+  const derived = deriveCoverageContract(tsvText, { root });
   const formatted = formatCoverageContract(derived);
 
   if (args.includes('--stdout')) {

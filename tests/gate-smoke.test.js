@@ -18,7 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeRenderModel } from '../tools/render-model.mjs';
 import { READ_STATE } from '../tools/resilience-audit.mjs';
-import { deriveCoverageContract, formatCoverageContract } from '../tools/derive-coverage-contract.mjs';
+import { deriveCoverageContract, formatCoverageContract, extractPendingSuites, isPendingSuite } from '../tools/derive-coverage-contract.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const gate = path.join(root, 'tools', 'fast-gate.sh');
@@ -71,8 +71,10 @@ const parseSuiteMap = (text = fs.readFileSync(path.join(root, 'tools', 'suite-ma
   const rows = [];
   for (const raw of text.split('\n')) {
     if (!raw.trim() || raw.trimStart().startsWith('#')) continue;
-    const [pattern, suites = ''] = raw.split('\t');
-    rows.push({ pattern: pattern.trim(), suites: suites.trim().split(/\s+/).filter(Boolean) });
+    const parts = raw.split('\t');
+    const pattern = parts[0] ? parts[0].trim() : '';
+    const suites = parts.slice(1).join(' ').trim().split(/\s+/).filter(Boolean);
+    rows.push({ pattern, suites });
   }
   return rows;
 };
@@ -83,7 +85,10 @@ const readContract = () => JSON.parse(fs.readFileSync(contractPath, 'utf8'));
 // `**` and `*` are the same opinion spelled differently by the two files; the
 // oracle treats both as "everything under this directory".
 const normPattern = (p) => p.replace(/\/\*\*$/, '/*');
-const isPendingSpelling = (suite) => suite.startsWith('test/') && !fs.existsSync(path.join(root, suite));
+const isPendingSpelling = (suite) => {
+  const pending = extractPendingSuites(fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8'));
+  return isPendingSuite(suite, pending, (rel) => fs.existsSync(path.join(root, rel)));
+};
 
 // The rows the contract restates: every path the map places, exemptions (`!`)
 // and pending suites (`~`) aside. A row that names only itself
@@ -95,7 +100,10 @@ const mapOpinion = (rows) => {
   const out = new Map();
   for (const { pattern, suites } of rows) {
     if (pattern.startsWith('!') || pattern.startsWith('~') || isSelfRow(pattern, suites)) continue;
-    out.set(normPattern(pattern), new Set(suites.filter((s) => !isPendingSpelling(s))));
+    const active = suites.filter((s) => !isPendingSpelling(s));
+    if (active.length > 0) {
+      out.set(normPattern(pattern), new Set(active));
+    }
   }
   return out;
 };
@@ -236,14 +244,14 @@ test('every suite the contract names exists (airhorn-ona)', () => {
 test('the fleet coverage contract is fresh and derived from tools/suite-map.tsv (airhorn-y7mx)', () => {
   const committed = fs.readFileSync(contractPath, 'utf8');
   const tsv = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
-  const generated = formatCoverageContract(deriveCoverageContract(tsv));
+  const generated = formatCoverageContract(deriveCoverageContract(tsv, { root }));
   assert.equal(committed, generated,
     'the coverage contract does not match the generated output from tools/suite-map.tsv. Run node tools/derive-coverage-contract.mjs to regenerate.');
 });
 
 test('the freshness guard fails when the contract is hand-edited (airhorn-y7mx)', () => {
   const tsv = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
-  const generated = formatCoverageContract(deriveCoverageContract(tsv));
+  const generated = formatCoverageContract(deriveCoverageContract(tsv, { root }));
   const handEdited = generated.replace('tests/horn.test.js', 'tests/tampered.test.js');
   assert.notEqual(handEdited, generated, 'mutation must differ');
   assert.throws(() => {
