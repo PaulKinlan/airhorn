@@ -43,14 +43,13 @@
  *   node tools/audio-parity.mjs --check               # exit 2 if out of parity
  */
 
-import { spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
-import { sweepProfile } from './lib/reap.mjs';
+import { connectPage, launchChrome } from './lib/chrome.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -879,100 +878,24 @@ function printSweep(results) {
 // NOT enough: no exit event fires on a signal default-death.
 let liveBrowser = null;
 installSignalExit(() => {
-  if (!liveBrowser) return;
-  const { chrome, profileDir } = liveBrowser;
+  const browser = liveBrowser;
   liveBrowser = null;
-  // Inside the signal-exit grace: sweep (sync, uninterruptible) then rm with
-  // a budget that fits, as airhorn-gau8 sized browser.mjs's close().
-  sweepProfile(profileDir);
-  try { chrome.kill('SIGTERM'); } catch { /* already gone */ }
-  try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
+  // Inside the signal-exit grace: killNow() is the launcher's synchronous
+  // sweep + tree kill + profile rm, sized to fit the grace (airhorn-gau8) -
+  // the same teardown this tool used to spell out here (airhorn-2po9).
+  browser?.killNow();
 });
 
 async function main() {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
-  const chromeBin =
-    process.env.CHROME_BIN ||
-    (fs.existsSync('/usr/bin/google-chrome')
-      ? '/usr/bin/google-chrome'
-      : fs.existsSync('/usr/bin/chromium')
-        ? '/usr/bin/chromium'
-        : fs.existsSync('/usr/bin/chromium-browser')
-          ? '/usr/bin/chromium-browser'
-          : 'google-chrome');
-
-  let chrome = null;
-  let profileDir = null;
+  // One launcher owns chrome, its process tree and its profile (airhorn-2po9).
+  let browser = null;
+  let ws;
   try {
-    profileDir = `/tmp/chrome-audio-parity-${Date.now()}`;
-    chrome = spawn(
-      chromeBin,
-      [
-        '--headless=new',
-        '--no-sandbox',
-        '--disable-gpu',
-        '--autoplay-policy=no-user-gesture-required',
-        // No crashpad handler outliving the browser (it is a shared-path
-        // process the reaper cannot attribute - airhorn-jx9/nn26).
-        '--disable-breakpad',
-        '--disable-crash-reporter',
-        '--remote-debugging-port=0',
-        `--user-data-dir=${profileDir}`,
-        'about:blank',
-      ],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
-      // NOT detached (airhorn-105n, the tools' copy of the acex fix): chrome
-      // must stay in the caller's process group so an ancestor group-kill -
-      // what fleet-gate's bound and any job-tree reaper send - reaches the
-      // whole tree; SIGKILL runs no handler, so a detached launch outlived
-      // the kill.
-    );
-
-    liveBrowser = { chrome, profileDir };
-
-    let wsUrl = null;
-    const stderrLines = [];
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`Chrome start timeout: ${stderrLines.join('\n')}`)), 15000);
-      chrome.stderr.on('data', (chunk) => {
-        const text = chunk.toString();
-        stderrLines.push(text);
-        const match = text.match(/ws:\/\/[^\s]+/);
-        if (match) {
-          wsUrl = match[0];
-          clearTimeout(timer);
-          resolve();
-        }
-      });
-      chrome.on('error', (err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-    });
-
-    const chromePort = new URL(wsUrl).port;
-    // Discovery is bounded like the handshake above: a DevTools endpoint that
-    // accepts and never answers must reject into this tool's cleanup instead
-    // of parking it until undici's ~300s headers timeout (airhorn-9vg3).
-    let targets;
-    try {
-      targets = await (await fetch(`http://127.0.0.1:${chromePort}/json/list`, { signal: AbortSignal.timeout(15000) })).json();
-    } catch (err) {
-      if (err?.name === 'TimeoutError') throw new Error('DevTools discovery timeout: /json/list did not settle within 15000ms');
-      throw err;
-    }
-    const pageTarget = targets.find((target) => target.type === 'page');
-    const ws = new WebSocket(pageTarget.webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => {
-      // Bounded like discovery above: a peer that answers /json/list but never
-      // completes the ws upgrade must reject into the cleanup instead of
-      // parking the tool with its launch alive (airhorn-doek).
-      const bound = setTimeout(() => reject(new Error('DevTools ws handshake timeout: the page socket never opened within 15000ms')), 15000);
-      ws.onopen = () => { clearTimeout(bound); resolve(); };
-      ws.onerror = (err) => { clearTimeout(bound); reject(err instanceof Error ? err : new Error('DevTools ws handshake failed: the page socket errored')); };
-    });
-
+    browser = await launchChrome({ label: 'audio-parity', autoplay: true, timeoutMs: 15000, discoveryMs: 15000 });
+    liveBrowser = browser;
+    ws = await connectPage(browser, { label: 'audio-parity', timeoutMs: 15000 });
     let messageId = 1;
     const pending = new Map();
     const pageErrors = [];
@@ -1052,17 +975,12 @@ async function main() {
     if (check && !results.inParity) process.exitCode = 2;
   } finally {
     liveBrowser = null;
-    if (chrome) {
-      // End every member of the launch before removing the profile: a
-      // main-only kill leaves renderers/cache children that recreate files
-      // after the removal (airhorn-jx9, airhorn-nn26). The sweep is the
-      // group-kill's replacement now that chrome is not its own group leader
-      // (airhorn-105n): same tree guarantee, no group semantics.
-      sweepProfile(profileDir);
-      try { chrome.kill('SIGTERM'); } catch {}
-      // A dying child's final writeback can land during the rm walk - retry.
-      try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch {}
-    }
+    // End every member of the launch before removing the profile: a main-only
+    // kill leaves renderers/cache children that recreate files after the
+    // removal (airhorn-jx9, airhorn-nn26). close() is the launcher's one
+    // teardown: marker sweep, tree kill, then the rm with its retries, and it
+    // does all of that before its first await.
+    if (browser) await browser.close();
     server.close();
   }
 }

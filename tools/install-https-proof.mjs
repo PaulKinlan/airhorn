@@ -30,7 +30,7 @@
  * the Install button AND the HTTP contrast does not fire it.
  */
 
-import { spawn, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import https from 'node:https';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -38,7 +38,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-import { sweepProfile, sweepStaleProfiles } from './lib/reap.mjs';
+import { sweepStaleProfiles } from './lib/reap.mjs';
+import { connectPage, launchChrome } from './lib/chrome.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 // The bound-kill handler (airhorn-y6mi): this is the one tool of the four that
@@ -50,12 +51,12 @@ import { installSignalExit } from '../tests/support/signal-exit.mjs';
 // renderers that outlive it, so the launch is registered here for the handler.
 let liveBrowser = null;
 installSignalExit(() => {
-  if (!liveBrowser) return;
-  const { chrome, profileDir } = liveBrowser;
+  const browser = liveBrowser;
   liveBrowser = null;
-  sweepProfile(profileDir);
-  try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
-  try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
+  // killNow() is the launcher's synchronous sweep + tree kill + profile rm,
+  // sized to fit the grace; the group kill only reaches chrome's main process,
+  // so the sweep is what finds the renderers that outlive it (airhorn-2po9).
+  browser?.killNow();
 });
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -76,10 +77,6 @@ const mimeTypes = {
   '.mp3': 'audio/mpeg',
   '.ico': 'image/x-icon',
 };
-
-const CHROME_BIN = process.env.CHROME_BIN ||
-  (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
-  fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : 'google-chrome');
 
 function makeSelfSignedCert(dir) {
   const key = path.join(dir, 'key.pem');
@@ -125,100 +122,46 @@ function makeServer(distDir, tlsOptions) {
 // One Chrome for both origins: fresh profile, the certificate-ignoring and
 // hostname-mapping flags, nothing else. Returns a cdp client bound to the
 // single pre-created about:blank target; each origin navigates this page.
-async function launchChrome(extraFlags) {
-  const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-https-proof-'));
-  const chrome = spawn(CHROME_BIN, [
-    '--headless=new',
-    '--no-sandbox',
-    '--disable-gpu',
-    '--autoplay-policy=no-user-gesture-required',
-    ...extraFlags,
-    '--remote-debugging-port=0',
-    `--user-data-dir=${profileDir}`,
-    'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
-  // NOT detached (airhorn-105n, the tools' copy of the acex fix): chrome must
-  // stay in the caller's process group so an ancestor group-kill - what
-  // fleet-gate's bound and any job-tree reaper send - reaches the whole tree;
-  // SIGKILL runs no handler, so a detached launch outlived the kill.
-  liveBrowser = { chrome, profileDir };
-
-  // A spawn that never produced a process reports through the 'error' event,
-  // not a rejection: with no listener that is an uncaughtException, so it aborts
-  // the tool BEFORE any teardown and leaves the mkdtemp'd profile dir behind
-  // (airhorn-trj7). Raced against the handshake so a bad CHROME_BIN takes
-  // reapNow() like every other launch-window failure.
-  const spawnFailed = new Promise((_, reject) =>
-    chrome.once('error', (err) => reject(new Error(`chrome launch failed: ${err.message}`))));
-
-  let wsUrl = null;
+async function openBrowser(extraFlags) {
+  // The profile dir keeps this tool's own mkdtemp shape: sweepStaleProfiles
+  // above is keyed on it, so the launcher is told the directory rather than
+  // making one of its own (airhorn-2po9).
+  const browser = await launchChrome({
+    label: 'https-proof',
+    autoplay: true,
+    extraFlags,
+    profileDir: fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-https-proof-')),
+    timeoutMs: 15000,
+    discoveryMs: 15000,
+  });
+  liveBrowser = browser;
   let ws = null;
-  // Hoisted so the early window (handshake, discovery, ws connect) can take
-  // the same teardown the happy path uses: a failure there used to escape
-  // with chrome and its profile alive, because cleanup only existed after
-  // everything had succeeded (airhorn-51lr).
+  try {
+    ws = await connectPage(browser, { label: 'https-proof', timeoutMs: 15000 });
+  } catch (err) {
+    // The socket never opened, so nothing downstream owns this launch.
+    liveBrowser = null;
+    await browser.close();
+    throw err;
+  }
+
+  // Both teardowns this file used to spell out (cleanup's timer-delayed kill
+  // and reapNow's synchronous spin) are the launcher's now: close() and
+  // killNow() both sweep, tree-kill and rm before their first await, so a
+  // caller that does not await still gets the whole teardown.
   const cleanup = () => {
     liveBrowser = null;
     try { ws?.close(); } catch {}
-    chrome.kill('SIGTERM');
-    setTimeout(() => { try { chrome.kill('SIGKILL'); } catch {} }, 2000);
-    // The profile flush races the kill; best-effort removal, retried once.
-    const rm = () => { try { fs.rmSync(profileDir, { recursive: true, force: true }); return true; } catch { return false; } };
-    setTimeout(() => { if (!rm()) setTimeout(rm, 1500); }, 300);
+    // Not awaited: every caller of cleanup() is a finally or a signal path. The
+    // teardown is synchronous before close()'s first await, so the reap is done
+    // either way - the catch only stops a late rejection escaping the caller.
+    browser.close().catch(() => { /* teardown is best-effort by design */ });
   };
-  // The launch window's synchronous reap (airhorn-51lr): cleanup()'s kill and
-  // rm are timer-delayed and the process exits before those timers fire. Used
-  // by the launch try/catch below AND by the Page.enable/Runtime.enable
-  // sends, which sit after it and must take the same teardown when a peer
-  // that completed the upgrade swallows their replies (airhorn-nbh9).
   const reapNow = () => {
     liveBrowser = null;
     try { ws?.close(); } catch {}
-    sweepProfile(profileDir);
-    try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      try { fs.rmSync(profileDir, { recursive: true, force: true }); break; } catch { /* writeback race - retry */ }
-      const wait = Date.now() + 100;
-      while (Date.now() < wait) { /* spin: signal/error path, keep it sync */ }
-    }
+    browser.killNow();
   };
-  try {
-    await Promise.race([spawnFailed, new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('Chrome timeout')), 15000);
-      const onData = d => {
-        const m = d.toString().match(/ws:\/\/[^\s]+/);
-        if (m && !wsUrl) { wsUrl = m[0]; clearTimeout(t); resolve(); }
-      };
-      chrome.stderr.on('data', onData);
-      chrome.stdout.on('data', onData);
-      chrome.on('exit', code => reject(new Error('Chrome exited early: ' + code)));
-    })]);
-
-    const port = new URL(wsUrl).port;
-    // Discovery is bounded like the handshake above: a DevTools endpoint that
-    // accepts and never answers must reject into this tool's cleanup instead of
-    // parking it until undici's ~300s headers timeout (airhorn-9vg3).
-    let targets;
-    try {
-      targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(15000) })).json();
-    } catch (err) {
-      if (err?.name === 'TimeoutError') throw new Error('DevTools discovery timeout: /json/list did not settle within 15000ms');
-      throw err;
-    }
-    const page = targets.find(t => t.type === 'page');
-    ws = new WebSocket(page.webSocketDebuggerUrl);
-    // Bounded like discovery above: a peer that answers /json/list but never
-    // completes the ws upgrade must reject into the cleanup instead of parking
-    // the tool with its launch alive (airhorn-doek).
-    await new Promise((resolve, reject) => {
-      const bound = setTimeout(() => reject(new Error('DevTools ws handshake timeout: the page socket never opened within 15000ms')), 15000);
-      ws.onopen = () => { clearTimeout(bound); resolve(); };
-      ws.onerror = () => { clearTimeout(bound); reject(new Error('DevTools ws handshake failed: the page socket errored')); };
-    });
-  } catch (err) {
-    reapNow();
-    throw err;
-  }
 
   let msgId = 1;
   const pending = new Map();
@@ -288,7 +231,7 @@ async function launchChrome(extraFlags) {
     fs.writeFileSync(path.join(outDir, file), Buffer.from(res.data, 'base64'));
     return file;
   };
-  return { send, evaluate, waitFor, navigate, screenshot, cleanup, chrome, profileDir };
+  return { send, evaluate, waitFor, navigate, screenshot, cleanup };
 }
 
 // Runs one origin end to end and returns its evidence object. On the HTTP
@@ -400,8 +343,6 @@ async function main() {
   let serverHttp = null;
   let serverHttps = null;
   let cdp = null;
-  let chrome = null;
-  let profileDir = null;
   try {
     const { key, cert, spki } = makeSelfSignedCert(tmp);
     serverHttp = await makeServer(distDir, null);
@@ -414,12 +355,10 @@ async function main() {
     // still sees the invalid certificate and never fires the prompt
     // (measured; recorded in the report). Trusting the generated key via
     // spki-list is the configuration that simulates a valid certificate.
-    cdp = await launchChrome([
+    cdp = await openBrowser([
       `--host-resolver-rules=MAP ${HOSTNAME} 127.0.0.1`,
       `--ignore-certificate-errors-spki-list=${spki}`,
     ]);
-    chrome = cdp.chrome;
-    profileDir = cdp.profileDir;
 
     const httpEv = await probeOrigin(cdp, `http://${HOSTNAME}:${httpPort}/`, 'http-insecure', false);
     const httpsEv = await probeOrigin(cdp, `https://${HOSTNAME}:${httpsPort}/`, 'https-selfsigned', true);
@@ -457,18 +396,10 @@ async function main() {
     if (httpEv.installPrompt.fired) throw new Error('the insecure-HTTP contrast fired the prompt - the contrast is invalid');
     console.log('install-https-proof: PASS');
   } finally {
-    liveBrowser = null; // the sweep below owns it now; a late signal must not repeat it
-    // Synchronous reap (airhorn-nbh9): cleanup()'s kill and rm are
-    // timer-delayed and the process exits before those timers fire when a
-    // failure throws past the launch window - the 51lr lesson applies to the
-    // whole run, not just the launch it originally covered.
-    if (chrome) {
-      sweepProfile(profileDir);
-      try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
-    }
-    if (profileDir) {
-      try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
-    }
+    liveBrowser = null; // the handle's teardown owns it now; a late signal must not repeat it
+    // Synchronous reap (airhorn-nbh9): cleanup() reaps the launch before its
+    // first await, so a failure that throws past the launch window still leaves
+    // no chrome tree and no profile behind.
     if (cdp) cdp.cleanup();
     if (serverHttp) serverHttp.close();
     if (serverHttps) serverHttps.close();

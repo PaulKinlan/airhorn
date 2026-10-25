@@ -54,10 +54,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { launchBrowser, chromeBin, killTree } from '../tests/support/browser.mjs';
-import { sweepProfile } from './lib/reap.mjs';
+import { launchChrome } from './lib/chrome.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -438,38 +436,32 @@ function swRequests() {
 
 // A browser whose profile is KEPT: the only way to ask "what does this device do
 // after a restart", which is what "a returning visitor" means in the plan.
-// Mirrors tests/support/browser.mjs's flag family (same reasons), spawned here
-// because that helper deliberately owns and deletes its own mkdtemp profile.
+// keepProfile tells the one launcher (tools/lib/chrome.mjs) to leave the dir on
+// disk - the flag family, the startup/discovery bounds and the tree kill are the
+// same ones every suite and tool uses, which is what this copy existed to mirror
+// before airhorn-2po9.
 async function launchPersistent(profileDir, label) {
-  const chrome = spawn(chromeBin(), [
-    '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-    '--disable-breakpad', '--disable-crash-reporter',
-    '--remote-debugging-port=0', `--user-data-dir=${profileDir}`, 'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
-  const wsUrl = await new Promise((resolve, reject) => {
-    let stderr = '';
-    const timer = setTimeout(() => reject(new Error(`chrome start timeout (${label}): ${stderr}`)), 20000);
-    chrome.stderr.on('data', (d) => {
-      stderr += d.toString();
-      const m = stderr.match(/ws:\/\/[^\s]+/);
-      if (m) { clearTimeout(timer); resolve(m[0]); }
-    });
-    chrome.on('exit', (code) => { clearTimeout(timer); reject(new Error(`chrome exited (${code}) (${label}): ${stderr}`)); });
+  const browser = await launchChrome({
+    label: `rehearsal-${label}`,
+    profileDir,
+    keepProfile: true,
+    timeoutMs: 20000,
+    discoveryMs: 20000,
   });
-  const port = new URL(wsUrl).port;
-  const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  const target = list.find((t) => t.type === 'page');
-  const page = await connect(target.webSocketDebuggerUrl);
-  const browser = { port };
+  let page;
+  try {
+    page = await connect(browser.pageWsUrl);
+  } catch (err) {
+    await browser.close();
+    throw err;
+  }
   const reapSync = () => {
     page.close();
-    try { chrome.kill('SIGTERM'); } catch { /* already gone */ }
-    // killTree walks ppid, which misses a child that was reparented when the
-    // browser died first; the marker sweep finds chrome's children by their
-    // own command line instead (the same pass tests/support/browser.mjs uses).
-    try { sweepProfile(profileDir); } catch { /* /proc-less: killTree below is the fallback */ }
-    try { killTree(chrome.pid); } catch { /* already gone */ }
-    try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch { /* best effort */ }
+    // killNow() is the launcher's synchronous sweep + tree kill; the sweep
+    // finds chrome's children by their own command line, which is what catches a
+    // child reparented when the browser died first (killTree's ppid walk misses
+    // it). The profile is KEPT: a restart scenario reuses it.
+    browser.killNow();
   };
   const untrack = trackHandle(reapSync);
   return {
@@ -484,7 +476,7 @@ async function launchPersistent(profileDir, label) {
 }
 
 async function withProfile(label, fn) {
-  const browser = await launchBrowser({ label: `rehearsal-${label}`, timeoutMs: 20000 });
+  const browser = await launchChrome({ label: `rehearsal-${label}`, timeoutMs: 20000 });
   // killNow() is the helper's SYNCHRONOUS reap (killTree + profile rm), so it is
   // safe inside an exit hook; close() does the same work and then awaits tidiness.
   const untrack = trackHandle(() => browser.killNow());

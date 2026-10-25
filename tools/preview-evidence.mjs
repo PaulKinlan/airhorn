@@ -23,7 +23,6 @@
  * failed. This script never deploys anything.
  */
 
-import { spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -31,7 +30,7 @@ import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
-import { sweepProfile } from './lib/reap.mjs';
+import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
 
 // Every launch's teardown lives in a try/finally, which a bound-kill (fleet-gate's
 // SIGTERM, a job-tree reaper, Ctrl-C) never reaches - so the chrome tree and its
@@ -41,12 +40,11 @@ import { sweepProfile } from './lib/reap.mjs';
 // synchronously inside its grace.
 let liveBrowser = null;
 installSignalExit(() => {
-  if (!liveBrowser) return;
-  const { chrome, profileDir } = liveBrowser;
+  const browser = liveBrowser;
   liveBrowser = null;
-  sweepProfile(profileDir);
-  try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
-  try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
+  // killNow() is the launcher's synchronous sweep + tree kill + profile rm,
+  // sized to fit the grace (airhorn-gau8); this tool used to spell it out here.
+  browser?.killNow();
 });
 
 
@@ -67,17 +65,6 @@ const mimeTypes = {
   '.mp3': 'audio/mpeg',
   '.ico': 'image/x-icon',
 };
-
-const CHROME_BIN = process.env.CHROME_BIN ||
-  (fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' :
-  fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : 'google-chrome');
-
-const BASE_FLAGS = [
-  '--headless=new',
-  '--no-sandbox',
-  '--disable-gpu',
-  '--autoplay-policy=no-user-gesture-required',
-];
 
 // Collects beforeinstallprompt on every document, from the first byte on.
 const BIP_PROBE = `
@@ -109,85 +96,39 @@ async function startServer() {
   return server;
 }
 
-// Launches a fresh-profile headless Chrome and returns { chrome, cdp } where
-// cdp is a minimal CDP-over-WebSocket client.
-async function launchChrome(extraFlags = []) {
-  const profileDir = '/tmp/chrome-preview-evidence-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
-  const chrome = spawn(CHROME_BIN, [
-    ...BASE_FLAGS,
-    ...extraFlags,
-    '--remote-debugging-port=0',
-    `--user-data-dir=${profileDir}`,
-    'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
-  // NOT detached (airhorn-105n, the tools' copy of the acex fix): chrome must
-  // stay in the caller's process group so an ancestor group-kill - what
-  // fleet-gate's bound and any job-tree reaper send - reaches the whole tree;
-  // SIGKILL runs no handler, so a detached launch outlived the kill.
-  liveBrowser = { chrome, profileDir };
-
-  // A spawn that never produced a process reports through the 'error' event,
-  // not a rejection: with no listener that is an uncaughtException, so it aborts
-  // the tool BEFORE any teardown and leaves the profile dir this launch made
-  // behind (airhorn-trj7). Raced against the handshake so a bad CHROME_BIN takes
-  // the same cleanup as every other launch-window failure.
-  const spawnFailed = new Promise((_, reject) =>
-    chrome.once('error', (err) => reject(new Error(`chrome launch failed: ${err.message}`))));
-
-  let wsUrl = null;
+// Launches a fresh-profile headless Chrome through the one launcher
+// (tools/lib/chrome.mjs, airhorn-2po9) and returns { chrome, ...cdp helpers } -
+// the handle is the launcher's, so the flags, the startup/discovery/handshake
+// bounds and the teardown are not this file's problem. cdp is the minimal
+// CDP-over-WebSocket client below, bound to the fresh about:blank page.
+async function openBrowser(extraFlags = []) {
+  const browser = await launchChrome({
+    label: 'preview-evidence',
+    autoplay: true,
+    extraFlags,
+    timeoutMs: 15000,
+    discoveryMs: 15000,
+  });
+  liveBrowser = browser;
   let ws = null;
-  // Hoisted so the early window (handshake, discovery, ws connect) can take
-  // the same teardown the happy path uses: a failure there used to escape
-  // with chrome and its profile alive, because cleanup only existed after
-  // everything had succeeded (airhorn-51lr).
+  try {
+    ws = await connectPage(browser, { label: 'preview-evidence', timeoutMs: 15000 });
+  } catch (err) {
+    // The socket never opened, so nothing downstream owns this launch.
+    liveBrowser = null;
+    await browser.close();
+    throw err;
+  }
+
   const cleanup = () => {
     liveBrowser = null;
     try { ws?.close(); } catch {}
-    sweepProfile(profileDir);
-    try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
-    fs.rmSync(profileDir, { recursive: true, force: true });
+    // close() reaps SYNCHRONOUSLY (marker sweep, tree kill, profile rm) before
+    // its first await, so a caller that does not await cleanup still gets the
+    // full teardown - which is how every caller here uses it. The catch only
+    // stops a late rejection escaping that caller.
+    browser.close().catch(() => { /* teardown is best-effort by design */ });
   };
-  try {
-    await Promise.race([spawnFailed, new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Chrome timeout')), 15000);
-      const onData = (d) => {
-        const match = d.toString().match(/ws:\/\/[^\s]+/);
-        if (match && !wsUrl) {
-          wsUrl = match[0];
-          clearTimeout(timeout);
-          resolve();
-        }
-      };
-      chrome.stderr.on('data', onData);
-      chrome.stdout.on('data', onData);
-      chrome.on('exit', (code) => reject(new Error('Chrome exited early with code ' + code)));
-    })]);
-
-    const port = new URL(wsUrl).port;
-    // Discovery is bounded like the handshake above: a DevTools endpoint that
-    // accepts and never answers must reject into this tool's cleanup instead of
-    // parking it until undici's ~300s headers timeout (airhorn-9vg3).
-    let targets;
-    try {
-      targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(15000) })).json();
-    } catch (err) {
-      if (err?.name === 'TimeoutError') throw new Error('DevTools discovery timeout: /json/list did not settle within 15000ms');
-      throw err;
-    }
-    const page = targets.find(t => t.type === 'page');
-    ws = new WebSocket(page.webSocketDebuggerUrl);
-    // Bounded like discovery above: a peer that answers /json/list but never
-    // completes the ws upgrade must reject into the cleanup instead of parking
-    // the tool with its launch alive (airhorn-doek).
-    await new Promise((resolve, reject) => {
-      const bound = setTimeout(() => reject(new Error('DevTools ws handshake timeout: the page socket never opened within 15000ms')), 15000);
-      ws.onopen = () => { clearTimeout(bound); resolve(); };
-      ws.onerror = () => { clearTimeout(bound); reject(new Error('DevTools ws handshake failed: the page socket errored')); };
-    });
-  } catch (err) {
-    cleanup();
-    throw err;
-  }
 
   let msgId = 1;
   const pending = new Map();
@@ -265,7 +206,7 @@ async function launchChrome(extraFlags = []) {
     return file;
   };
 
-  return { chrome, send, evaluate, waitFor, waitEvent, navigate, screenshot, cleanup };
+  return { chrome: browser.chrome, send, evaluate, waitFor, waitEvent, navigate, screenshot, cleanup };
 }
 
 // The published-file inventory is the deploy pack's size claim, so it records the
@@ -414,7 +355,7 @@ async function captureMain(cdp, origin) {
 
 async function captureWebMCP(origin) {
   const ev = {};
-  const cdp = await launchChrome(['--enable-features=WebMCP,WebMCPTesting']);
+  const cdp = await openBrowser(['--enable-features=WebMCP,WebMCPTesting']);
   try {
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
@@ -449,7 +390,7 @@ async function main() {
   const evidence = {
     generatedAt: new Date().toISOString(),
     url: origin + '/',
-    chrome: CHROME_BIN,
+    chrome: chromeBin(),
     publishedFiles: await inventoryDist(),
     // Totals are what DEPLOY.md quotes; keeping them here means the doc's size
     // claim is a read of this file, not a hand-measurement that goes stale.
@@ -464,7 +405,7 @@ async function main() {
   let webmcpEv = null;
   try {
     // Browser 1: render, offline, installability. Closed before browser 2 starts.
-    mainCdp = await launchChrome();
+    mainCdp = await openBrowser();
     try {
       const mainEv = await captureMain(mainCdp, origin);
       evidence.captures.push(...mainEv.captures);

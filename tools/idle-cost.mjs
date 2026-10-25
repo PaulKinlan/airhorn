@@ -54,7 +54,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { launchBrowser } from '../tests/support/browser.mjs';
+import { connectPage, launchChrome } from './lib/chrome.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -183,11 +183,13 @@ async function main() {
   /** @type {any} */
   let browserLevel = null;
   try {
-    page = await launchBrowser({ autoplay: true, label: 'idle-cost', timeoutMs: 15000 });
+    page = await launchChrome({ autoplay: true, label: 'idle-cost', timeoutMs: 15000 });
     liveBrowser = page;
 
-    const ws = new WebSocket(page.pageWsUrl);
-    await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
+    // connectPage is the one bounded page-socket handshake (airhorn-doek): an
+    // unbounded open parked a tool with a live browser when the peer completed
+    // /json/list and never finished the upgrade.
+    const ws = await connectPage(page, { label: 'idle-cost', timeoutMs: 15000 });
     let id = 1;
     const pending = new Map();
     ws.onmessage = (event) => {
