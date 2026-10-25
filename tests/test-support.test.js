@@ -11,6 +11,11 @@
  * must not outlive the grace bound, and must exit with the signal's own code
  * (airhorn-4vfn).
  *
+ * tools/lib/chrome.mjs: the options the migrated tools launch with - a
+ * browser-level launch with no page discovery, a profile kept for a restart
+ * scenario, and the page ws handshake bound - behave as the tools expect
+ * (airhorn-2po9).
+ *
  * tools/lib/reap.mjs: the shared profile-marker sweep must reap a tree that
  * carries the marker, and must SAY SO when nothing carries it while a process
  * still names the profile dir - the marker premise drifting must not turn into
@@ -37,7 +42,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 const SUPPORT = pathToFileURL(path.join(import.meta.dirname, 'support', 'browser.mjs')).href;
-const { launchBrowser } = await import(SUPPORT);
+const { launchBrowser, launchChrome, connectPage } = await import(SUPPORT);
 const SIGNAL_EXIT = pathToFileURL(path.join(import.meta.dirname, 'support', 'signal-exit.mjs')).href;
 
 const runLabel = (what) => `bsup-${what}-${process.pid}-${Date.now()}`;
@@ -316,6 +321,92 @@ test('a SIGTERM in the launch window leaves no profile for the OWNED browser eit
     await peerInflight.close();
     removeProfiles(labelOwned);
     removeProfiles(labelInflight);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* -- tools/lib/chrome.mjs: the options the tools launch with (airhorn-2po9) -- */
+
+// The eight tools migrated onto the one launcher in airhorn-2po9. Three of its
+// options exist only for them, and each replaces a private copy of a bound that
+// already cost a merge somewhere: discoverPage:false (a browser-level CDP
+// session, tools/resilience-audit.mjs), keepProfile:true (the persistent-profile
+// scenarios, tools/rollback-rehearsal.mjs), and connectPage()'s ws bound
+// (airhorn-doek/nbfp/e4im - the same handshake timeout fixed in four copies).
+
+test('connectPage bounds the page ws handshake instead of parking the caller (airhorn-doek)', async () => {
+  // The silent peer accepts the TCP connection and writes no HTTP response, so
+  // the WebSocket upgrade never completes - the shape that parked a tool with a
+  // live browser when the open was unbounded.
+  const peer = await silentPeer();
+  try {
+    const startedAt = Date.now();
+    await assert.rejects(
+      connectPage(`ws://127.0.0.1:${peer.port}/devtools/page/x`, { label: 'ws-bound', timeoutMs: 300 }),
+      /DevTools ws handshake timeout \(ws-bound\): the page socket never opened within 300ms/);
+    const elapsed = Date.now() - startedAt;
+    assert.ok(elapsed < 3000, `the ws bound did not hold: connectPage took ${elapsed}ms against a 300ms bound`);
+  } finally {
+    await peer.close();
+  }
+});
+
+test('connectPage refuses to dial a handle that has no page target', async () => {
+  await assert.rejects(connectPage({ pageWsUrl: null }, { label: 'no-page' }),
+    /connectPage: no page socket to dial \(no-page\)/);
+});
+
+test('discoverPage:false launches without touching /json/list (tools/resilience-audit.mjs)', async () => {
+  // A browser-level CDP session never needs a page, and the peer below never
+  // answers /json/list: if the launcher fetched it, this launch would sit at the
+  // discovery bound and fail.
+  const dir = marker();
+  const peer = await silentPeer();
+  const stub = stubChrome(dir, peer.port);
+  const label = runLabel('nopagefetch');
+  const realChromeBin = process.env.CHROME_BIN;
+  try {
+    process.env.CHROME_BIN = stub;
+    const handle = await launchChrome({ label, discoverPage: false, discoveryMs: 60000, timeoutMs: 5000 });
+    try {
+      assert.match(handle.browserWsUrl, /^ws:\/\//, 'the browser-level endpoint must still be resolved');
+      assert.equal(handle.port, String(peer.port), 'the port must come from the announced endpoint');
+      assert.equal(handle.pageWsUrl, null, 'no page target was asked for, so there must be none');
+      assert.equal(handle.pageTargetId, null, 'no page target was asked for, so there must be none');
+    } finally {
+      await handle.close();
+    }
+    assert.deepEqual(liveStubProcesses(stub), [], 'close() must reap the browser it launched');
+    assert.deepEqual(profilesFor(label), [], 'close() must remove the profile it made');
+  } finally {
+    process.env.CHROME_BIN = realChromeBin;
+    await peer.close();
+    removeProfiles(label);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('keepProfile:true leaves the profile on disk for a restart scenario (tools/rollback-rehearsal.mjs)', async () => {
+  const dir = marker();
+  const peer = await discoveryPeer();
+  const stub = stubChrome(dir, peer.port);
+  const label = runLabel('keep');
+  const realChromeBin = process.env.CHROME_BIN;
+  try {
+    process.env.CHROME_BIN = stub;
+    const handle = await launchChrome({ label, keepProfile: true });
+    const profileDir = handle.profileDir;
+    await handle.close();
+    try {
+      assert.ok(fs.existsSync(profileDir), 'keepProfile must leave the directory: a restart scenario reuses it');
+      assert.deepEqual(liveStubProcesses(stub), [], 'the browser must still be reaped');
+    } finally {
+      fs.rmSync(profileDir, { recursive: true, force: true });
+    }
+  } finally {
+    process.env.CHROME_BIN = realChromeBin;
+    await peer.close();
+    removeProfiles(label);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
