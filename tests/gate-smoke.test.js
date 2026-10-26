@@ -640,7 +640,17 @@ test('a launch that never starts fails labelled and leaves no profile behind (ai
       [path.join(root, 'tools', 'install-https-proof.mjs'), '--out', path.join(tmp, 'out')], {
         encoding: 'utf8',
         timeout: 120000,
-        env: { ...process.env, CHROME_BIN: path.join(tmp, 'no-such-chrome'), TMPDIR: tmp },
+        env: {
+          ...process.env,
+          CHROME_BIN: path.join(tmp, 'no-such-chrome'),
+          TMPDIR: tmp,
+          // Pin the steal seam healthy, exactly as airhorn-r5me does (airhorn-cl29):
+          // this test is about a launch that cannot START, so the launch has to be
+          // ATTEMPTED. Without the pin the preflight refuses first on a loaded host
+          // and the test fails for the wrong reason - it asserted about the machine.
+          AIRHORN_TEST_CONTEXT: '1',
+          CHROME_STEAL_OVERRIDE: '0',
+        },
       });
     assert.equal(res.status, 1, `expected a labelled failure (rc 1), got ${res.status}: ${res.stderr}`);
     assert.doesNotMatch(res.stderr, /Unhandled 'error' event/,
