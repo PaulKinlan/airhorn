@@ -233,19 +233,38 @@ for (const doc of DOCS) {
  * command, so this asserts the cheaper half of that: every repo path a fenced
  * bash block names is really there.
  *
- * Deliberately narrow, so it cannot grow into a linter:
- *   - $repo/<path> and ${repo}/<path>       (root-relative by construction)
- *   - a bare <name>.md inside a fenced block (root-relative: a snippet that means
- *     its own neighbour has to say ./file - the doc-directory fallback is exactly
- *     what hid the alze bug)
- *   - a path with a directory component that a reader command opens
+ * The rules, stated exactly, because airhorn-lgx8 found this header promising a
+ * convention the code did not implement:
+ *   - $repo/<path>, ${repo}/<path>            repo root (by construction)
+ *   - ./<path>                                repo root: a documented recipe runs
+ *                                             from the repo root, so that is what
+ *                                             ./ means when it is executed, and
+ *                                             ./x is checked rather than skipped
+ *                                             (it used to match nothing at all -
+ *                                             the hole airhorn-lgx8 found)
+ *   - <name>.md with no slash                 repo root (a bare name means the
+ *                                             repo; that is the alze bug's shape)
+ *   - <dir>/<name>.md, and any path a reader
+ *     command opens                            repo root
+ *   - ../<path>                               skipped: it names something outside
+ *                                             the repo, which this cannot judge
+ * A token the block WRITES before reading it is skipped, not checked: a recipe
+ * that generates out/log.txt and then greps it is correct as printed even though
+ * out/log.txt is not in the repo (airhorn-lgx8).
  * A block that cds OUT of the repo (~/..., /...) is working in an artifact
  * directory, so only its root-relative tokens are checked: ROLLBACK.md §10(a)
  * reads MANIFEST.tsv inside ~/airhorn-v1-artifact, which is not a repo path.
  */
 const REPO_TOKEN = /\$\{?repo\}?\/([^\s"'`;|)&]+)/g;
+const DOT_RELATIVE = /(?<![\w/.-])(\.{1,2}\/[\w./-]+\.[a-z0-9]+)/g;
 const BARE_MD = /(?<![\w/.-])([\w.-]+\.md)\b/g;
+const SLASHED_MD = /(?<![\w/.:-])([\w.-]+(?:\/[\w.-]+)+\.md)\b/g;
 const READER_TOKEN = /\b(?:awk|grep|cat|sha256sum|diff|sed|head|tail|test\s+-f|open)\b[^\n]*?([\w./-]+\.[a-z0-9]+)/gi;
+// Anything the block itself produces: redirections, tee, touch, mkdir, the
+// destination of cp/mv, and an --out style flag. Reading these back is not a
+// claim that they are in the repo.
+const WRITE_TARGET = /(?:>>?|\btee\b|\btouch\b|\bmkdir\b(?:\s+-p)?|\bcp\b|\bmv\b|\binstall\b)[^\n]*?([\w./-]+\.[a-z0-9]+|\b[\w-]+\/[\w./-]+)/gi;
+const WRITE_FLAG = /--(?:out|output|dest|destination)[= ]([\w./-]+)/gi;
 const leavesRepo = (block) => /^\s*(?:cd|pushd)\s+(?:~|\$HOME|\/)/m.test(block);
 
 // Only SHELL fences: a javascript block is source, and its comments talk about the
@@ -270,24 +289,57 @@ function fencedBlocks(text) {
   return blocks;
 }
 
-function pathsNamedBy(block) {
-  const found = new Map();
-  for (const m of block.matchAll(REPO_TOKEN)) found.set(m[1], true);
-  if (!leavesRepo(block)) {
-    for (const m of block.matchAll(BARE_MD)) if (!found.has(m[1])) found.set(m[1], true);
-    for (const m of block.matchAll(READER_TOKEN)) {
-      const token = m[1];
-      if (token.includes('/') && !found.has(token)) found.set(token, true);
+/** Paths this block WRITES, so reading them back is not a repo claim (airhorn-lgx8). */
+const generatedBy = (block) => {
+  const written = new Set();
+  for (const pattern of [WRITE_TARGET, WRITE_FLAG]) {
+    for (const m of block.matchAll(pattern)) {
+      const token = (m[1] || '').replace(/^["']|["']$/g, '').replace(/^\.\//, '');
+      if (token && !/^https?:/.test(token)) written.add(token);
     }
   }
-  return [...found.keys()].filter((p) => p
-    && !/^https?:/.test(p)
-    && !p.includes('*')
-    && !p.startsWith('$')
-    // "$repo/x" is one claim, not two: the reader-command pattern also catches the
-    // "repo/x" tail of it, which would double-report the same line.
-    && !/^repo\//.test(p));
+  return written;
+};
+
+/**
+ * Every path a block claims is IN THE REPO, with where it says it lives:
+ *   { path, base: 'root' } - the repo root;  { path, base: 'doc' } - the doc's dir.
+ * Generated paths and artifact-directory reads are not repo claims and are not
+ * returned. Exported so the rules themselves can be pinned by tests: this guard
+ * is only as good as its ability to be wrong out loud (airhorn-lgx8).
+ */
+export function pathClaims(block) {
+  const generated = generatedBy(block);
+  const claims = new Map();
+  const add = (rawPath, base) => {
+    // "./x" and "x" are the same claim from the repo root, and SLASHED_MD and
+    // DOT_RELATIVE both see "./x": normalise here so a reviewer is not told the
+    // same path is missing twice.
+    const p = rawPath.replace(/^["']|["']$/g, '').replace(/^\.\//, '');
+    if (!p || /^https?:/.test(p) || p.includes('*') || p.startsWith('$')) return;
+    if (generated.has(p) || generated.has(p.replace(/^\.\//, ''))) return; // generated in this block
+    if (/^repo\//.test(p)) return; // the tail of $repo/x, already claimed as root
+    const key = `${base}:${p}`;
+    if (!claims.has(key)) claims.set(key, { path: p, base });
+  };
+  for (const m of block.matchAll(REPO_TOKEN)) add(m[1], 'root');
+  if (!leavesRepo(block)) {
+    for (const m of block.matchAll(DOT_RELATIVE)) {
+      const rel = m[1];
+      if (rel.startsWith('../')) continue;           // outside the repo: not ours to judge
+      add(rel.replace(/^\.\//, ''), 'root');        // ./x is x, from the repo root
+    }
+    for (const m of block.matchAll(BARE_MD)) add(m[1], 'root');
+    for (const m of block.matchAll(SLASHED_MD)) add(m[1], 'root');
+    for (const m of block.matchAll(READER_TOKEN)) if (m[1].includes('/')) add(m[1], 'root');
+  }
+  return [...claims.values()];
 }
+
+/** Where a claim points on disk, inside the repo. */
+const claimTarget = (claim, docName) => (claim.base === 'doc'
+  ? path.resolve(root, path.dirname(docName), claim.path)
+  : path.resolve(root, claim.path));
 
 // Every markdown file that carries operator instructions, wherever airhorn-alze
 // has put it: the runbooks moved to docs/runbooks/ and the README did not.
@@ -318,9 +370,11 @@ test('a fenced recipe never names a repo path that does not exist', () => {
         .filter((line) => !/^\s*#/.test(line))
         .map((line) => line.replace(/(^|\s)#.*$/, '$1'))
         .join('\n');
-      for (const rel of pathsNamedBy(block)) {
+      for (const claim of pathClaims(block)) {
         checked += 1;
-        if (!fs.existsSync(path.join(root, rel))) missing.push(`${name} block ${index + 1}: ${rel}`);
+        if (!fs.existsSync(claimTarget(claim, name))) {
+          missing.push(`${name} block ${index + 1}: ${claim.base === 'doc' ? `./${claim.path}` : claim.path}`);
+        }
       }
     }
   }
@@ -333,3 +387,47 @@ function checkMissing(missing, checked) {
   if (missing.length === 0) assert.ok(checked > 0, 'the guard found no paths at all, so it is asserting nothing - check its patterns');
   return missing.length;
 }
+
+/*
+ * airhorn-lgx8 — the rules above are only a guard if they can be shown wrong, so
+ * the two blind spots the reviewer found are pinned directly. Both cases are the
+ * reviewer's own repro, expressed as assertions instead of prose.
+ */
+const claimsOf = (block) => pathClaims(block);
+
+test('./x is checked, not skipped: the convention the header promises is enforced', () => {
+  const claims = claimsOf('runbook="./ROLLBACK.md"\nsed -n 1p "$runbook"');
+  assert.deepEqual(claims, [{ path: 'ROLLBACK.md', base: 'root' }],
+    `./ROLLBACK.md must be claimed (as the repo root, where a documented recipe runs), got ${JSON.stringify(claims)}`);
+  // ...and a doc-relative miss is a real miss: ./NOT-THERE.md resolves to nothing.
+  const missing = claimsOf('cat ./NOT-THERE.md').filter((c) => !fs.existsSync(claimTarget(c, 'docs/runbooks/ROLLBACK.md')));
+  assert.equal(missing.length, 1, './NOT-THERE.md must be reported as missing, otherwise it is silently unchecked');
+});
+
+test('a path the recipe itself generates is read back without being called missing', () => {
+  const generateThenRead = [
+    'mkdir -p out',
+    'sha256sum dist/sw.js > out/log.txt',
+    'grep -c . out/log.txt',
+    'node tools/x.mjs --out out/report.json',
+    'cat out/report.json',
+  ].join('\n');
+  const generated = claimsOf(generateThenRead).filter((c) => c.path.startsWith('out/'));
+  assert.deepEqual(generated, [],
+    `a recipe that writes out/log.txt and out/report.json, then reads them, makes no repo claim about them; got ${JSON.stringify(generated)}`);
+
+  // The same read WITHOUT a write is still a claim, so this is not a blanket
+  // exemption for anything under a directory.
+  const readOnly = claimsOf('grep -c . out/log.txt').filter((c) => c.path.startsWith('out/'));
+  assert.deepEqual(readOnly, [{ path: 'out/log.txt', base: 'root' }],
+    'reading a generated-looking path that nothing in the block creates is still a claim');
+});
+
+test('$repo stays root-relative and a bare name stays root-relative: the alze bug is still caught', () => {
+  // The shape that shipped in airhorn-alze: a moved doc whose recipe still names
+  // the old root path. It must be a root claim, never rescued by the doc's own dir.
+  const alze = claimsOf('rows=$(grep -c x "$repo/ROLLBACK.md")').map((c) => c.base);
+  assert.deepEqual(alze, ['root'], `$repo/ROLLBACK.md must be a root claim, got ${JSON.stringify(alze)}`);
+  const bare = claimsOf('grep -c x ROLLBACK.md').map((c) => c.base);
+  assert.deepEqual(bare, ['root'], `a bare ROLLBACK.md must be a root claim, got ${JSON.stringify(bare)}`);
+});
