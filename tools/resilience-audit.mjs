@@ -569,6 +569,10 @@ function summarise(state) {
 
 const results = [];
 
+// A launch failure stops the audit but must not stop the REPORT: it is a finding
+// (a starved host measured nothing) and the report is where findings live.
+class AuditAborted extends Error {}
+
 async function withBrowser(id, name, fn) {
   let browser = null;
   let result = { id, name };
@@ -580,8 +584,18 @@ async function withBrowser(id, name, fn) {
     // entry point's catch, which exits 1.
     browser = await launchBrowser();
   } catch (err) {
+    // Record the row FIRST, then stop (airhorn-w1wh review, round 3): throwing
+    // from here exited nonzero with no row and no report, so the one artefact
+    // that says what happened was never written. One launch failure is enough
+    // to know the rest cannot be measured, so the audit stops at it.
     const why = String((err && err.message) || err);
-    throw new Error(`cannot launch a browser for the audit, so no scenario was measured: ${why}`);
+    results.push({
+      id,
+      name,
+      error: `cannot launch a browser for the audit, so no scenario was measured: ${why}`,
+      launchError: true,
+    });
+    throw new AuditAborted(why);
   }
   try {
     const collectors = makeCollectors(browser.cdp);
@@ -988,12 +1002,38 @@ async function runAudit() {
         pageErrors: [...afterJsCorruption.errors, ...afterShellCorruption.errors],
       };
     });
+  } catch (err) {
+    // A launch failure already recorded its row; every later scenario would say
+    // the same thing. Anything else is a bug in the harness and must surface.
+    if (!(err instanceof AuditAborted)) throw err;
+    console.log(`audit aborted after the launch failure: ${err.message}`);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
 
   /* ------------------------------------------------------------ reporting */
 
+  // The exit contract is applied HERE, by the entry point: writeReport() only
+  // writes and reports, so importing it cannot change a caller's exit code.
+  process.exitCode = writeReport(results);
+}
+
+/*
+ * The audit's exit contract (airhorn-w1wh review, round 3): a report row with an
+ * error - a browser that would not start, or a scenario that threw - is a FAILED
+ * audit, not a green one. An empty selection (nothing wanted, RESILIENCE_ONLY=none)
+ * measured nothing on purpose and stays 0, which is the one case where zero errors
+ * means nothing to report rather than a pass.
+ */
+export function auditExitCode(scenarios) {
+  return (scenarios || []).some((row) => row && row.error) ? 1 : 0;
+}
+
+// Extracted from runAudit so a browser-free test can hand it a stubbed failing
+// scenario and check the row really lands in the file, not just in memory.
+export function writeReport(scenarios, outDir = OUT) {
+  const results = scenarios;
+  const OUT = outDir;
   const report = {
     target: 'airhorn',
     auditedAt: new Date().toISOString(),
@@ -1035,7 +1075,11 @@ async function runAudit() {
 
   console.log(`\n${lines.slice(5, 6 + results.length).join('\n')}\n`);
   console.log(`Evidence: ${OUT}`);
-  console.log('\nThis is an audit: exit 0 whatever it found. File findings against the bead, do not gate on it.');
+  const exitCode = auditExitCode(results);
+  console.log(exitCode === 0
+    ? '\nThis is an audit: every selected scenario was measured and none reported an error.'
+    : '\nThis audit MEASURED NOTHING OR FOUND ERRORS (see the ERROR rows): exiting nonzero so a starved host or a broken scenario is not read as a green audit.');
+  return exitCode;
 }
 
 // Only drive the audit when this file is the entry point: importing it (to
