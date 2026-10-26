@@ -748,6 +748,145 @@ test('a refused launch leaves no profile behind in install-https-proof (airhorn-
   }
 });
 
+const RESILIENCE_TOOL = path.join(import.meta.dirname, '..', 'tools', 'resilience-audit.mjs');
+
+test('a browser that cannot start fails the resilience audit AND still writes the report (airhorn-w1wh review)', async () => {
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-audit-'));
+  const startedAt = Date.now();
+  const run = spawnSync(process.execPath, [RESILIENCE_TOOL], {
+    encoding: 'utf8',
+    timeout: 180000,
+    env: { ...process.env, CHROME_STEAL_OVERRIDE: '0.96', RESILIENCE_OUT: out, RESILIENCE_ONLY: '' },
+  });
+  const output = `${run.stdout || ''}${run.stderr || ''}`;
+  try {
+    assert.notEqual(run.status, 0,
+      'an audit whose browser could not start measured nothing, so it must not exit 0');
+    // Round 3: exiting nonzero is not enough - the report is the artefact, so the
+    // launch failure must be a ROW in it, not just a message on stderr.
+    const md = path.join(out, 'report.md');
+    const json = path.join(out, 'report.json');
+    assert.ok(fs.existsSync(md), `a starved audit must still write report.md (dir: ${fs.existsSync(out) ? fs.readdirSync(out).join(',') : 'missing'})`);
+    assert.ok(fs.existsSync(json), 'a starved audit must still write report.json');
+    assert.match(fs.readFileSync(md, 'utf8'), /\| ERROR \|.*cannot launch a browser for the audit/s,
+      'the launch failure must appear as an ERROR row in the report, not only in the exit code');
+    const report = JSON.parse(fs.readFileSync(json, 'utf8'));
+    // Every selected scenario appears, each as an ERROR row: the report is an account of
+    // the run, so the unmeasured ones say so rather than vanishing.
+    assert.ok(report.scenarios.length > 0, 'the report must carry rows');
+    assert.ok(report.scenarios.every((r) => r.status === 'ERROR'),
+      `every row must be ERROR when nothing was measured: ${JSON.stringify(report.scenarios.map((r) => r.status))}`);
+    assert.match(report.scenarios[0].error, /cannot launch a browser for the audit/,
+      'the first row must carry the launch reason');
+    assert.ok(report.scenarios.every((r) => r.error), 'no ERROR row may be silent');
+    assert.match(output, /\bhost starved\b/, 'the failure must name the starved host, not just any error');
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+  assert.ok(Date.now() - startedAt < 180000, 'the audit must fail at the launch, not run every scenario first');
+});
+
+test('an audit that selected nothing still exits 0, and still writes a report (airhorn-w1wh review)', async () => {
+  // The one case where zero errors means "nothing to say", not "everything passed".
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-audit-none-'));
+  try {
+    const run = spawnSync(process.execPath, [RESILIENCE_TOOL], {
+      encoding: 'utf8',
+      timeout: 120000,
+      // The steal override only guarantees it cannot accidentally launch a browser here.
+      env: { ...process.env, CHROME_STEAL_OVERRIDE: '0.96', RESILIENCE_OUT: out, RESILIENCE_ONLY: 'none' },
+    });
+    assert.equal(run.status, 0, `an intentionally empty selection must stay a zero exit: ${(run.stdout || '') + (run.stderr || '')}`);
+    assert.ok(fs.existsSync(path.join(out, 'report.md')), 'an empty selection still writes the (empty) report');
+    const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+    assert.deepEqual(report.scenarios, [], 'nothing was selected, so there are no rows');
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test('a scenario error is a failed audit, and its row reaches the report (airhorn-w1wh review)', async () => {
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-audit-stub-'));
+  try {
+    // A scenario that throws cannot be staged without a browser, so the tool takes
+    // one documented stub (RESILIENCE_STUB_SCENARIO) that records exactly that row
+    // and measures nothing. No browser, no server work beyond a handler.
+    const run = spawnSync(process.execPath, [RESILIENCE_TOOL], {
+      encoding: 'utf8',
+      timeout: 120000,
+      env: {
+        ...process.env,
+        RESILIENCE_STUB_SCENARIO: 'fail',
+        RESILIENCE_TEST_MODE: '1',
+        RESILIENCE_OUT: out,
+        RESILIENCE_ONLY: '',
+        CHROME_STEAL_OVERRIDE: '0.96',   // cannot matter: the stub never launches
+      },
+    });
+    const output = `${run.stdout || ''}${run.stderr || ''}`;
+    assert.notEqual(run.status, 0,
+      `a scenario that reported ERROR must not leave the process successful: ${output}`);
+    const md = fs.readFileSync(path.join(out, 'report.md'), 'utf8');
+    assert.match(md, /\| stub — stubbed failing scenario \| ERROR \|/, 'the failing scenario must be a row in the report');
+    assert.match(md, /the scenario failed on purpose/, 'the row must carry the error text, not just ERROR');
+    const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+    assert.equal(report.scenarios.length, 1);
+    assert.equal(report.scenarios[0].id, 'stub', 'the row must survive into report.json');
+    assert.equal(report.scenarios[0].status, 'ERROR',
+      'the stub row must carry the OK/ERROR status like every other row, not just an error string');
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+
+  // The rule itself, which the entry point applies: any error row fails the audit,
+  // and an empty selection is the one case that stays 0.
+  const saved = { out: process.env.RESILIENCE_OUT };
+  process.env.RESILIENCE_OUT = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-audit-rule-'));
+  try {
+    const audit = await import(pathToFileURL(RESILIENCE_TOOL).href);
+    assert.equal(audit.auditExitCode([{ id: 'stub', name: 'stubbed failing scenario', error: 'boom' }]), 1,
+      'an ERROR row must make the audit fail');
+    assert.equal(audit.auditExitCode([{ id: 'stub', name: 'stubbed failing scenario', status: 'ERROR' }]), 1,
+      'a status ERROR row fails the audit even without an error string');
+    assert.equal(audit.auditExitCode([]), 0, 'nothing selected is not a failure');
+    assert.equal(audit.auditExitCode([{ id: 'ok', renders: true, hornUsable: true }]), 0,
+      'measured, clean rows pass');
+  } finally {
+    fs.rmSync(process.env.RESILIENCE_OUT, { recursive: true, force: true });
+    if (saved.out === undefined) delete process.env.RESILIENCE_OUT; else process.env.RESILIENCE_OUT = saved.out;
+  }
+});
+
+test('a stray RESILIENCE_STUB_SCENARIO cannot fake an audit without test mode (airhorn-w1wh review)', async () => {
+  // Production entry point: the seam is honoured only under RESILIENCE_TEST_MODE=1, so
+  // "RESILIENCE_STUB_SCENARIO=stale RESILIENCE_ONLY=offline" (round 4, P1) must run the
+  // REAL offline scenario instead of reporting one fabricated stub row.
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-audit-stray-'));
+  try {
+    const run = spawnSync(process.execPath, [RESILIENCE_TOOL], {
+      encoding: 'utf8',
+      timeout: 180000,
+      env: {
+        ...process.env,
+        RESILIENCE_STUB_SCENARIO: 'stale',
+        RESILIENCE_TEST_MODE: '',
+        RESILIENCE_ONLY: 'offline',          // the reporter's own repro
+        CHROME_STEAL_OVERRIDE: '0.96',       // so this stays browser-free: the launch is refused
+        RESILIENCE_OUT: out,
+      },
+    });
+    const output = `${run.stdout || ''}${run.stderr || ''}`;
+    assert.match(output, /honoured only with RESILIENCE_TEST_MODE=1/, 'the ignored seam must say so');
+    const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+    assert.deepEqual(report.scenarios.map((r) => r.id), ['offline'],
+      `the real scenario must run: a stray stub env var must not replace the audit (got ${JSON.stringify(report.scenarios.map((r) => r.id))})`);
+    assert.equal(report.scenarios[0].status, 'ERROR', 'refused launch is an ERROR row, not a green one');
+    assert.notEqual(run.status, 0);
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+});
+
 test('a bound-kill exits with the signal code and runs the cleanup exactly once (airhorn-4vfn)', async () => {
   // Two SIGTERMs: the second must not run the cleanup again.
   const result = await runStandIn({ signal: 'SIGTERM', cleanup: '' });
