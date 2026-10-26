@@ -1199,3 +1199,28 @@ test('slow resume: a horn that has already played waits out an idle re-suspend w
     assert.equal(ctx.state, 'running');
   }));
 });
+
+test('a synth blast announces its end on the audio clock, not on a delayed timer', async () => {
+  // airhorn-dxug: the non-loop synth blast used to rely solely on
+  // setTimeout(cleanup, 950). On a starved main thread that timer ran 5.3 s late,
+  // so the button kept claiming a sound that had already finished.
+  const originalFetch = globalThis.fetch;
+  const ctx = new FakeAudioContext();
+  ctx.shouldFailDecode = true;              // force the synth voice
+  globalThis.fetch = async () => ({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(16) });
+  try {
+    const horn = new Horn({ audioContext: ctx });
+    let stopped = 0;
+    horn.onstopped = () => { stopped += 1; };
+    assert.equal(await horn.start({ loop: false }), true);
+    assert.equal(horn.usingFallback, true);
+    assert.equal(stopped, 0);
+    const lastOsc = ctx.oscillators.at(-1);
+    assert.equal(typeof lastOsc.onended, 'function', 'the synth must hear its own end, not only a timer');
+    lastOsc.onended();                      // the audio clock says the blast is over
+    assert.equal(horn.isPlaying(), false, 'the finished blast must stop being reported as playing');
+    assert.equal(stopped, 1, 'the end must be announced without waiting for a timer');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

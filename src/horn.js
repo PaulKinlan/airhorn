@@ -389,6 +389,17 @@ export class Horn {
       for (const osc of oscillators) {
         try { osc.stop(now + blastDuration); } catch {}
       }
+      // Announce the end from the AUDIO clock, not from a timer set for the same
+      // moment: when the renderer's main thread is starved the timer runs seconds
+      // late, and the claim on the button ("this is playing") outlives the sound -
+      // measured at 5.3 s for a 0.9 s blast under load, which is what
+      // tests/webmcp-browser.test.mjs step 4 read as "did not restore the button
+      // state" (airhorn-dxug). The audio schedule itself keeps time (0.9 s of
+      // oscillators ended in 0.944 s at load 14.5), so the last oscillator's
+      // ended event is the honest edge; the timer stays as a backstop for a
+      // browser that never delivers it. cleanup() is idempotent.
+      const lastOsc = oscillators[oscillators.length - 1];
+      if (lastOsc) lastOsc.onended = cleanup;
       synthHandle.stopTimer = setTimeout(cleanup, blastDuration * 1000 + 50);
     }
 
