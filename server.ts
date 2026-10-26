@@ -89,12 +89,21 @@ const BUILD_TIMESTAMP = envOpt("BUILD_TIMESTAMP") ?? new Date().toISOString();
 
 const HEALTH_BODY = JSON.stringify({ status: "ok", version, commit, buildTimestamp: BUILD_TIMESTAMP });
 const HEALTH_HEADERS = { "content-type": "application/json; charset=utf-8" };
+// The length GET sends, derived from the body rather than written down twice, so
+// the HEAD below cannot drift from it (airhorn-ld31).
+const HEALTH_BODY_BYTES = new TextEncoder().encode(HEALTH_BODY).byteLength;
 
 function handler(req: Request): Response | Promise<Response> {
   const { pathname } = new URL(req.url);
   if (pathname === "/health") {
     if (req.method === "GET") return new Response(HEALTH_BODY, { headers: HEALTH_HEADERS });
-    if (req.method === "HEAD") return new Response(null, { headers: HEALTH_HEADERS });
+    // RFC 9110 9.3.2: a HEAD response carries the header fields GET would send,
+    // including content-length. Deno fills in content-length: 0 for a null body,
+    // which asserts an empty entity for the one endpoint whose body is the whole
+    // point - so it is stated here explicitly (airhorn-ld31).
+    if (req.method === "HEAD") {
+      return new Response(null, { headers: { ...HEALTH_HEADERS, "content-length": String(HEALTH_BODY_BYTES) } });
+    }
     return new Response(JSON.stringify({ error: "method not allowed" }), {
       status: 405,
       headers: { ...HEALTH_HEADERS, allow: "GET, HEAD" },

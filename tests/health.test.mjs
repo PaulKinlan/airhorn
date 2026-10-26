@@ -240,10 +240,20 @@ test('HEAD answers like GET (empty body), other methods get 405, and the app sti
   if (!deno) return t.skip('deno is not installed on this machine; /health is served by server.ts');
   const srv = await startServer();
   try {
+    const get = await srv.fetch('/health');
+    const getBody = await get.text();
     const head = await srv.fetch('/health', { method: 'HEAD' });
     assert.equal(head.status, 200);
     assert.equal(head.headers.get('content-type'), 'application/json; charset=utf-8');
     assert.equal(await head.text(), '');
+    // RFC 9110 9.3.2: HEAD sends the same header fields as GET. The bug this
+    // pins (airhorn-ld31) was invisible here because only status, type and an
+    // empty body were asserted: the server declared content-length: 0, claiming
+    // an empty entity for an endpoint whose body is the entire point.
+    assert.equal(head.headers.get('content-length'), String(new TextEncoder().encode(getBody).byteLength),
+      'HEAD /health must declare the content-length GET would send, not 0');
+    assert.equal(head.headers.get('content-length'), get.headers.get('content-length'),
+      'HEAD and GET must agree on content-length');
 
     const post = await srv.fetch('/health', { method: 'POST' });
     assert.equal(post.status, 405);
