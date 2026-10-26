@@ -42,6 +42,12 @@ deno.lock	tests/health.test.mjs
 # tools/* is covered by a REAL smoke suite: the gate's own selection contract
 # plus syntax checks of the scripts it names (airhorn-1ye).
 tools/*	tests/gate-smoke.test.js
+# The two tools that drive a browser for minutes and are SIGTERMed by the gate's
+# bound: their handler is behaviour, so a change to either runs the guard that
+# kills them mid-run and checks the tree is empty afterwards (airhorn-aaxm,
+# airhorn-cyga). ~0.5 s for both tools.
+tools/cache-growth.mjs	tests/tool-bound-kill.test.mjs
+tools/soak.mjs	tests/tool-bound-kill.test.mjs
 # tools/derive-coverage-contract.mjs is covered by its own unit suite as well
 # as the tools/* gate-smoke check (airhorn-1qw6).
 tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
@@ -77,6 +83,7 @@ public/styles/**	tests/a11y.test.mjs tests/keyboard.test.mjs tests/visual-overri
 # to be identical to the generated output.
 .fleet/coverage-contract.json	tests/gate-smoke.test.js
 tests/derive-coverage-contract.test.js	tests/derive-coverage-contract.test.js
+tests/tool-bound-kill.test.mjs	tests/tool-bound-kill.test.mjs
 tests/horn.test.js	tests/horn.test.js
 tests/a11y.test.mjs	tests/a11y.test.mjs
 tests/sw-offline.test.mjs	tests/sw-offline.test.mjs
@@ -115,6 +122,10 @@ README.md	tests/docs-recipe.test.mjs
 # tests/docs-recipe.test.mjs executes, so a change to it must run that suite rather
 # than fall through to the `!*.md` exemption below (a row always beats an exemption).
 docs/runbooks/DEPLOY.md	tests/docs-recipe.test.mjs
+# Every other runbook too: the suite also asserts that a fenced recipe does not
+# name a repo path that does not exist, which is what airhorn-alze's move broke in
+# two recipes (airhorn-2jwe, airhorn-fs8s). Static, ~5 ms.
+docs/runbooks/**	tests/docs-recipe.test.mjs
 # Static assets and prose carry no behaviour; no suite covers them.
 !*.md
 !LICENSE
@@ -146,4 +157,4 @@ tests/acceptance.mjs	tests/acceptance.mjs
 tests/support/browser.mjs	tests/test-support.test.js
 tests/support/signal-exit.mjs	tests/test-support.test.js
 tests/test-support.test.js	tests/test-support.test.js
-tests/support/**	tests/a11y.test.mjs tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs tests/shortcuts.test.mjs tests/multitab.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs tests/health.test.mjs tests/docs-recipe.test.mjs
+tests/support/**	tests/a11y.test.mjs tests/docs-recipe.test.mjs tests/health.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/reflow-zoom.test.mjs tests/resilience-ui.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs tests/tool-bound-kill.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp.test.mjs
