@@ -264,7 +264,11 @@ const READER_TOKEN = /\b(?:awk|grep|cat|sha256sum|diff|sed|head|tail|test\s+-f|o
 // destination of cp/mv, and an --out style flag. Reading these back is not a
 // claim that they are in the repo.
 const WRITE_TARGET = /(?:>>?|\btee\b|\btouch\b|\bmkdir\b(?:\s+-p)?|\bcp\b|\bmv\b|\binstall\b)[^\n]*?([\w./-]+\.[a-z0-9]+|\b[\w-]+\/[\w./-]+)/gi;
-const WRITE_FLAG = /--(?:out|output|dest|destination)[= ]([\w./-]+)/gi;
+// Build tools spell the output flag several ways: --out/--output/--dest (and
+// vite/esbuild/tsc's --outDir/--out-file/--outfile, in any case, with `=value`
+// or space-separated values). A correct build-then-read recipe must not be
+// called missing because of the spelling it happened to use (airhorn-5c81).
+const WRITE_FLAG = /--(?:out|output|outdir|out-dir|outfile|out-file|dest|destination)[= ]([\w./-]+)/gi;
 const leavesRepo = (block) => /^\s*(?:cd|pushd)\s+(?:~|\$HOME|\/)/m.test(block);
 
 // Only SHELL fences: a javascript block is source, and its comments talk about the
@@ -302,6 +306,21 @@ const generatedBy = (block) => {
 };
 
 /**
+ * Is `p` produced by this block? Exact match, or anything UNDER a written
+ * directory: --outDir public makes public/sw.js generated, because a build
+ * that writes a directory writes everything under it (airhorn-5c81). A read
+ * outside every written path stays a claim, so the guard still bites.
+ */
+const isGenerated = (generated, p) => {
+  const norm = p.replace(/^\.\//, '');
+  for (const g of generated) {
+    if (norm === g) return true;
+    if (norm.startsWith(g.endsWith('/') ? g : `${g}/`)) return true;
+  }
+  return false;
+};
+
+/**
  * Every path a block claims is IN THE REPO, with where it says it lives:
  *   { path, base: 'root' } - the repo root;  { path, base: 'doc' } - the doc's dir.
  * Generated paths and artifact-directory reads are not repo claims and are not
@@ -317,7 +336,7 @@ export function pathClaims(block) {
     // same path is missing twice.
     const p = rawPath.replace(/^["']|["']$/g, '').replace(/^\.\//, '');
     if (!p || /^https?:/.test(p) || p.includes('*') || p.startsWith('$')) return;
-    if (generated.has(p) || generated.has(p.replace(/^\.\//, ''))) return; // generated in this block
+    if (isGenerated(generated, p)) return; // generated in this block
     if (/^repo\//.test(p)) return; // the tail of $repo/x, already claimed as root
     const key = `${base}:${p}`;
     if (!claims.has(key)) claims.set(key, { path: p, base });
@@ -421,6 +440,38 @@ test('a path the recipe itself generates is read back without being called missi
   const readOnly = claimsOf('grep -c . out/log.txt').filter((c) => c.path.startsWith('out/'));
   assert.deepEqual(readOnly, [{ path: 'out/log.txt', base: 'root' }],
     'reading a generated-looking path that nothing in the block creates is still a claim');
+});
+
+/*
+ * airhorn-5c81 — WRITE_FLAG used to know only --out/--output/--dest/--destination,
+ * so a CORRECT recipe that built with --outDir public and then read public/sw.js
+ * was called missing. Both directions are pinned: every spelling marks its value
+ * written (green), and a path nothing creates is still a claim (red).
+ */
+test('build output flags mark their value written: --outDir/--out-dir/--outfile/--out-file, space or = (airhorn-5c81)', () => {
+  const spellings = ['--outDir', '--out-dir', '--outfile', '--out-file'];
+  for (const flag of spellings) {
+    for (const separator of [' ', '=']) {
+      const claims = claimsOf(`node tools/build.mjs ${flag}${separator}public\ncat public/sw.js`)
+        .filter((c) => c.path.startsWith('public/'));
+      assert.deepEqual(claims, [],
+        `${flag}${separator}public marks public/ written, so reading public/sw.js back is not a repo claim; got ${JSON.stringify(claims)}`);
+    }
+  }
+  // A file-valued flag covers exactly that file.
+  const fileForm = claimsOf('node tools/build.mjs --outFile=dist/bundle.js\ncat dist/bundle.js')
+    .filter((c) => c.path === 'dist/bundle.js');
+  assert.deepEqual(fileForm, [], '--outFile=<file> marks that file written');
+});
+
+test('a path the recipe never creates is still a claim, so the guard keeps biting (airhorn-5c81)', () => {
+  const noWrite = claimsOf('cat dist/never-built.js');
+  assert.deepEqual(noWrite, [{ path: 'dist/never-built.js', base: 'root' }],
+    `reading a path nothing in the block creates must be claimed, got ${JSON.stringify(noWrite)}`);
+  const outsideDir = claimsOf('node tools/build.mjs --outDir public\ncat other/sw.js')
+    .filter((c) => c.path.startsWith('other/'));
+  assert.deepEqual(outsideDir, [{ path: 'other/sw.js', base: 'root' }],
+    `writing public/ must not exempt a read outside it, got ${JSON.stringify(outsideDir)}`);
 });
 
 test('$repo stays root-relative and a bare name stays root-relative: the alze bug is still caught', () => {
