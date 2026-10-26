@@ -54,6 +54,10 @@ const { stretchedBounds } = await import(
 // file: steal 0 is the bounds they were written against. The tests that pin the
 // starved branch set it themselves and restore it.
 process.env.CHROME_STEAL_OVERRIDE = '0';
+// Round 6, P1: CHROME_STEAL_OVERRIDE / CHROME_STEAL_CEILING are honoured only in an
+// explicit test context, so a stray variable cannot disable the ceiling in production.
+// This file is that context.
+process.env.AIRHORN_TEST_CONTEXT = '1';
 // The shared-browser mode is not part of this branch (it was split out with its two
 // P1s): this file drives the cold launch only.
 const withSteal = async (value, fn) => {
@@ -589,42 +593,96 @@ const INSTALL_TOOL = path.join(import.meta.dirname, '..', 'tools', 'install-http
 const httpsProofProfiles = () => fs.readdirSync(os.tmpdir())
   .filter((name) => /^chrome-https-proof-(?:tmp-)?[A-Za-z0-9]{6}$/.test(name));
 
-test('a malformed /proc/stat reads as UNKNOWN, never as zero steal (airhorn-w1wh review)', async () => {
+test('an unreadable /proc/stat is UNKNOWN, and UNKNOWN refuses the launch (airhorn-w1wh review)', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-stat-'));
   const stat = path.join(dir, 'stat');
-  // user nice system idle iowait irq softirq steal (guest/guest_nice omitted: the kernel
-  // counts those inside user/nice, and the parser must not need them).
-  const line = (busy, steal) => `cpu  ${busy} 0 ${busy} ${8000 - busy} 0 0 0 ${steal} 0 0\n`;
-  fs.writeFileSync(stat, line(100, 0));
-  const saved = { statPath: process.env.CHROME_STAT_PATH, override: process.env.CHROME_STEAL_OVERRIDE };
-  process.env.CHROME_STAT_PATH = stat;
-  delete process.env.CHROME_STEAL_OVERRIDE;
+  const saved = { statPath: process.env.CHROME_STAT_PATH, bin: process.env.CHROME_BIN, override: process.env.CHROME_STEAL_OVERRIDE };
   try {
-    // A fresh module instance takes its baseline from this fixture, not from the
-    // machine (a cache-busting query busts ESM's module cache).
-    const mod = await import(`${pathToFileURL(CHROME_MJS).href}?w1wh-stat=${Date.now()}`);
-    fs.writeFileSync(stat, line(300, 0));   // 200 ticks advanced, no steal: a genuine 0%
-    assert.equal(mod.hostSteal(), 0, 'a well-formed line whose steal column did not advance is a real 0%');
+    const { parseCpuTicks, cpuStatProblem, hostSteal, stealUnknownReason, launchChrome } = await import(
+      `${pathToFileURL(CHROME_MJS).href}?w1wh-unknown=${Date.now()}`);
 
-    // The defect: a line that LOST the steal column was filled with 0, so once the
-    // other counters advanced the preflight reported a confident "healthy" host.
-    fs.writeFileSync(stat, `cpu  ${900} 0 ${900} ${8000 - 900} 0 0 0\n`);
-    assert.equal(mod.hostSteal(), null, 'a line with no steal field must be UNKNOWN');
-    fs.writeFileSync(stat, 'cpu0  10 0 10 80 0 0 0 0\n');
-    assert.equal(mod.hostSteal(), null, 'a per-cpu line is not the aggregate line: UNKNOWN');
-    fs.writeFileSync(stat, 'cpu  10 0 10 nope 0 0 0 0 0 0\n');
-    assert.equal(mod.hostSteal(), null, 'a non-numeric counter must be UNKNOWN');
-    // And the pure parser says why, rather than quietly returning a number.
-    assert.throws(() => mod.parseCpuTicks('cpu  1 2 3\n'), /malformed aggregate cpu line/);
-    assert.throws(() => mod.parseCpuTicks('intr 1 2 3\n'), /not the aggregate 'cpu' line/);
-    assert.deepEqual(mod.parseCpuTicks(line(300, 40), 'fixture'),
-      { total: 300 + 0 + 300 + (8000 - 300) + 0 + 0 + 0 + 40, steal: 40 },
-      'a well-formed line parses to the first eight counters, steal in column 8');
+    // Round 6, P3: the parser RETURNS null rather than throwing, and says why separately.
+    for (const [bad, why] of [
+      ['cpu  1 2 3\n', /malformed aggregate cpu line/],
+      ['cpu0  10 0 10 80 0 0 0 0\n', /not the aggregate 'cpu' line/],
+      ['cpu  10 0 10 nope 0 0 0 0 0 0\n', /non-numeric/],
+    ]) {
+      assert.equal(parseCpuTicks(bad), null, `a malformed line must be UNKNOWN, not a number: ${JSON.stringify(bad)}`);
+      assert.match(cpuStatProblem(bad), why, 'and it must name the reason');
+    }
+    // A well-formed line still parses, first eight counters, steal in column 8.
+    assert.deepEqual(parseCpuTicks('cpu  300 0 300 7700 0 0 0 40 0 0\n', 'fixture'),
+      { total: 300 + 0 + 300 + 7700 + 0 + 0 + 0 + 40, steal: 40 });
+
+    // A missing file is UNKNOWN too, and the reason names the file.
+    process.env.CHROME_STAT_PATH = path.join(dir, 'does-not-exist');
+    delete process.env.CHROME_STEAL_OVERRIDE;
+    assert.equal(hostSteal(), null, 'a missing /proc/stat cannot produce a steal rate');
+    assert.match(stealUnknownReason(), /does-not-exist/, 'the reason must name the file it could not read');
+
+    // And the preflight REFUSES on UNKNOWN instead of skipping the check (round 6, P3).
+    process.env.CHROME_BIN = path.join(os.tmpdir(), 'must-not-be-spawned-chrome');
+    await assert.rejects(() => launchChrome({ label: 'unknown-steal' }),
+      (err) => /cannot judge host steal/.test(err.message) && /does-not-exist/.test(err.message),
+      'an unknown steal reading must refuse the launch and say why');
+
+    // Same for a malformed line: still a refusal, never a launch.
+    fs.writeFileSync(stat, 'cpu  900 0 900 7100 0 0 0\n');   // steal column gone
+    process.env.CHROME_STAT_PATH = stat;
+    await assert.rejects(() => launchChrome({ label: 'malformed-steal' }),
+      /cannot judge host steal: .*malformed aggregate cpu line/,
+      'a line without the steal column must refuse, naming the malformed line');
   } finally {
     if (saved.statPath === undefined) delete process.env.CHROME_STAT_PATH; else process.env.CHROME_STAT_PATH = saved.statPath;
+    if (saved.bin === undefined) delete process.env.CHROME_BIN; else process.env.CHROME_BIN = saved.bin;
     if (saved.override === undefined) delete process.env.CHROME_STEAL_OVERRIDE; else process.env.CHROME_STEAL_OVERRIDE = saved.override;
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('the steal seams cannot be used to bypass the ceiling outside a test context (airhorn-w1wh review)', async () => {
+  // Round 6, P1: CHROME_STEAL_OVERRIDE=0 on a 96% host used to proceed to spawn, and
+  // CHROME_STEAL_CEILING=1 raised the ceiling - both in production. Neither may apply
+  // without an explicit test context, and the ceiling can never be raised without one.
+  const { resolveSeams, stealCeiling, DEFAULT_STEAL_CEILING } = await import(
+    `${pathToFileURL(CHROME_MJS).href}?w1wh-seams=${Date.now()}`);
+
+  const production = resolveSeams({ CHROME_STEAL_OVERRIDE: '0', CHROME_STEAL_CEILING: '1' });
+  assert.equal(production.testContext, false);
+  assert.equal(production.override, null, 'a production CHROME_STEAL_OVERRIDE must be IGNORED');
+  assert.equal(production.ceiling, DEFAULT_STEAL_CEILING, 'a production CHROME_STEAL_CEILING must be IGNORED');
+  assert.equal(stealCeiling({ CHROME_STEAL_CEILING: '0.99' }), DEFAULT_STEAL_CEILING,
+    'the ceiling accessor ignores the variable outside a test context');
+
+  const test = resolveSeams({ AIRHORN_TEST_CONTEXT: '1', CHROME_STEAL_OVERRIDE: '0', CHROME_STEAL_CEILING: '0.9' });
+  assert.equal(test.testContext, true);
+  assert.equal(test.override, 0, 'inside a test context the override applies');
+  assert.equal(test.ceiling, 0.9, 'inside a test context the ceiling may be retuned');
+  assert.equal(resolveSeams({ CHROME_STEAL_OVERRIDE: '0' }).override, null,
+    'the context must be explicit, not implied by the presence of the variable');
+});
+
+test('the steal decision uses a window that ENDS NOW, not a lifetime average (airhorn-w1wh review)', async () => {
+  // Round 6, P2: 10,000 healthy ticks then 2,000 ticks at 96% averages 16%, which read
+  // as healthy and launched. The decision must come from the recent window.
+  const { stealRate, createStealProbe } = await import(`${pathToFileURL(CHROME_MJS).href}?w1wh-window=${Date.now()}`);
+
+  const healthy = { total: 10000, steal: 0 };
+  const starvedSince = { total: 12000, steal: 1920 };   // +2000 ticks, 1920 of them stolen
+  assert.equal((1920 / 12000).toFixed(2), '0.16', 'the trap: the lifetime average reads as 16%');
+  assert.ok(stealRate(healthy, starvedSince) > 0.9,
+    'the recent window must report the 96% steal, not the 16% lifetime average');
+
+  // And the probe takes its two readings from THIS call, never from module load.
+  const readings = [{ total: 50000, steal: 0 }, { total: 50200, steal: 192 }];
+  const probe = createStealProbe({ readStat: () => readings.shift(), sleep: () => {} });
+  assert.ok(probe.rate() > 0.9, 'the probe judges the delta between its own two readings');
+
+  // A window too short to measure, or counters going backwards, is UNKNOWN - not 0.
+  assert.equal(stealRate({ total: 100, steal: 0 }, { total: 104, steal: 0 }), null,
+    'a window with fewer than ten ticks is not a verdict');
+  assert.equal(stealRate({ total: 1000, steal: 500 }, { total: 900, steal: 400 }), null,
+    'a counter that went backwards is not a rate');
 });
 
 test('a refused launch leaves no profile behind in install-https-proof (airhorn-w1wh review)', async () => {

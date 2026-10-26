@@ -101,8 +101,21 @@ export { sweepProfile };
 const DEFAULT_STEAL_CEILING = 0.6;
 const MAX_BOUND_STRETCH = 8;
 const MIN_STEAL_TICKS = 10;
-const STEAL_SAMPLE_MS = 2000;
-const STEAL_SUSPICIOUS = 0.3;
+// The window ENDS NOW, every time: a lifetime average cannot see a host that has
+// just been starved (10,000 healthy ticks then 2,000 starved ones average 16% -
+// a healthy verdict from the wrong window).
+//
+// The window has to be long enough to be believable, and the two decisions do not
+// cost the same: refusing early is cheap and safe, letting a launch through is the
+// one that burns a gate bound. So a clear reading decides at once (500ms), anything
+// in the ambiguous band is confirmed over a second reading that still ends now
+// (2s total), and only a comfortably healthy host gets the short path. Measured
+// cost on a healthy host: ~0.5s per launch; on a starved host the refusal lands in
+// ~0.5s instead of the old 2s sample.
+const DEFAULT_STEAL_WINDOW_MS = 500;
+const STEAL_CONFIRM_MS = 1500;
+const STEAL_SUSPICIOUS = 0.10;
+const TEST_CONTEXT_ENV = 'AIRHORN_TEST_CONTEXT';
 
 // A synchronous, bounded sleep: the preflight runs before the launch and cannot
 // await, and the only thing it needs is a window wide enough to measure.
@@ -122,71 +135,132 @@ const CPU_STAT_FIELDS = 8;   // user nice system idle iowait irq softirq steal
  * review). Missing file, wrong line and wrong field count all mean the same
  * thing: we do not know, so the caller behaves as it did before this existed.
  */
-export function parseCpuTicks(text, source = '/proc/stat') {
+export function cpuStatProblem(text, source = '/proc/stat') {
   const first = String(text).split('\n')[0].trim();
   const parts = first === '' ? [] : first.split(/\s+/);
   if (parts[0] !== 'cpu') {
-    throw new Error(`${source}: first line is not the aggregate 'cpu' line (${JSON.stringify(parts[0] ?? '')})`);
+    return `${source}: first line is not the aggregate 'cpu' line (${JSON.stringify(parts[0] ?? '')})`;
   }
   const fields = parts.slice(1).map(Number);
   if (fields.length < CPU_STAT_FIELDS) {
-    throw new Error(`${source}: malformed aggregate cpu line (${fields.length} fields, need ${CPU_STAT_FIELDS} so steal is present)`);
+    return `${source}: malformed aggregate cpu line (${fields.length} fields, need ${CPU_STAT_FIELDS} so steal is present)`;
   }
-  // guest/guest_nice are already counted inside user/nice, so the total is the
-  // first eight counters only - summing all ten would double-count them.
   const counters = fields.slice(0, CPU_STAT_FIELDS);
   if (!counters.every(Number.isFinite)) {
-    throw new Error(`${source}: malformed aggregate cpu line (non-numeric counter: ${counters.join(',')})`);
+    return `${source}: malformed aggregate cpu line (non-numeric counter: ${counters.join(',')})`;
   }
+  return null;
+}
+
+// Returns null - UNKNOWN - for anything it cannot read with confidence, and never
+// throws (airhorn-w1wh round 6, P3): a throw here was converted to null further
+// up, so the reason was lost at exactly the point a caller needs to name it.
+export function parseCpuTicks(text, source = '/proc/stat') {
+  if (cpuStatProblem(text, source) !== null) return null;
+  // guest/guest_nice are already counted inside user/nice, so the total is the
+  // first eight counters only - summing all ten would double-count them.
+  const counters = String(text).split('\n')[0].trim().split(/\s+/).slice(1, 1 + CPU_STAT_FIELDS).map(Number);
   return { total: counters.reduce((a, b) => a + b, 0), steal: counters[7] };
 }
 
-function readCpuTicks() {
+function readStatNow() {
   const path = process.env.CHROME_STAT_PATH || '/proc/stat';
-  return parseCpuTicks(fs.readFileSync(path, 'utf8'), path);
+  const text = fs.readFileSync(path, 'utf8');
+  const problem = cpuStatProblem(text, path);
+  if (problem !== null) throw new Error(problem);
+  return parseCpuTicks(text, path);
 }
 
-const stealBaseline = (() => { try { return readCpuTicks(); } catch { return null; } })();
-
-function stealCeiling() {
-  const raw = Number(process.env.CHROME_STEAL_CEILING ?? DEFAULT_STEAL_CEILING);
-  return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : DEFAULT_STEAL_CEILING;
+/*
+ * The steal rate between two readings, or null when the pair cannot support a
+ * verdict (missing data, no ticks between them, counters going backwards). Pure,
+ * so the decision is testable without a machine, a clock or a browser.
+ */
+export function stealRate(from, to) {
+  if (!from || !to) return null;
+  const total = to.total - from.total;
+  const steal = to.steal - from.steal;
+  if (!(total >= MIN_STEAL_TICKS)) return null;   // too short a window to mean anything
+  if (!(steal >= 0)) return null;                 // a counter that went backwards is not a rate
+  return Math.min(1, Math.max(0, steal / total));
 }
 
-let stealCached = null;
+/*
+ * A probe measures over a window that ENDS NOW: read, wait the window, read again,
+ * and judge the delta between those two readings. It deliberately keeps no
+ * baseline from module load or from a previous launch - that is what let a host
+ * that had just been starved read as healthy (airhorn-w1wh round 6, P2).
+ * Injectable so the window logic is testable with a scripted reader and no sleep.
+ */
+export function createStealProbe({
+  readStat = readStatNow,
+  sleep = sleepSync,
+  windowMs = DEFAULT_STEAL_WINDOW_MS,
+  confirmMs = STEAL_CONFIRM_MS,
+  suspicious = STEAL_SUSPICIOUS,
+  ceiling = DEFAULT_STEAL_CEILING,
+} = {}) {
+  return {
+    rate() {
+      const from = readStat();
+      sleep(windowMs);
+      const to = readStat();
+      const quick = stealRate(from, to);
+      if (quick === null) return null;
+      // A reading at or above the ceiling already decides the launch: say so at once.
+      if (quick >= ceiling) return quick;
+      // A low reading is the one that lets a launch through, so it is the one worth
+      // confirming - over a window that still ENDS NOW, never a cached baseline.
+      if (quick >= suspicious) return quick;   // nothing to gain from a longer wait here
+      sleep(confirmMs);
+      const confirmed = stealRate(from, readStat());
+      return confirmed === null ? quick : confirmed;
+    },
+  };
+}
+
+let lastUnknownReason = null;
+
+// Why the last hostSteal() could not judge the host, for the refusal message.
+export function stealUnknownReason() { return lastUnknownReason; }
+
+/*
+ * The seam resolver (airhorn-w1wh round 6, P1). CHROME_STEAL_OVERRIDE and
+ * CHROME_STEAL_CEILING exist so tests can drive both branches of this decision on
+ * any machine - and they were honoured in production, which meant
+ * CHROME_STEAL_OVERRIDE=0 (or CHROME_STEAL_CEILING=1) silently disabled the
+ * ceiling on a 96% host. They now only apply in an explicit test context, and the
+ * ceiling cannot be raised above the default at all outside one.
+ */
+export function resolveSeams(env = process.env) {
+  const testContext = env[TEST_CONTEXT_ENV] === '1';
+  let override = null;
+  let ceiling = DEFAULT_STEAL_CEILING;
+  if (testContext) {
+    const forced = Number(env.CHROME_STEAL_OVERRIDE);
+    if (env.CHROME_STEAL_OVERRIDE !== undefined && env.CHROME_STEAL_OVERRIDE !== '' && Number.isFinite(forced)) {
+      override = Math.min(1, Math.max(0, forced));
+    }
+    const rawCeiling = Number(env.CHROME_STEAL_CEILING);
+    if (Number.isFinite(rawCeiling) && rawCeiling > 0 && rawCeiling <= 1) ceiling = rawCeiling;
+  }
+  return { testContext, override, ceiling };
+}
 
 export function hostSteal() {
-  const override = process.env.CHROME_STEAL_OVERRIDE;
-  if (override !== undefined && override !== '') {
-    const forced = Number(override);
-    if (Number.isFinite(forced)) return Math.min(1, Math.max(0, forced));
+  const { override } = resolveSeams();
+  if (override !== null) { lastUnknownReason = null; return override; }
+  const { ceiling } = resolveSeams();
+  try {
+    const rate = createStealProbe({ ceiling }).rate();
+    lastUnknownReason = rate === null
+      ? 'no usable window between two /proc/stat readings (fewer than 10 ticks advanced, or a counter went backwards)'
+      : null;
+    return rate;
+  } catch (err) {
+    lastUnknownReason = String((err && err.message) || err);
+    return null;
   }
-  if (!stealBaseline) return null;
-  const fraction = (from) => {
-    const now = readCpuTicks();
-    const total = now.total - from.total;
-    if (!(total >= MIN_STEAL_TICKS)) return null;
-    return Math.min(1, Math.max(0, (now.steal - from.steal) / total));
-  };
-
-  // Two stages, because the two costs are not symmetric: a reading that is
-  // nowhere near the ceiling cannot change the outcome, so it must not cost the
-  // gate a wait (`nothing regresses on a healthy host`), while a reading that is
-  // close to it - or a launch that is about to be stretched - is worth the full
-  // ~2s sample that the fleet contract asks for. Cheap first, then confirm.
-  let cheap;
-  try { cheap = fraction(stealBaseline); } catch { return null; }
-  if (cheap !== null && cheap < STEAL_SUSPICIOUS) return cheap;
-  if (stealCached !== null) return stealCached;
-
-  const from = (() => { try { return readCpuTicks(); } catch { return null; } })();
-  if (!from) return cheap;
-  sleepSync(STEAL_SAMPLE_MS);
-  let measured;
-  try { measured = fraction(from); } catch { measured = null; }
-  if (measured === null) return cheap;
-  stealCached = measured;
-  return measured;
 }
 
 // A loaded box gets more time, not a wrong verdict: the bounds grow by exactly
@@ -198,7 +272,11 @@ export function stretchedBounds({ timeoutMs, discoveryMs, steal }) {
   return { timeoutMs: Math.round(timeoutMs * stretch), discoveryMs: Math.round(discoveryMs * stretch) };
 }
 
-export { DEFAULT_STEAL_CEILING, MAX_BOUND_STRETCH, stealCeiling };
+export function stealCeiling(env = process.env) {
+  return resolveSeams(env).ceiling;
+}
+
+export { DEFAULT_STEAL_CEILING, MAX_BOUND_STRETCH };
 
 export function chromeBin() {
   return process.env.CHROME_BIN ||
@@ -295,13 +373,6 @@ export async function launchChrome({
   profileDir: givenProfileDir = null,
   keepProfile = false,
   discoverPage = true,
-  // The one caller that may launch on a starved host is the gate's shared
-  // browser (tools/shared-chrome.mjs): it pays ONE launch for every suite, so it
-  // can afford a long, measured budget where a per-suite launch cannot. Without
-  // this, sharing and the steal preflight fight each other - the preflight
-  // refuses exactly the host where one shared browser is the only way to run at
-  // all. It is deliberately not a general escape hatch: a suite never sets it.
-  allowStarved = false,
 } = {}) {
   // Before anything is created or spawned (airhorn-w1wh): on a starved host this
   // launch cannot succeed, and waiting for the bound to expire is what turned
@@ -309,15 +380,23 @@ export async function launchChrome({
   // an 1800s gate. Saying it costs nothing and names the actual cause.
   const steal = hostSteal();
   const ceiling = stealCeiling();
-  if (steal !== null && steal >= ceiling && !allowStarved) {
+  if (steal === null) {
+    // UNKNOWN fails CLOSED (airhorn-w1wh round 6, P3): "we could not read the host"
+    // used to skip the refusal and launch anyway, which is the one case where the
+    // guard silently stops guarding. Name why, so the fix is obvious from the log.
+    throw new Error(
+      `cannot judge host steal: ${stealUnknownReason() || 'no recent sample'} - ` +
+      `refusing to launch chrome (${label}): without a current steal reading this host cannot be ` +
+      'shown to be healthy, and launching here is what spends the gate bound on a machine that ' +
+      'cannot run it (airhorn-w1wh)');
+  }
+  if (steal >= ceiling) {
     throw new Error(
       `host starved: steal ${(steal * 100).toFixed(0)}% (ceiling ${(ceiling * 100).toFixed(0)}%) - ` +
       `refusing to launch chrome (${label}): this host cannot start a browser, and failing here ` +
       'names the machine instead of spending the gate bound on it (airhorn-w1wh)');
   }
-  const bounds = allowStarved
-    ? { timeoutMs, discoveryMs }   // the caller set a budget it measured; do not stretch it again
-    : stretchedBounds({ timeoutMs, discoveryMs, steal });
+  const bounds = stretchedBounds({ timeoutMs, discoveryMs, steal });
   const profileDir = givenProfileDir ?? fs.mkdtempSync(path.join(os.tmpdir(), `chrome-${label}-`));
   const chrome = spawn(chromeBin(), [
     ...familyArgs({ autoplay, webmcp }),
