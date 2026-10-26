@@ -803,3 +803,26 @@ test('a dist-needing suite rebuilds an unfingerprinted dist/; a non-dist suite d
     fs.rmSync(probe.probe, { recursive: true, force: true });
   }
 });
+
+test('a suite that builds ../dist with path.join counts as dist-dependent (airhorn-nh8y)', () => {
+  // Grepping for the literal "dist/" was too literal: tests/horn.test.js and
+  // tests/visual-overrides.test.mjs construct path.join(__dirname, '../dist'), so the
+  // gate said "no selected suite reads dist/" and would keep - or refuse to make - a
+  // dist/ those suites read. Fail-first: pre-fix this probe answers keep.
+  const probe = buildGateProbe();
+  try {
+    fs.writeFileSync(path.join(probe.probe, 'tests', 'joined-suite.test.js'),
+      "import path from 'node:path';\n// reads the bundle via path.join(__dirname, '../dist')\n" +
+      "export const distDir = path.join(import.meta.dirname, '../dist');\n");
+    fs.writeFileSync(path.join(probe.probe, 'joined-src.txt'), 'plain');
+    fs.appendFileSync(path.join(probe.probe, 'tools', 'suite-map.tsv'),
+      'joined-src.txt\ttests/joined-suite.test.js\ntests/joined-suite.test.js\ttests/joined-suite.test.js\n');
+
+    const res = probe.run(['--build-plan', '--changed', 'joined-src.txt']);
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /build-plan: build \(/,
+      `a suite that joins ../dist must count as dist-dependent: ${res.stdout}`);
+  } finally {
+    fs.rmSync(probe.probe, { recursive: true, force: true });
+  }
+});

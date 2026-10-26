@@ -347,10 +347,18 @@ stale_build_input() { # $1 = dist entry point ; prints the first build input new
 # build (and must not fail for want of one). Conservative on purpose: a suite that
 # merely MENTIONS dist/ counts, because gate-smoke spawns the gate in its own pins.
 suites_need_dist() {
+  # Match the TOKEN `dist`, not the literal "dist/" (airhorn-nh8y): suites build the
+  # path as path.join(__dirname, '../dist'), so a slash-only pattern misses them and the
+  # gate would keep - or refuse to make - a dist/ they read. Bounded so `distribution`
+  # and `distDir` (which contains the token as a prefix only) do not count as a whole
+  # word: uppercase D after dist is a different identifier, not a path segment.
   local s
   for s in "$@"; do
     [ -f "$ROOT/$s" ] || continue
-    grep -qE 'dist/' "$ROOT/$s" 2>/dev/null && return 0
+    grep -qE '(^|[^[:alnum:]_])dist([^[:alnum:]_]|$)|/dist([/"'\'']|$)' "$ROOT/$s" 2>/dev/null && return 0
+    # A suite that spawns the gate can make a child gate serve dist/ even when the
+    # suite's own text never names it (the airhorn-0ct pin does exactly that).
+    grep -qE 'fast-gate\.sh' "$ROOT/$s" 2>/dev/null && return 0
   done
   return 1
 }
@@ -431,7 +439,6 @@ else
   echo "fast-gate: building dist (${_decision#* })"
 fi
 if [ "${_decision%% *}" != "keep" ]; then
-  echo "fast-gate: building dist (browser suites serve it)"
   if ! (cd "$ROOT" && npm run build --silent) >"$TMP/build.log" 2>&1; then
     echo "fast-gate: failed: build"
     sed 's/^/    /' "$TMP/build.log" 2>/dev/null | tail -20
