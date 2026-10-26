@@ -314,25 +314,63 @@ if [ "${#RUN[@]}" -eq 0 ]; then
   exit 0
 fi
 
+# --- the dist/ build decision, in ONE place (airhorn-k8sd, airhorn-5pqg) -----------
+# Two callers ask this question: --build-plan (the millisecond query) and the gate
+# itself. A rule that exists twice drifts, so both call build_decision and only the
+# printing differs. The freshness arm is the fix for airhorn-k8sd: after rebasing onto
+# an advancing master, CHANGED contains only the lane's own delta, so "did this delta
+# touch a build input" is the WRONG question - dist/ can be stale while the delta is
+# tests-only. Comparing build-input mtimes against dist/index.html asks the question
+# that actually matters: was dist/ built from the tree we are about to test?
+BUILD_INPUT_PATHS='src public index.html package.json package-lock.json deno.lock'
+
+stale_build_input() { # $1 = dist entry point ; prints the first build input newer than it
+  local dist_ref=$1 p hit c
+  for p in $BUILD_INPUT_PATHS; do
+    [ -e "$ROOT/$p" ] || continue
+    if [ -d "$ROOT/$p" ]; then
+      hit=$(find "$ROOT/$p" -type f -newer "$dist_ref" -print -quit 2>/dev/null)
+    else
+      [ "$ROOT/$p" -nt "$dist_ref" ] && hit=$p
+    fi
+    [ -n "$hit" ] && { echo "${hit#"$ROOT"/}"; return 0; }
+  done
+  for c in "$ROOT"/vite.config.*; do
+    [ -e "$c" ] || continue
+    [ "$c" -nt "$dist_ref" ] && { echo "${c#"$ROOT"/}"; return 0; }
+  done
+  return 1
+}
+
+build_decision() { # prints "<build|keep> <reason>"; never builds, never exits
+  local f stale
+  local changed_is_input=0
+  for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
+    case $f in
+      src/*|public/*|index.html|vite.config.*|package.json|package-lock.json|deno.lock) changed_is_input=1 ;;
+    esac
+  done
+  if [ "${FAST_GATE_FORCE_BUILD:-0}" = "1" ]; then
+    echo "build FAST_GATE_FORCE_BUILD=1"; return
+  fi
+  if [ ! -f "$ROOT/dist/index.html" ]; then
+    echo "build no dist/index.html to reuse"; return
+  fi
+  if [ "$changed_is_input" -eq 1 ]; then
+    echo "build a changed path is a build input"; return
+  fi
+  if stale=$(stale_build_input "$ROOT/dist/index.html"); then
+    echo "build $stale is newer than dist/index.html, so dist/ predates this tree"; return
+  fi
+  echo "keep dist/index.html is newer than every build input"
+}
+
 # --build-plan is a QUERY like --list: it says whether the build WOULD run, and never
 # runs it (airhorn-onz0b). It exists so the decision is testable in milliseconds
 # instead of by spawning whole gates, and so a human can ask "why did it build?".
 if [ "$BUILD_PLAN" -eq 1 ]; then
-  BUILD_INPUT=0
-  for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
-    case $f in
-      src/*|public/*|index.html|vite.config.*|package.json|package-lock.json|deno.lock) BUILD_INPUT=1 ;;
-    esac
-  done
-  if [ "${FAST_GATE_FORCE_BUILD:-0}" = "1" ]; then
-    echo "fast-gate: build-plan: build (FAST_GATE_FORCE_BUILD=1)"
-  elif [ "$BUILD_INPUT" -eq 1 ]; then
-    echo "fast-gate: build-plan: build (a changed path is a build input)"
-  elif [ ! -f "$ROOT/dist/index.html" ]; then
-    echo "fast-gate: build-plan: build (no dist/index.html to reuse)"
-  else
-    echo "fast-gate: build-plan: keep (no build input changed)"
-  fi
+  _decision=$(build_decision)
+  echo "fast-gate: build-plan: ${_decision%% *} (${_decision#* })"
   exit 0
 fi
 
@@ -344,15 +382,13 @@ fi
 # the dist/ already on disk, and the browser suites serve the same bytes they would have
 # got. FAST_GATE_FORCE_BUILD=1 overrides.
 mkdir -p "$RESULTS_DIR"
-BUILD_INPUT=0
-for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
-  case $f in
-    src/*|public/*|index.html|vite.config.*|package.json|package-lock.json|deno.lock) BUILD_INPUT=1 ;;
-  esac
-done
-if [ "$BUILD_INPUT" -eq 0 ] && [ -f "$ROOT/dist/index.html" ] && [ "${FAST_GATE_FORCE_BUILD:-0}" != "1" ]; then
-  echo "fast-gate: keeping dist/ (no build input changed: nothing under src/, public/, index.html or the config/lockfiles)"
+_decision=$(build_decision)
+if [ "${_decision%% *}" = "keep" ]; then
+  echo "fast-gate: keeping dist/ (${_decision#* })"
 else
+  echo "fast-gate: building dist (${_decision#* })"
+fi
+if [ "${_decision%% *}" != "keep" ]; then
   echo "fast-gate: building dist (browser suites serve it)"
   if ! (cd "$ROOT" && npm run build --silent) >"$TMP/build.log" 2>&1; then
     echo "fast-gate: failed: build"

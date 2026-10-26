@@ -685,3 +685,67 @@ test('ambient GSM_TOOLS_ROOT redirection is impossible without the minted guard 
 // verdict is three-state: 'none' prunes a subtree, 'own' drops only this
 // node's own text (so a visibility override below it survives), 'text'
 // collects.
+
+test('the build decision rebuilds when a build input is newer than dist/, even for a tests-only delta (airhorn-k8sd)', () => {
+  // The reviewer's scenario: the lane's own delta is tests-only, but the tree it is
+  // about to test arrived via a rebase that moved src/. "Did this delta touch a build
+  // input" is then the wrong question, and answering it served stale bytes to the
+  // browser suites. Fail-first: before the freshness arm this printed
+  // "keep (no build input changed)" for exactly this tree.
+  const probe = buildGateProbe();
+  try {
+    const distFile = path.join(probe.probe, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'BUILT-FROM-SRC-V1');
+    const srcFile = path.join(probe.probe, 'src', 'a.js');
+    fs.writeFileSync(srcFile, '// SRC V2 CHANGE\n');
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(distFile, old, old);
+
+    const res = probe.run(['--build-plan', '--changed', 'tests/pass.test.js']);
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /build-plan: build \(/, `expected a build, got: ${res.stdout}`);
+    assert.match(res.stdout, /src\/a\.js is newer than dist\/index\.html/,
+      `the reason must name the stale input, got: ${res.stdout}`);
+  } finally {
+    fs.rmSync(probe.probe, { recursive: true, force: true });
+  }
+});
+
+test('the build decision keeps dist/ when it is newer than every build input (airhorn-5pqg)', () => {
+  const probe = buildGateProbe();
+  try {
+    const distFile = path.join(probe.probe, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'BUILT-NOW');
+    const future = new Date(Date.now() + 5_000);
+    fs.utimesSync(distFile, future, future);
+
+    const kept = probe.run(['--build-plan', '--changed', 'tests/pass.test.js']);
+    assert.equal(kept.status, 0, kept.stderr);
+    assert.match(kept.stdout, /build-plan: keep \(/, `expected a keep, got: ${kept.stdout}`);
+
+    // and the override still wins over a fresh dist/
+    const forced = probe.run(['--build-plan', '--changed', 'tests/pass.test.js'], { FAST_GATE_FORCE_BUILD: '1' });
+    assert.match(forced.stdout, /build-plan: build \(FAST_GATE_FORCE_BUILD=1\)/, forced.stdout);
+  } finally {
+    fs.rmSync(probe.probe, { recursive: true, force: true });
+  }
+});
+
+test('the build decision rebuilds when a build input arrives through the delta itself (airhorn-5pqg)', () => {
+  const probe = buildGateProbe();
+  try {
+    const distFile = path.join(probe.probe, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'BUILT-NOW');
+    const future = new Date(Date.now() + 5_000);
+    fs.utimesSync(distFile, future, future);
+
+    const res = probe.run(['--build-plan', '--changed', 'src/a.js']);
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /build-plan: build \(a changed path is a build input\)/, res.stdout);
+  } finally {
+    fs.rmSync(probe.probe, { recursive: true, force: true });
+  }
+});
