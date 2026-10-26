@@ -60,6 +60,11 @@ tools/lib/**	tests/test-support.test.js
 # (fresh page via Target.createTarget, id-matched /json/list) is pinned there, so a change
 # to it selects that suite as well as gate-smoke (which owns every tools/* file).
 tools/shared-chrome.mjs	tests/test-support.test.js
+# The two tools whose LAUNCH behaviour has its own regression guard (a refused launch must leave
+# no profile; a browser that cannot start must fail the audit) are driven by test-support, on
+# top of the gate-smoke row every tools/* file already selects (airhorn-w1wh review).
+tools/install-https-proof.mjs	tests/gate-smoke.test.js tests/test-support.test.js
+tools/resilience-audit.mjs	tests/gate-smoke.test.js tests/test-support.test.js
 # The SW/offline suite covers the PWA surface (it verifies sw caching + manifest contents in dist)
 # AND the worker's cache-integrity behaviour (a corrupt entry must be evicted and healed, never
 # served - airhorn-un5; merged into it in airhorn-iwf so one worker change pays one Chromium launch,

@@ -122,18 +122,29 @@ function makeServer(distDir, tlsOptions) {
 // One Chrome for both origins: fresh profile, the certificate-ignoring and
 // hostname-mapping flags, nothing else. Returns a cdp client bound to the
 // single pre-created about:blank target; each origin navigates this page.
-async function openBrowser(extraFlags) {
+export async function openBrowser(extraFlags) {
   // The profile dir keeps this tool's own mkdtemp shape: sweepStaleProfiles
   // above is keyed on it, so the launcher is told the directory rather than
   // making one of its own (airhorn-2po9).
-  const browser = await launchChrome({
-    label: 'https-proof',
-    autoplay: true,
-    extraFlags,
-    profileDir: fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-https-proof-')),
-    timeoutMs: 15000,
-    discoveryMs: 15000,
-  });
+  const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-https-proof-'));
+  let browser;
+  try {
+    browser = await launchChrome({
+      label: 'https-proof',
+      autoplay: true,
+      extraFlags,
+      profileDir,
+      timeoutMs: 15000,
+      discoveryMs: 15000,
+    });
+  } catch (err) {
+    // A launch that never produced a handle never adopted this profile - on a
+    // starved host launchChrome refuses before it spawns anything, so the rm
+    // that would have run in close() never exists - and nothing else can remove
+    // a directory whose owner refused to start (airhorn-w1wh review).
+    try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
+    throw err;
+  }
   liveBrowser = browser;
   let ws = null;
   try {
@@ -407,4 +418,11 @@ async function main() {
   }
 }
 
-main().catch(err => { console.error(err); process.exit(1); });
+// Only drive the tool when this file is the entry point: the regression tests
+// import openBrowser to prove a refused launch leaves no profile behind, and an
+// import must not start a server. Same guard (and same reason) as
+// tools/resilience-audit.mjs - import.meta.main is the reliable test (Node 24+),
+// and the argv fallback keeps older runtimes from turning a real run into a
+// silent no-op that exits 0.
+const isMain = import.meta.main ?? (!!process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url));
+if (isMain) main().catch(err => { console.error(err); process.exit(1); });

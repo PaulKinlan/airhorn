@@ -573,7 +573,17 @@ async function withBrowser(id, name, fn) {
   let browser = null;
   let result = { id, name };
   try {
+    // A browser that cannot START is not a scenario result (airhorn-w1wh
+    // review). Every scenario below is then unmeasured, and this file's exit is
+    // 0 whatever the table says - so catching it as a scenario error would
+    // report a starved host as a green audit. Launch failures propagate to the
+    // entry point's catch, which exits 1.
     browser = await launchBrowser();
+  } catch (err) {
+    const why = String((err && err.message) || err);
+    throw new Error(`cannot launch a browser for the audit, so no scenario was measured: ${why}`);
+  }
+  try {
     const collectors = makeCollectors(browser.cdp);
     result = { id, name, ...(await fn(browser, collectors)) };
   } catch (err) {

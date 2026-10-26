@@ -110,12 +110,40 @@ function sleepSync(ms) {
   try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no SAB: skip */ }
 }
 
+const CPU_STAT_FIELDS = 8;   // user nice system idle iowait irq softirq steal
+
+/*
+ * Parse /proc/stat's aggregate line. Exported because the validation IS the
+ * contract: a malformed or truncated read must be UNKNOWN, never "steal 0".
+ * A short line (an unusual kernel, a fixture, a truncated read) used to fill the
+ * missing steal column with 0, and once the remaining fields advanced ten ticks
+ * hostSteal() returned a confident 0% - a healthy verdict derived from no data,
+ * which is exactly how a starved host would masquerade as idle (airhorn-w1wh
+ * review). Missing file, wrong line and wrong field count all mean the same
+ * thing: we do not know, so the caller behaves as it did before this existed.
+ */
+export function parseCpuTicks(text, source = '/proc/stat') {
+  const first = String(text).split('\n')[0].trim();
+  const parts = first === '' ? [] : first.split(/\s+/);
+  if (parts[0] !== 'cpu') {
+    throw new Error(`${source}: first line is not the aggregate 'cpu' line (${JSON.stringify(parts[0] ?? '')})`);
+  }
+  const fields = parts.slice(1).map(Number);
+  if (fields.length < CPU_STAT_FIELDS) {
+    throw new Error(`${source}: malformed aggregate cpu line (${fields.length} fields, need ${CPU_STAT_FIELDS} so steal is present)`);
+  }
+  // guest/guest_nice are already counted inside user/nice, so the total is the
+  // first eight counters only - summing all ten would double-count them.
+  const counters = fields.slice(0, CPU_STAT_FIELDS);
+  if (!counters.every(Number.isFinite)) {
+    throw new Error(`${source}: malformed aggregate cpu line (non-numeric counter: ${counters.join(',')})`);
+  }
+  return { total: counters.reduce((a, b) => a + b, 0), steal: counters[7] };
+}
+
 function readCpuTicks() {
-  const line = fs.readFileSync(process.env.CHROME_STAT_PATH || '/proc/stat', 'utf8').split('\n')[0].trim().split(/\s+/);
-  // "cpu user nice system idle iowait irq softirq steal guest guest_nice"
-  const fields = line.slice(1).map(Number);
-  const total = fields.reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
-  return { total, steal: Number.isFinite(fields[7]) ? fields[7] : 0 };
+  const path = process.env.CHROME_STAT_PATH || '/proc/stat';
+  return parseCpuTicks(fs.readFileSync(path, 'utf8'), path);
 }
 
 const stealBaseline = (() => { try { return readCpuTicks(); } catch { return null; } })();

@@ -695,6 +695,88 @@ test('with no shared browser exported, the suite still cold-launches (airhorn-w1
   }
 });
 
+/*
+ * Findings from the airhorn-w1wh review. All three are browser-free: the steal
+ * seam and a fixture /proc/stat stand in for the host, and the two tools are
+ * driven only as far as the launch.
+ */
+const CHROME_MJS = path.join(import.meta.dirname, '..', 'tools', 'lib', 'chrome.mjs');
+const INSTALL_TOOL = path.join(import.meta.dirname, '..', 'tools', 'install-https-proof.mjs');
+const RESILIENCE_TOOL = path.join(import.meta.dirname, '..', 'tools', 'resilience-audit.mjs');
+const httpsProofProfiles = () => fs.readdirSync('/tmp')
+  .filter((name) => /^chrome-https-proof-(?:tmp-)?[A-Za-z0-9]{6}$/.test(name));
+
+test('a malformed /proc/stat reads as UNKNOWN, never as zero steal (airhorn-w1wh review)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-stat-'));
+  const stat = path.join(dir, 'stat');
+  // user nice system idle iowait irq softirq steal (guest/guest_nice omitted: the kernel
+  // counts those inside user/nice, and the parser must not need them).
+  const line = (busy, steal) => `cpu  ${busy} 0 ${busy} ${8000 - busy} 0 0 0 ${steal} 0 0\n`;
+  fs.writeFileSync(stat, line(100, 0));
+  const saved = { statPath: process.env.CHROME_STAT_PATH, override: process.env.CHROME_STEAL_OVERRIDE };
+  process.env.CHROME_STAT_PATH = stat;
+  delete process.env.CHROME_STEAL_OVERRIDE;
+  try {
+    // A fresh module instance takes its baseline from this fixture, not from the
+    // machine (a cache-busting query busts ESM's module cache).
+    const mod = await import(`${pathToFileURL(CHROME_MJS).href}?w1wh-stat=${Date.now()}`);
+    fs.writeFileSync(stat, line(300, 0));   // 200 ticks advanced, no steal: a genuine 0%
+    assert.equal(mod.hostSteal(), 0, 'a well-formed line whose steal column did not advance is a real 0%');
+
+    // The defect: a line that LOST the steal column was filled with 0, so once the
+    // other counters advanced the preflight reported a confident "healthy" host.
+    fs.writeFileSync(stat, `cpu  ${900} 0 ${900} ${8000 - 900} 0 0 0\n`);
+    assert.equal(mod.hostSteal(), null, 'a line with no steal field must be UNKNOWN');
+    fs.writeFileSync(stat, 'cpu0  10 0 10 80 0 0 0 0\n');
+    assert.equal(mod.hostSteal(), null, 'a per-cpu line is not the aggregate line: UNKNOWN');
+    fs.writeFileSync(stat, 'cpu  10 0 10 nope 0 0 0 0 0 0\n');
+    assert.equal(mod.hostSteal(), null, 'a non-numeric counter must be UNKNOWN');
+    // And the pure parser says why, rather than quietly returning a number.
+    assert.throws(() => mod.parseCpuTicks('cpu  1 2 3\n'), /malformed aggregate cpu line/);
+    assert.throws(() => mod.parseCpuTicks('intr 1 2 3\n'), /not the aggregate 'cpu' line/);
+    assert.deepEqual(mod.parseCpuTicks(line(300, 40), 'fixture'),
+      { total: 300 + 0 + 300 + (8000 - 300) + 0 + 0 + 0 + 40, steal: 40 },
+      'a well-formed line parses to the first eight counters, steal in column 8');
+  } finally {
+    if (saved.statPath === undefined) delete process.env.CHROME_STAT_PATH; else process.env.CHROME_STAT_PATH = saved.statPath;
+    if (saved.override === undefined) delete process.env.CHROME_STEAL_OVERRIDE; else process.env.CHROME_STEAL_OVERRIDE = saved.override;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a refused launch leaves no profile behind in install-https-proof (airhorn-w1wh review)', async () => {
+  const before = httpsProofProfiles();
+  const saved = process.env.CHROME_STEAL_OVERRIDE;
+  process.env.CHROME_STEAL_OVERRIDE = '0.96';
+  try {
+    const { openBrowser } = await import(pathToFileURL(INSTALL_TOOL).href);
+    await assert.rejects(() => openBrowser([]), /host starved: steal 96%/,
+      'the tool passes the preflight parameters that make it refuse on a starved host');
+    assert.deepEqual(httpsProofProfiles(), before,
+      'the launch never adopted the profile the caller created, so the caller must remove it');
+  } finally {
+    if (saved === undefined) delete process.env.CHROME_STEAL_OVERRIDE; else process.env.CHROME_STEAL_OVERRIDE = saved;
+    for (const name of httpsProofProfiles()) {
+      if (!before.includes(name)) fs.rmSync(path.join('/tmp', name), { recursive: true, force: true });
+    }
+  }
+});
+
+test('a browser that cannot start fails the resilience audit instead of passing it (airhorn-w1wh review)', async () => {
+  const startedAt = Date.now();
+  const run = spawnSync(process.execPath, [RESILIENCE_TOOL], {
+    encoding: 'utf8',
+    timeout: 180000,
+    env: { ...process.env, CHROME_STEAL_OVERRIDE: '0.96' },   // the child must see a starved host
+  });
+  const output = `${run.stdout || ''}${run.stderr || ''}`;
+  assert.notEqual(run.status, 0,
+    'an audit whose browser could not start measured nothing, so it must not exit 0 (it reported a table of errors and 0 before)');
+  assert.match(output, /cannot launch a browser for the audit|\bhost starved\b/,
+    `the failure must name the launch, not just any error: ${output.slice(-400)}`);
+  assert.ok(Date.now() - startedAt < 120000, 'the audit must fail at the launch, not run every scenario first');
+});
+
 test('a bound-kill exits with the signal code and runs the cleanup exactly once (airhorn-4vfn)', async () => {
   // Two SIGTERMs: the second must not run the cleanup again.
   const result = await runStandIn({ signal: 'SIGTERM', cleanup: '' });
