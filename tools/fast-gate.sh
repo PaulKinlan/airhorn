@@ -22,6 +22,7 @@
 #   bash tools/fast-gate.sh                     # changed paths vs the merge-base with origin/master
 #   bash tools/fast-gate.sh --changed src/a.js  # repeatable; bypasses git entirely
 #   bash tools/fast-gate.sh --list              # print the suites it WOULD run, run nothing
+#   bash tools/fast-gate.sh --build-plan --changed <path>  # would this build dist? (never builds)
 #   bash tools/fast-gate.sh --base <ref>        # compare against another base
 #   FAST_GATE_JOBS=1 bash tools/fast-gate.sh    # serial: one suite at a time
 #                                                # (fallback when gate.conf sets none: one per core)
@@ -86,10 +87,11 @@ runner_for() {
   esac
 }
 
-LIST=0; BASE="${FAST_GATE_BASE:-}"; EXPLICIT=()
+LIST=0; BUILD_PLAN=0; BASE="${FAST_GATE_BASE:-}"; EXPLICIT=()
 while [ $# -gt 0 ]; do
   case $1 in
     --list)    LIST=1; shift ;;
+    --build-plan) BUILD_PLAN=1; shift ;;
     --changed) EXPLICIT+=("${2:?--changed needs a path}"); shift 2 ;;
     --base)    BASE="${2:?--base needs a ref}"; shift 2 ;;
     *)         echo "fast-gate: unknown argument '$1'" >&2; exit 2 ;;
@@ -312,14 +314,52 @@ if [ "${#RUN[@]}" -eq 0 ]; then
   exit 0
 fi
 
-# --- build once: browser suites serve dist/ (a11y, sw-offline); the build is ~0.3s --------------------
+# --build-plan is a QUERY like --list: it says whether the build WOULD run, and never
+# runs it (airhorn-onz0b). It exists so the decision is testable in milliseconds
+# instead of by spawning whole gates, and so a human can ask "why did it build?".
+if [ "$BUILD_PLAN" -eq 1 ]; then
+  BUILD_INPUT=0
+  for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
+    case $f in
+      src/*|public/*|index.html|vite.config.*|package.json|package-lock.json|deno.lock) BUILD_INPUT=1 ;;
+    esac
+  done
+  if [ "${FAST_GATE_FORCE_BUILD:-0}" = "1" ]; then
+    echo "fast-gate: build-plan: build (FAST_GATE_FORCE_BUILD=1)"
+  elif [ "$BUILD_INPUT" -eq 1 ]; then
+    echo "fast-gate: build-plan: build (a changed path is a build input)"
+  elif [ ! -f "$ROOT/dist/index.html" ]; then
+    echo "fast-gate: build-plan: build (no dist/index.html to reuse)"
+  else
+    echo "fast-gate: build-plan: keep (no build input changed)"
+  fi
+  exit 0
+fi
+
+# --- build once: the browser suites serve dist/ (a11y, sw-offline). ---------
+# Measured on a loaded 2-core VM: 48 s wall for `npm run build` (20.5 s in vite, the
+# rest npm startup), which is most of a fast gate for a change that cannot affect the
+# bundle. So build only when something the build READS changed (airhorn-onz0b,
+# sanctioned by coord as docs/speed.md R2); a tools/, tests/ or docs-only change reuses
+# the dist/ already on disk, and the browser suites serve the same bytes they would have
+# got. FAST_GATE_FORCE_BUILD=1 overrides.
 mkdir -p "$RESULTS_DIR"
-echo "fast-gate: building dist (browser suites serve it)"
-if ! (cd "$ROOT" && npm run build --silent) >"$TMP/build.log" 2>&1; then
-  echo "fast-gate: failed: build"
-  sed 's/^/    /' "$TMP/build.log" 2>/dev/null | tail -20
-  echo "fast-gate: FAIL - build failed; browser suites cannot run." >&2
-  exit 1
+BUILD_INPUT=0
+for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
+  case $f in
+    src/*|public/*|index.html|vite.config.*|package.json|package-lock.json|deno.lock) BUILD_INPUT=1 ;;
+  esac
+done
+if [ "$BUILD_INPUT" -eq 0 ] && [ -f "$ROOT/dist/index.html" ] && [ "${FAST_GATE_FORCE_BUILD:-0}" != "1" ]; then
+  echo "fast-gate: keeping dist/ (no build input changed: nothing under src/, public/, index.html or the config/lockfiles)"
+else
+  echo "fast-gate: building dist (browser suites serve it)"
+  if ! (cd "$ROOT" && npm run build --silent) >"$TMP/build.log" 2>&1; then
+    echo "fast-gate: failed: build"
+    sed 's/^/    /' "$TMP/build.log" 2>/dev/null | tail -20
+    echo "fast-gate: FAIL - build failed; browser suites cannot run." >&2
+    exit 1
+  fi
 fi
 
 printf 'fast-gate: running: %s\n' "${RUN[@]}"
