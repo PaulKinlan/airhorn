@@ -783,8 +783,14 @@ test('a browser that cannot start fails the resilience audit AND still writes th
     assert.match(fs.readFileSync(md, 'utf8'), /\| ERROR \|.*cannot launch a browser for the audit/s,
       'the launch failure must appear as an ERROR row in the report, not only in the exit code');
     const report = JSON.parse(fs.readFileSync(json, 'utf8'));
-    assert.equal(report.scenarios.length, 1, 'the audit stops at the first launch failure instead of repeating it per scenario');
-    assert.match(report.scenarios[0].error, /cannot launch a browser for the audit/);
+    // Every selected scenario appears, each as an ERROR row: the report is an account of
+    // the run, so the unmeasured ones say so rather than vanishing.
+    assert.ok(report.scenarios.length > 0, 'the report must carry rows');
+    assert.ok(report.scenarios.every((r) => r.status === 'ERROR'),
+      `every row must be ERROR when nothing was measured: ${JSON.stringify(report.scenarios.map((r) => r.status))}`);
+    assert.match(report.scenarios[0].error, /cannot launch a browser for the audit/,
+      'the first row must carry the launch reason');
+    assert.ok(report.scenarios.every((r) => r.error), 'no ERROR row may be silent');
     assert.match(output, /\bhost starved\b/, 'the failure must name the starved host, not just any error');
   } finally {
     fs.rmSync(out, { recursive: true, force: true });
@@ -849,6 +855,8 @@ test('a scenario error is a failed audit, and its row reaches the report (airhor
     const audit = await import(pathToFileURL(RESILIENCE_TOOL).href);
     assert.equal(audit.auditExitCode([{ id: 'stub', name: 'stubbed failing scenario', error: 'boom' }]), 1,
       'an ERROR row must make the audit fail');
+    assert.equal(audit.auditExitCode([{ id: 'stub', name: 'stubbed failing scenario', status: 'ERROR' }]), 1,
+      'a status ERROR row fails the audit even without an error string');
     assert.equal(audit.auditExitCode([]), 0, 'nothing selected is not a failure');
     assert.equal(audit.auditExitCode([{ id: 'ok', renders: true, hornUsable: true }]), 0,
       'measured, clean rows pass');

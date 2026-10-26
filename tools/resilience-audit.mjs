@@ -569,39 +569,43 @@ function summarise(state) {
 
 const results = [];
 
-// A launch failure stops the audit but must not stop the REPORT: it is a finding
-// (a starved host measured nothing) and the report is where findings live.
-class AuditAborted extends Error {}
+// A browser that cannot START is not a scenario result - but it IS a finding, and
+// the report is where findings live (airhorn-w1wh review, round 3). So the launch
+// catch records an ERROR row and returns; one launch failure marks the audit
+// failed, and every later scenario is recorded as unmeasured rather than
+// relaunching a browser the host has already refused.
+let launchFailed = false;
 
 async function withBrowser(id, name, fn) {
+  if (launchFailed) {
+    const result = { id, name, status: 'ERROR', error: 'not measured: the browser could not start earlier in this audit' };
+    results.push(result);
+    console.log(`[${id}] ${name}\n  ERROR ${result.error}`);
+    return;
+  }
   let browser = null;
   let result = { id, name };
   try {
-    // A browser that cannot START is not a scenario result (airhorn-w1wh
-    // review). Every scenario below is then unmeasured, and this file's exit is
-    // 0 whatever the table says - so catching it as a scenario error would
-    // report a starved host as a green audit. Launch failures propagate to the
-    // entry point's catch, which exits 1.
     browser = await launchBrowser();
   } catch (err) {
-    // Record the row FIRST, then stop (airhorn-w1wh review, round 3): throwing
-    // from here exited nonzero with no row and no report, so the one artefact
-    // that says what happened was never written. One launch failure is enough
-    // to know the rest cannot be measured, so the audit stops at it.
+    launchFailed = true;
     const why = String((err && err.message) || err);
-    results.push({
+    result = {
       id,
       name,
+      status: 'ERROR',
       error: `cannot launch a browser for the audit, so no scenario was measured: ${why}`,
       launchError: true,
-    });
-    throw new AuditAborted(why);
+    };
+    results.push(result);
+    console.log(`[${id}] ${name}\n  ERROR ${result.error}`);
+    return;
   }
   try {
     const collectors = makeCollectors(browser.cdp);
-    result = { id, name, ...(await fn(browser, collectors)) };
+    result = { id, name, status: 'OK', ...(await fn(browser, collectors)) };
   } catch (err) {
-    result = { id, name, error: String((err && err.message) || err) };
+    result = { id, name, status: 'ERROR', error: String((err && err.message) || err) };
   } finally {
     await closeBrowser(browser);
   }
@@ -1011,11 +1015,6 @@ async function runAudit() {
       };
     });
     }
-  } catch (err) {
-    // A launch failure already recorded its row; every later scenario would say
-    // the same thing. Anything else is a bug in the harness and must surface.
-    if (!(err instanceof AuditAborted)) throw err;
-    console.log(`audit aborted after the launch failure: ${err.message}`);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -1035,7 +1034,7 @@ async function runAudit() {
  * means nothing to report rather than a pass.
  */
 export function auditExitCode(scenarios) {
-  return (scenarios || []).some((row) => row && row.error) ? 1 : 0;
+  return (scenarios || []).some((row) => row && (row.status === 'ERROR' || row.error)) ? 1 : 0;
 }
 
 // Extracted from runAudit so a browser-free test can hand it a stubbed failing
@@ -1054,7 +1053,7 @@ export function writeReport(scenarios, outDir = OUT) {
   const row = (r) => [
     r.id,
     r.name,
-    r.error ? 'ERROR' : (r.renders ? 'yes' : 'NO'),
+    (r.status === 'ERROR' || r.error) ? 'ERROR' : (r.renders ? 'yes' : 'NO'),
     r.error ? '-' : (r.hornVisible ? 'yes' : 'NO'),
     r.error ? '-' : (r.hornUsable ? 'yes' : 'NO'),
     r.error ? '-' : (r.explainsItself ? `yes (${r.explanationEvidence})` : 'NO'),
