@@ -41,7 +41,7 @@ server.ts	tests/gate-smoke.test.js tests/health.test.mjs
 deno.lock	tests/health.test.mjs
 # tools/* is covered by a REAL smoke suite: the gate's own selection contract
 # plus syntax checks of the scripts it names (airhorn-1ye).
-tools/*	tests/gate-smoke.test.js
+tools/*	tests/gate-smoke.test.js tests/gate-map.test.js
 # The two tools that drive a browser for minutes and are SIGTERMed by the gate's
 # bound: their handler is behaviour, so a change to either runs the guard that
 # kills them mid-run and checks the tree is empty afterwards (airhorn-aaxm,
@@ -83,7 +83,7 @@ public/styles/**	tests/a11y.test.mjs tests/keyboard.test.mjs tests/visual-overri
 # for the fleet's independent coverage oracle, which cannot read this tsv (airhorn-pwe, airhorn-y7mx).
 # The two are kept in step by tests/gate-smoke.test.js, which requires the committed contract
 # to be identical to the generated output.
-.fleet/coverage-contract.json	tests/gate-smoke.test.js
+.fleet/coverage-contract.json	tests/gate-smoke.test.js tests/gate-map.test.js
 tests/derive-coverage-contract.test.js	tests/derive-coverage-contract.test.js
 tests/tool-bound-kill.test.mjs	tests/tool-bound-kill.test.mjs
 tests/horn.test.js	tests/horn.test.js
@@ -92,6 +92,8 @@ tests/sw-offline.test.mjs	tests/sw-offline.test.mjs
 tests/sw-failover.test.mjs	tests/sw-failover.test.mjs
 tests/webmcp.test.mjs	tests/webmcp.test.mjs
 tests/gate-smoke.test.js	tests/gate-smoke.test.js
+# The fast half's own self-row: a change to it must run it (airhorn-gkqu).
+tests/gate-map.test.js	tests/gate-map.test.js
 tests/webmcp-browser.test.mjs	tests/webmcp-browser.test.mjs
 tests/webmcp-fuzz.test.mjs	tests/webmcp-fuzz.test.mjs
 tests/resilience-ui.test.mjs	tests/resilience-ui.test.mjs
