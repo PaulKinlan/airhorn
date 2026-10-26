@@ -639,7 +639,7 @@ test('a launch that never starts fails labelled and leaves no profile behind (ai
     const res = spawnSync(process.execPath,
       [path.join(root, 'tools', 'install-https-proof.mjs'), '--out', path.join(tmp, 'out')], {
         encoding: 'utf8',
-        timeout: 120000,
+        timeout: 60000,
         env: { ...process.env, CHROME_BIN: path.join(tmp, 'no-such-chrome'), TMPDIR: tmp },
       });
     assert.equal(res.status, 1, `expected a labelled failure (rc 1), got ${res.status}: ${res.stderr}`);
