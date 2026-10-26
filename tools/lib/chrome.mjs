@@ -39,6 +39,16 @@
  *   - the discovery bound is enforced twice, by the abort AND by a race, so a
  *     fetch that ignores its AbortSignal (a stub, an older runtime) cannot park
  *     the launch past every gate bound (airhorn-4yhb).
+ *   - the bounds state the host's condition instead of asserting a machine
+ *     speed (airhorn-w1wh). /proc/stat's steal column measured 88-96% on the
+ *     2-vCPU fleet box for minutes at a time, in 11 consecutive 2s samples,
+ *     while our own processes used 3-6% of a core; under that, chrome needed
+ *     22-57s to answer /json/list at ONE browser (68-123s at two). A fixed 15s
+ *     bound is a machine-speed assertion by 2-4x there, and a full gate paid
+ *     1800s to report 11 failures that were all the same expired bound. So
+ *     above a ceiling the launch refuses AT ONCE with 'host starved: steal
+ *     NN%', and below it both bounds stretch by 1/(1-steal), capped. A healthy
+ *     host (steal 0) takes neither branch and keeps today's exact bounds.
  *
  * A shared-Chrome mode (one long-lived browser per flag family, fresh page per
  * suite via Target.createTarget) was built and measured for airhorn-ecp and
@@ -71,6 +81,80 @@ import path from 'node:path';
 import { sweepProfile } from './reap.mjs';
 
 export { sweepProfile };
+
+/*
+ * Host steal (airhorn-w1wh) - see the header bullet.
+ *
+ * hostSteal() is the fraction of THIS VM's ticks the hypervisor took away,
+ * measured across the process's own lifetime (a sample at module load, then the
+ * delta at call time). It is deliberately a delta and not a lifetime average:
+ * these VMs are days old, so the since-boot average is diluted by quiet periods
+ * and reads low exactly when the box is starved now. A window too short to
+ * measure (< MIN_STEAL_TICKS) returns null, which means "unknown" - the caller
+ * then behaves exactly as it did before this existed, so a launch can never be
+ * blocked on a reading nobody took.
+ *
+ * CHROME_STEAL_OVERRIDE (0..1) and CHROME_STEAL_CEILING (0..1) are the test
+ * seams for both branches: a suite may not assert the machine it runs on
+ * (docs/speed.md independence), so the tests here drive these, not /proc.
+ */
+const DEFAULT_STEAL_CEILING = 0.6;
+const MAX_BOUND_STRETCH = 8;
+const MIN_STEAL_TICKS = 10;
+const STEAL_FALLBACK_MS = 120;
+
+// A synchronous, bounded sleep: the preflight runs before the launch and cannot
+// await, and the only thing it needs is a window wide enough to measure. Used
+// ONLY when the module-load baseline is too close to the call to have
+// accumulated MIN_STEAL_TICKS (an import-and-launch immediately, which is what a
+// fast suite does), so the ordinary path pays nothing.
+function sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no SAB: skip */ }
+}
+
+function readCpuTicks() {
+  const line = fs.readFileSync(process.env.CHROME_STAT_PATH || '/proc/stat', 'utf8').split('\n')[0].trim().split(/\s+/);
+  // "cpu user nice system idle iowait irq softirq steal guest guest_nice"
+  const fields = line.slice(1).map(Number);
+  const total = fields.reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
+  return { total, steal: Number.isFinite(fields[7]) ? fields[7] : 0 };
+}
+
+const stealBaseline = (() => { try { return readCpuTicks(); } catch { return null; } })();
+
+function stealCeiling() {
+  const raw = Number(process.env.CHROME_STEAL_CEILING ?? DEFAULT_STEAL_CEILING);
+  return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : DEFAULT_STEAL_CEILING;
+}
+
+export function hostSteal() {
+  const override = process.env.CHROME_STEAL_OVERRIDE;
+  if (override !== undefined && override !== '') {
+    const forced = Number(override);
+    if (Number.isFinite(forced)) return Math.min(1, Math.max(0, forced));
+  }
+  if (!stealBaseline) return null;
+  let now;
+  try { now = readCpuTicks(); } catch { return null; }
+  if (now.total - stealBaseline.total < MIN_STEAL_TICKS) {
+    sleepSync(STEAL_FALLBACK_MS);
+    try { now = readCpuTicks(); } catch { return null; }
+  }
+  const total = now.total - stealBaseline.total;
+  if (!(total >= MIN_STEAL_TICKS)) return null;
+  return Math.min(1, Math.max(0, (now.steal - stealBaseline.steal) / total));
+}
+
+// A loaded box gets more time, not a wrong verdict: the bounds grow by exactly
+// the factor the machine is slower by (1/(1-steal)), capped. steal <= 0 (or
+// null, "unknown") returns the caller's bounds untouched.
+export function stretchedBounds({ timeoutMs, discoveryMs, steal }) {
+  if (steal === null || steal === undefined || !(steal > 0)) return { timeoutMs, discoveryMs };
+  const stretch = Math.min(1 / (1 - steal), MAX_BOUND_STRETCH);
+  return { timeoutMs: Math.round(timeoutMs * stretch), discoveryMs: Math.round(discoveryMs * stretch) };
+}
+
+export { DEFAULT_STEAL_CEILING, MAX_BOUND_STRETCH, stealCeiling };
 
 export function chromeBin() {
   return process.env.CHROME_BIN ||
@@ -169,6 +253,19 @@ export async function launchChrome({
   keepProfile = false,
   discoverPage = true,
 } = {}) {
+  // Before anything is created or spawned (airhorn-w1wh): on a starved host this
+  // launch cannot succeed, and waiting for the bound to expire is what turned
+  // one exhausted machine into eleven "DevTools discovery timeout" failures and
+  // an 1800s gate. Saying it costs nothing and names the actual cause.
+  const steal = hostSteal();
+  const ceiling = stealCeiling();
+  if (steal !== null && steal >= ceiling) {
+    throw new Error(
+      `host starved: steal ${(steal * 100).toFixed(0)}% (ceiling ${(ceiling * 100).toFixed(0)}%) - ` +
+      `refusing to launch chrome (${label}): this host cannot start a browser, and failing here ` +
+      'names the machine instead of spending the gate bound on it (airhorn-w1wh)');
+  }
+  const bounds = stretchedBounds({ timeoutMs, discoveryMs, steal });
   const profileDir = givenProfileDir ?? fs.mkdtempSync(path.join(os.tmpdir(), `chrome-${label}-`));
   const chrome = spawn(chromeBin(), [
     ...familyArgs({ autoplay, webmcp }),
@@ -235,7 +332,7 @@ export async function launchChrome({
   // measure different phases (spawn -> ws URL, then ws URL -> /json/list), and a
   // flat cap made the second phase inherit a budget sized for the first. A suite
   // that wants a fast total failure passes both bounds explicitly.
-  const discoveryBound = Math.max(1, discoveryMs);
+  const discoveryBound = Math.max(1, bounds.discoveryMs);
   try {
     await new Promise((resolve, reject) => {
       // A spawn that never produced a process reports through the 'error'
@@ -246,7 +343,8 @@ export async function launchChrome({
       // airhorn-r5me). Raced against the handshake so it takes the same
       // teardown as the ws-silent and exits-early shapes.
       const timeout = setTimeout(
-        () => reject(new Error(`Chrome start timeout (${label}): ${stderrLines.join('\n')}`)), timeoutMs);
+        () => reject(new Error(`Chrome start timeout (${label}) after ${bounds.timeoutMs}ms (steal ${(steal === null ? 'unknown' : `${(steal * 100).toFixed(0)}%`)}): ${stderrLines.join('\n')}`)),
+        bounds.timeoutMs);
       const onData = (data) => {
         const text = data.toString();
         stderrLines.push(text);

@@ -43,6 +43,21 @@ import { pathToFileURL } from 'node:url';
 
 const SUPPORT = pathToFileURL(path.join(import.meta.dirname, 'support', 'browser.mjs')).href;
 const { launchBrowser, launchChrome, connectPage } = await import(SUPPORT);
+const { stretchedBounds } = await import(
+  pathToFileURL(path.join(import.meta.dirname, '..', 'tools', 'lib', 'chrome.mjs')).href);
+
+// The host-steal preflight (airhorn-w1wh) is driven through its env seam, so a
+// test states the host instead of asserting the machine it happens to run on
+// (docs/speed.md independence). This file's launch tests are about the launch
+// MECHANISM, not the host, so the seam is pinned to "healthy" for the whole
+// file: steal 0 is the bounds they were written against. The tests that pin the
+// starved branch set it themselves and restore it.
+process.env.CHROME_STEAL_OVERRIDE = '0';
+const withSteal = async (value, fn) => {
+  const saved = process.env.CHROME_STEAL_OVERRIDE;
+  process.env.CHROME_STEAL_OVERRIDE = value;
+  try { return await fn(); } finally { process.env.CHROME_STEAL_OVERRIDE = saved; }
+};
 const SIGNAL_EXIT = pathToFileURL(path.join(import.meta.dirname, 'support', 'signal-exit.mjs')).href;
 
 const runLabel = (what) => `bsup-${what}-${process.pid}-${Date.now()}`;
@@ -489,6 +504,81 @@ const runStandIn = ({ signal, graceMs, cleanup }) => new Promise((resolve) => {
     fs.rmSync(dir, { recursive: true, force: true });
     resolve({ code, signal: sig, runs, elapsed: Date.now() - startedAt, out });
   });
+});
+
+/*
+ * Host steal (airhorn-w1wh): the bounds must state the host's condition instead
+ * of asserting a machine speed. Measured on the fleet box, /proc/stat steal sat
+ * at 88-96% for minutes, chrome needed 22-57s to answer /json/list at ONE
+ * browser, and a gate paid 1800s to report eleven expired bounds as eleven
+ * suite failures. These three tests pin both branches and the wiring, and none
+ * of them reads the machine.
+ */
+test('a starved host refuses the launch before spawning or creating a profile, naming the steal (airhorn-w1wh)', async () => {
+  const dir = marker();
+  const ran = path.join(dir, 'stub-ran');
+  const stub = path.join(dir, 'chrome-stub-starved.sh');
+  // The stub's only job is to record that it was started at all.
+  fs.writeFileSync(stub, `#!/bin/sh\ntouch "${ran}"\nwhile :; do sleep 5; done\n`, { mode: 0o755 });
+  const label = runLabel('starved');
+  const realChromeBin = process.env.CHROME_BIN;
+  process.env.CHROME_BIN = stub;
+  try {
+    await withSteal('0.96', () => assert.rejects(
+      () => launchChrome({ label }),
+      /host starved: steal 96% \(ceiling 60%\)/,
+      'a starved host must refuse at once, and the message must carry the measured steal'));
+    assert.equal(fs.existsSync(ran), false, 'the browser binary must not be spawned on a starved host');
+    assert.deepEqual(profilesFor(label), [], 'a launch that never started must not create a profile dir');
+  } finally {
+    process.env.CHROME_BIN = realChromeBin;
+    removeProfiles(label);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the bounds stretch with the load, and are untouched on an unstarved host (airhorn-w1wh)', () => {
+  const bounds = (steal) => stretchedBounds({ timeoutMs: 15000, discoveryMs: 15000, steal });
+  // Healthy and unknown are the SAME bounds as before this existed: no behaviour
+  // change on a box that is not starved is the point, not a nicety.
+  assert.deepEqual(bounds(0), { timeoutMs: 15000, discoveryMs: 15000 }, 'a healthy host keeps its bounds exactly');
+  assert.deepEqual(bounds(null), { timeoutMs: 15000, discoveryMs: 15000 }, 'an unknown reading must not invent a bound');
+  // 1/(1-steal): the factor the machine is slower by, not a guess.
+  assert.deepEqual(bounds(0.5), { timeoutMs: 30000, discoveryMs: 30000 });
+  assert.deepEqual(bounds(0.25), { timeoutMs: 20000, discoveryMs: 20000 });
+  // Capped: 0.99 asks for 100x, and an unbounded stretch is just a hang.
+  assert.deepEqual(bounds(0.99), { timeoutMs: 120000, discoveryMs: 120000 }, 'the stretch is capped');
+});
+
+test('the stretched bound is the one a stalled launch actually reports (airhorn-w1wh)', async () => {
+  const dir = marker();
+  // Announces nothing, ever: the startup bound is what ends this launch.
+  const stub = path.join(dir, 'chrome-stub-silent.sh');
+  fs.writeFileSync(stub, '#!/bin/sh\nwhile :; do sleep 5; done\n', { mode: 0o755 });
+  const realChromeBin = process.env.CHROME_BIN;
+  process.env.CHROME_BIN = stub;
+  try {
+    const healthyLabel = runLabel('healthy-bound');
+    await withSteal('0', () => assert.rejects(
+      () => launchChrome({ label: healthyLabel, timeoutMs: 400, discoveryMs: 400 }),
+      /Chrome start timeout \(bsup-healthy-bound-[^)]*\) after 400ms \(steal 0%\)/,
+      'an unstarved host must still fail at the bound the caller asked for'));
+    assert.deepEqual(profilesFor(healthyLabel), [], 'the reaped launch left a profile behind');
+
+    const loadedLabel = runLabel('loaded-bound');
+    const startedAt = Date.now();
+    await withSteal('0.5', () => assert.rejects(
+      () => launchChrome({ label: loadedLabel, timeoutMs: 400, discoveryMs: 400 }),
+      /Chrome start timeout \(bsup-loaded-bound-[^)]*\) after 800ms \(steal 50%\)/,
+      'the caller\'s bound must be the STRETCHED one, and the error must say by how much'));
+    const elapsed = Date.now() - startedAt;
+    assert.ok(elapsed >= 700, `the launch did not honour the stretched bound: rejected after only ${elapsed}ms`);
+    assert.deepEqual(liveStubProcesses(stub), [], 'the stalled launch left its stub process tree running');
+    assert.deepEqual(profilesFor(loadedLabel), [], 'the stalled launch left its /tmp profile behind');
+  } finally {
+    process.env.CHROME_BIN = realChromeBin;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a bound-kill exits with the signal code and runs the cleanup exactly once (airhorn-4vfn)', async () => {
