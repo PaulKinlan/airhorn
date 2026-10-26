@@ -43,6 +43,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 import { installSignalExit } from './support/signal-exit.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -275,7 +276,10 @@ async function launch({ label = 'screenreader' } = {}) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const axTree = () => send('Accessibility.getFullAXTree');
 
-  const waitFor = async (predicate, { timeout = 8000, interval = 50, label = 'condition' } = {}) => {
+  // Wait for the condition, not the clock: the AX tree, the live region and the
+  // service-worker stand-ins all land late on a busy box, and the 3 s windows
+  // this suite used to give them were machine-state assertions (airhorn-sesh).
+  const waitFor = async (predicate, { timeout = WAIT_TIMEOUT_MS, interval = 50, label = 'condition' } = {}) => {
     const deadline = Date.now() + timeout;
     let last;
     while (Date.now() < deadline) {
@@ -445,7 +449,7 @@ async function run() {
       const tree = await axTree();
       const node = tree.nodes.find((n) => roleOf(n) === 'button' && nameOf(n) === 'Air horn');
       return propsOf(node).pressed === 'true' ? tree : null;
-    }, { label: 'the held horn to expose pressed=true', timeout: 3000 });
+    }, { label: 'the held horn to expose pressed=true' });
     writeEvidence('horn-held', 'during', heldTree);
     const heldNode = heldTree.nodes.find((n) => roleOf(n) === 'button' && nameOf(n) === 'Air horn');
     assert(propsOf(heldNode).focused === true, 'the held horn is not the focused node in AX');
@@ -454,7 +458,7 @@ async function run() {
       const tree = await axTree();
       const node = tree.nodes.find((n) => roleOf(n) === 'button' && nameOf(n) === 'Air horn');
       return propsOf(node).pressed === 'false' ? tree : null;
-    }, { label: 'the released horn to expose pressed=false', timeout: 3000 });
+    }, { label: 'the released horn to expose pressed=false' });
     writeEvidence('horn-released', 'after', releasedTree);
     console.log('  pressed: false at rest -> true while held -> false after release, in the AX tree');
     await sleep(300);
@@ -538,21 +542,17 @@ async function run() {
     });
     const started = await evaluate(`window.__airhorn.start({ loop: false }).then((ok) => ok)`);
     assert(started === false, `the suspended-context start reported ${JSON.stringify(started)}, expected false - the hint path was not entered`);
-    const hintDeadline = Date.now() + 3000;
-    let hintState = null;
-    while (Date.now() < hintDeadline) {
-      hintState = await evaluate(`({
-        status: document.getElementById('app-status').textContent,
-        log: window.__srLog.slice(),
-        playing: window.__airhorn.isPlaying(),
-        hasAudio: window.__airhorn.hasAudioContext(),
-        pressed: document.querySelector('.horn').getAttribute('aria-pressed'),
-      })`);
-      if (hintState.status === hintCopy) break;
-      await sleep(50);
-    }
-    assert(hintState && hintState.status === hintCopy,
-      `the tap hint never reached the live region; observed ${JSON.stringify(hintState)}`);
+    const readHintState = () => evaluate(`({
+      status: document.getElementById('app-status').textContent,
+      log: window.__srLog.slice(),
+      playing: window.__airhorn.isPlaying(),
+      hasAudio: window.__airhorn.hasAudioContext(),
+      pressed: document.querySelector('.horn').getAttribute('aria-pressed'),
+    })`);
+    const hintState = await waitFor(
+      async () => { const s = await readHintState(); return s.status === hintCopy ? s : null; },
+      { label: 'the tap hint to reach the live region' },
+    );
     await sleep(150);
     const hintTree = await axTree();
     writeEvidence('tap-hint', 'after', hintTree, hintCopy);
@@ -597,14 +597,14 @@ async function run() {
     const installingCopy = 'Updating the Air Horner to a new version...';
     const readyCopy = 'A new version is ready - reloading...';
     await waitFor(() => evaluate(`document.getElementById('app-status').textContent === ${JSON.stringify(installingCopy)}`), {
-      label: 'the installing-phase update notice', timeout: 3000,
+      label: 'the installing-phase update notice', 
     });
     const installingTree = await axTree();
     writeEvidence('update-installing', 'after', installingTree, installingCopy);
     assertAnnouncedOnce(installingTree, installingCopy, { previous: hintCopy, label: 'update (installing)' });
     await evaluate(`(() => { window.__srWorker.state = 'installed'; window.__srDispatch('statechange'); })()`);
     await waitFor(() => evaluate(`document.getElementById('app-status').textContent === ${JSON.stringify(readyCopy)}`), {
-      label: 'the ready-phase update notice', timeout: 3000,
+      label: 'the ready-phase update notice', 
     });
     await sleep(150);
     const readyTree = await axTree();

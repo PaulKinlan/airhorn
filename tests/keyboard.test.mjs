@@ -35,6 +35,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 import { installSignalExit } from './support/signal-exit.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -332,7 +333,12 @@ async function launch({ label = 'keyboard' } = {}) {
     };
   })()`);
 
-  const waitFor = async (predicate, { timeout = 6000, interval = 50, label = 'condition' } = {}) => {
+  // The bound is how long we are willing to WAIT for the state, not a claim
+  // about how long the app takes: a loaded box queues the CDP round trip and the
+  // page's own work behind other lanes, and a 3 s window turned a correct app red
+  // (airhorn-sesh). Polling stops the moment the condition holds, so the happy
+  // path costs nothing.
+  const waitFor = async (predicate, { timeout = WAIT_TIMEOUT_MS, interval = 50, label = 'condition' } = {}) => {
     const deadline = Date.now() + timeout;
     let last = null;
     while (Date.now() < deadline) {
@@ -496,13 +502,32 @@ async function run() {
     console.log('--- 3. Space holds the horn: one blast while held, silence on release ---');
     await focus('.horn');
     const beforeSpace = await snapshot();
-    await hold('Space');
     // aria-pressed flips optimistically, so wait for the voice itself: the count
     // of starts is what "it sounded" means here.
-    const duringSpace = await waitFor((s) => s.horning && s.sources + s.oscillators > beforeSpace.sources + beforeSpace.oscillators, {
-      label: 'Space keydown to start a voice',
-      timeout: 3000,
-    });
+    const voiceStarted = (label) => waitFor(
+      (s) => s.horning && s.sources + s.oscillators > beforeSpace.sources + beforeSpace.oscillators,
+      { label },
+    );
+    await hold('Space');
+    let duringSpace;
+    try {
+      duringSpace = await voiceStarted('Space keydown to start a voice');
+    } catch (err) {
+      // First press refused: the app retracts an optimistic press when the audio
+      // graph has not resumed within its own race window, and says so through the
+      // tap hint (airhorn-hlg/x4l). Under load a CDP gesture can arrive after the
+      // browser's activation window, so the FIRST press legitimately refuses -
+      // that is the environment, not a keyboard defect, and the app's own recovery
+      // contract is "press again". Press once more; a second refusal fails here
+      // (with the hint in the message), so this cannot hide a real regression
+      // (airhorn-sesh: measured at load 19, 3 concurrent browsers).
+      const refused = await snapshot();
+      if (!/needs a tap/i.test(refused.status || '')) throw err;
+      console.log(`  note: the browser refused the first gesture (status: ${JSON.stringify(refused.status)}); pressing again, as the app instructs`);
+      await release('Space');
+      await hold('Space');
+      duringSpace = await voiceStarted('Space keydown to start a voice (after the app asked for a second press)');
+    }
     assert(duringSpace.pressed === 'true', `hold Space: aria-pressed is ${duringSpace.pressed} while the horn sounds`);
     const spaceBlast = blastStarts(beforeSpace, duringSpace);
     assert(
@@ -511,7 +536,7 @@ async function run() {
     );
     assertFocusRing(duringSpace.active, 'hold Space (while sounding)');
     await release('Space');
-    const afterSpace = await waitFor((s) => !s.horning, { label: 'Space keyup to stop the horn', timeout: 3000 });
+    const afterSpace = await waitFor((s) => !s.horning, { label: 'Space keyup to stop the horn' });
     assert(afterSpace.pressed === 'false', `release Space: aria-pressed stayed ${afterSpace.pressed}`);
     await sleep(250);
     const settledSpace = await snapshot();
@@ -529,7 +554,6 @@ async function run() {
     await hold('Enter');
     const duringEnter = await waitFor((s) => s.horning && s.sources + s.oscillators > beforeEnter.sources + beforeEnter.oscillators, {
       label: 'Enter keydown to start a voice',
-      timeout: 3000,
     });
     const enterBlast = blastStarts(beforeEnter, duringEnter);
     assert(
@@ -538,7 +562,7 @@ async function run() {
     );
     assertFocusRing(duringEnter.active, 'hold Enter (while sounding)');
     await release('Enter');
-    const afterEnter = await waitFor((s) => !s.horning, { label: 'Enter keyup to stop the horn', timeout: 3000 });
+    const afterEnter = await waitFor((s) => !s.horning, { label: 'Enter keyup to stop the horn' });
     await sleep(200);
     const settledEnter = await snapshot();
     assert(blastStarts(afterEnter, settledEnter).total === 0, 'release Enter: the keyup started another blast');
@@ -549,10 +573,10 @@ async function run() {
     console.log('--- 5. Escape retires a hold, and the key repeat tail cannot restart it ---');
     await focus('.horn');
     await hold('Space');
-    await waitFor((s) => s.horning, { label: 'Space keydown (before Escape)', timeout: 3000 });
+    await waitFor((s) => s.horning, { label: 'Space keydown (before Escape)' });
     await key('keyDown', 'Escape');
     await key('keyUp', 'Escape');
-    const escaped = await waitFor((s) => !s.horning, { label: 'Escape to retire the hold', timeout: 3000 });
+    const escaped = await waitFor((s) => !s.horning, { label: 'Escape to retire the hold' });
     assert(escaped.pressed === 'false', `Escape: aria-pressed stayed ${escaped.pressed}`);
     // The key is still physically down: the browser keeps sending auto-repeats.
     await hold('Space', { repeat: true });
@@ -563,10 +587,10 @@ async function run() {
     await sleep(120);
     // A genuine new press (repeat=false) after the release must still work.
     await hold('Space');
-    const fresh = await waitFor((s) => s.horning, { label: 'a fresh Space press after Escape', timeout: 3000 });
+    const fresh = await waitFor((s) => s.horning, { label: 'a fresh Space press after Escape' });
     assert(fresh.horning, 'a fresh Space press after Escape did not sound the horn');
     await release('Space');
-    await waitFor((s) => !s.horning, { label: 'release after the fresh press', timeout: 3000 });
+    await waitFor((s) => !s.horning, { label: 'release after the fresh press' });
     assertFocusRing((await snapshot()).active, 'after Escape and a re-press');
     console.log('  Escape stops it; repeats stay quiet; a new press still works');
 
@@ -574,7 +598,7 @@ async function run() {
     console.log('--- 6. tabbing away mid-hold retires the hold (no stuck horn, no lost focus) ---');
     await focus('.horn');
     await hold('Space');
-    await waitFor((s) => s.horning, { label: 'Space keydown before tabbing away', timeout: 3000 });
+    await waitFor((s) => s.horning, { label: 'Space keydown before tabbing away' });
     const away = await tab();
     assert(hasClass(away, 'button'), `Tab away mid-hold: expected the next control (install), got ${describeStop(away)}`);
     await sleep(150);
@@ -601,7 +625,6 @@ async function run() {
     await release('Enter');
     const chosen = await waitFor((s) => s.status === 'Installation cancelled', {
       label: 'Enter on the install button to prompt and announce the outcome',
-      timeout: 3000,
     });
     assert(
       chosen.prompts === beforePrompt.prompts + 1,
@@ -623,9 +646,9 @@ async function run() {
     const online = await waitFor((s) => s.status === 'Back online.', { label: 'the back-online announcement', timeout: 4000 });
     assert(hasClass(online.active, 'horn'), `back online: focus moved to ${describeStop(online.active)}`);
     await hold('Space');
-    const afterFlip = await waitFor((s) => s.horning, { label: 'a keyboard blast after the connection flips', timeout: 3000 });
+    const afterFlip = await waitFor((s) => s.horning, { label: 'a keyboard blast after the connection flips' });
     await release('Space');
-    await waitFor((s) => !s.horning, { label: 'release after the connection flip', timeout: 3000 });
+    await waitFor((s) => !s.horning, { label: 'release after the connection flip' });
     assertFocusRing((await snapshot()).active, 'after a blast following the offline flip');
     console.log('  announced, not moved: focus stayed on the horn through offline, online and a blast');
 

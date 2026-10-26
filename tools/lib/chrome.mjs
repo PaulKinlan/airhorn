@@ -157,7 +157,13 @@ export async function launchChrome({
   extraFlags = [],
   label = 'chrome',
   timeoutMs = 15000,
-  discoveryMs = 5000,
+  // Bound on /json/list discovery, generous on purpose (airhorn-sesh): Chrome's
+  // DevTools endpoint answers LATE on a loaded box - measured at 5 s on a 2-core
+  // VM with other lanes' suites running, which read as a launch failure in a
+  // browser suite that was fine (visual-overrides: '/json/list never answered on
+  // port ...'). It is still capped by timeoutMs, so a suite that wants to fail
+  // fast on a real launch failure passes a lower bound explicitly.
+  discoveryMs = 15000,
   profileDir: givenProfileDir = null,
   keepProfile = false,
   discoverPage = true,

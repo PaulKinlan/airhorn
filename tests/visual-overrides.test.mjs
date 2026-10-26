@@ -46,6 +46,7 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { WAIT_TIMEOUT_MS, waitForCondition } from './support/poll.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -119,6 +120,15 @@ async function run() {
       ws.send(JSON.stringify({ id, method, params }));
     });
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    // Wait for a STATE, never for the clock (airhorn-sesh): every sleep-then-read
+    // below used to give the app 150-400 ms to react, which is a machine-state
+    // assertion - on a loaded box the key event, the class change and the style
+    // flush queue behind other lanes and a correct app read red.
+    const waitFor = async (predicate, { label = 'condition', timeout = WAIT_TIMEOUT_MS } = {}) =>
+      waitForCondition(async () => {
+        const value = await predicate();
+        return value || null;
+      }, { label, timeout, observe: () => 'see the failure above' });
     const evaluate = async (expression) => {
       const r = await send('Runtime.evaluate', { expression, returnByValue: true });
       if (r.exceptionDetails) {
@@ -206,7 +216,8 @@ async function run() {
     // 1b. Keyboard focus ring survives: real Tab -> :focus-visible with a
     // painted >=3px outline (the UA palette may recolour it; painting is the contract).
     await pressKey('Tab', 'Tab', 9);
-    await sleep(150);
+    await waitFor(() => evaluate(`document.activeElement === document.querySelector('.horn') && document.activeElement.matches(':focus-visible')`),
+      { label: 'Tab to land :focus-visible on the horn' });
     const focus = await evaluate(`(() => {
       const el = document.activeElement;
       const cs = getComputedStyle(el);
@@ -228,8 +239,7 @@ async function run() {
     // (outline) must be painted at real width and the horn must settle (translate).
     // Focus is still on the horn from the Tab above; hold Space through CDP.
     await send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, text: ' ' });
-    await sleep(400);
-    const pressed = await evaluate(`(() => {
+    const readPressed = () => evaluate(`(() => {
       const horn = document.querySelector('.horn');
       const cs = getComputedStyle(horn);
       return {
@@ -239,6 +249,10 @@ async function run() {
         translate: cs.translate,
       };
     })()`);
+    const pressed = await waitFor(async () => {
+      const state = await readPressed();
+      return state.horning && state.ariaPressed === 'true' ? state : null;
+    }, { label: 'the forced-colors pressed state after holding Space' });
     if (!pressed.horning || pressed.ariaPressed !== 'true') {
       throw new Error(`Forced colors: held Space did not enter the pressed state: ${JSON.stringify(pressed)}`);
     }
@@ -358,8 +372,7 @@ async function run() {
     // still on the horn; hold Space. (A Tab here would move to the installer
     // button and sound nothing.)
     await send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, text: ' ' });
-    await sleep(400);
-    const census = await evaluate(`(() => {
+    const readCensus = () => evaluate(`(() => {
       const all = document.getAnimations({ subtree: true });
       return {
         horning: document.querySelector('.horn').classList.contains('horning'),
@@ -370,9 +383,12 @@ async function run() {
         })),
       };
     })()`);
-    if (!census.horning) {
-      throw new Error(`reduced motion: horn did not enter the pressed state: ${JSON.stringify(census)}`);
-    }
+    // Wait for the pressed state, THEN read the census: the claim is "nothing
+    // animates while it sounds", which is a state condition, not a 400 ms one.
+    const census = await waitFor(async () => {
+      const state = await readCensus();
+      return state.horning ? state : null;
+    }, { label: 'the reduced-motion pressed state after holding Space' });
     if (census.running.length > 0) {
       throw new Error(
         `reduced motion: ${census.running.length} animation(s)/transition(s) still running while sounding: ` +
@@ -567,9 +583,13 @@ async function run() {
     await send('Network.enable');
     await send('Network.setBlockedURLs', { urls: ['*styles/*.css'] });
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await sleep(600);
 
-    const fallbackHeading = await evaluate(`(() => {
+    // Wait for the fallback heading to REACH THE SCREEN, not for 600 ms to pass:
+    // the navigation, the blocked stylesheet's failure and the inline watchdog
+    // that adds .stylesheet-failed are all queued behind other lanes on a loaded
+    // box, and the old sleep read `null` for an element that had not been
+    // created yet - a correct page reading as a broken one (airhorn-sesh).
+    const readFallbackHeading = () => evaluate(`(() => {
       const el = document.querySelector('.horn-label');
       if (!el) return null;
       const cs = getComputedStyle(el);
@@ -586,7 +606,12 @@ async function run() {
       };
     })()`);
 
-    if (!fallbackHeading || !fallbackHeading.isPainted) {
+    const fallbackHeading = await waitFor(async () => {
+      const heading = await readFallbackHeading();
+      return heading && heading.isPainted ? heading : null;
+    }, { label: 'the blocked-stylesheet fallback heading to paint' });
+
+    if (!fallbackHeading.isPainted) {
       throw new Error(`Fallback heading (.horn-label) failed to paint under blocked stylesheet: ${JSON.stringify(fallbackHeading)}`);
     }
     if (fallbackHeading.fontFamily !== expectedSystemStack) {
