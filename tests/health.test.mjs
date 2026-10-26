@@ -1,7 +1,7 @@
 /*
  * tests/health.test.mjs — GET /health tells the truth about the running build (airhorn-uexx)
  *
- * server.ts is the production origin (DEPLOY.md): a Deno static server over
+ * server.ts is the production origin (docs/runbooks/DEPLOY.md): a Deno static server over
  * dist/. Its /health endpoint reports status, version, commit sha and build
  * timestamp, and the contract this suite pins is the one an operator leans on:
  *

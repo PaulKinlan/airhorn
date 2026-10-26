@@ -7,7 +7,7 @@ import { serveDir } from "jsr:@std/http@^1.0.25/file-server";
 // the route costs one string write under load.
 //
 // Each value has a build/deploy-time override (set these when you build or
-// upload dist/, e.g. from CI — see DEPLOY.md) and a run-time fallback:
+// upload dist/, e.g. from CI — see docs/runbooks/DEPLOY.md) and a run-time fallback:
 //
 //   version        APP_VERSION      -> package.json's "version" -> "unknown"
 //   commit         GIT_COMMIT       -> `git rev-parse --short HEAD`, once

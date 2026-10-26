@@ -68,7 +68,7 @@ the recipe and the permissions `server.ts` asks for cannot drift apart again.
 
 `"unknown"` is a truthful answer, not an error — a host that ships only `dist/` has
 no `.git` to ask. Where you would rather not grant git execution at all, stamp the
-value at build time instead: [DEPLOY.md](DEPLOY.md)'s deployment recipe sets
+value at build time instead: [docs/runbooks/DEPLOY.md](docs/runbooks/DEPLOY.md)'s deployment recipe sets
 `APP_VERSION`, `GIT_COMMIT` and `BUILD_TIMESTAMP` and runs `server.ts` with **no
 `--allow-run`** — a stamped value is read before the git fallback is ever reached,
 and `tests/docs-recipe.test.mjs` runs that recipe as printed, too.
@@ -81,6 +81,12 @@ build/deploy-time override and a safe fallback (`APP_VERSION` → package.json �
 `BUILD_TIMESTAMP` → server start time), so the route never blocks and never errors;
 `curl -s localhost:8000/health` is the one-line proof of a deployment.
 `tests/health.test.mjs` pins the contract.
+
+Operator runbooks live in [docs/runbooks/](docs/runbooks/): deploy and health
+([DEPLOY.md](docs/runbooks/DEPLOY.md)), the rollback plan
+([ROLLBACK.md](docs/runbooks/ROLLBACK.md)), a two-minute real-device check
+([PHONE-CHECK.md](docs/runbooks/PHONE-CHECK.md)) and what our evidence does not
+cover ([EVIDENCE-LIMITS.md](docs/runbooks/EVIDENCE-LIMITS.md)).
 
 ## Offline and updates
 
@@ -244,14 +250,14 @@ way. A suite that dies before reporting is shown as `no result` and still fails 
 All automated test passes and performance numbers in this repository were produced
 by a synthetic harness on a single Linux VM running Chromium.
 
-See [EVIDENCE-LIMITS.md](EVIDENCE-LIMITS.md) for a blunt inventory of what our
+See [EVIDENCE-LIMITS.md](docs/runbooks/EVIDENCE-LIMITS.md) for a blunt inventory of what our
 evidence does not cover (zero WebKit/Safari or Gecko verification, synthetic
 `AnalyserNode` probes instead of human ears, self-signed local certs instead of public
 HTTPS, performance measured by emulated mobile throttling or by an unthrottled desktop
 headless harness rather than on a phone, WebMCP flags, and artificial test shims), what
 closing each gap entails, and what it costs.
 
-[PHONE-CHECK.md](PHONE-CHECK.md) is the same gaps as a two-minute checklist you can run
+[PHONE-CHECK.md](docs/runbooks/PHONE-CHECK.md) is the same gaps as a two-minute checklist you can run
 on a real phone (Android Chrome, iOS Safari), with the exact pass/fail observable for
 each step - useful, because our evidence is only ever a headless Chromium on a Linux VM.
 

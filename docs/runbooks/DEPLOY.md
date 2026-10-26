@@ -91,7 +91,7 @@ npm ci
 `npm ci`, not `npm install`: it installs exactly `package-lock.json` and fails
 if the two disagree, which is what you want for a ship. Observed, from a clean
 `git archive` copy of the repo (`npm install` also works — that is what
-[README.md](README.md) shows — but it may rewrite the lockfile):
+[README.md](../../README.md) shows — but it may rewrite the lockfile):
 
 ```
 added 14 packages, and audited 15 packages in 1s

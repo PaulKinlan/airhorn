@@ -16,7 +16,7 @@
  *                         offline-play check, WebMCP tool listing (flag on),
  *                         installability probe (manifest + SW + beforeinstallprompt),
  *                         published-file inventory (raw and gzip bytes per file,
- *                         plus the totals DEPLOY.md quotes)
+ *                         plus the totals docs/runbooks/DEPLOY.md quotes)
  *
  * Exit code 0 only if every REQUIRED capture succeeded; assertions that cannot
  * hold without HTTPS (a real beforeinstallprompt on a device) are recorded, not
@@ -210,7 +210,7 @@ async function openBrowser(extraFlags = []) {
 }
 
 // The published-file inventory is the deploy pack's size claim, so it records the
-// gzip size of every file as well as the raw size (airhorn-2rxv): DEPLOY.md used
+// gzip size of every file as well as the raw size (airhorn-2rxv): docs/runbooks/DEPLOY.md used
 // to quote a gzip total that nothing in the pack could reproduce, which made a
 // stale number indistinguishable from a fresh one. zlib level 9, i.e. what
 // `gzip -9` writes; a host's own compressor may beat it (brotli more so).
@@ -392,7 +392,7 @@ async function main() {
     url: origin + '/',
     chrome: chromeBin(),
     publishedFiles: await inventoryDist(),
-    // Totals are what DEPLOY.md quotes; keeping them here means the doc's size
+    // Totals are what docs/runbooks/DEPLOY.md quotes; keeping them here means the doc's size
     // claim is a read of this file, not a hand-measurement that goes stale.
     publishedTotals: null,
     captures: [],

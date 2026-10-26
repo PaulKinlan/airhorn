@@ -225,7 +225,7 @@ tar -xzf "$tarball" -C "$HOME/airhorn-v1-artifact"
 
 To re-fetch it **from production** instead (this is also how you check that the live site is
 still serving the archived bytes), run this from a checkout of this repo - it locates
-`ROLLBACK.md` itself, so there is nothing to edit. **It downloads into a scratch directory,
+this file itself (`docs/runbooks/ROLLBACK.md`), so there is nothing to edit. **It downloads into a scratch directory,
 never into the archive**: the archive is the rollback target, so a check that overwrote it
 would destroy the thing it is checking before it knows whether the origin has drifted (an
 earlier version of this recipe did exactly that).
@@ -233,8 +233,11 @@ earlier version of this recipe did exactly that).
 ```bash
 repo=$(git rev-parse --show-toplevel)          # run from the checkout, before the cd
 scratch=$(mktemp -d)                           # NOT ~/airhorn-v1-artifact: see above
+# this file, wherever the tree keeps it - it lives in docs/runbooks/, not the repo root,
+# and hardcoding the old root path made this recipe fail with "No such file or directory".
+runbook="$repo/docs/runbooks/ROLLBACK.md"
 awk -F'|' '{p=$2; h=$3; gsub(/^ +| +$/, "", p); gsub(/^ +| +$/, "", h);
-            if (length(h)==64) print p}' "$repo/ROLLBACK.md" > "$scratch/paths.txt"
+            if (length(h)==64) print p}' "$runbook" > "$scratch/paths.txt"
 while IFS= read -r path; do
   mkdir -p "$scratch/live/$(dirname "$path")"   # inside live/, because that is where -o writes
   curl -sS --compressed --fail -o "$scratch/live/$path" "https://airhorner.com/${path// /%20}"
@@ -243,10 +246,10 @@ done < "$scratch/paths.txt"
 # (It is inlined here so the check cannot be skipped by the download looking plausible.)
 ( set -euo pipefail
   files=54
-  rows=$(grep -c '| [0-9a-f]\{64\} |' "$repo/ROLLBACK.md")
+  rows=$(grep -c '| [0-9a-f]\{64\} |' "$runbook")
   [ "$rows" -eq "$files" ] || { echo "this table has $rows rows, expected $files" >&2; exit 1; }
   awk -F'|' '{p=$2; h=$3; gsub(/^ +| +$/, "", p); gsub(/^ +| +$/, "", h);
-              if (length(h)==64) print p"\t"h}' "$repo/ROLLBACK.md" |
+              if (length(h)==64) print p"\t"h}' "$runbook" |
   while IFS=$'\t' read -r p want; do
     got=$(sha256sum "$scratch/live/$p" 2>/dev/null | cut -d' ' -f1 || true)
     [ "$got" = "$want" ] || { echo "MISMATCH: $p" >&2; exit 1; }
@@ -586,15 +589,17 @@ carries on, and an empty manifest makes a per-file loop do nothing and "succeed"
 ```bash
 # (b) from a checkout of this repo, checking the table below against an archive made beside
 #     it (the form that does not need MANIFEST.tsv). Run it HERE, not in the archive:
-#     ROLLBACK.md lives in the repo and an archive does not carry it. Pass the archive path
-#     as $1 if it is not the default.
+#     this file lives in the repo (docs/runbooks/ROLLBACK.md) and an archive does not carry
+#     it. Pass the archive path as $1 if it is not the default.
 ( set -euo pipefail
+  repo=$(git rev-parse --show-toplevel)         # run from the checkout
+  runbook="$repo/docs/runbooks/ROLLBACK.md"
   archive="${1:-$HOME/airhorn-v1-artifact}"
   files=54
-  rows=$(grep -c '| [0-9a-f]\{64\} |' ROLLBACK.md)
+  rows=$(grep -c '| [0-9a-f]\{64\} |' "$runbook")
   [ "$rows" -eq "$files" ] || { echo "this table has $rows rows, expected $files" >&2; exit 1; }
   awk -F'|' '{p=$2; h=$3; gsub(/^ +| +$/,"",p); gsub(/^ +| +$/,"",h);
-              if (length(h)==64) print p"\t"h}' ROLLBACK.md |
+              if (length(h)==64) print p"\t"h}' "$runbook" |
   while IFS=$'\t' read -r p want; do
     got=$(sha256sum "$archive/live/$p" 2>/dev/null | cut -d' ' -f1 || true)
     [ "$got" = "$want" ] || { echo "MISMATCH: $p - do not deploy" >&2; exit 1; }
