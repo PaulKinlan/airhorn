@@ -16,6 +16,224 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
+ * Converts a glob pattern (supporting * and **) to a RegExp.
+ */
+export function globToRegex(glob) {
+  let reStr = '^';
+  let i = 0;
+  while (i < glob.length) {
+    const c = glob[i];
+    if (c === '*' && glob[i + 1] === '*') {
+      if (glob[i + 2] === '/') {
+        reStr += '(?:.+/)?';
+        i += 3;
+      } else {
+        reStr += '.*';
+        i += 2;
+      }
+    } else if (c === '*') {
+      reStr += '[^/]*';
+      i += 1;
+    } else if (c === '?') {
+      reStr += '[^/]';
+      i += 1;
+    } else if (c === '[') {
+      const closingIdx = glob.indexOf(']', i + 1);
+      if (closingIdx !== -1) {
+        let inner = glob.slice(i + 1, closingIdx);
+        let negated = false;
+        if (inner.startsWith('!') || inner.startsWith('^')) {
+          negated = true;
+          inner = inner.slice(1);
+        }
+        let classPattern = '';
+        for (let j = 0; j < inner.length; j++) {
+          const ch = inner[j];
+          if (ch === '-' && j > 0 && j < inner.length - 1) {
+            classPattern += '-';
+          } else if ('\\^$-[]'.includes(ch)) {
+            classPattern += '\\' + ch;
+          } else {
+            classPattern += ch;
+          }
+        }
+        if (negated) {
+          reStr += '[^/' + classPattern + ']';
+        } else {
+          reStr += '[' + classPattern.replace(/\//g, '') + ']';
+        }
+        i = closingIdx + 1;
+      } else {
+        reStr += '\\[';
+        i += 1;
+      }
+    } else if ('+?.()|^$[]{}'.includes(c)) {
+      reStr += '\\' + c;
+      i += 1;
+    } else {
+      reStr += c;
+      i += 1;
+    }
+  }
+  reStr += '$';
+  return new RegExp(reStr);
+}
+
+/**
+ * Checks whether a glob pattern matches at least one file on disk.
+ */
+export function globMatchesAny(pattern, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
+  const fileExists = existsFn || fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+
+  if (!pattern.includes('*') && !pattern.includes('?') && !pattern.includes('[')) {
+    return fileExists(pattern);
+  }
+
+  const baseDirPart = pattern.split(/[*?[]/)[0];
+  const lastSlash = baseDirPart.lastIndexOf('/');
+  const baseDir = lastSlash >= 0 ? baseDirPart.slice(0, lastSlash) : '';
+
+  const dirOnDisk = baseDir ? path.join(root, baseDir) : root;
+
+  let stat;
+  try {
+    stat = fs.statSync(dirOnDisk);
+  } catch {
+    return false;
+  }
+  if (!stat.isDirectory()) {
+    return false;
+  }
+
+  const regex = globToRegex(pattern);
+
+  function walk(currentDir, relPrefix) {
+    let entries;
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const ent of entries) {
+      const childRel = relPrefix ? `${relPrefix}/${ent.name}` : ent.name;
+      if (ent.isDirectory()) {
+        if (walk(path.join(currentDir, ent.name), childRel)) {
+          return true;
+        }
+      } else {
+        if (regex.test(childRel)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  return walk(dirOnDisk, baseDir);
+}
+
+/**
+ * Validates suite-map integrity across all 4 violation classes:
+ * 1. zero_match_glob: Pattern contains wildcards but matches 0 files under root.
+ * 2. missing_literal: Plain pattern path does not exist on disk (! and ~ rows skipped).
+ * 3. glob_suite_token: Suite token contains wildcard metacharacters (*, ?, [).
+ * 4. missing_suite: Suite file is missing from disk and not declared pending.
+ *
+ * Returns Array<{ type: string, token: string, pattern?: string, message: string }>
+ */
+export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
+  const fileExists = existsFn || fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  const pendingDeclared = extractPendingSuites(tsvText);
+  const violations = [];
+
+  for (const line of tsvText.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const parts = trimmed.split('\t');
+    const pattern = parts[0] ? parts[0].trim() : '';
+    if (!pattern) continue;
+
+    const suiteTokens = parts.slice(1).join(' ').trim().split(/\s+/).filter(Boolean);
+
+    // 1 & 2. Pattern side validation
+    if (pattern.startsWith('~')) {
+      // Pending declaration: allowed to be absent until landed
+    } else if (pattern.startsWith('!')) {
+      const cleanPat = pattern.slice(1);
+      const isGlob = cleanPat.includes('*') || cleanPat.includes('?') || cleanPat.includes('[');
+      if (isGlob) {
+        if (!globMatchesAny(cleanPat, { root, existsFn, fileExists })) {
+          violations.push({
+            type: 'zero_match_glob',
+            token: pattern,
+            pattern,
+            message: `Exemption glob pattern matches zero files on disk: ${pattern}`,
+          });
+        }
+      } else {
+        if (!fileExists(cleanPat)) {
+          violations.push({
+            type: 'missing_literal',
+            token: pattern,
+            pattern,
+            message: `Exemption path does not exist on disk: ${pattern}`,
+          });
+        }
+      }
+    } else {
+      const isGlob = pattern.includes('*') || pattern.includes('?') || pattern.includes('[');
+      if (isGlob) {
+        if (!globMatchesAny(pattern, { root, existsFn, fileExists })) {
+          violations.push({
+            type: 'zero_match_glob',
+            token: pattern,
+            pattern,
+            message: `Mapped glob pattern matches zero files on disk: ${pattern}`,
+          });
+        }
+      } else {
+        if (!fileExists(pattern)) {
+          violations.push({
+            type: 'missing_literal',
+            token: pattern,
+            pattern,
+            message: `Mapped path does not exist on disk: ${pattern}`,
+          });
+        }
+      }
+    }
+
+    // 3 & 4. Suite side validation
+    for (const token of suiteTokens) {
+      if (token.includes('*') || token.includes('?') || token.includes('[')) {
+        violations.push({
+          type: 'glob_suite_token',
+          token,
+          pattern,
+          message: `Suite token contains wildcard metacharacters: ${token} (referenced by ${pattern})`,
+        });
+        continue;
+      }
+
+      if (isPendingSuite(token, pendingDeclared, fileExists)) {
+        continue;
+      }
+
+      if (!fileExists(token)) {
+        violations.push({
+          type: 'missing_suite',
+          token,
+          pattern,
+          message: `Suite does not exist on disk: ${token} (referenced by ${pattern})`,
+        });
+      }
+    }
+  }
+
+  return violations;
+}
+
+/**
  * Extracts all suite paths declared pending via ~ rows.
  */
 export function extractPendingSuites(tsvText) {
@@ -108,13 +326,35 @@ export function main(args = process.argv.slice(2), { root = DEFAULT_ROOT, exists
   const contractPath = path.join(root, '.fleet', 'coverage-contract.json');
 
   const tsvText = fs.readFileSync(tsvPath, 'utf8');
-  const derived = deriveCoverageContract(tsvText, { root, existsFn, fileExists });
-  const formatted = formatCoverageContract(derived);
 
   if (args.includes('--stdout')) {
+    const derived = deriveCoverageContract(tsvText, { root, existsFn, fileExists });
+    const formatted = formatCoverageContract(derived);
     process.stdout.write(formatted);
     return 0;
   }
+
+  if (args.includes('--validate-map')) {
+    const violations = validateSuiteMap(tsvText, { root, existsFn, fileExists });
+    if (violations.length > 0) {
+      for (const v of violations) {
+        console.error(`FAIL: suite-map: [${v.type}] ${v.message}`);
+      }
+      return 1;
+    }
+    return 0;
+  }
+
+  const violations = validateSuiteMap(tsvText, { root, existsFn, fileExists });
+  if (violations.length > 0) {
+    for (const v of violations) {
+      console.error(`FAIL: suite-map: [${v.type}] ${v.message}`);
+    }
+    return 1;
+  }
+
+  const derived = deriveCoverageContract(tsvText, { root, existsFn, fileExists });
+  const formatted = formatCoverageContract(derived);
 
   if (args.includes('--check')) {
     let current = '';

@@ -65,8 +65,6 @@ tools/lib/**	tests/test-support.test.js
 public/sw.js	tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/sw-failover.test.mjs
 public/manifest.json	tests/sw-offline.test.mjs test/sw-offline.test.mjs
 public/sounds/**	tests/sw-offline.test.mjs test/sw-offline.test.mjs
-# The install-compat shim affects the page the a11y suite drives.
-public/scripts/**	tests/a11y.test.mjs test/a11y.test.mjs
 # The stylesheet is behaviour, not decoration: the a11y suite pins computed
 # styles and the horn's >=3:1 boundary ring, the keyboard suite asserts the
 # focus rings it paints are a visible 3:1 indicator (airhorn-bjk1), and
@@ -107,6 +105,7 @@ tests/health.test.mjs	tests/health.test.mjs
 # cost decision as keeping sw-failover off index.html (airhorn-iwf). A change
 # to the suite runs the suite; the cross-tab assertions travel with it.
 tests/multitab.test.mjs	tests/multitab.test.mjs
+tests/docs-recipe.test.mjs	tests/docs-recipe.test.mjs
 ~test/a11y.test.mjs	test/a11y.test.mjs
 ~test/sw-offline.test.mjs	test/sw-offline.test.mjs
 ~test/webmcp.test.mjs	test/webmcp.test.mjs

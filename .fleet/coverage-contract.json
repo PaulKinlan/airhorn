@@ -79,9 +79,6 @@
  "public/sounds/**": [
   "tests/sw-offline.test.mjs"
  ],
- "public/scripts/**": [
-  "tests/a11y.test.mjs"
- ],
  "public/styles/**": [
   "tests/a11y.test.mjs",
   "tests/keyboard.test.mjs",
