@@ -60,7 +60,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { quiescenceProbe, waitForQuiescence } from '../tests/support/quiescence.mjs';
+import { installSignalExit } from '../tests/support/signal-exit.mjs';
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
+
+// A bound-kill (fleet-gate's SIGTERM, a job-tree reaper, Ctrl-C) never runs the
+// try/finally below, so a mid-run kill left the chrome tree and its /tmp profile
+// behind (airhorn-aaxm, spot: this tool was one of two that drove a browser and
+// registered no handler). Register the live launch and reap it synchronously
+// inside the handler's grace - killNow() is the launcher's own marker sweep +
+// tree kill + profile rm, sized to fit that grace (airhorn-gau8).
+let liveBrowser = null;
+installSignalExit(() => {
+  const browser = liveBrowser;
+  liveBrowser = null;
+  browser?.killNow();
+});
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -466,6 +480,8 @@ async function main() {
       timeoutMs: 20000,
       discoveryMs: 20000,
     });
+    // Registered before the ws handshake: from here the handler owns the reap.
+    liveBrowser = browser;
     ws = await connectPage(browser, { label: 'soak-profile', timeoutMs: 20000 });
 
     let msgId = 1;
@@ -1072,6 +1088,7 @@ async function main() {
     // The handle's teardown is the launcher's: marker sweep, tree kill, profile
     // rm - and the rm runs before its first await (airhorn-5xqi's writeback
     // race cannot recreate Default/ after it).
+    liveBrowser = null; // this path owns the reap now; a late signal must not repeat it
     if (browser) await browser.close();
   }
 }
