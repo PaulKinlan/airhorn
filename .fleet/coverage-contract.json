@@ -55,7 +55,8 @@
   "tests/health.test.mjs"
  ],
  "tools/*": [
-  "tests/gate-smoke.test.js"
+  "tests/gate-smoke.test.js",
+  "tests/gate-map.test.mjs"
  ],
  "tools/cache-growth.mjs": [
   "tests/tool-bound-kill.test.mjs"
@@ -86,7 +87,8 @@
   "tests/reflow-zoom.test.mjs"
  ],
  ".fleet/coverage-contract.json": [
-  "tests/gate-smoke.test.js"
+  "tests/gate-smoke.test.js",
+  "tests/gate-map.test.mjs"
  ],
  "README.md": [
   "tests/docs-recipe.test.mjs"
@@ -106,6 +108,7 @@
  "tests/support/**": [
   "tests/a11y.test.mjs",
   "tests/docs-recipe.test.mjs",
+  "tests/gate-map.test.mjs",
   "tests/health.test.mjs",
   "tests/keyboard.test.mjs",
   "tests/multitab.test.mjs",
