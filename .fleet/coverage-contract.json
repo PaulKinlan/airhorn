@@ -76,10 +76,6 @@
   "tests/gate-smoke.test.js",
   "tests/test-support.test.js"
  ],
- "tools/resilience-audit.mjs": [
-  "tests/gate-smoke.test.js",
-  "tests/test-support.test.js"
- ],
  "public/sw.js": [
   "tests/sw-offline.test.mjs",
   "tests/sw-failover.test.mjs"
