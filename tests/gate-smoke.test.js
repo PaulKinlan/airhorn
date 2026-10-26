@@ -128,16 +128,13 @@ const contractDrift = (contract, tsvText = fs.readFileSync(path.join(root, 'tool
   return problems;
 };
 
-// Records the probe's dist/ as the CURRENT tree's, the way a real build does: the gate
-// prints the wanted fingerprint in its "not from this tree" reason, so the test can
-// stamp it without duplicating the hashing rule (drift between test and gate would
-// defeat the point). Returns the stamp.
+// Records the probe's dist/ as the CURRENT tree's, the way a real build does. The gate
+// exposes this as --stamp-dist (a repair/testing query): it asserts that what is on disk
+// is current, and if either side changes afterwards the next decision rebuilds.
 const stampProbeDist = (probe) => {
-  const res = probe.run(['--build-plan', '--changed', 'tests/pass.test.js']);
-  const m = /fingerprint (?:none|[0-9a-f]{64}) != ([0-9a-f]{64})/.exec(res.stdout);
-  assert.ok(m, `expected the gate to name the wanted fingerprint, got: ${res.stdout}`);
-  fs.writeFileSync(path.join(probe.probe, 'dist', '.fast-gate-inputs'), m[1]);
-  return m[1];
+  const res = probe.run(['--stamp-dist']);
+  assert.equal(res.status, 0, res.stderr);
+  return res.stdout;
 };
 
 const buildGateProbe = () => {
@@ -159,6 +156,9 @@ const buildGateProbe = () => {
   fs.writeFileSync(path.join(probe, 'pending-src.txt'), 'pending');
   fs.writeFileSync(path.join(probe, 'mixed-src.js'), '// mixed');
   fs.writeFileSync(path.join(probe, 'README.md'), '# probe');
+  // dist/ is gitignored in the real repo, so it never appears as a CHANGED path. The
+  // probe must mirror that or every case that plants a dist/ would report it unmapped.
+  fs.writeFileSync(path.join(probe, '.gitignore'), 'dist/\nnode_modules/\n');
   fs.writeFileSync(path.join(toolsDir, 'suite-map.tsv'), [
     'src/a.js\ttests/pass.test.js',
     'pending-src.txt\ttests/pending.test.js',
@@ -698,50 +698,41 @@ test('ambient GSM_TOOLS_ROOT redirection is impossible without the minted guard 
 // node's own text (so a visibility override below it survives), 'text'
 // collects.
 
-test('the build decision rebuilds when a build input is newer than dist/, even for a tests-only delta (airhorn-k8sd)', () => {
-  // The reviewer's scenario: the lane's own delta is tests-only, but the tree it is
-  // about to test arrived via a rebase that moved src/. "Did this delta touch a build
-  // input" is then the wrong question, and answering it served stale bytes to the
-  // browser suites. Fail-first: before the freshness arm this printed
-  // "keep (no build input changed)" for exactly this tree.
+test('an unstamped dist/ is never reused, whatever its mtime says (airhorn-k8sd)', () => {
+  // The reviewer's design: reuse requires a stamp that binds the working-tree build
+  // inputs AND the dist/ bytes. A dist/ with no stamp is unverified, even if it looks
+  // fresh - "newer than every input" is not evidence of anything.
   const probe = buildGateProbe();
   try {
     const distFile = path.join(probe.probe, 'dist', 'index.html');
     fs.mkdirSync(path.dirname(distFile), { recursive: true });
-    fs.writeFileSync(distFile, 'BUILT-FROM-SRC-V1');
-    const srcFile = path.join(probe.probe, 'src', 'a.js');
-    fs.writeFileSync(srcFile, '// SRC V2 CHANGE\n');
-    const old = new Date(Date.now() - 60_000);
-    fs.utimesSync(distFile, old, old);
+    fs.writeFileSync(distFile, 'DIST-WITH-NO-PROVENANCE');
+    const future = new Date(Date.now() + 5_000);
+    fs.utimesSync(distFile, future, future);
 
-    // With no fingerprint yet, the gate refuses the dist/ outright; stamp it as this
-    // tree's and the freshness arm is what has to catch the staleness.
-    stampProbeDist(probe);
     const res = probe.run(['--build-plan', '--changed', 'tests/pass.test.js']);
     assert.equal(res.status, 0, res.stderr);
-    assert.match(res.stdout, /build-plan: build \(/, `expected a build, got: ${res.stdout}`);
-    assert.match(res.stdout, /src\/a\.js is newer than dist\/index\.html/,
-      `the reason must name the stale input, got: ${res.stdout}`);
+    assert.match(res.stdout, /build-plan: build \(dist\/ carries no stamp/,
+      `an unstamped dist/ must not be reused: ${res.stdout}`);
   } finally {
     fs.rmSync(probe.probe, { recursive: true, force: true });
   }
 });
 
-test('the build decision keeps dist/ when it is newer than every build input (airhorn-5pqg)', () => {
+test('a stamped dist/ that matches its inputs and its own bytes is reused (airhorn-5pqg)', () => {
   const probe = buildGateProbe();
   try {
     const distFile = path.join(probe.probe, 'dist', 'index.html');
     fs.mkdirSync(path.dirname(distFile), { recursive: true });
     fs.writeFileSync(distFile, 'BUILT-NOW');
-    const future = new Date(Date.now() + 5_000);
-    fs.utimesSync(distFile, future, future);
     stampProbeDist(probe);
 
     const kept = probe.run(['--build-plan', '--changed', 'tests/pass.test.js']);
     assert.equal(kept.status, 0, kept.stderr);
-    assert.match(kept.stdout, /build-plan: keep \(/, `expected a keep, got: ${kept.stdout}`);
+    assert.match(kept.stdout, /build-plan: keep \(dist\/ is stamped for these inputs/,
+      `a matching stamp must be reused: ${kept.stdout}`);
 
-    // and the override still wins over a fresh dist/
+    // ... and the override still wins over a valid stamp.
     const forced = probe.run(['--build-plan', '--changed', 'tests/pass.test.js'], { FAST_GATE_FORCE_BUILD: '1' });
     assert.match(forced.stdout, /build-plan: build \(FAST_GATE_FORCE_BUILD=1\)/, forced.stdout);
   } finally {
@@ -749,18 +740,51 @@ test('the build decision keeps dist/ when it is newer than every build input (ai
   }
 });
 
-test('the build decision rebuilds when a build input arrives through the delta itself (airhorn-5pqg)', () => {
+test('the build decision rebuilds when a build input\'s BYTES change, not just its status text (airhorn-k8sd P1a)', () => {
+  // The reviewer's P1a: a file that is already 'M' and edited again keeps the same
+  // git status text, so a status-based stamp says "unchanged" while the bytes differ.
   const probe = buildGateProbe();
   try {
     const distFile = path.join(probe.probe, 'dist', 'index.html');
     fs.mkdirSync(path.dirname(distFile), { recursive: true });
     fs.writeFileSync(distFile, 'BUILT-NOW');
-    const future = new Date(Date.now() + 5_000);
-    fs.utimesSync(distFile, future, future);
+    const srcFile = path.join(probe.probe, 'src', 'a.js');
+    fs.writeFileSync(srcFile, '// dirty edit one\n');   // already 'M'
+    stampProbeDist(probe);
 
-    const res = probe.run(['--build-plan', '--changed', 'src/a.js']);
-    assert.equal(res.status, 0, res.stderr);
-    assert.match(res.stdout, /build-plan: build \(a changed path is a build input\)/, res.stdout);
+    const unchanged = probe.run(['--build-plan', '--changed', 'tests/pass.test.js']);
+    assert.match(unchanged.stdout, /build-plan: keep \(/, `baseline must keep: ${unchanged.stdout}`);
+
+    fs.writeFileSync(srcFile, '// dirty edit two, same git status\n');  // status text unchanged
+    const after = probe.run(['--build-plan', '--changed', 'tests/pass.test.js']);
+    assert.match(after.stdout, /build-plan: build .*working-tree build inputs changed/,
+      `changed bytes must rebuild even when git status text is identical: ${after.stdout}`);
+  } finally {
+    fs.rmSync(probe.probe, { recursive: true, force: true });
+  }
+});
+
+test('the build decision rebuilds when dist/ bytes change under a current stamp (airhorn-k8sd P1b)', () => {
+  // The reviewer's P1b: a stamp that is not bound to the OUTPUT bytes lets an older
+  // dist/ be copied in underneath it, and a tests-only selection then keeps it.
+  const probe = buildGateProbe();
+  try {
+    const distFile = path.join(probe.probe, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'BUILT-FROM-SRC-V2');
+    stampProbeDist(probe);
+
+    const kept = probe.run(['--build-plan', '--changed', 'tests/pass.test.js']);
+    assert.match(kept.stdout, /build-plan: keep \(/, `baseline must keep: ${kept.stdout}`);
+
+    // An older build copied in, stamp file untouched and still current for the inputs.
+    fs.writeFileSync(distFile, 'BUILT-FROM-SRC-V1-OLDER');
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(distFile, old, old);
+
+    const after = probe.run(['--build-plan', '--changed', 'tests/pass.test.js']);
+    assert.match(after.stdout, /build-plan: build .*bytes in dist\/ changed/,
+      `swapped dist bytes must rebuild even with a current stamp: ${after.stdout}`);
   } finally {
     fs.rmSync(probe.probe, { recursive: true, force: true });
   }
@@ -785,7 +809,7 @@ test('a dist-needing suite rebuilds an unfingerprinted dist/; a non-dist suite d
 
     const needs = probe.run(['--build-plan', '--changed', 'dist-src.txt']);
     assert.equal(needs.status, 0, needs.stderr);
-    assert.match(needs.stdout, /build-plan: build .*not from this tree/,
+    assert.match(needs.stdout, /build-plan: build \(dist\/ carries no stamp/,
       `a dist-needing suite must not reuse an unfingerprinted dist/: ${needs.stdout}`);
 
     // A suite that never mentions dist/ must not pay for a build, and must not fail

@@ -87,11 +87,12 @@ runner_for() {
   esac
 }
 
-LIST=0; BUILD_PLAN=0; BASE="${FAST_GATE_BASE:-}"; EXPLICIT=()
+LIST=0; BUILD_PLAN=0; STAMP_DIST=0; BASE="${FAST_GATE_BASE:-}"; EXPLICIT=()
 while [ $# -gt 0 ]; do
   case $1 in
     --list)    LIST=1; shift ;;
     --build-plan) BUILD_PLAN=1; shift ;;
+    --stamp-dist) STAMP_DIST=1; shift ;;
     --changed) EXPLICIT+=("${2:?--changed needs a path}"); shift 2 ;;
     --base)    BASE="${2:?--base needs a ref}"; shift 2 ;;
     *)         echo "fast-gate: unknown argument '$1'" >&2; exit 2 ;;
@@ -115,6 +116,74 @@ if [ "${#EXPLICIT[@]}" -eq 0 ]; then
                           | sed '/^$/d' | sort -u )
 else
   CHANGED=("${EXPLICIT[@]}")
+fi
+
+# --stamp-dist records the CURRENT tree and the CURRENT dist/ bytes as a matched pair,
+# for repair and for tests. It asserts nothing it cannot see: if either side changes
+# afterwards, the next decision rebuilds.
+# --- binding dist/ to the tree: a stamp over BOTH sides (airhorn-k8sd) --------------
+# The round-3 reviewer's P1a/P1b: a stamp over committed tree entries plus `git status`
+# TEXT cannot see a file that is already 'M' and edited again, and a stamp that is not
+# bound to the OUTPUT bytes lets an older dist/ be copied in underneath a current stamp.
+# So the stamp records two CONTENT digests - the working-tree build inputs, bytes
+# exactly as they are on disk (dirty or not), and the built outputs in dist/ - and
+# reuse requires both to match. A stale-dist green is worse than a slow gate.
+# Cost on this repo: 27 input files (~344K) and 27 output files (~332K), tens of ms.
+FP_FILE_NAME='.fast-gate-stamp'
+
+input_paths() { # existing build-input paths, relative to ROOT
+  local p
+  for p in src public index.html package.json package-lock.json deno.lock; do
+    [ -e "$ROOT/$p" ] && printf '%s\n' "$p"
+  done
+  for p in "$ROOT"/vite.config.*; do
+    [ -e "$p" ] && printf '%s\n' "${p#"$ROOT"/}"
+  done
+}
+
+content_digest() { # $1 = directory to walk from, rest = paths inside it
+  local base=$1; shift
+  [ "$#" -gt 0 ] || { echo "empty"; return; }
+  ( cd "$base" 2>/dev/null || exit 0
+    find "$@" -type f -print0 2>/dev/null \
+      | LC_ALL=C sort -z \
+      | xargs -0 -r sha256sum 2>/dev/null \
+      | sha256sum | awk '{print $1}' )
+}
+
+inputs_digest() {
+  local paths=()
+  mapfile -t paths < <(input_paths)
+  content_digest "$ROOT" ${paths[@]+"${paths[@]}"}
+}
+
+outputs_digest() { # everything in dist/ except the stamp itself
+  [ -d "$ROOT/dist" ] || { echo "empty"; return; }
+  ( cd "$ROOT/dist" || exit 0
+    find . -type f ! -name "$FP_FILE_NAME" -print0 2>/dev/null \
+      | LC_ALL=C sort -z \
+      | xargs -0 -r sha256sum 2>/dev/null \
+      | sha256sum | awk '{print $1}' )
+}
+
+read_stamp() { # prints "inputs=<h> outputs=<h>" from the stamp, or nothing
+  local f="$ROOT/dist/$FP_FILE_NAME" i='' o=''
+  [ -f "$f" ] || return 0
+  i=$(awk -F' ' '$1=="inputs"{print $2; exit}' "$f" 2>/dev/null)
+  o=$(awk -F' ' '$1=="outputs"{print $2; exit}' "$f" 2>/dev/null)
+  [ -n "$i" ] && [ -n "$o" ] && echo "inputs=$i outputs=$o"
+  return 0
+}
+
+write_stamp() {
+  mkdir -p "$ROOT/dist"
+  { echo "inputs $(inputs_digest)"; echo "outputs $(outputs_digest)"; } > "$ROOT/dist/$FP_FILE_NAME"
+}
+
+if [ "$STAMP_DIST" -eq 1 ]; then
+  write_stamp
+  echo "fast-gate: stamped dist/ ($(read_stamp))"
+  exit 0
 fi
 
 # Read MAP once into memory:
@@ -322,26 +391,6 @@ fi
 # touch a build input" is the WRONG question - dist/ can be stale while the delta is
 # tests-only. Comparing build-input mtimes against dist/index.html asks the question
 # that actually matters: was dist/ built from the tree we are about to test?
-BUILD_INPUT_PATHS='src public index.html package.json package-lock.json deno.lock'
-
-stale_build_input() { # $1 = dist entry point ; prints the first build input newer than it
-  local dist_ref=$1 p hit c
-  for p in $BUILD_INPUT_PATHS; do
-    [ -e "$ROOT/$p" ] || continue
-    if [ -d "$ROOT/$p" ]; then
-      hit=$(find "$ROOT/$p" -type f -newer "$dist_ref" -print -quit 2>/dev/null)
-    else
-      [ "$ROOT/$p" -nt "$dist_ref" ] && hit=$p
-    fi
-    [ -n "$hit" ] && { echo "${hit#"$ROOT"/}"; return 0; }
-  done
-  for c in "$ROOT"/vite.config.*; do
-    [ -e "$c" ] || continue
-    [ "$c" -nt "$dist_ref" ] && { echo "${c#"$ROOT"/}"; return 0; }
-  done
-  return 1
-}
-
 # Does any selected suite actually READ dist/? A suite that never touches dist/ does
 # not care whether it is fresh, so a tree that only selects those must not pay for a
 # build (and must not fail for want of one). Conservative on purpose: a suite that
@@ -363,56 +412,31 @@ suites_need_dist() {
   return 1
 }
 
-# The verifiable current-tree fingerprint the reviewer asked for (airhorn-k8sd): the
-# build inputs as they are committed (ls-tree) PLUS their working-tree state, hashed.
-# Written next to dist/ after a successful build, compared before any reuse, so a
-# dist/ produced by an earlier checkout - or by a tree with edits not yet committed -
-# can never be passed off as this tree's. One git ls-tree + one git status: ~40ms.
-FP_FILE_SUFFIX='.fast-gate-inputs'
-dist_fingerprint() {
-  local paths=() p
-  for p in src public index.html package.json package-lock.json deno.lock; do
-    [ -e "$ROOT/$p" ] && paths+=("$p")
-  done
-  for p in "$ROOT"/vite.config.*; do
-    [ -e "$p" ] && paths+=("${p#"$ROOT"/}")
-  done
-  [ "${#paths[@]}" -gt 0 ] || { echo "no-build-inputs"; return; }
-  {
-    git -C "$ROOT" ls-tree -r HEAD -- "${paths[@]}" 2>/dev/null
-    git -C "$ROOT" status --porcelain -uall -- "${paths[@]}" 2>/dev/null
-  } | sha256sum | awk '{print $1}'
-}
-
 build_decision() { # prints "<build|keep> <reason>"; never builds, never exits
-  local f stale changed_is_input=0
+  local f
   if [ "${FAST_GATE_FORCE_BUILD:-0}" = "1" ]; then
     echo "build FAST_GATE_FORCE_BUILD=1"; return
   fi
   if ! suites_need_dist ${RUN[@]+"${RUN[@]}"}; then
     echo "keep no selected suite reads dist/"; return
   fi
-  for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
-    case $f in
-      src/*|public/*|index.html|vite.config.*|package.json|package-lock.json|deno.lock) changed_is_input=1 ;;
-    esac
-  done
   if [ ! -f "$ROOT/dist/index.html" ]; then
     echo "build no dist/index.html to reuse"; return
   fi
-  if [ "$changed_is_input" -eq 1 ]; then
-    echo "build a changed path is a build input"; return
+  local stamp want_in want_out
+  stamp=$(read_stamp)
+  if [ -z "$stamp" ]; then
+    echo "build dist/ carries no stamp, so its bytes are unverified"; return
   fi
-  local have want
-  want=$(dist_fingerprint)
-  have=$([ -f "$ROOT/dist/$FP_FILE_SUFFIX" ] && cat "$ROOT/dist/$FP_FILE_SUFFIX")
-  if [ "$have" != "$want" ]; then
-    echo "build dist/ is not from this tree (fingerprint ${have:-none} != $want)"; return
+  want_in=$(inputs_digest)
+  want_out=$(outputs_digest)
+  if [ "${stamp#*inputs=}" != "$want_in" ] && [[ " $stamp " != *" inputs=$want_in "* ]]; then
+    echo "build the working-tree build inputs changed (stamp $stamp, now inputs=$want_in)"; return
   fi
-  if stale=$(stale_build_input "$ROOT/dist/index.html"); then
-    echo "build $stale is newer than dist/index.html, so dist/ predates this tree"; return
+  if [[ " $stamp " != *" outputs=$want_out "* ]]; then
+    echo "build the bytes in dist/ changed since the stamp (now outputs=$want_out)"; return
   fi
-  echo "keep dist/ matches this tree (fingerprint $want)"
+  echo "keep dist/ is stamped for these inputs and these output bytes (inputs=$want_in)"
 }
 
 # --build-plan is a QUERY like --list: it says whether the build WOULD run, and never
@@ -445,7 +469,7 @@ if [ "${_decision%% *}" != "keep" ]; then
     echo "fast-gate: FAIL - build failed; browser suites cannot run." >&2
     exit 1
   fi
-  dist_fingerprint > "$ROOT/dist/$FP_FILE_SUFFIX" 2>/dev/null || true
+  write_stamp || true
 fi
 
 printf 'fast-gate: running: %s\n' "${RUN[@]}"
