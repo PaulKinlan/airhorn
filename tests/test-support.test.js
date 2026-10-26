@@ -813,29 +813,48 @@ test('an audit that selected nothing still exits 0, and still writes a report (a
 
 test('a scenario error is a failed audit, and its row reaches the report (airhorn-w1wh review)', async () => {
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-audit-stub-'));
-  const saved = { out: process.env.RESILIENCE_OUT, only: process.env.RESILIENCE_ONLY };
-  process.env.RESILIENCE_OUT = out;   // so importing the tool does not leave an evidence dir behind
   try {
-    // The tool is import-guarded (it only drives the audit as an entry point), so
-    // this needs no browser and starts no server.
-    const audit = await import(pathToFileURL(RESILIENCE_TOOL).href);
-    // A stubbed failing scenario: exactly the shape withBrowser records when a
-    // scenario callback throws (result.error at the catch), with no browser.
-    const stubbed = [{ id: 'stub', name: 'stubbed failing scenario', error: 'Error: the scenario threw' }];
-    assert.equal(audit.auditExitCode(stubbed), 1, 'an ERROR row must make the audit fail');
-    assert.equal(audit.auditExitCode([]), 0, 'nothing selected is not a failure');
-    assert.equal(audit.auditExitCode([{ id: 'ok', renders: true, hornUsable: true }]), 0, 'measured, clean rows pass');
-
-    audit.writeReport(stubbed, out);
+    // A scenario that throws cannot be staged without a browser, so the tool takes
+    // one documented stub (RESILIENCE_STUB_SCENARIO) that records exactly that row
+    // and measures nothing. No browser, no server work beyond a handler.
+    const run = spawnSync(process.execPath, [RESILIENCE_TOOL], {
+      encoding: 'utf8',
+      timeout: 120000,
+      env: {
+        ...process.env,
+        RESILIENCE_STUB_SCENARIO: 'fail',
+        RESILIENCE_OUT: out,
+        RESILIENCE_ONLY: '',
+        CHROME_STEAL_OVERRIDE: '0.96',   // cannot matter: the stub never launches
+      },
+    });
+    const output = `${run.stdout || ''}${run.stderr || ''}`;
+    assert.notEqual(run.status, 0,
+      `a scenario that reported ERROR must not leave the process successful: ${output}`);
     const md = fs.readFileSync(path.join(out, 'report.md'), 'utf8');
     assert.match(md, /\| stub — stubbed failing scenario \| ERROR \|/, 'the failing scenario must be a row in the report');
-    assert.match(md, /the scenario threw/, 'the row must carry the error text, not just ERROR');
+    assert.match(md, /the scenario failed on purpose/, 'the row must carry the error text, not just ERROR');
     const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+    assert.equal(report.scenarios.length, 1);
     assert.equal(report.scenarios[0].id, 'stub', 'the row must survive into report.json');
   } finally {
-    if (saved.out === undefined) delete process.env.RESILIENCE_OUT; else process.env.RESILIENCE_OUT = saved.out;
-    if (saved.only === undefined) delete process.env.RESILIENCE_ONLY; else process.env.RESILIENCE_ONLY = saved.only;
     fs.rmSync(out, { recursive: true, force: true });
+  }
+
+  // The rule itself, which the entry point applies: any error row fails the audit,
+  // and an empty selection is the one case that stays 0.
+  const saved = { out: process.env.RESILIENCE_OUT };
+  process.env.RESILIENCE_OUT = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-audit-rule-'));
+  try {
+    const audit = await import(pathToFileURL(RESILIENCE_TOOL).href);
+    assert.equal(audit.auditExitCode([{ id: 'stub', name: 'stubbed failing scenario', error: 'boom' }]), 1,
+      'an ERROR row must make the audit fail');
+    assert.equal(audit.auditExitCode([]), 0, 'nothing selected is not a failure');
+    assert.equal(audit.auditExitCode([{ id: 'ok', renders: true, hornUsable: true }]), 0,
+      'measured, clean rows pass');
+  } finally {
+    fs.rmSync(process.env.RESILIENCE_OUT, { recursive: true, force: true });
+    if (saved.out === undefined) delete process.env.RESILIENCE_OUT; else process.env.RESILIENCE_OUT = saved.out;
   }
 });
 

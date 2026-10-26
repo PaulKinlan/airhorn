@@ -626,7 +626,15 @@ async function runAudit() {
   const only = (process.env.RESILIENCE_ONLY || '').split(',').map((s) => s.trim()).filter(Boolean);
   const want = (id) => only.length === 0 || only.includes(id);
 
+  // Test seam (airhorn-w1wh review, round 3): a scenario error is otherwise
+  // unreachable without a working browser, so a spawned run can stage exactly one
+  // failing row. It adds a row and measures nothing; unset in every normal run.
+  const stub = (process.env.RESILIENCE_STUB_SCENARIO || '').trim();
+
   try {
+    if (stub) {
+      results.push({ id: 'stub', name: 'stubbed failing scenario', error: `the scenario failed on purpose: ${stub}` });
+    } else {
     /* ---- 1. real offline after first load ---- */
     if (want('offline')) await withBrowser('offline', 'offline after first load', async ({ cdp }, collectors) => {
       reset();
@@ -1002,6 +1010,7 @@ async function runAudit() {
         pageErrors: [...afterJsCorruption.errors, ...afterShellCorruption.errors],
       };
     });
+    }
   } catch (err) {
     // A launch failure already recorded its row; every later scenario would say
     // the same thing. Anything else is a bug in the harness and must surface.
