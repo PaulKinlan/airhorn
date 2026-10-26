@@ -155,14 +155,14 @@ test('a page change selects the page suites', () => {
 });
 
 test('the split gives every concern its own row, and the gate cost tracks blast radius (airhorn-1l04)', () => {
-  // Read the map the way the gate does (parseSuiteMap, the same parser the
-  // contract drift check uses) instead of spawning `fast-gate.sh --list` once
-  // per path: this suite is itself on the tools/* row, and each spawn costs
-  // ~0.5 s, so a dozen shell-outs here is a tax on every tools change for an
-  // opinion the map already holds. The SELECTOR is exercised for real by the
-  // page-change test above; this one is about the rows.
-  const byPattern = new Map(parseSuiteMap().map(({ pattern, suites }) => [pattern, suites]));
-  const selectorsFor = (file) => byPattern.get(file) || [];
+  // Read the map through y7mx's single-sourced derivation (deriveMapOpinion), not
+  // by spawning `fast-gate.sh --list` once per path and not with a second parser:
+  // this suite is itself on the tools/* row, each spawn costs ~0.5 s, and a local
+  // parseSuiteMap copy was deleted when the mapping was single-sourced (airhorn-48ce)
+  // - which is exactly how this test rebased onto a ReferenceError. The SELECTOR is
+  // exercised for real by the page-change test above; this one is about the rows.
+  const byPattern = deriveMapOpinion(fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8'), { root });
+  const selectorsFor = (file) => [...(byPattern.get(file) || [])];
 
   // Every module under src/ is mapped: a new module with no row would make the
   // fast gate report 'unmapped' - loud, but only once someone edited it. This is
