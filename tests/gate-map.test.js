@@ -237,6 +237,23 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
   // index.html, which is why the page row above carries the copy assertions.
   assert.ok(listFor('public/sw.js').includes('tests/sw-failover.test.mjs'),
     'public/sw.js must still select the failover suite');
+  // (c) the REPLACEMENT coverage, asserted here rather than left implied. Before
+  // the split this test's "covered anyway" half was `src/main.js` selecting
+  // sw-failover, which the split made false. Dropping it must not leave the
+  // composition root ungated: if main.js stops selecting the suites that actually
+  // exercise it, this must fail. The pointer/keyboard path it wires is input.js's
+  // (its row owns the interaction suites), and main.js's own wiring is pinned by
+  // the browser-free structural suite - so both ends are named, not assumed.
+  const compositionRow = listFor('src/main.js');
+  for (const s of ['tests/modules.test.js', 'tests/resilience-ui.test.mjs']) {
+    assert.ok(compositionRow.includes(s),
+      `src/main.js must still select ${s} - the composition root cannot lose its coverage when the page row drops a suite, got ${JSON.stringify(compositionRow)}`);
+  }
+  const inputRow = listFor('src/input.js');
+  for (const s of ['tests/keyboard.test.mjs', 'tests/horn.test.js']) {
+    assert.ok(inputRow.includes(s),
+      `src/input.js must still select ${s} - the P0 pointer/keyboard semantics live there, got ${JSON.stringify(inputRow)}`);
+  }
 });
 
 test('the fleet coverage contract restates the map, not a stale opinion (airhorn-ona)', () => {
