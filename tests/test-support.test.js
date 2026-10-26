@@ -662,27 +662,54 @@ test('the steal seams cannot be used to bypass the ceiling outside a test contex
     'the context must be explicit, not implied by the presence of the variable');
 });
 
-test('the steal decision uses a window that ENDS NOW, not a lifetime average (airhorn-w1wh review)', async () => {
-  // Round 6, P2: 10,000 healthy ticks then 2,000 ticks at 96% averages 16%, which read
-  // as healthy and launched. The decision must come from the recent window.
+test('the steal decision uses ONLY the latest window, never an average or an earlier value (airhorn-w1wh review)', async () => {
+  // Round 7. The probe owns a baseline taken at call time, but each window is computed
+  // from its OWN two readings and the answer is the LAST window measured. No band
+  // returns early, and nothing falls back to an earlier number.
   const { stealRate, createStealProbe } = await import(`${pathToFileURL(CHROME_MJS).href}?w1wh-window=${Date.now()}`);
+  const probeOf = (readings) => {
+    const it = readings[Symbol.iterator]();
+    return createStealProbe({
+      readStat: () => {
+        const next = it.next();
+        if (next.done) throw new Error('readStat exhausted: the probe read more than the fixture allows');
+        return next.value;
+      },
+      sleep: () => {},
+    });
+  };
 
-  const healthy = { total: 10000, steal: 0 };
-  const starvedSince = { total: 12000, steal: 1920 };   // +2000 ticks, 1920 of them stolen
-  assert.equal((1920 / 12000).toFixed(2), '0.16', 'the trap: the lifetime average reads as 16%');
-  assert.ok(stealRate(healthy, starvedSince) > 0.9,
-    'the recent window must report the 96% steal, not the 16% lifetime average');
+  // (1) The reported case: {10000,0}, {10100,0}, {10300,170}. Averaging from the
+  // baseline gave 56.7% and launched; the latest window is 85% and must refuse.
+  assert.equal(((170 - 0) / (10300 - 10000)).toFixed(3), '0.567', 'the trap: baseline-to-now reads 56.7%');
+  assert.equal(probeOf([{ total: 10000, steal: 0 }, { total: 10100, steal: 0 }, { total: 10300, steal: 170 }]).rate(), 0.85,
+    'the latest window (10100 -> 10300) is 85% stolen and that is the verdict');
 
-  // And the probe takes its two readings from THIS call, never from module load.
-  const readings = [{ total: 50000, steal: 0 }, { total: 50200, steal: 192 }];
-  const probe = createStealProbe({ readStat: () => readings.shift(), sleep: () => {} });
-  assert.ok(probe.rate() > 0.9, 'the probe judges the delta between its own two readings');
+  // (2) Two healthy reads then a rise: the rate is the latest window, not the average.
+  assert.equal(probeOf([{ total: 10000, steal: 0 }, { total: 10100, steal: 20 }, { total: 10200, steal: 30 }]).rate(), 0.10,
+    'the second window (20 -> 30 of 100) is 10%, not the 15% average across both');
 
-  // A window too short to measure, or counters going backwards, is UNKNOWN - not 0.
+  // (3) Counters going backwards is UNKNOWN - and never the earlier healthy number.
+  const backwards = probeOf([{ total: 2000, steal: 100 }, { total: 1900, steal: 90 }]);
+  assert.equal(backwards.rate(), null, 'a counter that went backwards cannot produce a rate');
+  assert.match(backwards.reason(), /went backwards/, 'and the reason says so');
+
+  // (4) A window whose delta is too small is retried, then UNKNOWN - not 0%.
+  const short = probeOf([{ total: 10000, steal: 0 }, { total: 10004, steal: 0 }, { total: 10008, steal: 0 },
+    { total: 10012, steal: 0 }, { total: 10016, steal: 0 }]);
+  assert.equal(short.rate(), null, 'windows that advanced 4 ticks each are not a verdict');
+  assert.match(short.reason(), /too few ticks/, 'and the reason says which');
+
+  // ...and a short window followed by a real one still decides on the latest window.
+  assert.equal(probeOf([{ total: 10000, steal: 0 }, { total: 10004, steal: 0 },
+    { total: 10104, steal: 90 }, { total: 10204, steal: 180 }]).rate(), 0.90,
+    'a retried window still ends the probe on the latest measurement');
+
+  // The pure rate keeps its contract for callers that want the number alone.
+  assert.ok(stealRate({ total: 10000, steal: 0 }, { total: 12000, steal: 1920 }) > 0.9,
+    'the recent window reports 96%, not the 16% lifetime average');
   assert.equal(stealRate({ total: 100, steal: 0 }, { total: 104, steal: 0 }), null,
     'a window with fewer than ten ticks is not a verdict');
-  assert.equal(stealRate({ total: 1000, steal: 500 }, { total: 900, steal: 400 }), null,
-    'a counter that went backwards is not a rate');
 });
 
 test('a refused launch leaves no profile behind in install-https-proof (airhorn-w1wh review)', async () => {

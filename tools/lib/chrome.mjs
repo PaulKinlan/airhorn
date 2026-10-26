@@ -105,16 +105,14 @@ const MIN_STEAL_TICKS = 10;
 // just been starved (10,000 healthy ticks then 2,000 starved ones average 16% -
 // a healthy verdict from the wrong window).
 //
-// The window has to be long enough to be believable, and the two decisions do not
-// cost the same: refusing early is cheap and safe, letting a launch through is the
-// one that burns a gate bound. So a clear reading decides at once (500ms), anything
-// in the ambiguous band is confirmed over a second reading that still ends now
-// (2s total), and only a comfortably healthy host gets the short path. Measured
-// cost on a healthy host: ~0.5s per launch; on a starved host the refusal lands in
-// ~0.5s instead of the old 2s sample.
+// Each window is measured over its OWN two readings and the verdict is the LATEST
+// window: there is no band that returns early, no average from a baseline, and no
+// fallback to an earlier number (airhorn-w1wh round 7). Two windows are taken so a
+// single unusual stretch cannot decide the launch, and a window whose tick delta is
+// too small is retried - a short window is not a verdict, it is no data.
 const DEFAULT_STEAL_WINDOW_MS = 500;
-const STEAL_CONFIRM_MS = 1500;
-const STEAL_SUSPICIOUS = 0.10;
+const STEAL_WINDOWS = 2;      // windows that must be measured before deciding
+const STEAL_MAX_ATTEMPTS = 4; // ...including retries for windows that advanced too few ticks
 const TEST_CONTEXT_ENV = 'AIRHORN_TEST_CONTEXT';
 
 // A synchronous, bounded sleep: the preflight runs before the launch and cannot
@@ -176,13 +174,24 @@ function readStatNow() {
  * verdict (missing data, no ticks between them, counters going backwards). Pure,
  * so the decision is testable without a machine, a clock or a browser.
  */
-export function stealRate(from, to) {
-  if (!from || !to) return null;
+export function stealRateDetail(from, to) {
+  if (!from || !to) return { rate: null, problem: 'no reading for this window' };
   const total = to.total - from.total;
   const steal = to.steal - from.steal;
-  if (!(total >= MIN_STEAL_TICKS)) return null;   // too short a window to mean anything
-  if (!(steal >= 0)) return null;                 // a counter that went backwards is not a rate
-  return Math.min(1, Math.max(0, steal / total));
+  if (!(total >= 0) || !(steal >= 0)) {
+    return {
+      rate: null,
+      problem: `counters went backwards between readings (total ${from.total}->${to.total}, steal ${from.steal}->${to.steal})`,
+    };
+  }
+  if (!(total >= MIN_STEAL_TICKS)) {
+    return { rate: null, problem: `too few ticks advanced in the window (${total} < ${MIN_STEAL_TICKS})` };
+  }
+  return { rate: Math.min(1, Math.max(0, steal / total)), problem: null };
+}
+
+export function stealRate(from, to) {
+  return stealRateDetail(from, to).rate;
 }
 
 /*
@@ -196,26 +205,45 @@ export function createStealProbe({
   readStat = readStatNow,
   sleep = sleepSync,
   windowMs = DEFAULT_STEAL_WINDOW_MS,
-  confirmMs = STEAL_CONFIRM_MS,
-  suspicious = STEAL_SUSPICIOUS,
-  ceiling = DEFAULT_STEAL_CEILING,
+  windows = STEAL_WINDOWS,
+  maxAttempts = STEAL_MAX_ATTEMPTS,
 } = {}) {
+  let lastProblem = null;
   return {
+    /*
+     * The probe owns a baseline reading taken at CALL TIME. Every window is computed
+     * from that window's own two readings - previous reading -> fresh reading - and
+     * the answer is the LAST window measured. Never the baseline-to-now average
+     * (which is what returned 56.7% for a window that was 85% stolen), never an
+     * earlier window's number, and no branch keyed on how high the rate looks.
+     */
     rate() {
-      const from = readStat();
-      sleep(windowMs);
-      const to = readStat();
-      const quick = stealRate(from, to);
-      if (quick === null) return null;
-      // A reading at or above the ceiling already decides the launch: say so at once.
-      if (quick >= ceiling) return quick;
-      // A low reading is the one that lets a launch through, so it is the one worth
-      // confirming - over a window that still ENDS NOW, never a cached baseline.
-      if (quick >= suspicious) return quick;   // nothing to gain from a longer wait here
-      sleep(confirmMs);
-      const confirmed = stealRate(from, readStat());
-      return confirmed === null ? quick : confirmed;
+      lastProblem = null;
+      let previous = readStat();          // this call's starting point
+      let measured = 0;
+      let latest = null;
+      for (let attempt = 1; attempt <= maxAttempts && measured < windows; attempt++) {
+        sleep(windowMs);
+        const fresh = readStat();
+        const { rate, problem } = stealRateDetail(previous, fresh);
+        if (rate === null) {
+          lastProblem = problem;
+          // A window that merely advanced too few ticks gets another go ending now.
+          // Counters going backwards (or no reading) is not a timing problem: it is
+          // host state nobody can explain, so it is UNKNOWN immediately.
+          if (!/^too few ticks/.test(problem)) return null;
+          previous = fresh;
+          continue;
+        }
+        latest = rate;                    // the latest window is the only number kept
+        lastProblem = null;
+        previous = fresh;                 // the next window starts here, not at the baseline
+        measured++;
+      }
+      if (measured < windows) return null;
+      return latest;
     },
+    reason() { return lastProblem; },
   };
 }
 
@@ -250,11 +278,11 @@ export function resolveSeams(env = process.env) {
 export function hostSteal() {
   const { override } = resolveSeams();
   if (override !== null) { lastUnknownReason = null; return override; }
-  const { ceiling } = resolveSeams();
   try {
-    const rate = createStealProbe({ ceiling }).rate();
+    const probe = createStealProbe();
+    const rate = probe.rate();
     lastUnknownReason = rate === null
-      ? 'no usable window between two /proc/stat readings (fewer than 10 ticks advanced, or a counter went backwards)'
+      ? (probe.reason() || 'no usable window between two /proc/stat readings')
       : null;
     return rate;
   } catch (err) {
