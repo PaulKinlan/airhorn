@@ -34,6 +34,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -43,6 +44,27 @@ import { pathToFileURL } from 'node:url';
 
 const SUPPORT = pathToFileURL(path.join(import.meta.dirname, 'support', 'browser.mjs')).href;
 const { launchBrowser, launchChrome, connectPage } = await import(SUPPORT);
+const { stretchedBounds } = await import(
+  pathToFileURL(path.join(import.meta.dirname, '..', 'tools', 'lib', 'chrome.mjs')).href);
+
+// The host-steal preflight (airhorn-w1wh) is driven through its env seam, so a
+// test states the host instead of asserting the machine it happens to run on
+// (docs/speed.md independence). This file's launch tests are about the launch
+// MECHANISM, not the host, so the seam is pinned to "healthy" for the whole
+// file: steal 0 is the bounds they were written against. The tests that pin the
+// starved branch set it themselves and restore it.
+process.env.CHROME_STEAL_OVERRIDE = '0';
+// Round 6, P1: CHROME_STEAL_OVERRIDE / CHROME_STEAL_CEILING are honoured only in an
+// explicit test context, so a stray variable cannot disable the ceiling in production.
+// This file is that context.
+process.env.AIRHORN_TEST_CONTEXT = '1';
+// The shared-browser mode is not part of this branch (it was split out with its two
+// P1s): this file drives the cold launch only.
+const withSteal = async (value, fn) => {
+  const saved = process.env.CHROME_STEAL_OVERRIDE;
+  process.env.CHROME_STEAL_OVERRIDE = value;
+  try { return await fn(); } finally { process.env.CHROME_STEAL_OVERRIDE = saved; }
+};
 const SIGNAL_EXIT = pathToFileURL(path.join(import.meta.dirname, 'support', 'signal-exit.mjs')).href;
 
 const runLabel = (what) => `bsup-${what}-${process.pid}-${Date.now()}`;
@@ -111,9 +133,9 @@ const marker = () => fs.mkdtempSync(path.join(os.tmpdir(), 'browser-support-test
 // helper made for this run's label. Both must be empty after a failed launch.
 const liveStubProcesses = (stubFile) => execFileSync('ps', ['-eo', 'args='], { encoding: 'utf8' })
   .split('\n').filter((line) => line.includes(stubFile));
-const profilesFor = (label) => fs.readdirSync('/tmp').filter((name) => name.startsWith(`chrome-${label}-`));
+const profilesFor = (label) => fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith(`chrome-${label}-`));
 const removeProfiles = (label) => {
-  for (const name of profilesFor(label)) fs.rmSync(path.join('/tmp', name), { recursive: true, force: true });
+  for (const name of profilesFor(label)) fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
 };
 const waitFor = async (fn, ms = 5000) => {
   const end = Date.now() + ms;
@@ -489,6 +511,241 @@ const runStandIn = ({ signal, graceMs, cleanup }) => new Promise((resolve) => {
     fs.rmSync(dir, { recursive: true, force: true });
     resolve({ code, signal: sig, runs, elapsed: Date.now() - startedAt, out });
   });
+});
+
+/*
+ * Host steal (airhorn-w1wh): the bounds must state the host's condition instead
+ * of asserting a machine speed. Measured on the fleet box, /proc/stat steal sat
+ * at 88-96% for minutes, chrome needed 22-57s to answer /json/list at ONE
+ * browser, and a gate paid 1800s to report eleven expired bounds as eleven
+ * suite failures. These three tests pin both branches and the wiring, and none
+ * of them reads the machine.
+ */
+test('a starved host refuses the launch before spawning or creating a profile, naming the steal (airhorn-w1wh)', async () => {
+  const dir = marker();
+  const ran = path.join(dir, 'stub-ran');
+  const stub = path.join(dir, 'chrome-stub-starved.sh');
+  // The stub's only job is to record that it was started at all.
+  fs.writeFileSync(stub, `#!/bin/sh\ntouch "${ran}"\nwhile :; do sleep 5; done\n`, { mode: 0o755 });
+  const label = runLabel('starved');
+  const realChromeBin = process.env.CHROME_BIN;
+  process.env.CHROME_BIN = stub;
+  try {
+    await withSteal('0.96', () => assert.rejects(
+      () => launchChrome({ label }),
+      /host starved: steal 96% \(ceiling 60%\)/,
+      'a starved host must refuse at once, and the message must carry the measured steal'));
+    assert.equal(fs.existsSync(ran), false, 'the browser binary must not be spawned on a starved host');
+    assert.deepEqual(profilesFor(label), [], 'a launch that never started must not create a profile dir');
+  } finally {
+    process.env.CHROME_BIN = realChromeBin;
+    removeProfiles(label);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the bounds stretch with the load, and are untouched on an unstarved host (airhorn-w1wh)', () => {
+  const bounds = (steal) => stretchedBounds({ timeoutMs: 15000, discoveryMs: 15000, steal });
+  // Healthy and unknown are the SAME bounds as before this existed: no behaviour
+  // change on a box that is not starved is the point, not a nicety.
+  assert.deepEqual(bounds(0), { timeoutMs: 15000, discoveryMs: 15000 }, 'a healthy host keeps its bounds exactly');
+  assert.deepEqual(bounds(null), { timeoutMs: 15000, discoveryMs: 15000 }, 'an unknown reading must not invent a bound');
+  // 1/(1-steal): the factor the machine is slower by, not a guess.
+  assert.deepEqual(bounds(0.5), { timeoutMs: 30000, discoveryMs: 30000 });
+  assert.deepEqual(bounds(0.25), { timeoutMs: 20000, discoveryMs: 20000 });
+  // Capped: 0.99 asks for 100x, and an unbounded stretch is just a hang.
+  assert.deepEqual(bounds(0.99), { timeoutMs: 120000, discoveryMs: 120000 }, 'the stretch is capped');
+});
+
+test('the stretched bound is the one a stalled launch actually reports (airhorn-w1wh)', async () => {
+  const dir = marker();
+  // Announces nothing, ever: the startup bound is what ends this launch.
+  const stub = path.join(dir, 'chrome-stub-silent.sh');
+  fs.writeFileSync(stub, '#!/bin/sh\nwhile :; do sleep 5; done\n', { mode: 0o755 });
+  const realChromeBin = process.env.CHROME_BIN;
+  process.env.CHROME_BIN = stub;
+  try {
+    const healthyLabel = runLabel('healthy-bound');
+    await withSteal('0', () => assert.rejects(
+      () => launchChrome({ label: healthyLabel, timeoutMs: 400, discoveryMs: 400 }),
+      /Chrome start timeout \(bsup-healthy-bound-[^)]*\) after 400ms \(steal 0%\)/,
+      'an unstarved host must still fail at the bound the caller asked for'));
+    assert.deepEqual(profilesFor(healthyLabel), [], 'the reaped launch left a profile behind');
+
+    const loadedLabel = runLabel('loaded-bound');
+    const startedAt = Date.now();
+    await withSteal('0.5', () => assert.rejects(
+      () => launchChrome({ label: loadedLabel, timeoutMs: 400, discoveryMs: 400 }),
+      /Chrome start timeout \(bsup-loaded-bound-[^)]*\) after 800ms \(steal 50%\)/,
+      'the caller\'s bound must be the STRETCHED one, and the error must say by how much'));
+    const elapsed = Date.now() - startedAt;
+    assert.ok(elapsed >= 700, `the launch did not honour the stretched bound: rejected after only ${elapsed}ms`);
+    assert.deepEqual(liveStubProcesses(stub), [], 'the stalled launch left its stub process tree running');
+    assert.deepEqual(profilesFor(loadedLabel), [], 'the stalled launch left its /tmp profile behind');
+  } finally {
+    process.env.CHROME_BIN = realChromeBin;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const CHROME_MJS = path.join(import.meta.dirname, '..', 'tools', 'lib', 'chrome.mjs');
+const INSTALL_TOOL = path.join(import.meta.dirname, '..', 'tools', 'install-https-proof.mjs');
+const httpsProofProfiles = () => fs.readdirSync(os.tmpdir())
+  .filter((name) => /^chrome-https-proof-(?:tmp-)?[A-Za-z0-9]{6}$/.test(name));
+
+test('an unreadable /proc/stat is UNKNOWN, and UNKNOWN refuses the launch (airhorn-w1wh review)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-stat-'));
+  const stat = path.join(dir, 'stat');
+  const saved = { statPath: process.env.CHROME_STAT_PATH, bin: process.env.CHROME_BIN, override: process.env.CHROME_STEAL_OVERRIDE };
+  try {
+    const { parseCpuTicks, cpuStatProblem, hostSteal, stealUnknownReason, launchChrome } = await import(
+      `${pathToFileURL(CHROME_MJS).href}?w1wh-unknown=${Date.now()}`);
+
+    // Round 6, P3: the parser RETURNS null rather than throwing, and says why separately.
+    for (const [bad, why] of [
+      ['cpu  1 2 3\n', /malformed aggregate cpu line/],
+      ['cpu0  10 0 10 80 0 0 0 0\n', /not the aggregate 'cpu' line/],
+      ['cpu  10 0 10 nope 0 0 0 0 0 0\n', /non-numeric/],
+    ]) {
+      assert.equal(parseCpuTicks(bad), null, `a malformed line must be UNKNOWN, not a number: ${JSON.stringify(bad)}`);
+      assert.match(cpuStatProblem(bad), why, 'and it must name the reason');
+    }
+    // A well-formed line still parses, first eight counters, steal in column 8.
+    assert.deepEqual(parseCpuTicks('cpu  300 0 300 7700 0 0 0 40 0 0\n', 'fixture'),
+      { total: 300 + 0 + 300 + 7700 + 0 + 0 + 0 + 40, steal: 40 });
+
+    // A missing file is UNKNOWN too, and the reason names the file.
+    process.env.CHROME_STAT_PATH = path.join(dir, 'does-not-exist');
+    delete process.env.CHROME_STEAL_OVERRIDE;
+    assert.equal(hostSteal(), null, 'a missing /proc/stat cannot produce a steal rate');
+    assert.match(stealUnknownReason(), /does-not-exist/, 'the reason must name the file it could not read');
+
+    // And the preflight REFUSES on UNKNOWN instead of skipping the check (round 6, P3).
+    process.env.CHROME_BIN = path.join(os.tmpdir(), 'must-not-be-spawned-chrome');
+    await assert.rejects(() => launchChrome({ label: 'unknown-steal' }),
+      (err) => /cannot judge host steal/.test(err.message) && /does-not-exist/.test(err.message),
+      'an unknown steal reading must refuse the launch and say why');
+
+    // Same for a malformed line: still a refusal, never a launch.
+    fs.writeFileSync(stat, 'cpu  900 0 900 7100 0 0 0\n');   // steal column gone
+    process.env.CHROME_STAT_PATH = stat;
+    await assert.rejects(() => launchChrome({ label: 'malformed-steal' }),
+      /cannot judge host steal: .*malformed aggregate cpu line/,
+      'a line without the steal column must refuse, naming the malformed line');
+  } finally {
+    if (saved.statPath === undefined) delete process.env.CHROME_STAT_PATH; else process.env.CHROME_STAT_PATH = saved.statPath;
+    if (saved.bin === undefined) delete process.env.CHROME_BIN; else process.env.CHROME_BIN = saved.bin;
+    if (saved.override === undefined) delete process.env.CHROME_STEAL_OVERRIDE; else process.env.CHROME_STEAL_OVERRIDE = saved.override;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the steal seams cannot be used to bypass the ceiling outside a test context (airhorn-w1wh review)', async () => {
+  // Round 6, P1: CHROME_STEAL_OVERRIDE=0 on a 96% host used to proceed to spawn, and
+  // CHROME_STEAL_CEILING=1 raised the ceiling - both in production. Neither may apply
+  // without an explicit test context, and the ceiling can never be raised without one.
+  const { resolveSeams, stealCeiling, DEFAULT_STEAL_CEILING } = await import(
+    `${pathToFileURL(CHROME_MJS).href}?w1wh-seams=${Date.now()}`);
+
+  const production = resolveSeams({ CHROME_STEAL_OVERRIDE: '0', CHROME_STEAL_CEILING: '1' });
+  assert.equal(production.testContext, false);
+  assert.equal(production.override, null, 'a production CHROME_STEAL_OVERRIDE must be IGNORED');
+  assert.equal(production.ceiling, DEFAULT_STEAL_CEILING, 'a production CHROME_STEAL_CEILING must be IGNORED');
+  assert.equal(stealCeiling({ CHROME_STEAL_CEILING: '0.99' }), DEFAULT_STEAL_CEILING,
+    'the ceiling accessor ignores the variable outside a test context');
+
+  const test = resolveSeams({ AIRHORN_TEST_CONTEXT: '1', CHROME_STEAL_OVERRIDE: '0', CHROME_STEAL_CEILING: '0.9' });
+  assert.equal(test.testContext, true);
+  assert.equal(test.override, 0, 'inside a test context the override applies');
+  assert.equal(test.ceiling, 0.9, 'inside a test context the ceiling may be retuned');
+  assert.equal(resolveSeams({ CHROME_STEAL_OVERRIDE: '0' }).override, null,
+    'the context must be explicit, not implied by the presence of the variable');
+});
+
+test('the steal decision uses ONLY the latest window, never an average or an earlier value (airhorn-w1wh review)', async () => {
+  // Round 7. The probe owns a baseline taken at call time, but each window is computed
+  // from its OWN two readings and the answer is the LAST window measured. No band
+  // returns early, and nothing falls back to an earlier number.
+  const { stealRate, createStealProbe } = await import(`${pathToFileURL(CHROME_MJS).href}?w1wh-window=${Date.now()}`);
+  const probeOf = (readings) => {
+    const it = readings[Symbol.iterator]();
+    return createStealProbe({
+      readStat: () => {
+        const next = it.next();
+        if (next.done) throw new Error('readStat exhausted: the probe read more than the fixture allows');
+        return next.value;
+      },
+      sleep: () => {},
+    });
+  };
+
+  // (1) The reported case: {10000,0}, {10100,0}, {10300,170}. Averaging from the
+  // baseline gave 56.7% and launched; the latest window is 85% and must refuse.
+  assert.equal(((170 - 0) / (10300 - 10000)).toFixed(3), '0.567', 'the trap: baseline-to-now reads 56.7%');
+  assert.equal(probeOf([{ total: 10000, steal: 0 }, { total: 10100, steal: 0 }, { total: 10300, steal: 170 }]).rate(), 0.85,
+    'the latest window (10100 -> 10300) is 85% stolen and that is the verdict');
+
+  // (2) Two healthy reads then a rise: the rate is the latest window, not the average.
+  assert.equal(probeOf([{ total: 10000, steal: 0 }, { total: 10100, steal: 20 }, { total: 10200, steal: 30 }]).rate(), 0.10,
+    'the second window (20 -> 30 of 100) is 10%, not the 15% average across both');
+
+  // (3) Counters going backwards is UNKNOWN - and never the earlier healthy number.
+  // The window BEFORE the backwards one is healthy on purpose: the round-7 regression
+  // kept that 0% and launched (airhorn-w1wh round 8, P2).
+  const backwards = probeOf([{ total: 1000, steal: 0 }, { total: 1100, steal: 0 }, { total: 1050, steal: 5 }]);
+  assert.equal(backwards.rate(), null, 'a healthy window must not survive counters going backwards');
+  assert.match(backwards.reason(), /went backwards/, 'and the reason says so');
+
+  // (3b) steal outgrowing the total is not "100% starved", it is unreadable. Clamping it
+  // to 1 refused with 'host starved' for a pair that cannot both be right (round 8, P1).
+  // Three readings so the probe can take its two windows: the second window is the
+  // impossible pair (60 total ticks advanced, 150 of them "stolen").
+  const impossible = probeOf([{ total: 100, steal: 0 }, { total: 140, steal: 0 }, { total: 200, steal: 150 }]);
+  assert.equal(impossible.rate(), null, 'steal > total is UNKNOWN, not a 100% verdict');
+  assert.match(impossible.reason(), /steal advanced faster than the total/, 'and it names why');
+
+  // (3c) Running out of attempts after ONE usable window must say that, not report a
+  // generic "no usable window" (round 8, P2).
+  const exhausted = probeOf([{ total: 0, steal: 0 }, { total: 4, steal: 0 }, { total: 8, steal: 0 },
+    { total: 12, steal: 0 }, { total: 112, steal: 0 }]);
+  assert.equal(exhausted.rate(), null);
+  assert.equal(typeof exhausted.reason(), 'string', 'exhaustion must carry a reason, not null');
+  assert.match(exhausted.reason(), /only 1 of 2 usable windows/, 'exhaustion reports how many windows worked');
+
+  // (4) A window whose delta is too small is retried, then UNKNOWN - not 0%.
+  const short = probeOf([{ total: 10000, steal: 0 }, { total: 10004, steal: 0 }, { total: 10008, steal: 0 },
+    { total: 10012, steal: 0 }, { total: 10016, steal: 0 }]);
+  assert.equal(short.rate(), null, 'windows that advanced 4 ticks each are not a verdict');
+  assert.match(short.reason(), /too few ticks/, 'and the reason says which');
+
+  // ...and a short window followed by a real one still decides on the latest window.
+  assert.equal(probeOf([{ total: 10000, steal: 0 }, { total: 10004, steal: 0 },
+    { total: 10104, steal: 90 }, { total: 10204, steal: 180 }]).rate(), 0.90,
+    'a retried window still ends the probe on the latest measurement');
+
+  // The pure rate keeps its contract for callers that want the number alone.
+  assert.ok(stealRate({ total: 10000, steal: 0 }, { total: 12000, steal: 1920 }) > 0.9,
+    'the recent window reports 96%, not the 16% lifetime average');
+  assert.equal(stealRate({ total: 100, steal: 0 }, { total: 104, steal: 0 }), null,
+    'a window with fewer than ten ticks is not a verdict');
+});
+
+test('a refused launch leaves no profile behind in install-https-proof (airhorn-w1wh review)', async () => {
+  const before = httpsProofProfiles();
+  const saved = process.env.CHROME_STEAL_OVERRIDE;
+  process.env.CHROME_STEAL_OVERRIDE = '0.96';
+  try {
+    const { openBrowser } = await import(pathToFileURL(INSTALL_TOOL).href);
+    await assert.rejects(() => openBrowser([]), /host starved: steal 96%/,
+      'the tool passes the preflight parameters that make it refuse on a starved host');
+    assert.deepEqual(httpsProofProfiles(), before,
+      'the launch never adopted the profile the caller created, so the caller must remove it');
+  } finally {
+    if (saved === undefined) delete process.env.CHROME_STEAL_OVERRIDE; else process.env.CHROME_STEAL_OVERRIDE = saved;
+    for (const name of httpsProofProfiles()) {
+      if (!before.includes(name)) fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
+    }
+  }
 });
 
 test('a bound-kill exits with the signal code and runs the cleanup exactly once (airhorn-4vfn)', async () => {

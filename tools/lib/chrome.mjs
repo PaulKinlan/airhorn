@@ -39,6 +39,16 @@
  *   - the discovery bound is enforced twice, by the abort AND by a race, so a
  *     fetch that ignores its AbortSignal (a stub, an older runtime) cannot park
  *     the launch past every gate bound (airhorn-4yhb).
+ *   - the bounds state the host's condition instead of asserting a machine
+ *     speed (airhorn-w1wh). /proc/stat's steal column measured 88-96% on the
+ *     2-vCPU fleet box for minutes at a time, in 11 consecutive 2s samples,
+ *     while our own processes used 3-6% of a core; under that, chrome needed
+ *     22-57s to answer /json/list at ONE browser (68-123s at two). A fixed 15s
+ *     bound is a machine-speed assertion by 2-4x there, and a full gate paid
+ *     1800s to report 11 failures that were all the same expired bound. So
+ *     above a ceiling the launch refuses AT ONCE with 'host starved: steal
+ *     NN%', and below it both bounds stretch by 1/(1-steal), capped. A healthy
+ *     host (steal 0) takes neither branch and keeps today's exact bounds.
  *
  * A shared-Chrome mode (one long-lived browser per flag family, fresh page per
  * suite via Target.createTarget) was built and measured for airhorn-ecp and
@@ -71,6 +81,245 @@ import path from 'node:path';
 import { sweepProfile } from './reap.mjs';
 
 export { sweepProfile };
+
+/*
+ * Host steal (airhorn-w1wh) - see the header bullet.
+ *
+ * hostSteal() is the fraction of THIS VM's ticks the hypervisor took away,
+ * measured across the process's own lifetime (a sample at module load, then the
+ * delta at call time). It is deliberately a delta and not a lifetime average:
+ * these VMs are days old, so the since-boot average is diluted by quiet periods
+ * and reads low exactly when the box is starved now. A window too short to
+ * measure (< MIN_STEAL_TICKS) returns null, which means "unknown" - the caller
+ * then behaves exactly as it did before this existed, so a launch can never be
+ * blocked on a reading nobody took.
+ *
+ * CHROME_STEAL_OVERRIDE (0..1) and CHROME_STEAL_CEILING (0..1) are the test
+ * seams for both branches: a suite may not assert the machine it runs on
+ * (docs/speed.md independence), so the tests here drive these, not /proc.
+ */
+const DEFAULT_STEAL_CEILING = 0.6;
+const MAX_BOUND_STRETCH = 8;
+const MIN_STEAL_TICKS = 10;
+// The window ENDS NOW, every time: a lifetime average cannot see a host that has
+// just been starved (10,000 healthy ticks then 2,000 starved ones average 16% -
+// a healthy verdict from the wrong window).
+//
+// Each window is measured over its OWN two readings and the verdict is the LATEST
+// window: there is no band that returns early, no average from a baseline, and no
+// fallback to an earlier number (airhorn-w1wh round 7). Two windows are taken so a
+// single unusual stretch cannot decide the launch, and a window whose tick delta is
+// too small is retried - a short window is not a verdict, it is no data.
+const DEFAULT_STEAL_WINDOW_MS = 500;
+const STEAL_WINDOWS = 2;      // windows that must be measured before deciding
+const STEAL_MAX_ATTEMPTS = 4; // ...including retries for windows that advanced too few ticks
+const TEST_CONTEXT_ENV = 'AIRHORN_TEST_CONTEXT';
+
+// A synchronous, bounded sleep: the preflight runs before the launch and cannot
+// await, and the only thing it needs is a window wide enough to measure.
+function sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no SAB: skip */ }
+}
+
+const CPU_STAT_FIELDS = 8;   // user nice system idle iowait irq softirq steal
+
+/*
+ * Parse /proc/stat's aggregate line. Exported because the validation IS the
+ * contract: a malformed or truncated read must be UNKNOWN, never "steal 0".
+ * A short line (an unusual kernel, a fixture, a truncated read) used to fill the
+ * missing steal column with 0, and once the remaining fields advanced ten ticks
+ * hostSteal() returned a confident 0% - a healthy verdict derived from no data,
+ * which is exactly how a starved host would masquerade as idle (airhorn-w1wh
+ * review). Missing file, wrong line and wrong field count all mean the same
+ * thing: we do not know, so the caller behaves as it did before this existed.
+ */
+export function cpuStatProblem(text, source = '/proc/stat') {
+  const first = String(text).split('\n')[0].trim();
+  const parts = first === '' ? [] : first.split(/\s+/);
+  if (parts[0] !== 'cpu') {
+    return `${source}: first line is not the aggregate 'cpu' line (${JSON.stringify(parts[0] ?? '')})`;
+  }
+  const fields = parts.slice(1).map(Number);
+  if (fields.length < CPU_STAT_FIELDS) {
+    return `${source}: malformed aggregate cpu line (${fields.length} fields, need ${CPU_STAT_FIELDS} so steal is present)`;
+  }
+  const counters = fields.slice(0, CPU_STAT_FIELDS);
+  if (!counters.every(Number.isFinite)) {
+    return `${source}: malformed aggregate cpu line (non-numeric counter: ${counters.join(',')})`;
+  }
+  return null;
+}
+
+// Returns null - UNKNOWN - for anything it cannot read with confidence, and never
+// throws (airhorn-w1wh round 6, P3): a throw here was converted to null further
+// up, so the reason was lost at exactly the point a caller needs to name it.
+export function parseCpuTicks(text, source = '/proc/stat') {
+  if (cpuStatProblem(text, source) !== null) return null;
+  // guest/guest_nice are already counted inside user/nice, so the total is the
+  // first eight counters only - summing all ten would double-count them.
+  const counters = String(text).split('\n')[0].trim().split(/\s+/).slice(1, 1 + CPU_STAT_FIELDS).map(Number);
+  return { total: counters.reduce((a, b) => a + b, 0), steal: counters[7] };
+}
+
+function readStatNow() {
+  const path = process.env.CHROME_STAT_PATH || '/proc/stat';
+  const text = fs.readFileSync(path, 'utf8');
+  const problem = cpuStatProblem(text, path);
+  if (problem !== null) throw new Error(problem);
+  return parseCpuTicks(text, path);
+}
+
+/*
+ * The steal rate between two readings, or null when the pair cannot support a
+ * verdict (missing data, no ticks between them, counters going backwards). Pure,
+ * so the decision is testable without a machine, a clock or a browser.
+ */
+export function stealRateDetail(from, to) {
+  if (!from || !to) return { rate: null, problem: 'no reading for this window' };
+  const total = to.total - from.total;
+  const steal = to.steal - from.steal;
+  if (!(total >= 0) || !(steal >= 0)) {
+    return {
+      rate: null,
+      problem: `counters went backwards between readings (total ${from.total}->${to.total}, steal ${from.steal}->${to.steal})`,
+    };
+  }
+  if (!(total >= MIN_STEAL_TICKS)) {
+    return { rate: null, problem: `too few ticks advanced in the window (${total} < ${MIN_STEAL_TICKS})` };
+  }
+  if (steal > total) {
+    // steal is one of the counters the total is summed from, so it cannot outgrow it.
+    // Clamping this to 1 said "host starved" for a pair that is simply not readable
+    // (airhorn-w1wh round 8, P1): inconsistent counters are UNKNOWN, not 100%.
+    return {
+      rate: null,
+      problem: `steal advanced faster than the total (steal ${steal} > total ${total}) - these readings cannot both be right`,
+    };
+  }
+  return { rate: Math.min(1, Math.max(0, steal / total)), problem: null };
+}
+
+export function stealRate(from, to) {
+  return stealRateDetail(from, to).rate;
+}
+
+/*
+ * A probe measures over a window that ENDS NOW: read, wait the window, read again,
+ * and judge the delta between those two readings. It deliberately keeps no
+ * baseline from module load or from a previous launch - that is what let a host
+ * that had just been starved read as healthy (airhorn-w1wh round 6, P2).
+ * Injectable so the window logic is testable with a scripted reader and no sleep.
+ */
+export function createStealProbe({
+  readStat = readStatNow,
+  sleep = sleepSync,
+  windowMs = DEFAULT_STEAL_WINDOW_MS,
+  windows = STEAL_WINDOWS,
+  maxAttempts = STEAL_MAX_ATTEMPTS,
+} = {}) {
+  let lastProblem = null;
+  return {
+    /*
+     * The probe owns a baseline reading taken at CALL TIME. Every window is computed
+     * from that window's own two readings - previous reading -> fresh reading - and
+     * the answer is the LAST window measured. Never the baseline-to-now average
+     * (which is what returned 56.7% for a window that was 85% stolen), never an
+     * earlier window's number, and no branch keyed on how high the rate looks.
+     */
+    rate() {
+      lastProblem = null;
+      let previous = readStat();          // this call's starting point
+      let measured = 0;
+      let latest = null;
+      for (let attempt = 1; attempt <= maxAttempts && measured < windows; attempt++) {
+        sleep(windowMs);
+        const fresh = readStat();
+        const { rate, problem } = stealRateDetail(previous, fresh);
+        if (rate === null) {
+          lastProblem = problem;
+          // A window that merely advanced too few ticks gets another go ending now.
+          // Counters going backwards (or no reading) is not a timing problem: it is
+          // host state nobody can explain, so it is UNKNOWN immediately.
+          if (!/^too few ticks/.test(problem)) return null;
+          previous = fresh;
+          continue;
+        }
+        latest = rate;                    // the latest window is the only number kept
+        lastProblem = null;
+        previous = fresh;                 // the next window starts here, not at the baseline
+        measured++;
+      }
+      if (measured < windows) {
+        // The last window that DID work cleared the problem, so exhaustion after one
+        // usable window used to report nothing useful (airhorn-w1wh round 8, P2).
+        lastProblem = `only ${measured} of ${windows} usable windows before ${maxAttempts} attempts` +
+          (lastProblem ? ` (last window: ${lastProblem})` : '');
+        return null;
+      }
+      return latest;
+    },
+    reason() { return lastProblem; },
+  };
+}
+
+let lastUnknownReason = null;
+
+// Why the last hostSteal() could not judge the host, for the refusal message.
+export function stealUnknownReason() { return lastUnknownReason; }
+
+/*
+ * The seam resolver (airhorn-w1wh round 6, P1). CHROME_STEAL_OVERRIDE and
+ * CHROME_STEAL_CEILING exist so tests can drive both branches of this decision on
+ * any machine - and they were honoured in production, which meant
+ * CHROME_STEAL_OVERRIDE=0 (or CHROME_STEAL_CEILING=1) silently disabled the
+ * ceiling on a 96% host. They now only apply in an explicit test context, and the
+ * ceiling cannot be raised above the default at all outside one.
+ */
+export function resolveSeams(env = process.env) {
+  const testContext = env[TEST_CONTEXT_ENV] === '1';
+  let override = null;
+  let ceiling = DEFAULT_STEAL_CEILING;
+  if (testContext) {
+    const forced = Number(env.CHROME_STEAL_OVERRIDE);
+    if (env.CHROME_STEAL_OVERRIDE !== undefined && env.CHROME_STEAL_OVERRIDE !== '' && Number.isFinite(forced)) {
+      override = Math.min(1, Math.max(0, forced));
+    }
+    const rawCeiling = Number(env.CHROME_STEAL_CEILING);
+    if (Number.isFinite(rawCeiling) && rawCeiling > 0 && rawCeiling <= 1) ceiling = rawCeiling;
+  }
+  return { testContext, override, ceiling };
+}
+
+export function hostSteal() {
+  const { override } = resolveSeams();
+  if (override !== null) { lastUnknownReason = null; return override; }
+  try {
+    const probe = createStealProbe();
+    const rate = probe.rate();
+    lastUnknownReason = rate === null
+      ? (probe.reason() || 'no usable window between two /proc/stat readings')
+      : null;
+    return rate;
+  } catch (err) {
+    lastUnknownReason = String((err && err.message) || err);
+    return null;
+  }
+}
+
+// A loaded box gets more time, not a wrong verdict: the bounds grow by exactly
+// the factor the machine is slower by (1/(1-steal)), capped. steal <= 0 (or
+// null, "unknown") returns the caller's bounds untouched.
+export function stretchedBounds({ timeoutMs, discoveryMs, steal }) {
+  if (steal === null || steal === undefined || !(steal > 0)) return { timeoutMs, discoveryMs };
+  const stretch = Math.min(1 / (1 - steal), MAX_BOUND_STRETCH);
+  return { timeoutMs: Math.round(timeoutMs * stretch), discoveryMs: Math.round(discoveryMs * stretch) };
+}
+
+export function stealCeiling(env = process.env) {
+  return resolveSeams(env).ceiling;
+}
+
+export { DEFAULT_STEAL_CEILING, MAX_BOUND_STRETCH };
 
 export function chromeBin() {
   return process.env.CHROME_BIN ||
@@ -157,8 +406,7 @@ export async function launchChrome({
   webmcp = false,
   extraFlags = [],
   label = 'chrome',
-  timeoutMs = 15000,
-  // Bound on /json/list discovery, generous on purpose (airhorn-sesh): Chrome's
+  timeoutMs = 15000,  // Bound on /json/list discovery, generous on purpose (airhorn-sesh): Chrome's
   // DevTools endpoint answers LATE on a loaded box - measured at 5 s on a 2-core
   // VM with other lanes' suites running, which read as a launch failure in a
   // browser suite that was fine (visual-overrides: '/json/list never answered on
@@ -169,6 +417,29 @@ export async function launchChrome({
   keepProfile = false,
   discoverPage = true,
 } = {}) {
+  // Before anything is created or spawned (airhorn-w1wh): on a starved host this
+  // launch cannot succeed, and waiting for the bound to expire is what turned
+  // one exhausted machine into eleven "DevTools discovery timeout" failures and
+  // an 1800s gate. Saying it costs nothing and names the actual cause.
+  const steal = hostSteal();
+  const ceiling = stealCeiling();
+  if (steal === null) {
+    // UNKNOWN fails CLOSED (airhorn-w1wh round 6, P3): "we could not read the host"
+    // used to skip the refusal and launch anyway, which is the one case where the
+    // guard silently stops guarding. Name why, so the fix is obvious from the log.
+    throw new Error(
+      `cannot judge host steal: ${stealUnknownReason() || 'no recent sample'} - ` +
+      `refusing to launch chrome (${label}): without a current steal reading this host cannot be ` +
+      'shown to be healthy, and launching here is what spends the gate bound on a machine that ' +
+      'cannot run it (airhorn-w1wh)');
+  }
+  if (steal >= ceiling) {
+    throw new Error(
+      `host starved: steal ${(steal * 100).toFixed(0)}% (ceiling ${(ceiling * 100).toFixed(0)}%) - ` +
+      `refusing to launch chrome (${label}): this host cannot start a browser, and failing here ` +
+      'names the machine instead of spending the gate bound on it (airhorn-w1wh)');
+  }
+  const bounds = stretchedBounds({ timeoutMs, discoveryMs, steal });
   const profileDir = givenProfileDir ?? fs.mkdtempSync(path.join(os.tmpdir(), `chrome-${label}-`));
   const chrome = spawn(chromeBin(), [
     ...familyArgs({ autoplay, webmcp }),
@@ -235,7 +506,7 @@ export async function launchChrome({
   // measure different phases (spawn -> ws URL, then ws URL -> /json/list), and a
   // flat cap made the second phase inherit a budget sized for the first. A suite
   // that wants a fast total failure passes both bounds explicitly.
-  const discoveryBound = Math.max(1, discoveryMs);
+  const discoveryBound = Math.max(1, bounds.discoveryMs);
   try {
     await new Promise((resolve, reject) => {
       // A spawn that never produced a process reports through the 'error'
@@ -246,7 +517,8 @@ export async function launchChrome({
       // airhorn-r5me). Raced against the handshake so it takes the same
       // teardown as the ws-silent and exits-early shapes.
       const timeout = setTimeout(
-        () => reject(new Error(`Chrome start timeout (${label}): ${stderrLines.join('\n')}`)), timeoutMs);
+        () => reject(new Error(`Chrome start timeout (${label}) after ${bounds.timeoutMs}ms (steal ${(steal === null ? 'unknown' : `${(steal * 100).toFixed(0)}%`)}): ${stderrLines.join('\n')}`)),
+        bounds.timeoutMs);
       const onData = (data) => {
         const text = data.toString();
         stderrLines.push(text);
