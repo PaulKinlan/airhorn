@@ -260,11 +260,12 @@ const DOT_RELATIVE = /(?<![\w/.-])(\.{1,2}\/[\w./-]+\.[a-z0-9]+)/g;
 const BARE_MD = /(?<![\w/.-])([\w.-]+\.md)\b/g;
 const SLASHED_MD = /(?<![\w/.:-])([\w.-]+(?:\/[\w.-]+)+\.md)\b/g;
 const READER_TOKEN = /\b(?:awk|grep|cat|sha256sum|diff|sed|head|tail|test\s+-f|open)\b[^\n]*?([\w./-]+\.[a-z0-9]+)/gi;
-// Anything the block itself produces: redirections, tee, touch, mkdir, the
-// destination of cp/mv, and an --out style flag. Reading these back is not a
-// claim that they are in the repo.
-const WRITE_TARGET = /(?:>>?|\btee\b|\btouch\b|\bmkdir\b(?:\s+-p)?|\bcp\b|\bmv\b|\binstall\b)[^\n]*?([\w./-]+\.[a-z0-9]+|\b[\w-]+\/[\w./-]+)/gi;
-const WRITE_FLAG = /--(?:out|output|dest|destination)[= ]([\w./-]+)/gi;
+// A path-ish token: a directory component, an extension, or a trailing slash.
+const looksLikePath = (token) => !!token && (token.includes('/') || /\.[a-z0-9]+$/i.test(token));
+// Copy-like commands: their SOURCE is read, their LAST operand is written.
+const COPIERS = new Set(['cp', 'mv', 'install', 'rsync', 'ln']);
+// Commands where every operand is created or written.
+const CREATORS = new Set(['mkdir', 'touch', 'tee']);
 const leavesRepo = (block) => /^\s*(?:cd|pushd)\s+(?:~|\$HOME|\/)/m.test(block);
 
 // Only SHELL fences: a javascript block is source, and its comments talk about the
@@ -289,13 +290,37 @@ function fencedBlocks(text) {
   return blocks;
 }
 
-/** Paths this block WRITES, so reading them back is not a repo claim (airhorn-lgx8). */
+/**
+ * Paths this block WRITES, so reading them back is not a repo claim.
+ *
+ * Segment-aware on purpose (airhorn-kuqn): `cp SOURCE DEST` writes DEST, so a
+ * copier contributes its LAST operand only and the source stays a read claim the
+ * guard must be able to report as missing. A first-match regex cannot express
+ * that - it captured the source, which excused a missing input AND still flagged
+ * a generated destination that a later line read back.
+ */
 const generatedBy = (block) => {
   const written = new Set();
-  for (const pattern of [WRITE_TARGET, WRITE_FLAG]) {
-    for (const m of block.matchAll(pattern)) {
-      const token = (m[1] || '').replace(/^["']|["']$/g, '').replace(/^\.\//, '');
-      if (token && !/^https?:/.test(token)) written.add(token);
+  const add = (raw) => {
+    const token = String(raw).replace(/^["'`]|["'`]$/g, '').replace(/^\.\//, '');
+    if (!token || /^https?:/.test(token) || token.startsWith('-')) return;
+    if (looksLikePath(token)) written.add(token);
+  };
+
+  for (const line of block.split('\n')) {
+    // Redirection targets: `> out/log.txt`, `>> "$scratch/rows.txt"`.
+    for (const m of line.matchAll(/>>?\s*("[^"]+"|'[^']+'|[^\s;&|()]+)/g)) add(m[1]);
+    // --out / --output / --dest style flags.
+    for (const m of line.matchAll(/--(?:out|output|dest|destination)[= ]\s*("[^"]+"|'[^']+'|[^\s;&|()]+)/gi)) add(m[1]);
+
+    // Command segments, so `cp a b && grep x b` is two commands and not one
+    // argument list whose "last operand" would be grep's file.
+    for (const segment of line.split(/&&|\|\||;|\|/)) {
+      const words = segment.trim().split(/\s+/).filter(Boolean).map((w) => w.replace(/^["'`]|["'`]$/g, ''));
+      if (words.length === 0) continue;
+      const verb = words[0].split('/').pop();
+      if (COPIERS.has(verb) && words.length >= 2) add(words[words.length - 1]); // DEST only, never the source
+      else if (CREATORS.has(verb)) for (const operand of words.slice(1)) add(operand);
     }
   }
   return written;
@@ -430,4 +455,42 @@ test('$repo stays root-relative and a bare name stays root-relative: the alze bu
   assert.deepEqual(alze, ['root'], `$repo/ROLLBACK.md must be a root claim, got ${JSON.stringify(alze)}`);
   const bare = claimsOf('grep -c x ROLLBACK.md').map((c) => c.base);
   assert.deepEqual(bare, ['root'], `a bare ROLLBACK.md must be a root claim, got ${JSON.stringify(bare)}`);
+});
+
+/*
+ * airhorn-kuqn — cp/mv/install have a SOURCE and a DESTINATION, and only the
+ * destination is written. The first version of the generated-file rule captured
+ * the first path-ish argument, i.e. the source, which produced both errors at
+ * once: a missing source was silently excused (it looked generated) and a
+ * generated destination with a file extension was still reported missing when a
+ * later line read it back.
+ */
+test('cp marks the DESTINATION as generated and never the source', () => {
+  const cp = claimsOf('cp gone/src.md dist/');
+  const claimed = cp.map((c) => c.path);
+  assert.ok(claimed.includes('gone/src.md'),
+    `the cp SOURCE is read, so a missing one must be claimed (and then reported): got ${JSON.stringify(cp)}`);
+
+  // A destination with an extension, written by cp, is generated: reading it back
+  // on a later line must make no repo claim about it.
+  const cpThenRead = claimsOf('cp dist/sw.js out/copy.js\nsha256sum -c out/copy.js');
+  assert.deepEqual(cpThenRead.filter((c) => c.path.startsWith('out/')), [],
+    `out/copy.js is written by the cp, so reading it back is not a repo claim: got ${JSON.stringify(cpThenRead)}`);
+
+  // mv and install behave the same way, and a multi-argument cp still writes its
+  // LAST argument only.
+  for (const line of ['mv dist/sw.js out/moved.js', 'install -m 644 dist/sw.js out/installed.js', 'cp -r a b c out/']) {
+    const dest = line.split(/\s+/).at(-1);
+    const claims = claimsOf(`${line}\nsha256sum ${dest}`).map((c) => c.path);
+    assert.ok(!claims.includes(dest), `${dest} is the destination of "${line}": reading it back must not be a claim (got ${JSON.stringify(claims)})`);
+  }
+});
+
+test('a missing cp source is caught end to end, the way a reader would hit it', () => {
+  // The reviewer's repro, as a document: the source does not exist, so running
+  // this as printed fails. Only the destination is written.
+  const claims = claimsOf('cp gone/source.md out/copied.md');
+  const missing = claims.filter((c) => !fs.existsSync(claimTarget(c, 'docs/runbooks/ROLLBACK.md')));
+  assert.deepEqual(missing.map((c) => c.path), ['gone/source.md'],
+    `the cp source must be the only missing claim, got ${JSON.stringify(claims)}`);
 });
