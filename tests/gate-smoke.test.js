@@ -18,6 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeRenderModel } from '../tools/render-model.mjs';
 import { READ_STATE } from '../tools/resilience-audit.mjs';
+import { deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites, isPendingSuite } from '../tools/derive-coverage-contract.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const gate = path.join(root, 'tools', 'fast-gate.sh');
@@ -66,38 +67,20 @@ const listFor = (changed) =>
 // cannot read a TSV. Two hand-maintained copies of one opinion drift - they did
 // (airhorn-ona: index.html still named the failover suite, src/main.js was
 // missing it) - so the drift is now a test instead of a comment asking politely.
-const parseSuiteMap = (text = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8')) => {
-  const rows = [];
-  for (const raw of text.split('\n')) {
-    if (!raw.trim() || raw.trimStart().startsWith('#')) continue;
-    const [pattern, suites = ''] = raw.split('\t');
-    rows.push({ pattern: pattern.trim(), suites: suites.trim().split(/\s+/).filter(Boolean) });
-  }
-  return rows;
-};
-
 const contractPath = path.join(root, '.fleet', 'coverage-contract.json');
 const readContract = () => JSON.parse(fs.readFileSync(contractPath, 'utf8'));
 
 // `**` and `*` are the same opinion spelled differently by the two files; the
 // oracle treats both as "everything under this directory".
 const normPattern = (p) => p.replace(/\/\*\*$/, '/*');
-const isPendingSpelling = (suite) => suite.startsWith('test/');
+
+const defaultPendingDeclared = extractPendingSuites(fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8'));
+const isPendingSpelling = (suite) => isPendingSuite(suite, defaultPendingDeclared, (rel) => fs.existsSync(path.join(root, rel)));
 
 // The rows the contract restates: every path the map places, exemptions (`!`)
-// and pending suites (`~`) aside. A row that names only itself
-// (`tests/x.test.mjs -> tests/x.test.mjs`) is the gate's reverse check, not a
-// coverage opinion about source, so it is not an oracle mapping.
+// and pending suites (`~`) aside. Single-sourced from deriveMapOpinion so
+// gate-smoke and derive-coverage-contract never disagree (airhorn-56dj).
 const CONTRACT_EXEMPT_EXT = new Set(['.json', '.md', '.txt', '.lock', '.png', '.svg', '.jpg']);
-const isSelfRow = (pattern, suites) => suites.length > 0 && suites.every((s) => s === pattern);
-const mapOpinion = (rows) => {
-  const out = new Map();
-  for (const { pattern, suites } of rows) {
-    if (pattern.startsWith('!') || pattern.startsWith('~') || isSelfRow(pattern, suites)) continue;
-    out.set(normPattern(pattern), new Set(suites.filter((s) => !isPendingSpelling(s))));
-  }
-  return out;
-};
 
 // Every disagreement, in both directions: a suite the contract over-names makes
 // the oracle report a truthful PARTIAL as a false one, and a suite it UNDER-names
@@ -105,8 +88,12 @@ const mapOpinion = (rows) => {
 // never ran). Prose/data paths (package.json, *.md) are compared when the
 // contract names them, but not required: the oracle exempts those extensions
 // itself, so a missing entry costs nothing there.
-const contractDrift = (contract, rows) => {
-  const want = mapOpinion(rows);
+const contractDrift = (contract, tsvText = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8')) => {
+  const pendingDeclared = extractPendingSuites(tsvText);
+  const fileExists = (rel) => fs.existsSync(path.join(root, rel));
+  const isPending = (suite) => isPendingSuite(suite, pendingDeclared, fileExists);
+
+  const want = deriveMapOpinion(tsvText, { root, fileExists });
   const problems = [];
   const seen = new Set();
   for (const [pattern, suites] of Object.entries(contract)) {
@@ -117,7 +104,7 @@ const contractDrift = (contract, rows) => {
       problems.push(`${pattern}: the contract names it, the map places nothing there`);
       continue;
     }
-    const got = new Set((Array.isArray(suites) ? suites : [suites]).filter((s) => !isPendingSpelling(s)));
+    const got = new Set((Array.isArray(suites) ? suites : [suites]).filter((s) => !isPending(s)));
     const missing = [...row].filter((s) => !got.has(s));
     const extra = [...got].filter((s) => !row.has(s));
     if (missing.length) problems.push(`${pattern}: the map runs ${missing.join(', ')}, the contract omits it`);
@@ -183,27 +170,60 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
 });
 
 test('the fleet coverage contract restates the map, not a stale opinion (airhorn-ona)', () => {
-  const problems = contractDrift(readContract(), parseSuiteMap());
+  const problems = contractDrift(readContract());
   assert.deepEqual(problems, [],
     `the coverage contract and tools/suite-map.tsv disagree:\n  ${problems.join('\n  ')}`);
+});
+
+test('contractDrift recognizes ~-declared pending suites on live rows (airhorn-x0xr, airhorn-m03d)', () => {
+  const syntheticTsv = [
+    '~tests/future-suite.test.mjs\ttests/future-suite.test.mjs',
+    'src/main.js\ttests/horn.test.js tests/future-suite.test.mjs',
+  ].join('\n');
+  const contract = {
+    'src/main.js': ['tests/horn.test.js'],
+  };
+  const problems = contractDrift(contract, syntheticTsv);
+  assert.deepEqual(problems, [],
+    `contractDrift must recognize ~-declared pending suites and report no drift, got: ${problems.join(', ')}`);
+});
+
+test('deriveMapOpinion and contractDrift handle self-rows with pending suites identically (airhorn-56dj)', () => {
+  const syntheticTsv = [
+    'src/extra.js\tsrc/extra.js test/notyet.test.mjs\n',
+  ].join('\n');
+  const contract = deriveCoverageContract(syntheticTsv, { root });
+  assert.equal(contract['src/extra.js'], undefined, 'self-row with pending suite must be omitted from contract');
+  const problems = contractDrift(contract, syntheticTsv);
+  assert.deepEqual(problems, [], 'contractDrift must agree with generator on self-row omission');
+});
+
+test('deriveMapOpinion and contractDrift union repeated patterns across multiple rows (airhorn-56dj)', () => {
+  const syntheticTsv = [
+    'src/main.js\ttests/horn.test.js',
+    'src/main.js\ttests/visual-overrides.test.mjs',
+  ].join('\n');
+  const contract = deriveCoverageContract(syntheticTsv, { root });
+  assert.deepEqual(contract['src/main.js'], ['tests/horn.test.js', 'tests/visual-overrides.test.mjs']);
+  const problems = contractDrift(contract, syntheticTsv);
+  assert.deepEqual(problems, [], 'contractDrift must union repeated patterns without drift');
 });
 
 test('the drift check fails when the two files disagree (airhorn-ona)', () => {
   // A comparator nobody has seen fail is a comparator nobody can trust: pin the
   // EXACT drift airhorn-ona reported, and the under-naming direction, without
   // touching either file.
-  const rows = parseSuiteMap();
   const contract = readContract();
   const stale = structuredClone(contract);
   stale['index.html'] = [...stale['index.html'], 'tests/sw-failover.test.mjs'];
   stale['src/main.js'] = stale['src/main.js'].filter((s) => s !== 'tests/sw-failover.test.mjs');
-  const problems = contractDrift(stale, rows);
+  const problems = contractDrift(stale);
   assert.ok(problems.some((p) => p.startsWith('index.html:') && /sw-failover/.test(p) && /does not run it/.test(p)),
     `an over-named suite must be reported: ${JSON.stringify(problems)}`);
   assert.ok(problems.some((p) => p.startsWith('src/main.js:') && /sw-failover/.test(p) && /omits it/.test(p)),
     `an under-named suite must be reported: ${JSON.stringify(problems)}`);
   delete stale['server.ts'];
-  assert.ok(contractDrift(stale, rows).some((p) => p.startsWith('server.ts:') && /no entry/.test(p)),
+  assert.ok(contractDrift(stale).some((p) => p.startsWith('server.ts:') && /no entry/.test(p)),
     'a map-placed path missing from the contract must be reported');
 });
 
@@ -230,6 +250,24 @@ test('every suite the contract names exists (airhorn-ona)', () => {
   }
   assert.deepEqual(typos, [], `contract entries spell test/ for suites that exist under tests/ - fix the spelling: ${typos.join(', ')}`);
   assert.deepEqual(missing, [], `the contract names suites that are not in the tree: ${missing.join(', ')}`);
+});
+
+test('the fleet coverage contract is fresh and derived from tools/suite-map.tsv (airhorn-y7mx)', () => {
+  const committed = fs.readFileSync(contractPath, 'utf8');
+  const tsv = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
+  const generated = formatCoverageContract(deriveCoverageContract(tsv, { root }));
+  assert.equal(committed, generated,
+    'the coverage contract does not match the generated output from tools/suite-map.tsv. Run node tools/derive-coverage-contract.mjs to regenerate.');
+});
+
+test('the freshness guard fails when the contract is hand-edited (airhorn-y7mx)', () => {
+  const tsv = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
+  const generated = formatCoverageContract(deriveCoverageContract(tsv, { root }));
+  const handEdited = generated.replace('tests/horn.test.js', 'tests/tampered.test.js');
+  assert.notEqual(handEdited, generated, 'mutation must differ');
+  assert.throws(() => {
+    assert.equal(handEdited, generated);
+  }, /AssertionError/);
 });
 
 test('an audit-tool change selects this suite (the tools/* row is real)', () => {

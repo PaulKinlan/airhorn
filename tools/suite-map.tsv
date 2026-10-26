@@ -42,6 +42,9 @@ deno.lock	tests/health.test.mjs
 # tools/* is covered by a REAL smoke suite: the gate's own selection contract
 # plus syntax checks of the scripts it names (airhorn-1ye).
 tools/*	tests/gate-smoke.test.js
+# tools/derive-coverage-contract.mjs is covered by its own unit suite as well
+# as the tools/* gate-smoke check (airhorn-1qw6).
+tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
 # tools/lib/** is the shared runtime the tools import (reap.mjs is the profile
 # marker sweep). It is NOT matched by `tools/*`, which does not cross a slash, so
 # a change to it used to select zero suites - a shared helper with no owner.
@@ -68,12 +71,12 @@ public/scripts/**	tests/a11y.test.mjs test/a11y.test.mjs
 public/styles/**	tests/a11y.test.mjs tests/keyboard.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs
 # Suite self-rows: the reverse check (every tree suite reachable from the map) reads these.
 # Plural-spelling suites exist on master; the singular test/ spellings are declared pending.
-# .fleet/coverage-contract.json restates the source-path mapping for the fleet's independent
-# coverage oracle, which cannot read this tsv (airhorn-pwe). The two are kept in step by
-# tests/gate-smoke.test.js ('the coverage contract restates the map'), so a hand-edit to the
-# contract is gated rather than trusted - and the directory is no longer blanket-exempt: a
-# behavioural file dropped into .fleet/ would have escaped the gate (airhorn-ona).
+# .fleet/coverage-contract.json is derived from this file via tools/derive-coverage-contract.mjs
+# for the fleet's independent coverage oracle, which cannot read this tsv (airhorn-pwe, airhorn-y7mx).
+# The two are kept in step by tests/gate-smoke.test.js, which requires the committed contract
+# to be identical to the generated output.
 .fleet/coverage-contract.json	tests/gate-smoke.test.js
+tests/derive-coverage-contract.test.js	tests/derive-coverage-contract.test.js
 tests/horn.test.js	tests/horn.test.js
 tests/a11y.test.mjs	tests/a11y.test.mjs
 tests/sw-offline.test.mjs	tests/sw-offline.test.mjs

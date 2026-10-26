@@ -1,12 +1,4 @@
 {
- "index.html": [
-  "tests/horn.test.js",
-  "tests/a11y.test.mjs",
-  "tests/webmcp-browser.test.mjs",
-  "tests/resilience-ui.test.mjs",
-  "tests/keyboard.test.mjs",
-  "tests/screenreader.test.mjs"
- ],
  "src/horn.js": [
   "tests/horn.test.js",
   "tests/a11y.test.mjs",
@@ -27,15 +19,49 @@
   "tests/webmcp-fuzz.test.mjs",
   "tests/webmcp-browser.test.mjs"
  ],
+ "index.html": [
+  "tests/horn.test.js",
+  "tests/a11y.test.mjs",
+  "tests/webmcp-browser.test.mjs",
+  "tests/resilience-ui.test.mjs",
+  "tests/keyboard.test.mjs",
+  "tests/screenreader.test.mjs"
+ ],
  "vite.config.js": [
   "tests/horn.test.js",
   "tests/a11y.test.mjs",
   "tests/sw-offline.test.mjs",
   "tests/webmcp-browser.test.mjs"
  ],
+ "package.json": [
+  "tests/horn.test.js",
+  "tests/a11y.test.mjs",
+  "tests/sw-offline.test.mjs",
+  "tests/webmcp.test.mjs",
+  "tests/webmcp-browser.test.mjs"
+ ],
+ "package-lock.json": [
+  "tests/horn.test.js",
+  "tests/a11y.test.mjs",
+  "tests/sw-offline.test.mjs",
+  "tests/webmcp.test.mjs",
+  "tests/webmcp-browser.test.mjs"
+ ],
  "server.ts": [
   "tests/gate-smoke.test.js",
   "tests/health.test.mjs"
+ ],
+ "deno.lock": [
+  "tests/health.test.mjs"
+ ],
+ "tools/*": [
+  "tests/gate-smoke.test.js"
+ ],
+ "tools/derive-coverage-contract.mjs": [
+  "tests/derive-coverage-contract.test.js"
+ ],
+ "tools/lib/**": [
+  "tests/test-support.test.js"
  ],
  "public/sw.js": [
   "tests/sw-offline.test.mjs",
@@ -56,14 +82,14 @@
   "tests/visual-overrides.test.mjs",
   "tests/reflow-zoom.test.mjs"
  ],
- "tools/*": [
-  "tests/gate-smoke.test.js"
- ],
- "tools/lib/**": [
-  "tests/test-support.test.js"
- ],
  ".fleet/coverage-contract.json": [
   "tests/gate-smoke.test.js"
+ ],
+ "README.md": [
+  "tests/docs-recipe.test.mjs"
+ ],
+ "docs/runbooks/DEPLOY.md": [
+  "tests/docs-recipe.test.mjs"
  ],
  "tests/support/browser.mjs": [
   "tests/test-support.test.js"
@@ -86,9 +112,6 @@
   "tests/visual-overrides.test.mjs",
   "tests/reflow-zoom.test.mjs",
   "tests/health.test.mjs",
-  "tests/docs-recipe.test.mjs"
- ],
- "README.md": [
   "tests/docs-recipe.test.mjs"
  ]
 }
