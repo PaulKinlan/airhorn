@@ -34,6 +34,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -53,6 +54,12 @@ const { stretchedBounds } = await import(
 // file: steal 0 is the bounds they were written against. The tests that pin the
 // starved branch set it themselves and restore it.
 process.env.CHROME_STEAL_OVERRIDE = '0';
+// The shared-browser mode (airhorn-w1wh) is the GATE's path: this file drives the
+// cold launch, so it must not inherit a shared browser if one is exported around
+// it (a gate run selects this suite too, and then AIRHORN_CHROME_WS_* is set).
+for (const key of ['AIRHORN_CHROME_WS', 'AIRHORN_CHROME_WS_AUTOPLAY', 'AIRHORN_CHROME_WS_WEBMCP']) {
+  delete process.env[key];
+}
 const withSteal = async (value, fn) => {
   const saved = process.env.CHROME_STEAL_OVERRIDE;
   process.env.CHROME_STEAL_OVERRIDE = value;
@@ -578,6 +585,113 @@ test('the stretched bound is the one a stalled launch actually reports (airhorn-
   } finally {
     process.env.CHROME_BIN = realChromeBin;
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/*
+ * The gate's shared browser (airhorn-w1wh). A suite that finds a family env var
+ * gets a fresh page in ONE browser the gate already started, instead of paying a
+ * launch - on the starved box that is the difference between a gate that runs and
+ * one that refuses (eleven launches at 22-57s each). The stub here is a real
+ * minimal devtools peer over a real WebSocket, so the client's handshake,
+ * Target.createTarget and id-matched /json/list lookup all run for real.
+ */
+function devtoolsFrame(text) {
+  const payload = Buffer.from(text);
+  if (payload.length < 126) return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+  if (payload.length < 65536) {
+    const head = Buffer.alloc(4); head[0] = 0x81; head[1] = 126; head.writeUInt16BE(payload.length, 2);
+    return Buffer.concat([head, payload]);
+  }
+  const head = Buffer.alloc(10); head[0] = 0x81; head[1] = 127; head.writeBigUInt64BE(BigInt(payload.length), 2);
+  return Buffer.concat([head, payload]);
+}
+
+const sharedDevtoolsPeer = ({ targetId, pageWsUrl }) => new Promise((resolve) => {
+  const sockets = new Set();
+  const server = http.createServer((req, res) => {
+    if (req.url === '/json/list') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      // A shared browser lists EVERY suite's targets: the client must match by id.
+      res.end(JSON.stringify([
+        { id: 'another-suite', type: 'page', webSocketDebuggerUrl: 'ws://127.0.0.1:9/devtools/page/other' },
+        { id: targetId, type: 'page', webSocketDebuggerUrl: pageWsUrl },
+      ]));
+      return;
+    }
+    res.writeHead(404); res.end();
+  });
+  server.on('connection', (socket) => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+  server.on('upgrade', (req, socket) => {
+    const accept = crypto.createHash('sha1')
+      .update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+      `Sec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    socket.on('data', (buffer) => {
+      let offset = 0;
+      while (offset + 2 <= buffer.length) {
+        const opcode = buffer[offset] & 0x0f;
+        let length = buffer[offset + 1] & 0x7f;
+        let cursor = offset + 2;
+        if (length === 126) { length = buffer.readUInt16BE(cursor); cursor += 2; }
+        else if (length === 127) { length = Number(buffer.readBigUInt64BE(cursor)); cursor += 8; }
+        const masked = (buffer[offset + 1] & 0x80) !== 0;
+        let mask = null;
+        if (masked) { mask = buffer.subarray(cursor, cursor + 4); cursor += 4; }
+        const payload = Buffer.from(buffer.subarray(cursor, cursor + length));
+        if (mask) for (let i = 0; i < payload.length; i += 1) payload[i] ^= mask[i % 4];
+        offset = cursor + length;
+        if (opcode === 0x8) { socket.end(); return; }
+        if (opcode !== 0x1) continue;
+        const message = JSON.parse(payload.toString());
+        const reply = (result) => socket.write(devtoolsFrame(JSON.stringify({ id: message.id, result })));
+        if (message.method === 'Target.createTarget') reply({ targetId });
+        else reply({});
+      }
+    });
+  });
+  server.listen(0, '127.0.0.1', () => resolve({
+    url: `ws://127.0.0.1:${server.address().port}/devtools/browser/shared-stub`,
+    close: () => new Promise((r) => { for (const s of sockets) s.destroy(); server.close(r); }),
+  }));
+});
+
+test('a shared browser hands the suite a fresh page instead of launching one (airhorn-w1wh)', async () => {
+  const targetId = 'page-for-this-suite';
+  const pageWsUrl = 'ws://127.0.0.1:9/devtools/page/page-for-this-suite';
+  const peer = await sharedDevtoolsPeer({ targetId, pageWsUrl });
+  const saved = { chrome: process.env.CHROME_BIN, ws: process.env.AIRHORN_CHROME_WS };
+  // A binary that must NOT be used: in shared mode there is nothing to spawn.
+  process.env.CHROME_BIN = path.join(os.tmpdir(), 'must-not-be-spawned-chrome');
+  process.env.AIRHORN_CHROME_WS = peer.url;
+  try {
+    const handle = await launchBrowser({ label: 'shared-mode' });
+    assert.equal(handle.shared, true, 'the shared path must be the one that ran');
+    assert.equal(handle.pageWsUrl, pageWsUrl, 'the page must be the one this suite created, matched by target id');
+    assert.equal(handle.chrome, null, 'shared mode must not spawn a browser');
+    assert.deepEqual(profilesFor('shared-mode'), [], 'shared mode must not create a profile of its own');
+    assert.equal(fs.existsSync(process.env.CHROME_BIN), false, 'the configured binary was never needed');
+    await handle.close();
+  } finally {
+    process.env.CHROME_BIN = saved.chrome;
+    if (saved.ws === undefined) delete process.env.AIRHORN_CHROME_WS; else process.env.AIRHORN_CHROME_WS = saved.ws;
+    await peer.close();
+  }
+});
+
+test('with no shared browser exported, the suite still cold-launches (airhorn-w1wh)', async () => {
+  const label = runLabel('cold-fallback');
+  const saved = { chrome: process.env.CHROME_BIN, ws: process.env.AIRHORN_CHROME_WS };
+  delete process.env.AIRHORN_CHROME_WS;
+  process.env.CHROME_BIN = path.join(os.tmpdir(), 'no-such-chrome-for-cold-fallback');
+  try {
+    await assert.rejects(() => launchBrowser({ label, timeoutMs: 900, discoveryMs: 900 }),
+      'a suite with no shared browser must fall back to a launch, not silently do nothing');
+    assert.deepEqual(profilesFor(label), [], 'the failed cold launch left its profile behind');
+  } finally {
+    process.env.CHROME_BIN = saved.chrome;
+    if (saved.ws !== undefined) process.env.AIRHORN_CHROME_WS = saved.ws;
+    removeProfiles(label);
   }
 });
 

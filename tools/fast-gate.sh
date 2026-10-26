@@ -280,7 +280,7 @@ fi
 # --- split selected suites: RUN (exists) vs PENDING (declared by a `~` row, not landed yet) ----------
 # A selected suite whose file is missing is a STALE map (fail) unless a `~` row declares it as pending
 # (arriving with a sibling branch) - then it is skipped loudly and simply not counted.
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+TMP=$(mktemp -d); SHARED_PID=""; trap 'kill ${SHARED_PID:-} 2>/dev/null; rm -rf "$TMP"' EXIT
 RUN=(); PENDING=(); MISSING=()
 for s in "${SELECTED[@]}"; do
   if [ -f "$ROOT/$s" ]; then RUN+=("$s");
@@ -323,6 +323,65 @@ if ! (cd "$ROOT" && npm run build --silent) >"$TMP/build.log" 2>&1; then
 fi
 
 printf 'fast-gate: running: %s\n' "${RUN[@]}"
+
+# --- starved host: refuse early, or pay ONE launch for every suite ---------------------------
+# A cold launch is ~2s on a healthy box, which is why airhorn-ecp measured sharing SLOWER there
+# (62-70s cold vs 82-98s shared: parallel suites contended inside one browser, eleven times over)
+# and reverted it. On the starved fleet box it is the other way round: steal 88-96% makes a launch
+# cost 22-57s (airhorn-w1wh), eleven of those cannot fit any gate bound, and tools/lib/chrome.mjs
+# REFUSES each one ('host starved: steal NN%').
+#
+# So on a starved host the default is to say so and stop: a gate that runs these suites here
+# reports expired bounds as suite failures - a lie about the code - and it costs the full bound to
+# say it. AIRHORN_SHARED_CHROME=1 is the measured alternative, one launch
+# (tools/shared-chrome.mjs, budgeted for a starved host) that every suite then shares. Opt-in
+# rather than default because sharing is the mode this repo measured SLOWER on a healthy box.
+STEAL=$(cd "$ROOT" && node --input-type=module -e "import('./tools/lib/chrome.mjs').then((m) => { const s = m.hostSteal(); process.stdout.write(s === null ? '' : s.toFixed(3)); })" 2>/dev/null)
+STEAL_CEILING=${CHROME_STEAL_CEILING:-0.6}
+# Which selected suites would actually be REFUSED by the preflight? Not every suite that names a
+# launch: tests/test-support.test.js drives the cold path with a stub binary and pins
+# CHROME_STEAL_OVERRIDE=0, so it never hits the refusal - and it must not, because it is the suite
+# that validates this change. Counting by name would either block it or miss the next such suite;
+# counting by "names a launch and does not pin the seam" tracks the code.
+BROWSER_SUITES=0
+for s in "${RUN[@]}"; do
+  [ -f "$ROOT/$s" ] || continue
+  grep -qE 'launchBrowser|launchChrome' "$ROOT/$s" || continue
+  grep -q 'CHROME_STEAL_OVERRIDE' "$ROOT/$s" && continue
+  BROWSER_SUITES=$((BROWSER_SUITES + 1))
+done
+if [ -n "$STEAL" ] && awk "BEGIN { exit !($STEAL >= $STEAL_CEILING) }" && [ "$BROWSER_SUITES" -gt 0 ]; then
+  if [ "${AIRHORN_SHARED_CHROME:-0}" = "1" ]; then
+    SHARED_ENV="$TMP/shared-chrome.env"
+    node "$HERE/shared-chrome.mjs" --out "$SHARED_ENV" --suites "${RUN[@]}" >"$TMP/shared-chrome.log" 2>&1 &
+    SHARED_PID=$!
+    # The broker's own launch budget is the starved one (180s), so the wait for its env file is
+    # sized to that: a helper that is still cold-launching is not a failure yet.
+    for _ in $(seq 1 400); do
+      [ -s "$SHARED_ENV" ] && break
+      kill -0 "$SHARED_PID" 2>/dev/null || break
+      sleep 0.5
+    done
+    if [ -s "$SHARED_ENV" ]; then
+      . "$SHARED_ENV"
+      echo "fast-gate: shared browser: one launch for ${#RUN[@]} suite(s) (host steal ${STEAL})" >&2
+    else
+      echo "fast-gate: shared browser did not start; suites will cold-launch (and refuse if starved)" >&2
+      sed 's/^/    /' "$TMP/shared-chrome.log" 2>/dev/null | tail -5 >&2
+      SHARED_PID=""
+    fi
+  else
+    {
+      echo "fast-gate: host starved: steal ${STEAL} (ceiling ${STEAL_CEILING}) - ${BROWSER_SUITES} selected suite(s)"
+      echo "fast-gate: drive a browser, and no browser launch completes on this host. Running them would"
+      echo "fast-gate: report expired bounds as suite failures and burn the whole gate bound to say it,"
+      echo "fast-gate: so this run stops here. Re-run when the host is not starved, or set"
+      echo "fast-gate: AIRHORN_SHARED_CHROME=1 to pay one measured launch and share it (airhorn-w1wh)."
+      echo "fast-gate: FAIL - host starved: steal ${STEAL}"
+    } >&2
+    exit 1
+  fi
+fi
 n=0
 SUITE_PIDS=()
 for s in "${RUN[@]}"; do

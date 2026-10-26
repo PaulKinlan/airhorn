@@ -101,13 +101,11 @@ export { sweepProfile };
 const DEFAULT_STEAL_CEILING = 0.6;
 const MAX_BOUND_STRETCH = 8;
 const MIN_STEAL_TICKS = 10;
-const STEAL_FALLBACK_MS = 120;
+const STEAL_SAMPLE_MS = 2000;
+const STEAL_SUSPICIOUS = 0.3;
 
 // A synchronous, bounded sleep: the preflight runs before the launch and cannot
-// await, and the only thing it needs is a window wide enough to measure. Used
-// ONLY when the module-load baseline is too close to the call to have
-// accumulated MIN_STEAL_TICKS (an import-and-launch immediately, which is what a
-// fast suite does), so the ordinary path pays nothing.
+// await, and the only thing it needs is a window wide enough to measure.
 function sleepSync(ms) {
   try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no SAB: skip */ }
 }
@@ -127,6 +125,8 @@ function stealCeiling() {
   return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : DEFAULT_STEAL_CEILING;
 }
 
+let stealCached = null;
+
 export function hostSteal() {
   const override = process.env.CHROME_STEAL_OVERRIDE;
   if (override !== undefined && override !== '') {
@@ -134,15 +134,31 @@ export function hostSteal() {
     if (Number.isFinite(forced)) return Math.min(1, Math.max(0, forced));
   }
   if (!stealBaseline) return null;
-  let now;
-  try { now = readCpuTicks(); } catch { return null; }
-  if (now.total - stealBaseline.total < MIN_STEAL_TICKS) {
-    sleepSync(STEAL_FALLBACK_MS);
-    try { now = readCpuTicks(); } catch { return null; }
-  }
-  const total = now.total - stealBaseline.total;
-  if (!(total >= MIN_STEAL_TICKS)) return null;
-  return Math.min(1, Math.max(0, (now.steal - stealBaseline.steal) / total));
+  const fraction = (from) => {
+    const now = readCpuTicks();
+    const total = now.total - from.total;
+    if (!(total >= MIN_STEAL_TICKS)) return null;
+    return Math.min(1, Math.max(0, (now.steal - from.steal) / total));
+  };
+
+  // Two stages, because the two costs are not symmetric: a reading that is
+  // nowhere near the ceiling cannot change the outcome, so it must not cost the
+  // gate a wait (`nothing regresses on a healthy host`), while a reading that is
+  // close to it - or a launch that is about to be stretched - is worth the full
+  // ~2s sample that the fleet contract asks for. Cheap first, then confirm.
+  let cheap;
+  try { cheap = fraction(stealBaseline); } catch { return null; }
+  if (cheap !== null && cheap < STEAL_SUSPICIOUS) return cheap;
+  if (stealCached !== null) return stealCached;
+
+  const from = (() => { try { return readCpuTicks(); } catch { return null; } })();
+  if (!from) return cheap;
+  sleepSync(STEAL_SAMPLE_MS);
+  let measured;
+  try { measured = fraction(from); } catch { measured = null; }
+  if (measured === null) return cheap;
+  stealCached = measured;
+  return measured;
 }
 
 // A loaded box gets more time, not a wrong verdict: the bounds grow by exactly
@@ -241,8 +257,7 @@ export async function launchChrome({
   webmcp = false,
   extraFlags = [],
   label = 'chrome',
-  timeoutMs = 15000,
-  // Bound on /json/list discovery, generous on purpose (airhorn-sesh): Chrome's
+  timeoutMs = 15000,  // Bound on /json/list discovery, generous on purpose (airhorn-sesh): Chrome's
   // DevTools endpoint answers LATE on a loaded box - measured at 5 s on a 2-core
   // VM with other lanes' suites running, which read as a launch failure in a
   // browser suite that was fine (visual-overrides: '/json/list never answered on
@@ -252,6 +267,13 @@ export async function launchChrome({
   profileDir: givenProfileDir = null,
   keepProfile = false,
   discoverPage = true,
+  // The one caller that may launch on a starved host is the gate's shared
+  // browser (tools/shared-chrome.mjs): it pays ONE launch for every suite, so it
+  // can afford a long, measured budget where a per-suite launch cannot. Without
+  // this, sharing and the steal preflight fight each other - the preflight
+  // refuses exactly the host where one shared browser is the only way to run at
+  // all. It is deliberately not a general escape hatch: a suite never sets it.
+  allowStarved = false,
 } = {}) {
   // Before anything is created or spawned (airhorn-w1wh): on a starved host this
   // launch cannot succeed, and waiting for the bound to expire is what turned
@@ -259,13 +281,15 @@ export async function launchChrome({
   // an 1800s gate. Saying it costs nothing and names the actual cause.
   const steal = hostSteal();
   const ceiling = stealCeiling();
-  if (steal !== null && steal >= ceiling) {
+  if (steal !== null && steal >= ceiling && !allowStarved) {
     throw new Error(
       `host starved: steal ${(steal * 100).toFixed(0)}% (ceiling ${(ceiling * 100).toFixed(0)}%) - ` +
       `refusing to launch chrome (${label}): this host cannot start a browser, and failing here ` +
       'names the machine instead of spending the gate bound on it (airhorn-w1wh)');
   }
-  const bounds = stretchedBounds({ timeoutMs, discoveryMs, steal });
+  const bounds = allowStarved
+    ? { timeoutMs, discoveryMs }   // the caller set a budget it measured; do not stretch it again
+    : stretchedBounds({ timeoutMs, discoveryMs, steal });
   const profileDir = givenProfileDir ?? fs.mkdtempSync(path.join(os.tmpdir(), `chrome-${label}-`));
   const chrome = spawn(chromeBin(), [
     ...familyArgs({ autoplay, webmcp }),
