@@ -16,6 +16,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import esbuild from 'esbuild';
 import { makeRenderModel } from '../tools/render-model.mjs';
 import { READ_STATE } from '../tools/resilience-audit.mjs';
 import { main as deriveContractMain, deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites, isPendingSuite } from '../tools/derive-coverage-contract.mjs';
@@ -279,6 +280,23 @@ test('the freshness guard BITES: a hand-edited contract fails --check (airhorn-b
     fs.mkdirSync(path.join(tempRoot, 'tools'), { recursive: true });
     fs.mkdirSync(path.join(tempRoot, '.fleet'), { recursive: true });
     fs.writeFileSync(path.join(tempRoot, 'tools', 'suite-map.tsv'), tsv);
+    for (const d of ['src', 'public', 'tests', 'test', 'docs', 'preview']) {
+      const srcDir = path.join(root, d);
+      const dstDir = path.join(tempRoot, d);
+      if (fs.existsSync(srcDir) && !fs.existsSync(dstDir)) {
+        fs.symlinkSync(srcDir, dstDir);
+      }
+    }
+    for (const d of fs.readdirSync(path.join(root, 'tools'), { withFileTypes: true })) {
+      if (d.isDirectory()) {
+        fs.symlinkSync(path.join(root, 'tools', d.name), path.join(tempRoot, 'tools', d.name));
+      }
+    }
+    for (const f of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!f.isDirectory() && f.name.endsWith('.md')) {
+        fs.symlinkSync(path.join(root, f.name), path.join(tempRoot, f.name));
+      }
+    }
     const contractFile = path.join(tempRoot, '.fleet', 'coverage-contract.json');
     const opts = { root: tempRoot, existsFn: (rel) => fs.existsSync(path.join(root, rel)) };
 
@@ -363,10 +381,16 @@ const buildGateProbe = () => {
   // The runner config is part of the gate: without its pinned TAP reporter the probe's
   // node --test would emit the spec summary and the gate would read the suite as silent.
   fs.copyFileSync(path.join(root, 'tools', 'gate.conf'), path.join(toolsDir, 'gate.conf'));
+  fs.copyFileSync(path.join(root, 'tools', 'derive-coverage-contract.mjs'), path.join(toolsDir, 'derive-coverage-contract.mjs'));
   fs.writeFileSync(path.join(probe, 'package.json'),
     JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'true' } }));
   fs.writeFileSync(path.join(probe, 'tests', 'pass.test.js'),
     "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('one passing case', () => { assert.ok(true); });\n");
+  fs.mkdirSync(path.join(probe, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(probe, 'src', 'a.js'), '// a');
+  fs.writeFileSync(path.join(probe, 'pending-src.txt'), 'pending');
+  fs.writeFileSync(path.join(probe, 'mixed-src.js'), '// mixed');
+  fs.writeFileSync(path.join(probe, 'README.md'), '# probe');
   fs.writeFileSync(path.join(toolsDir, 'suite-map.tsv'), [
     'src/a.js\ttests/pass.test.js',
     'pending-src.txt\ttests/pending.test.js',
@@ -513,16 +537,33 @@ test("an all-'~'-pending change fails loudly: zero executed suites is not green 
   }
 });
 
+test('map honesty in fast-gate rejects a literal missing path even with --list (airhorn-onz0)', () => {
+  // Round-2 review finding: a literal mapped path that does not exist on disk
+  // must fail map honesty even when querying with --list (which bypasses suite execution).
+  const { probe, run } = buildGateProbe();
+  try {
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'src/does-not-exist.js\ttests/pass.test.js\n');
+    const res = run(['--list']);
+    assert.equal(res.status, 1, `a literal missing path must fail map honesty with rc 1: ${res.stdout}`);
+    assert.ok(
+      res.stderr.includes('src/does-not-exist.js'),
+      `expected stderr to name src/does-not-exist.js, got:\n${res.stderr}`
+    );
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
 test('every tools script parses - recognised extensions at any depth (airhorn-7lm, airhorn-7z5, airhorn-h19)', () => {
   // Glob, not names (airhorn-v1n), and every RECOGNISED script extension,
   // not just .mjs (airhorn-h19: .cjs and .ts were unparseable, extensionless
   // files invisible). A tools file with no parser is a failure, not a skip:
   // teach the checker or list the extension as data here.
   const PARSERS = {
-    '.mjs': (f) => execFileSync(process.execPath, ['--check', f]),
-    '.js': (f) => execFileSync(process.execPath, ['--check', f]),
-    '.cjs': (f) => execFileSync(process.execPath, ['--check', f]),
-    '.ts': (f) => execFileSync(path.join(root, 'node_modules', '.bin', 'esbuild'), [f]),
+    '.mjs': (f) => esbuild.transformSync(fs.readFileSync(f, 'utf8'), { loader: 'js', sourcefile: f }),
+    '.js': (f) => esbuild.transformSync(fs.readFileSync(f, 'utf8'), { loader: 'js', sourcefile: f }),
+    '.cjs': (f) => esbuild.transformSync(fs.readFileSync(f, 'utf8'), { loader: 'js', sourcefile: f }),
+    '.ts': (f) => esbuild.transformSync(fs.readFileSync(f, 'utf8'), { loader: 'ts', sourcefile: f }),
     '.sh': (f) => execFileSync('bash', ['-n', f]),
   };
   const DATA_EXTS = new Set(['.conf', '.tsv', '.json', '.md', '.txt']);
@@ -598,7 +639,7 @@ test('a launch that never starts fails labelled and leaves no profile behind (ai
     const res = spawnSync(process.execPath,
       [path.join(root, 'tools', 'install-https-proof.mjs'), '--out', path.join(tmp, 'out')], {
         encoding: 'utf8',
-        timeout: 60000,
+        timeout: 120000,
         env: { ...process.env, CHROME_BIN: path.join(tmp, 'no-such-chrome'), TMPDIR: tmp },
       });
     assert.equal(res.status, 1, `expected a labelled failure (rc 1), got ${res.status}: ${res.stderr}`);

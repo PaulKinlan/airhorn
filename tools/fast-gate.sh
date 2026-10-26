@@ -115,89 +115,64 @@ else
   CHANGED=("${EXPLICIT[@]}")
 fi
 
+# Read MAP once into memory:
+MAP_ROWS_PAT=()
+MAP_ROWS_REST=()
+declare -A PENDING_SET=()
+declare -A REACHABLE_SET=()
+EXEMPT_PATTERNS=()
+
+while IFS=$'\t' read -r pat rest || [ -n "$pat" ]; do
+  case $pat in ''|\#*) continue ;; esac
+  MAP_ROWS_PAT+=("$pat")
+  MAP_ROWS_REST+=("$rest")
+  case $pat in
+    ~*)
+      for s in $rest; do PENDING_SET["$s"]=1; REACHABLE_SET["$s"]=1; done ;;
+    \!*)
+      [ -n "${pat#!}" ] && EXEMPT_PATTERNS+=("${pat#!}") ;;
+    *)
+      for s in $rest; do REACHABLE_SET["$s"]=1; done ;;
+  esac
+done < "$MAP"
+
 is_exempt() { # $1 = path ; true iff an `!` row matches it
   local pat
-  while IFS=$'\t' read -r pat _; do
+  for pat in ${EXEMPT_PATTERNS[@]+"${EXEMPT_PATTERNS[@]}"}; do
     # NOTE: the pattern side of `[[ ]]` must stay UNQUOTED or it is compared as a literal string.
-    case $pat in \!*) [ -n "${pat#!}" ] || continue; [[ $1 == ${pat#!} ]] && return 0 ;; esac
-  done < "$MAP"
+    [[ $1 == $pat ]] && return 0
+  done
   return 1
 }
 
 suites_for() { # $1 = path -> newline-separated suites (empty = unmapped)
-  local pat rest
+  local i pat
   # A changed suite maps to itself (both spellings of the suite directory, js/mjs/ts).
   case $1 in tests/*.test.js|tests/*.test.mjs|tests/*.test.ts|test/*.test.js|test/*.test.mjs|test/*.test.ts) echo "$1"; return ;; esac
   # ACCUMULATE every matching row, do not stop at the first (fleet-w7so): rows are additive, the caller
   # de-duplicates, so naming a suite twice is harmless — but silently dropping a row's coverage is not.
   # `~` rows are PENDING declarations and map no files (see is_pending).
-  while IFS=$'\t' read -r pat rest; do
-    case $pat in ''|\#*|\!*|~*) continue ;; esac
+  for i in "${!MAP_ROWS_PAT[@]}"; do
+    pat="${MAP_ROWS_PAT[$i]}"
+    case $pat in \!*|~*) continue ;; esac
     if [[ $1 == $pat ]]; then
-      printf '%s\n' $rest          # word-split on purpose: one row names several suites
+      printf '%s\n' ${MAP_ROWS_REST[$i]}          # word-split on purpose: one row names several suites
     fi
-  done < "$MAP"
+  done
   return
 }
 
 is_pending() { # $1 = suite path ; true iff a `~` row DECLARES it (arriving with a sibling branch)
-  local pat rest s   # local s: the inner loop must NOT clobber the caller's iteration variable
-  while IFS=$'	' read -r pat rest; do
-    case $pat in ~*) ;; *) continue ;; esac
-    for s in $rest; do [ "$s" = "$1" ] && return 0; done
-  done < "$MAP"
-  return 1
+  [[ -n "${PENDING_SET[$1]-}" ]]
 }
 
 map_reaches() { # $1 = suite path ; true iff a NON-exemption row names it (plain or `~`)
-  local pat rest s   # local s: see is_pending - this bug once appended the wrong suite to the FAIL list
-  while IFS=$'\t' read -r pat rest; do
-    case $pat in ''|\#*|\!*) continue ;; esac
-    for s in $rest; do [ "$s" = "$1" ] && return 0; done
-  done < "$MAP"
-  return 1
+  [[ -n "${REACHABLE_SET[$1]-}" ]]
 }
 
-# --- map honesty (airhorn-o0u): a property of the MAP, not of selection. ---
-# Every PLAIN row's suite token must exist in the tree, unless a '~' row
-# declares that token pending; a '!' row that pins a suite-shaped path must
-# name a file that exists. Anything else is dead config that reads green
-# forever, whatever a change happened to select - including rows naming a
-# suite under the OTHER root spelling, which selection-driven checks can
-# never see. One pass over the map, before any selection logic: a stale map
-# fails even a change that touches none of its live paths.
-MISSING_MAP=()
-while IFS=$'\t' read -r pat rest; do
-  case $pat in ''|\#*) continue ;; esac
-  case $pat in
-    \!*)
-      # An exemption pinning a literal suite-shaped path is checked like a
-      # plain row: if the file is gone the row is dead. A GLOB pin is the
-      # normal use of ! rows and cannot resolve - skip it BEFORE the
-      # suite-shape check, whose patterns would otherwise match the glob
-      # STRING itself and report a nonexistent file 'missing' (airhorn-lex).
-      _pin=${pat#!}
-      [ -n "$_pin" ] || continue
-      case $_pin in *[\*\?\[]*) continue ;; esac
-      case $_pin in tests/*.test.js|tests/*.test.mjs|tests/*.test.ts|test/*.test.js|test/*.test.mjs|test/*.test.ts)
-        [ -f "$ROOT/$_pin" ] || MISSING_MAP+=("$_pin") ;;
-      esac
-      continue ;;
-  esac
-  for s in $rest; do
-    case $s in tests/*.test.js|tests/*.test.mjs|tests/*.test.ts|test/*.test.js|test/*.test.mjs|test/*.test.ts) ;; *) continue ;; esac
-    [ -f "$ROOT/$s" ] && continue
-    is_pending "$s" && continue
-    MISSING_MAP+=("$s")
-  done
-done < "$MAP"
-if [ "${#MISSING_MAP[@]}" -gt 0 ]; then
-  mapfile -t _mm < <(printf '%s\n' "${MISSING_MAP[@]}" | sort -u)
-  for s in "${_mm[@]}"; do [ -n "$s" ] && echo "fast-gate: missing: $s"; done
-  echo "fast-gate: FAIL - the map names ${#_mm[@]} suite(s) that are not in the tree; the" >&2
-  echo "fast-gate: map is stale (a renamed or deleted suite reads as green forever" >&2
-  echo "fast-gate: otherwise). Fix the map, or mark the suite as '~'-pending if it" >&2
-  echo "fast-gate: arrives with a sibling branch." >&2
+# --- map honesty: validated by derive-coverage-contract.mjs --validate-map ---
+if ! node "$HERE/derive-coverage-contract.mjs" --validate-map; then
+  echo "fast-gate: FAIL - the map has integrity violations (see errors above)." >&2
   exit 1
 fi
 
