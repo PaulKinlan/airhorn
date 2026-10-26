@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -43,6 +44,21 @@ const instrumentation = `
   (() => {
     window.__probe = { starts: 0, peak: 0, level: 0, samples: 0, ctxState: null, active: 0, maxActive: 0, contexts: 0, oscStarts: 0, oscActive: 0, maxOscActive: 0 };
     window.__badge = { calls: [], cleared: 0 };
+
+    // Wait for a page STATE, never for the clock (airhorn-sesh). The UI claims
+    // below used to be read from snapshots taken after a fixed 300-400 ms sleep,
+    // which asserts machine speed: on a loaded box the tool call's own class and
+    // aria changes land late and a correct app reads red. The bound is how long
+    // we are willing to WAIT; polling stops as soon as the state holds.
+    window.__waitFor = async (predicate, label = 'condition', timeout = ${WAIT_TIMEOUT_MS}) => {
+      const deadline = Date.now() + timeout;
+      for (;;) {
+        const value = predicate();
+        if (value) return value;
+        if (Date.now() >= deadline) throw new Error('timed out after ' + timeout + ' ms waiting for ' + label);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
 
     const AC = window.AudioContext || window.webkitAudioContext;
     if (AC) {
@@ -357,9 +373,18 @@ async function run() {
       const horn = document.querySelector('.horn');
       const before = { pressed: horn.getAttribute('aria-pressed'), horning: horn.classList.contains('horning') };
       const result = await window.__call('play_horn', { loop: true });
-      await new Promise((r) => setTimeout(r, 400));
-      const during = { pressed: horn.getAttribute('aria-pressed'), horning: horn.classList.contains('horning') };
-      const levelA = window.__probe.level;
+      const during = await window.__waitFor(() => {
+        const state = { pressed: horn.getAttribute('aria-pressed'), horning: horn.classList.contains('horning') };
+        return state.pressed === 'true' && state.horning ? state : null;
+      }, 'play_horn to show its pressed state');
+      // A and B are a MEASUREMENT window, not a UI wait: the analyser samples the
+      // destination every 20 ms, so A waits for the first audible sample rather
+      // than for a fixed delay, and B is a second look after a gap so the claim
+      // "continuously sounding" is about two samples, not one.
+      const levelA = (await window.__waitFor(
+        () => (window.__probe.level > 0.005 ? { level: window.__probe.level } : null),
+        'audible output from the looped blast',
+      )).level;
       await new Promise((r) => setTimeout(r, 350));
       const levelB = window.__probe.level;
       const state = await window.__call('get_horn_state');
@@ -409,14 +434,26 @@ async function run() {
       const horn = document.querySelector('.horn');
       const startsBefore = window.__probe.starts;
       const result = await window.__call('stop_horn');
-      await new Promise((r) => setTimeout(r, 300));
+      await window.__waitFor(
+        () => horn.getAttribute('aria-pressed') === 'false' && !horn.classList.contains('horning'),
+        'stop_horn to clear the pressed state',
+      );
+      // The level is a MEASUREMENT window like A/B above: the analyser reports
+      // the last 20 ms sample, so "not audible" means waiting for the measured
+      // level to fall, not sleeping for a guess at how long the decay takes.
+      // Wrapped in an object on purpose: a measured level of exactly 0 IS the
+      // condition, and returning it bare would read as "not met" (0 is falsy).
+      const level = (await window.__waitFor(
+        () => (window.__probe.level <= 0.01 ? { level: window.__probe.level } : null),
+        'the stopped blast to fall silent',
+      )).level;
       return {
         result,
         startsBefore,
         startsAfter: window.__probe.starts,
         pressed: horn.getAttribute('aria-pressed'),
         horning: horn.classList.contains('horning'),
-        level: window.__probe.level,
+        level,
         state: await window.__call('get_horn_state'),
       };
     })()`);
@@ -583,9 +620,15 @@ async function run() {
         throw new Error(`the refusal repeated ${mega.responseBytes} bytes back at the caller`);
       }
       if (mega.echoedPayload) throw new Error('the refusal echoed the hostile payload');
-      if (mega.ms > 500) throw new Error(`refusing a megabyte took ${mega.ms}ms`);
-    } else if (mega.ms > 500) {
-      throw new Error(`the platform took ${mega.ms}ms to refuse a megabyte payload`);
+      // The promptness claim is a HANG detector, not a speed claim (airhorn-sesh):
+      // 500 ms was a wall-clock assertion that a loaded scheduler violates (measured
+      // 1108 ms at load 19 with the refusal itself working correctly - the echo and
+      // schema checks above are what prove the behaviour). A refusal that buffers or
+      // parses a megabyte without bounding it shows up here as a stall, which is the
+      // regression this line exists to catch.
+      if (mega.ms > WAIT_TIMEOUT_MS) throw new Error(`refusing a megabyte took ${mega.ms}ms (hang, not slow)`);
+    } else if (mega.ms > WAIT_TIMEOUT_MS) {
+      throw new Error(`the platform took ${mega.ms}ms to refuse a megabyte payload (hang, not slow)`);
     }
 
     // 6. Rapid repeated invocation: a flood must not stack playback, allocate
@@ -601,7 +644,7 @@ async function run() {
           return { rejected: String((err && err.message) || err) };
         })
       ));
-      await new Promise((r) => setTimeout(r, 300));
+      await window.__waitFor(() => horn.getAttribute('aria-pressed') === 'true', 'the flood to leave the horn sounding');
       const during = {
         active: window.__probe.active,
         maxActive: window.__probe.maxActive,
@@ -611,7 +654,10 @@ async function run() {
         state: await window.__call('get_horn_state'),
       };
       const stopped = await window.__call('stop_horn');
-      await new Promise((r) => setTimeout(r, 400));
+      await window.__waitFor(
+        () => horn.getAttribute('aria-pressed') === 'false' && !horn.classList.contains('horning'),
+        'the flood teardown to clear the pressed state',
+      );
       return {
         before,
         rejected,
@@ -728,7 +774,10 @@ async function run() {
       } catch (err) {
         entry = { resolved: false, rejected: String((err && err.message) || err) };
       }
-      await new Promise((r) => setTimeout(r, 250));
+      await window.__waitFor(
+        () => window.__probe.oscStarts > before.oscStarts,
+        'the synth fallback to start an oscillator',
+      );
       const during = {
         oscStarts: window.__probe.oscStarts - before.oscStarts,
         oscActive: window.__probe.oscActive,
@@ -737,7 +786,10 @@ async function run() {
         state: await window.__call('get_horn_state'),
       };
       const stopped = await window.__call('stop_horn');
-      await new Promise((r) => setTimeout(r, 300));
+      await window.__waitFor(
+        () => horn.getAttribute('aria-pressed') === 'false' && !horn.classList.contains('horning'),
+        'the synth fallback teardown to clear the pressed state',
+      );
       return {
         entry,
         during,

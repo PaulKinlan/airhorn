@@ -47,7 +47,7 @@ async function run() {
 
   let browser = null;
   try {
-    browser = await launchBrowser({ label: 'a11y', timeoutMs: 10000 });
+    browser = await launchBrowser({ label: 'a11y', timeoutMs: 15000 });
 
     console.log(`Chrome started, wsUrl: ${browser.browserWsUrl}`);
     const pageWsUrl = browser.pageWsUrl;
@@ -797,7 +797,7 @@ async function run() {
       // observable, so bound the overall wait and the state-only wait separately:
       // a stuck pipeline then fails in seconds, naming the cause, instead of
       // wedging for 20s and reporting that unspecified work is still pending.
-      timeoutMs: 10000,
+      timeoutMs: 15000,
       stateTimeoutMs: 4000,
     });
     console.log(

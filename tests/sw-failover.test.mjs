@@ -28,6 +28,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 import { installSignalExit } from './support/signal-exit.mjs';
 
 // A bound-kill (SIGTERM first, then the grace bound) bypasses the try/finally
@@ -306,11 +307,15 @@ async function run() {
     // the old regex passed green with the failure announcement deleted
     // (airhorn-tuuq F1). It must name the failure outcome.
     const REPORT_RE = /could not update|previous version|update failed/i;
-    // Same 3s window, but it stops as soon as the report lands (airhorn-iwf).
+    // Stops as soon as the report lands (airhorn-iwf). The bound is how long we
+    // are willing to wait for the worker, not a claim that it lands in 3 s: the
+    // upgrade announcement waits on a real worker statechange, and on a loaded
+    // box that is late for reasons that have nothing to do with the app
+    // (airhorn-sesh).
     const report = (await waitUntil(async () => {
       const r = await readReport();
       return REPORT_RE.test(r.text) ? r : null;
-    }, 3000)) || await readReport();
+    }, WAIT_TIMEOUT_MS)) || await readReport();
     const after = await evaluate(`caches.keys()`);
     state.swShim = null;
 
