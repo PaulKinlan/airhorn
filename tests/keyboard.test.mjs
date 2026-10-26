@@ -504,31 +504,18 @@ async function run() {
     const beforeSpace = await snapshot();
     // aria-pressed flips optimistically, so wait for the voice itself: the count
     // of starts is what "it sounded" means here.
-    const voiceStarted = (label) => waitFor(
-      (s) => s.horning && s.sources + s.oscillators > beforeSpace.sources + beforeSpace.oscillators,
-      { label },
-    );
+    //
+    // NO retry on a refused first press (airhorn-9u42, reviewer finding): retrying
+    // when the app answered with its 'needs a tap' hint passed any regression whose
+    // signature is 'first press refused, second works', which is exactly the defect
+    // airhorn-dxug is fixing. A refusal here is a red, and it is a real one: on a
+    // starved box src/horn.js's fixed resume race loses and the press is refused.
+    // The fix belongs in the app (dxug), not in a tolerance that hides it.
     await hold('Space');
-    let duringSpace;
-    try {
-      duringSpace = await voiceStarted('Space keydown to start a voice');
-    } catch (err) {
-      // First press refused: the app retracts an optimistic press when the audio
-      // graph has not resumed within its own race window, and says so through the
-      // tap hint (airhorn-hlg/x4l). Under load a CDP gesture can arrive after the
-      // browser's activation window, so the FIRST press legitimately refuses -
-      // that is the environment, not a keyboard defect, and the app's own recovery
-      // contract is "press again". Press once more; a second refusal fails here
-      // (with the hint in the message), so this cannot hide a real regression
-      // (airhorn-sesh: measured at load 19, 3 concurrent browsers).
-      const refused = await snapshot();
-      if (!/needs a tap/i.test(refused.status || '')) throw err;
-      console.log(`  note: the browser refused the first gesture (status: ${JSON.stringify(refused.status)}); pressing again, as the app instructs`);
-      await release('Space');
-      await hold('Space');
-      duringSpace = await voiceStarted('Space keydown to start a voice (after the app asked for a second press)');
-    }
-    assert(duringSpace.pressed === 'true', `hold Space: aria-pressed is ${duringSpace.pressed} while the horn sounds`);
+    const duringSpace = await waitFor(
+      (s) => s.horning && s.sources + s.oscillators > beforeSpace.sources + beforeSpace.oscillators,
+      { label: 'Space keydown to start a voice' },
+    );
     const spaceBlast = blastStarts(beforeSpace, duringSpace);
     assert(
       spaceBlast.total === 1 || spaceBlast.total === 3,
