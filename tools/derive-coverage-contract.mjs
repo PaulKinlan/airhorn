@@ -98,13 +98,17 @@ export function formatCoverageContract(contract) {
   return JSON.stringify(contract, null, 1) + '\n';
 }
 
-export function main(args = process.argv.slice(2)) {
-  const root = DEFAULT_ROOT;
+// root/existsFn are injectable so the freshness GUARD can be tested for real: a
+// test can point --check at a temp root and still resolve mapped paths against
+// this checkout, instead of asserting that two different strings differ, which is
+// true by construction and exercises nothing (airhorn-bja9). The CLI passes
+// neither, so production behaviour is unchanged.
+export function main(args = process.argv.slice(2), { root = DEFAULT_ROOT, existsFn, fileExists } = {}) {
   const tsvPath = path.join(root, 'tools', 'suite-map.tsv');
   const contractPath = path.join(root, '.fleet', 'coverage-contract.json');
 
   const tsvText = fs.readFileSync(tsvPath, 'utf8');
-  const derived = deriveCoverageContract(tsvText, { root });
+  const derived = deriveCoverageContract(tsvText, { root, existsFn, fileExists });
   const formatted = formatCoverageContract(derived);
 
   if (args.includes('--stdout')) {

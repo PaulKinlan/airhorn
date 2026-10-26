@@ -18,7 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeRenderModel } from '../tools/render-model.mjs';
 import { READ_STATE } from '../tools/resilience-audit.mjs';
-import { deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites, isPendingSuite } from '../tools/derive-coverage-contract.mjs';
+import { main as deriveContractMain, deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites, isPendingSuite } from '../tools/derive-coverage-contract.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const gate = path.join(root, 'tools', 'fast-gate.sh');
@@ -260,14 +260,51 @@ test('the fleet coverage contract is fresh and derived from tools/suite-map.tsv 
     'the coverage contract does not match the generated output from tools/suite-map.tsv. Run node tools/derive-coverage-contract.mjs to regenerate.');
 });
 
-test('the freshness guard fails when the contract is hand-edited (airhorn-y7mx)', () => {
-  const tsv = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
-  const generated = formatCoverageContract(deriveCoverageContract(tsv, { root }));
-  const handEdited = generated.replace('tests/horn.test.js', 'tests/tampered.test.js');
-  assert.notEqual(handEdited, generated, 'mutation must differ');
-  assert.throws(() => {
-    assert.equal(handEdited, generated);
-  }, /AssertionError/);
+test('the freshness guard BITES: a hand-edited contract fails --check (airhorn-bja9)', () => {
+  // This replaces a tautology (airhorn-y7mx's test asserted that two strings which
+  // differ by construction differ). A guard nobody has seen fire is a guess, so run
+  // the ACTUAL guard - main(['--check']) - against a temp root: it must pass on a
+  // freshly derived contract and fail, naming the fix, on one edited by hand.
+  //
+  // existsFn resolves mapped paths against this checkout: the temp root holds only
+  // tools/suite-map.tsv and .fleet/coverage-contract.json, so without it the
+  // derivation would treat every mapped source as missing and a FRESH contract
+  // would report drift, which is the opposite of the thing under test.
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'contract-fresh-guard-'));
+  const err = [];
+  const realError = console.error;
+  try {
+    const tsv = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
+    const generated = formatCoverageContract(deriveCoverageContract(tsv, { root }));
+    fs.mkdirSync(path.join(tempRoot, 'tools'), { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, '.fleet'), { recursive: true });
+    fs.writeFileSync(path.join(tempRoot, 'tools', 'suite-map.tsv'), tsv);
+    const contractFile = path.join(tempRoot, '.fleet', 'coverage-contract.json');
+    const opts = { root: tempRoot, existsFn: (rel) => fs.existsSync(path.join(root, rel)) };
+
+    console.error = (...args) => { err.push(args.join(' ')); };
+    try {
+      fs.writeFileSync(contractFile, generated);
+      assert.equal(deriveContractMain(['--check'], opts), 0,
+        `a freshly derived contract must pass --check; it reported: ${err.join(' | ')}`);
+
+      // Hand-edit exactly the way a person would: one suite renamed in the JSON.
+      const handEdited = generated.replace('tests/horn.test.js', 'tests/tampered.test.js');
+      assert.notEqual(handEdited, generated, 'mutation must differ');
+      fs.writeFileSync(contractFile, handEdited);
+      assert.equal(deriveContractMain(['--check'], opts), 1,
+        'a hand-edited contract must FAIL --check - this is the guard the old test claimed to cover');
+      assert.ok(err.some((line) => /out of date with tools\/suite-map\.tsv/.test(line)),
+        `the guard must say what is wrong; it said: ${err.join(' | ')}`);
+      assert.ok(err.some((line) => /Run "node tools\/derive-coverage-contract\.mjs" to regenerate/.test(line)),
+        `the guard must name the fix; it said: ${err.join(' | ')}`);
+    } finally {
+      console.error = realError;
+    }
+  } finally {
+    console.error = realError;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test('an audit-tool change selects this suite (the tools/* row is real)', () => {
