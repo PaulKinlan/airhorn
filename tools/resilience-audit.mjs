@@ -645,7 +645,24 @@ async function runAudit() {
 
   try {
     if (useStub) {
-      results.push({ id: 'stub', name: 'stubbed failing scenario', status: 'ERROR', error: `the scenario failed on purpose: ${stub}` });
+      // Two shapes, because the exit contract has two halves that must be told apart
+      // (airhorn-w1wh review): a scenario that could not be measured (ERROR -> the
+      // audit fails) and one that completed and FOUND PROBLEMS (OK -> the audit
+      // succeeds). RESILIENCE_STUB_SCENARIO=ok-finding stages the second.
+      if (/^ok-finding/.test(stub)) {
+        results.push({
+          id: 'stub',
+          name: 'stubbed completed scenario with a finding',
+          status: 'OK',
+          renders: false,
+          hornVisible: false,
+          hornUsable: false,
+          explainsItself: false,
+          explanationEvidence: 'none',
+        });
+      } else {
+        results.push({ id: 'stub', name: 'stubbed failing scenario', status: 'ERROR', error: `the scenario failed on purpose: ${stub}` });
+      }
     } else {
     /* ---- 1. real offline after first load ---- */
     if (want('offline')) await withBrowser('offline', 'offline after first load', async ({ cdp }, collectors) => {
