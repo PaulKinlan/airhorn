@@ -266,6 +266,38 @@ const looksLikePath = (token) => !!token && (token.includes('/') || /\.[a-z0-9]+
 const COPIERS = new Set(['cp', 'mv', 'install', 'rsync', 'ln']);
 // Commands where every operand is created or written.
 const CREATORS = new Set(['mkdir', 'touch', 'tee']);
+// Flags that consume the NEXT token as their value, so `install -m 644 a b` does
+// not turn '644' into a source path (airhorn-kuqn).
+const VALUE_FLAGS = new Set(['-m', '--mode', '-o', '--owner', '-g', '--group', '-t', '--target-directory', '-S', '--suffix']);
+
+/**
+ * The `cp SOURCE... DEST` calls a block makes, as { verb, sources, dest }.
+ *
+ * One parser for two questions the guard must answer differently (airhorn-kuqn):
+ * the DEST is written (so reading it back claims nothing), and every SOURCE is
+ * read (so a missing one must be reported - for ANY extension, not just markdown,
+ * which is what a markdown-shaped regex could only ever catch).
+ */
+function copyCalls(block) {
+  const calls = [];
+  for (const line of block.split('\n')) {
+    for (const segment of line.split(/&&|\|\||;|\|/)) {
+      const words = segment.trim().split(/\s+/).filter(Boolean).map((w) => w.replace(/^["'`]|["'`]$/g, ''));
+      if (words.length < 2) continue;
+      const verb = words[0].split('/').pop();
+      if (!COPIERS.has(verb)) continue;
+      const operands = [];
+      for (let i = 1; i < words.length; i += 1) {
+        const w = words[i];
+        if (w.startsWith('-')) { if (VALUE_FLAGS.has(w)) i += 1; continue; }
+        operands.push(w);
+      }
+      if (operands.length < 2) continue;
+      calls.push({ verb, sources: operands.slice(0, -1), dest: operands[operands.length - 1] });
+    }
+  }
+  return calls;
+}
 const leavesRepo = (block) => /^\s*(?:cd|pushd)\s+(?:~|\$HOME|\/)/m.test(block);
 
 // Only SHELL fences: a javascript block is source, and its comments talk about the
@@ -319,10 +351,11 @@ const generatedBy = (block) => {
       const words = segment.trim().split(/\s+/).filter(Boolean).map((w) => w.replace(/^["'`]|["'`]$/g, ''));
       if (words.length === 0) continue;
       const verb = words[0].split('/').pop();
-      if (COPIERS.has(verb) && words.length >= 2) add(words[words.length - 1]); // DEST only, never the source
-      else if (CREATORS.has(verb)) for (const operand of words.slice(1)) add(operand);
+      if (!COPIERS.has(verb) && CREATORS.has(verb)) for (const operand of words.slice(1)) add(operand);
     }
   }
+  // The DEST of every copier, from the one parser both answers come from.
+  for (const { dest } of copyCalls(block)) add(dest);
   return written;
 };
 
@@ -357,6 +390,10 @@ export function pathClaims(block) {
     for (const m of block.matchAll(BARE_MD)) add(m[1], 'root');
     for (const m of block.matchAll(SLASHED_MD)) add(m[1], 'root');
     for (const m of block.matchAll(READER_TOKEN)) if (m[1].includes('/')) add(m[1], 'root');
+    // A copy READS its sources (airhorn-kuqn round 2): without this, a source was
+    // only claimed when it happened to be markdown, so `cp absent/input.js out/x.js`
+    // read green while `cp absent/input.md ...` read red.
+    for (const { sources } of copyCalls(block)) for (const src of sources) add(src, 'root');
   }
   return [...claims.values()];
 }
@@ -493,4 +530,31 @@ test('a missing cp source is caught end to end, the way a reader would hit it', 
   const missing = claims.filter((c) => !fs.existsSync(claimTarget(c, 'docs/runbooks/ROLLBACK.md')));
   assert.deepEqual(missing.map((c) => c.path), ['gone/source.md'],
     `the cp source must be the only missing claim, got ${JSON.stringify(claims)}`);
+});
+
+/*
+ * airhorn-kuqn round 2 (reviewer): marking the DESTINATION as generated was only
+ * half the fix. The SOURCE of a cp/mv was still not a claim unless it happened to
+ * be markdown, because the claim pass reads BARE_MD/SLASHED_MD/READER_TOKEN and
+ * `cp` is none of those. So `cp absent/input.js out/copy.js` read green while
+ * `cp absent/input.md out/copy.md` read red: the guard was watching one
+ * extension. A copy reads its source whatever the extension.
+ */
+test('a missing cp SOURCE is caught for every extension, not just markdown (airhorn-kuqn)', () => {
+  const claims = claimsOf('cp absent/input.js out/copy.js\ncat out/copy.js');
+  const paths = claims.map((c) => c.path);
+  assert.ok(paths.includes('absent/input.js'),
+    `the .js source is read by the cp, so a missing one must be claimed: ${JSON.stringify(claims)}`);
+  assert.ok(!paths.includes('out/copy.js'), `the destination is written, not read: ${JSON.stringify(claims)}`);
+  const missing = claims.filter((c) => !fs.existsSync(claimTarget(c, 'docs/runbooks/ROLLBACK.md')));
+  assert.deepEqual(missing.map((c) => c.path), ['absent/input.js'],
+    `the .js source must be the only missing claim: ${JSON.stringify(missing)}`);
+
+  // Same for mv, install and a multi-source cp: every source is read.
+  const moved = claimsOf('mv absent/a.zip out/b.zip').map((c) => c.path);
+  assert.deepEqual(moved, ['absent/a.zip']);
+  const installed = claimsOf('install -m 644 absent/tool.sh out/tool').map((c) => c.path);
+  assert.deepEqual(installed, ['absent/tool.sh'], 'a value-taking flag must not become a claim of its own');
+  const many = claimsOf('cp absent/one.c absent/two.h out/').map((c) => c.path);
+  assert.deepEqual(many, ['absent/one.c', 'absent/two.h']);
 });
