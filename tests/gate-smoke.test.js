@@ -655,11 +655,20 @@ test('a launch that never starts fails labelled and leaves no profile behind (ai
 });
 
 test('an audit whose browser never starts reports a labelled ERROR row and keeps its exit contract (airhorn-r5me)', () => {
-  // The audit's contract is "exit 0 and print a table whatever it finds", so a
-  // CHROME_BIN that does not exist has to become an ERROR row for that scenario,
-  // not an uncaught 'error' event that aborts the run and leaks the launch
-  // profile. TMPDIR, RESILIENCE_OUT and the profile live under one per-test dir,
-  // so this probe cannot collide with a concurrent lane's audit.
+  // The exit contract distinguishes WHY a row is bad (airhorn-w1wh rounds 3-8):
+  //   - a row with status ERROR is an infrastructure/scenario failure - a browser
+  //     that cannot start, a scenario callback that throws - so the audit EXITS
+  //     NONZERO. A starved host reporting a green audit was the bug this pins.
+  //   - an audit that completes and reports findings is a SUCCESSFUL audit: its
+  //     rows are status OK and it exits 0, however bad the findings.
+  //   - an intentionally empty selection (RESILIENCE_ONLY=none) also exits 0.
+  // This fixture is the ERROR case: CHROME_BIN does not exist, so the launch fails
+  // and that must be a labelled ERROR row plus a written report, not an uncaught
+  // 'error' event that aborts the run and leaks the launch profile. The steal seam
+  // is pinned healthy so the launch is actually attempted here - otherwise the
+  // preflight refuses first on a starved host and this test would assert about the
+  // machine rather than about the audit. TMPDIR, RESILIENCE_OUT and the profile live
+  // under one per-test dir, so this probe cannot collide with a concurrent lane.
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsm-audit-'));
   try {
     const res = spawnSync(process.execPath, [path.join(root, 'tools', 'resilience-audit.mjs')], {
@@ -671,11 +680,20 @@ test('an audit whose browser never starts reports a labelled ERROR row and keeps
         RESILIENCE_OUT: path.join(tmp, 'evidence'),
         CHROME_BIN: path.join(tmp, 'no-such-chrome'),
         TMPDIR: tmp,
+        AIRHORN_TEST_CONTEXT: '1',   // opt into the seam so the launch is attempted
+        CHROME_STEAL_OVERRIDE: '0',  // ...and a starved host cannot intercept here
       },
     });
-    assert.equal(res.status, 0, `the audit exits 0 whatever it finds; got ${res.status}: ${res.stderr}`);
-    assert.match(res.stdout, /\[liefi\][\s\S]*ERROR chrome launch failed: .*ENOENT/,
-      `the scenario must carry a labelled ERROR row: ${res.stdout}`);
+    // An ERROR row is an infrastructure failure, so the audit fails (airhorn-w1wh
+    // rounds 3-8); a completed audit that merely FINDS problems still exits 0, which
+    // is the distinction, not "nonzero whenever the news is bad".
+    assert.notEqual(res.status, 0,
+      `an ERROR row must fail the audit; got ${res.status}: ${res.stderr}`);
+    assert.match(res.stdout, /\[liefi\][\s\S]*ERROR cannot launch a browser for the audit, so no scenario was measured: .*ENOENT/,
+      `the scenario must carry a labelled ERROR row naming the launch failure: ${res.stdout}`);
+    assert.ok(fs.existsSync(path.join(tmp, 'evidence', 'report.md')),
+      'the report is the deliverable: it must be written even when the browser never started');
+    assert.ok(fs.existsSync(path.join(tmp, 'evidence', 'report.json')));
     assert.doesNotMatch(res.stderr, /Unhandled 'error' event/,
       `a spawn error must not abort the audit: ${res.stderr}`);
     const left = fs.readdirSync(tmp).filter((name) => name !== 'evidence');
