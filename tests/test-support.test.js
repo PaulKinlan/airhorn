@@ -887,6 +887,43 @@ test('a stray RESILIENCE_STUB_SCENARIO cannot fake an audit without test mode (a
   }
 });
 
+test('a completed audit that FOUND problems still exits 0 and reports the row (airhorn-w1wh review)', async () => {
+  // The other half of the exit contract, and the half that was only in comments: a row
+  // with status ERROR (could not be measured) fails the audit, while a row with status
+  // OK that reports a BAD FINDING is a successful audit and exits 0. Without this, an
+  // auditExitCode that failed on `renders: false` would pass every other test here.
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-audit-okfinding-'));
+  try {
+    const run = spawnSync(process.execPath, [RESILIENCE_TOOL], {
+      encoding: 'utf8',
+      timeout: 120000,
+      env: {
+        ...process.env,
+        RESILIENCE_TEST_MODE: '1',
+        RESILIENCE_STUB_SCENARIO: 'ok-finding',   // a scenario that COMPLETED and found problems
+        RESILIENCE_OUT: out,
+        RESILIENCE_ONLY: '',
+        CHROME_STEAL_OVERRIDE: '0.96',            // irrelevant: the stub never launches
+      },
+    });
+    const output = `${run.stdout || ''}${run.stderr || ''}`;
+    assert.equal(run.status, 0,
+      `a completed audit that found problems is a SUCCESSFUL audit - it must exit 0, not fail on the news: ${output}`);
+    const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+    assert.equal(report.scenarios.length, 1, 'the finding must be recorded as a row');
+    const row = report.scenarios[0];
+    assert.equal(row.status, 'OK', 'a completed scenario is status OK even when everything it measured is bad');
+    assert.equal(row.renders, false, 'the row must carry the bad finding itself, not drop it');
+    const md = fs.readFileSync(path.join(out, 'report.md'), 'utf8');
+    assert.match(md, /\| stub — stubbed completed scenario with a finding \| NO \| NO \| NO \| NO \|/,
+      'the report must show the finding (NO), not ERROR, for a completed scenario');
+    assert.doesNotMatch(md, /stubbed completed scenario with a finding \| ERROR \|/,
+      'a completed scenario must never be reported as an ERROR row');
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+});
+
 test('a bound-kill exits with the signal code and runs the cleanup exactly once (airhorn-4vfn)', async () => {
   // Two SIGTERMs: the second must not run the cleanup again.
   const result = await runStandIn({ signal: 'SIGTERM', cleanup: '' });
