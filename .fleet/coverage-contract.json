@@ -69,9 +69,6 @@
  "tools/lib/**": [
   "tests/test-support.test.js"
  ],
- "tools/shared-chrome.mjs": [
-  "tests/test-support.test.js"
- ],
  "tools/install-https-proof.mjs": [
   "tests/gate-smoke.test.js",
   "tests/test-support.test.js"

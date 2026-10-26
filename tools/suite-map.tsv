@@ -56,10 +56,6 @@ tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
 # a change to it used to select zero suites - a shared helper with no owner.
 # tests/test-support.test.js drives it directly (marker hit and marker miss).
 tools/lib/**	tests/test-support.test.js
-# The gate's shared browser (airhorn-w1wh) is also driven by test-support: its client
-# (fresh page via Target.createTarget, id-matched /json/list) is pinned there, so a change
-# to it selects that suite as well as gate-smoke (which owns every tools/* file).
-tools/shared-chrome.mjs	tests/test-support.test.js
 # The two tools whose LAUNCH behaviour has its own regression guard (a refused launch must leave
 # no profile; a browser that cannot start must fail the audit) are driven by test-support, on
 # top of the gate-smoke row every tools/* file already selects (airhorn-w1wh review).
