@@ -133,9 +133,9 @@ const marker = () => fs.mkdtempSync(path.join(os.tmpdir(), 'browser-support-test
 // helper made for this run's label. Both must be empty after a failed launch.
 const liveStubProcesses = (stubFile) => execFileSync('ps', ['-eo', 'args='], { encoding: 'utf8' })
   .split('\n').filter((line) => line.includes(stubFile));
-const profilesFor = (label) => fs.readdirSync('/tmp').filter((name) => name.startsWith(`chrome-${label}-`));
+const profilesFor = (label) => fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith(`chrome-${label}-`));
 const removeProfiles = (label) => {
-  for (const name of profilesFor(label)) fs.rmSync(path.join('/tmp', name), { recursive: true, force: true });
+  for (const name of profilesFor(label)) fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
 };
 const waitFor = async (fn, ms = 5000) => {
   const end = Date.now() + ms;
@@ -703,7 +703,7 @@ test('with no shared browser exported, the suite still cold-launches (airhorn-w1
 const CHROME_MJS = path.join(import.meta.dirname, '..', 'tools', 'lib', 'chrome.mjs');
 const INSTALL_TOOL = path.join(import.meta.dirname, '..', 'tools', 'install-https-proof.mjs');
 const RESILIENCE_TOOL = path.join(import.meta.dirname, '..', 'tools', 'resilience-audit.mjs');
-const httpsProofProfiles = () => fs.readdirSync('/tmp')
+const httpsProofProfiles = () => fs.readdirSync(os.tmpdir())
   .filter((name) => /^chrome-https-proof-(?:tmp-)?[A-Za-z0-9]{6}$/.test(name));
 
 test('a malformed /proc/stat reads as UNKNOWN, never as zero steal (airhorn-w1wh review)', async () => {
@@ -757,7 +757,7 @@ test('a refused launch leaves no profile behind in install-https-proof (airhorn-
   } finally {
     if (saved === undefined) delete process.env.CHROME_STEAL_OVERRIDE; else process.env.CHROME_STEAL_OVERRIDE = saved;
     for (const name of httpsProofProfiles()) {
-      if (!before.includes(name)) fs.rmSync(path.join('/tmp', name), { recursive: true, force: true });
+      if (!before.includes(name)) fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
     }
   }
 });
