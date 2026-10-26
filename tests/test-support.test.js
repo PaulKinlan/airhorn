@@ -690,9 +690,27 @@ test('the steal decision uses ONLY the latest window, never an average or an ear
     'the second window (20 -> 30 of 100) is 10%, not the 15% average across both');
 
   // (3) Counters going backwards is UNKNOWN - and never the earlier healthy number.
-  const backwards = probeOf([{ total: 2000, steal: 100 }, { total: 1900, steal: 90 }]);
-  assert.equal(backwards.rate(), null, 'a counter that went backwards cannot produce a rate');
+  // The window BEFORE the backwards one is healthy on purpose: the round-7 regression
+  // kept that 0% and launched (airhorn-w1wh round 8, P2).
+  const backwards = probeOf([{ total: 1000, steal: 0 }, { total: 1100, steal: 0 }, { total: 1050, steal: 5 }]);
+  assert.equal(backwards.rate(), null, 'a healthy window must not survive counters going backwards');
   assert.match(backwards.reason(), /went backwards/, 'and the reason says so');
+
+  // (3b) steal outgrowing the total is not "100% starved", it is unreadable. Clamping it
+  // to 1 refused with 'host starved' for a pair that cannot both be right (round 8, P1).
+  // Three readings so the probe can take its two windows: the second window is the
+  // impossible pair (60 total ticks advanced, 150 of them "stolen").
+  const impossible = probeOf([{ total: 100, steal: 0 }, { total: 140, steal: 0 }, { total: 200, steal: 150 }]);
+  assert.equal(impossible.rate(), null, 'steal > total is UNKNOWN, not a 100% verdict');
+  assert.match(impossible.reason(), /steal advanced faster than the total/, 'and it names why');
+
+  // (3c) Running out of attempts after ONE usable window must say that, not report a
+  // generic "no usable window" (round 8, P2).
+  const exhausted = probeOf([{ total: 0, steal: 0 }, { total: 4, steal: 0 }, { total: 8, steal: 0 },
+    { total: 12, steal: 0 }, { total: 112, steal: 0 }]);
+  assert.equal(exhausted.rate(), null);
+  assert.equal(typeof exhausted.reason(), 'string', 'exhaustion must carry a reason, not null');
+  assert.match(exhausted.reason(), /only 1 of 2 usable windows/, 'exhaustion reports how many windows worked');
 
   // (4) A window whose delta is too small is retried, then UNKNOWN - not 0%.
   const short = probeOf([{ total: 10000, steal: 0 }, { total: 10004, steal: 0 }, { total: 10008, steal: 0 },

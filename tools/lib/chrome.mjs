@@ -187,6 +187,15 @@ export function stealRateDetail(from, to) {
   if (!(total >= MIN_STEAL_TICKS)) {
     return { rate: null, problem: `too few ticks advanced in the window (${total} < ${MIN_STEAL_TICKS})` };
   }
+  if (steal > total) {
+    // steal is one of the counters the total is summed from, so it cannot outgrow it.
+    // Clamping this to 1 said "host starved" for a pair that is simply not readable
+    // (airhorn-w1wh round 8, P1): inconsistent counters are UNKNOWN, not 100%.
+    return {
+      rate: null,
+      problem: `steal advanced faster than the total (steal ${steal} > total ${total}) - these readings cannot both be right`,
+    };
+  }
   return { rate: Math.min(1, Math.max(0, steal / total)), problem: null };
 }
 
@@ -240,7 +249,13 @@ export function createStealProbe({
         previous = fresh;                 // the next window starts here, not at the baseline
         measured++;
       }
-      if (measured < windows) return null;
+      if (measured < windows) {
+        // The last window that DID work cleared the problem, so exhaustion after one
+        // usable window used to report nothing useful (airhorn-w1wh round 8, P2).
+        lastProblem = `only ${measured} of ${windows} usable windows before ${maxAttempts} attempts` +
+          (lastProblem ? ` (last window: ${lastProblem})` : '');
+        return null;
+      }
       return latest;
     },
     reason() { return lastProblem; },
