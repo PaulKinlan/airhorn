@@ -1104,3 +1104,98 @@ test('idle release: the next press resumes the suspended context', async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+/*
+ * airhorn-dxug: a resume that lands late must still sound the horn for a press
+ * that is still held, while a document that has never been activated must keep
+ * its prompt, honest refusal - that is what tests/shortcuts.test.mjs case 9
+ * pins, and it is why simply raising the bound is not the fix.
+ *
+ * The two questions are answered by navigator.userActivation.hasBeenActive, so
+ * both cases here use the SAME slow resume and differ only in that fact.
+ */
+class LateResumeContext extends ReleasableAudioContext {
+  constructor(delayMs, state = 'suspended') {
+    super();
+    this.delayMs = delayMs;
+    this.state = state;
+  }
+
+  async resume() {
+    await wait(this.delayMs);
+    this.resumed = true;
+    this.state = 'running';
+  }
+}
+
+const withUserActivation = async (hasBeenActive, fn) => {
+  const nav = globalThis.navigator;
+  const previous = Object.getOwnPropertyDescriptor(nav, 'userActivation');
+  Object.defineProperty(nav, 'userActivation', {
+    value: { hasBeenActive, isActive: hasBeenActive },
+    configurable: true,
+    writable: true
+  });
+  try {
+    return await fn();
+  } finally {
+    if (previous) Object.defineProperty(nav, 'userActivation', previous);
+    else delete nav.userActivation;
+  }
+};
+
+const withFakeFetch = async (fn) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(32) });
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+};
+
+test('slow resume: an activated document waits for the graph instead of refusing the press', async () => {
+  await withFakeFetch(() => withUserActivation(true, async () => {
+    // 300 ms is longer than the unactivated bound (100 ms) and shorter than the
+    // activated one, so this press fails on the old fixed-bound code.
+    const ctx = new LateResumeContext(300);
+    const horn = new Horn({ audioContext: ctx });
+    const started = await horn.start({ loop: true });
+    assert.equal(ctx.resumed, true, 'setup: the resume must have been awaited');
+    assert.equal(started, true, 'a press in an activated document must sound even when resume is slow');
+    assert.equal(horn.isPlaying(), true);
+    assert.equal(ctx.state, 'running');
+  }));
+});
+
+test('slow resume: an unactivated document still refuses promptly and never claims to play', async () => {
+  await withFakeFetch(() => withUserActivation(false, async () => {
+    const ctx = new LateResumeContext(300);
+    const horn = new Horn({ audioContext: ctx });
+    const began = Date.now();
+    const started = await horn.start({ loop: true });
+    const elapsed = Date.now() - began;
+    assert.equal(started, false, 'a context that cannot resume must not be reported as playing');
+    assert.equal(horn.isPlaying(), false, 'nothing may be scheduled into a suspended context');
+    assert.equal(ctx.sources.length, 0, 'a refused press must not create a source');
+    assert.ok(elapsed < 250, `the refusal must stay prompt, took ${elapsed} ms`);
+  }));
+});
+
+test('slow resume: a horn that has already played waits out an idle re-suspend with no gesture at all', async () => {
+  // The WebMCP path: a tool call is never a gesture, and play_horn can arrive
+  // after airhorn-1umb's idle suspend has released the graph. The document has
+  // played before, so the policy question is settled - only the machine is slow.
+  await withFakeFetch(() => withUserActivation(false, async () => {
+    const ctx = new LateResumeContext(300, 'running');
+    const horn = new Horn({ audioContext: ctx });
+    assert.equal(await horn.start({ loop: true }), true, 'setup: the first blast must play');
+    horn.stop();
+    ctx.sources.at(-1).stop();
+    await wait(20);
+    ctx.state = 'suspended';           // the idle countdown released the graph
+    const second = await horn.start({ loop: false });
+    assert.equal(second, true, 'a tool call must not be refused just because resuming was slow');
+    assert.equal(ctx.state, 'running');
+  }));
+});

@@ -55,6 +55,48 @@ const SYNTH_OSC_TYPE = 'triangle';
  */
 const IDLE_SUSPEND_MS = 300;
 
+/*
+ * How long a start() waits for the audio graph to resume before it reports that
+ * the press produced no sound (airhorn-dxug).
+ *
+ * Resuming is not instant on a busy machine: on this 2-core VM under load it
+ * routinely takes several hundred milliseconds, and the old fixed 100 ms bound
+ * gave up mid-resume, so a perfectly good press was refused and announced as
+ * "the horn needs a tap". Widening the bound alone is NOT the fix - a tab that
+ * has never been activated keeps its context suspended (that is precisely what
+ * tests/shortcuts.test.mjs case 9 pins: do not CLAIM to be playing while the
+ * graph is suspended), and waiting longer there only makes the app lie for
+ * longer. So the bound follows the one fact that separates the two cases: has
+ * this document ever had a user gesture? Without one the context is blocked for
+ * policy reasons and the refusal must stay prompt and honest; with one, a late
+ * resume is only the machine being slow, and the press that is still physically
+ * held deserves its sound.
+ */
+const RESUME_BOUND_MS = 100;
+const ACTIVATED_RESUME_BOUND_MS = 1500;
+
+/*
+ * The two states a suspended context can be in look identical from here, and
+ * they want opposite treatment (airhorn-dxug):
+ *
+ *   never played, never activated -> the browser is refusing audio for policy
+ *     reasons and waiting cannot help. Refuse promptly, so the app retracts its
+ *     optimistic "pressed" state inside the window tests/shortcuts.test.mjs case
+ *     9 samples instead of claiming a horn nobody can hear (airhorn-x4l).
+ *   played before, or an activation just happened -> the graph is only idling
+ *     (airhorn-1umb suspends it 300 ms after the last sound), and resuming is a
+ *     question of how busy the machine is. Waiting is what delivers the press.
+ */
+const hasBeenActivated = () => {
+  try {
+    return globalThis.navigator?.userActivation?.hasBeenActive === true;
+  } catch {
+    return false;
+  }
+};
+
+const resumeMaySucceed = (hasPlayed) => hasPlayed || hasBeenActivated();
+
 export class Horn {
   #audioCtx = null;
   #bufferPromise = null;
@@ -64,12 +106,23 @@ export class Horn {
   #suspendTimer = null;
   #suspendGeneration = 0;
   #idleSuspendMs = IDLE_SUSPEND_MS;
+  #resumeBoundMs = RESUME_BOUND_MS;
+  #activatedResumeBoundMs = ACTIVATED_RESUME_BOUND_MS;
+  #hasPlayed = false;
   #audioSrc;
   #usingFallback = false;
 
-  constructor({ audioSrc = '/sounds/airhorn.mp3', audioContext = null, idleSuspendMs = IDLE_SUSPEND_MS } = {}) {
+  constructor({
+    audioSrc = '/sounds/airhorn.mp3',
+    audioContext = null,
+    idleSuspendMs = IDLE_SUSPEND_MS,
+    resumeBoundMs = RESUME_BOUND_MS,
+    activatedResumeBoundMs = ACTIVATED_RESUME_BOUND_MS
+  } = {}) {
     this.#audioSrc = audioSrc;
     this.#idleSuspendMs = idleSuspendMs;
+    this.#resumeBoundMs = resumeBoundMs;
+    this.#activatedResumeBoundMs = activatedResumeBoundMs;
     if (audioContext) {
       this.#audioCtx = audioContext;
     } else {
@@ -179,10 +232,14 @@ export class Horn {
 
     try {
       if (typeof this.#audioCtx.resume === 'function') {
+        // A press is not the only caller: an autoplay link or a WebMCP tool call
+        // can get here in a document that has never been touched, where the
+        // context stays suspended and waiting cannot help (airhorn-dxug).
+        const bound = resumeMaySucceed(this.#hasPlayed) ? this.#activatedResumeBoundMs : this.#resumeBoundMs;
         try {
           await Promise.race([
             this.#audioCtx.resume(),
-            new Promise(r => setTimeout(r, 100))
+            new Promise(r => setTimeout(r, bound))
           ]);
         } catch {}
       }
@@ -255,6 +312,7 @@ export class Horn {
     };
     source.start(0);
     this.#sources.add(source);
+    this.#hasPlayed = true;
     return true;
   }
 
@@ -335,6 +393,7 @@ export class Horn {
     }
 
     this.#synths.add(synthHandle);
+    this.#hasPlayed = true;
     return true;
   }
 
