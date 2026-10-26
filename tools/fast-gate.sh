@@ -342,27 +342,69 @@ stale_build_input() { # $1 = dist entry point ; prints the first build input new
   return 1
 }
 
+# Does any selected suite actually READ dist/? A suite that never touches dist/ does
+# not care whether it is fresh, so a tree that only selects those must not pay for a
+# build (and must not fail for want of one). Conservative on purpose: a suite that
+# merely MENTIONS dist/ counts, because gate-smoke spawns the gate in its own pins.
+suites_need_dist() {
+  local s
+  for s in "$@"; do
+    [ -f "$ROOT/$s" ] || continue
+    grep -qE 'dist/' "$ROOT/$s" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+# The verifiable current-tree fingerprint the reviewer asked for (airhorn-k8sd): the
+# build inputs as they are committed (ls-tree) PLUS their working-tree state, hashed.
+# Written next to dist/ after a successful build, compared before any reuse, so a
+# dist/ produced by an earlier checkout - or by a tree with edits not yet committed -
+# can never be passed off as this tree's. One git ls-tree + one git status: ~40ms.
+FP_FILE_SUFFIX='.fast-gate-inputs'
+dist_fingerprint() {
+  local paths=() p
+  for p in src public index.html package.json package-lock.json deno.lock; do
+    [ -e "$ROOT/$p" ] && paths+=("$p")
+  done
+  for p in "$ROOT"/vite.config.*; do
+    [ -e "$p" ] && paths+=("${p#"$ROOT"/}")
+  done
+  [ "${#paths[@]}" -gt 0 ] || { echo "no-build-inputs"; return; }
+  {
+    git -C "$ROOT" ls-tree -r HEAD -- "${paths[@]}" 2>/dev/null
+    git -C "$ROOT" status --porcelain -uall -- "${paths[@]}" 2>/dev/null
+  } | sha256sum | awk '{print $1}'
+}
+
 build_decision() { # prints "<build|keep> <reason>"; never builds, never exits
-  local f stale
-  local changed_is_input=0
+  local f stale changed_is_input=0
+  if [ "${FAST_GATE_FORCE_BUILD:-0}" = "1" ]; then
+    echo "build FAST_GATE_FORCE_BUILD=1"; return
+  fi
+  if ! suites_need_dist ${RUN[@]+"${RUN[@]}"}; then
+    echo "keep no selected suite reads dist/"; return
+  fi
   for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
     case $f in
       src/*|public/*|index.html|vite.config.*|package.json|package-lock.json|deno.lock) changed_is_input=1 ;;
     esac
   done
-  if [ "${FAST_GATE_FORCE_BUILD:-0}" = "1" ]; then
-    echo "build FAST_GATE_FORCE_BUILD=1"; return
-  fi
   if [ ! -f "$ROOT/dist/index.html" ]; then
     echo "build no dist/index.html to reuse"; return
   fi
   if [ "$changed_is_input" -eq 1 ]; then
     echo "build a changed path is a build input"; return
   fi
+  local have want
+  want=$(dist_fingerprint)
+  have=$([ -f "$ROOT/dist/$FP_FILE_SUFFIX" ] && cat "$ROOT/dist/$FP_FILE_SUFFIX")
+  if [ "$have" != "$want" ]; then
+    echo "build dist/ is not from this tree (fingerprint ${have:-none} != $want)"; return
+  fi
   if stale=$(stale_build_input "$ROOT/dist/index.html"); then
     echo "build $stale is newer than dist/index.html, so dist/ predates this tree"; return
   fi
-  echo "keep dist/index.html is newer than every build input"
+  echo "keep dist/ matches this tree (fingerprint $want)"
 }
 
 # --build-plan is a QUERY like --list: it says whether the build WOULD run, and never
@@ -396,6 +438,7 @@ if [ "${_decision%% *}" != "keep" ]; then
     echo "fast-gate: FAIL - build failed; browser suites cannot run." >&2
     exit 1
   fi
+  dist_fingerprint > "$ROOT/dist/$FP_FILE_SUFFIX" 2>/dev/null || true
 fi
 
 printf 'fast-gate: running: %s\n' "${RUN[@]}"

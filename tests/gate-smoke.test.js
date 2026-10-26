@@ -128,6 +128,18 @@ const contractDrift = (contract, tsvText = fs.readFileSync(path.join(root, 'tool
   return problems;
 };
 
+// Records the probe's dist/ as the CURRENT tree's, the way a real build does: the gate
+// prints the wanted fingerprint in its "not from this tree" reason, so the test can
+// stamp it without duplicating the hashing rule (drift between test and gate would
+// defeat the point). Returns the stamp.
+const stampProbeDist = (probe) => {
+  const res = probe.run(['--build-plan', '--changed', 'tests/pass.test.js']);
+  const m = /fingerprint (?:none|[0-9a-f]{64}) != ([0-9a-f]{64})/.exec(res.stdout);
+  assert.ok(m, `expected the gate to name the wanted fingerprint, got: ${res.stdout}`);
+  fs.writeFileSync(path.join(probe.probe, 'dist', '.fast-gate-inputs'), m[1]);
+  return m[1];
+};
+
 const buildGateProbe = () => {
   const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-contract-'));
   const toolsDir = path.join(probe, 'tools');
@@ -141,7 +153,7 @@ const buildGateProbe = () => {
   fs.writeFileSync(path.join(probe, 'package.json'),
     JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'true' } }));
   fs.writeFileSync(path.join(probe, 'tests', 'pass.test.js'),
-    "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('one passing case', () => { assert.ok(true); });\n");
+    "// serves files out of dist/\nimport { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('one passing case', () => { assert.ok(true); });\n");
   fs.mkdirSync(path.join(probe, 'src'), { recursive: true });
   fs.writeFileSync(path.join(probe, 'src', 'a.js'), '// a');
   fs.writeFileSync(path.join(probe, 'pending-src.txt'), 'pending');
@@ -702,6 +714,9 @@ test('the build decision rebuilds when a build input is newer than dist/, even f
     const old = new Date(Date.now() - 60_000);
     fs.utimesSync(distFile, old, old);
 
+    // With no fingerprint yet, the gate refuses the dist/ outright; stamp it as this
+    // tree's and the freshness arm is what has to catch the staleness.
+    stampProbeDist(probe);
     const res = probe.run(['--build-plan', '--changed', 'tests/pass.test.js']);
     assert.equal(res.status, 0, res.stderr);
     assert.match(res.stdout, /build-plan: build \(/, `expected a build, got: ${res.stdout}`);
@@ -720,6 +735,7 @@ test('the build decision keeps dist/ when it is newer than every build input (ai
     fs.writeFileSync(distFile, 'BUILT-NOW');
     const future = new Date(Date.now() + 5_000);
     fs.utimesSync(distFile, future, future);
+    stampProbeDist(probe);
 
     const kept = probe.run(['--build-plan', '--changed', 'tests/pass.test.js']);
     assert.equal(kept.status, 0, kept.stderr);
@@ -745,6 +761,44 @@ test('the build decision rebuilds when a build input arrives through the delta i
     const res = probe.run(['--build-plan', '--changed', 'src/a.js']);
     assert.equal(res.status, 0, res.stderr);
     assert.match(res.stdout, /build-plan: build \(a changed path is a build input\)/, res.stdout);
+  } finally {
+    fs.rmSync(probe.probe, { recursive: true, force: true });
+  }
+});
+
+test('a dist-needing suite rebuilds an unfingerprinted dist/; a non-dist suite does not build at all (airhorn-k8sd)', () => {
+  // The reviewer's P1: the skip has to know (a) whether a SELECTED suite reads dist/
+  // and (b) whether that dist/ came from THIS tree. Here dist/ exists but carries no
+  // fingerprint, exactly like a dist/ left behind by an earlier checkout.
+  const probe = buildGateProbe();
+  try {
+    const distFile = path.join(probe.probe, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'DIST-FROM-AN-EARLIER-CHECKOUT');
+
+    // A suite that serves dist/ files, mapped from a path that is NOT a build input.
+    fs.writeFileSync(path.join(probe.probe, 'tests', 'dist-suite.test.js'),
+      "// serves files out of dist/\nimport { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('x', () => { assert.ok(true); });\n");
+    fs.writeFileSync(path.join(probe.probe, 'dist-src.txt'), 'not a build input');
+    fs.appendFileSync(path.join(probe.probe, 'tools', 'suite-map.tsv'),
+      'dist-src.txt\ttests/dist-suite.test.js\ntests/dist-suite.test.js\ttests/dist-suite.test.js\n');
+
+    const needs = probe.run(['--build-plan', '--changed', 'dist-src.txt']);
+    assert.equal(needs.status, 0, needs.stderr);
+    assert.match(needs.stdout, /build-plan: build .*not from this tree/,
+      `a dist-needing suite must not reuse an unfingerprinted dist/: ${needs.stdout}`);
+
+    // A suite that never mentions dist/ must not pay for a build, and must not fail
+    // for want of one - that is the whole point of the skip.
+    fs.rmSync(distFile);
+    fs.writeFileSync(path.join(probe.probe, 'tests', 'plain-suite.test.js'),
+      "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('y', () => { assert.ok(true); });\n");
+    fs.writeFileSync(path.join(probe.probe, 'plain-src.txt'), 'plain');
+    fs.appendFileSync(path.join(probe.probe, 'tools', 'suite-map.tsv'),
+      'plain-src.txt\ttests/plain-suite.test.js\ntests/plain-suite.test.js\ttests/plain-suite.test.js\n');
+    const noDistNeeded = probe.run(['--build-plan', '--changed', 'plain-src.txt']);
+    assert.match(noDistNeeded.stdout, /build-plan: keep \(no selected suite reads dist\//,
+      `a non-dist suite must keep: ${noDistNeeded.stdout}`);
   } finally {
     fs.rmSync(probe.probe, { recursive: true, force: true });
   }
