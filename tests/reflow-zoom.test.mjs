@@ -86,7 +86,7 @@ async function run() {
 
   let browser = null;
   try {
-    browser = await launchBrowser({ label: 'reflow-zoom', timeoutMs: 10000, autoplay: true });
+    browser = await launchBrowser({ label: 'reflow-zoom', timeoutMs: 15000, autoplay: true });
 
     const ws = new WebSocket(browser.pageWsUrl);
     await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });

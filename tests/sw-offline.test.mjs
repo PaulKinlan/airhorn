@@ -31,6 +31,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { quiescenceProbe, waitForQuiescence, lateErrorMutant } from './support/quiescence.mjs';
+import { waitForCondition } from './support/poll.mjs';
 import { launchBrowser } from './support/browser.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -138,7 +139,7 @@ async function testSwAndManifest() {
   console.log(`Server listening on port ${port}`);
 
   // 3. Launch Chrome (the gate's shared one when it offers a page)
-  const browser = await launchBrowser({ label: 'sw-offline', timeoutMs: 10000 });
+  const browser = await launchBrowser({ label: 'sw-offline', timeoutMs: 15000 });
   const pageWsUrl = browser.pageWsUrl;
 
   const ws = new WebSocket(pageWsUrl);
@@ -354,17 +355,20 @@ async function testSwAndManifest() {
       awaitPromise: true
     });
 
-    // Wait for the new service worker to install, activate, and reload the page via controllerchange
-    await new Promise(r => setTimeout(r, 1500));
-
-    // Verify cache replacement after new SW activate handler ran
-    const afterKeysResult = await send('Runtime.evaluate', {
-      expression: `caches.keys()`,
-      awaitPromise: true,
-      returnByValue: true
-    });
-
-    const afterKeys = afterKeysResult.result.value;
+    // Wait for the new service worker to install, activate and finish its cache
+    // cleanup - as a CONDITION, not as a 1500 ms window. Under load the install,
+    // the activate handler and its deletions all land after a fixed sleep, and the
+    // suite then reported a legacy cache that was about to be deleted as surviving
+    // (airhorn-sesh: measured at load 14, sw-offline only).
+    const afterKeys = await waitForCondition(async () => {
+      const keysResult = await send('Runtime.evaluate', {
+        expression: `caches.keys()`,
+        awaitPromise: true,
+        returnByValue: true
+      });
+      const keys = keysResult.result.value;
+      return Array.isArray(keys) && keys.includes('airhorner-2.0.0-build2') && !keys.includes('airhorner-0.7.1') ? keys : null;
+    }, { label: 'the activated worker to install its cache and delete the legacy one' });
     console.log('Caches after real SW update:', afterKeys);
 
     if (!afterKeys.includes('airhorner-2.0.0-build2')) {

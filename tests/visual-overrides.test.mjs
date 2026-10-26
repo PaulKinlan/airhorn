@@ -98,7 +98,7 @@ async function run() {
 
   let browser = null;
   try {
-    browser = await launchBrowser({ label: 'visual-overrides', timeoutMs: 10000 });
+    browser = await launchBrowser({ label: 'visual-overrides', timeoutMs: 15000 });
 
     const ws = new WebSocket(browser.pageWsUrl);
     await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });

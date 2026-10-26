@@ -104,7 +104,7 @@ async function testBootWatchdog() {
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
 
-  const browser = await launchBrowser({ label: 'resilience-ui', timeoutMs: 10000 });
+  const browser = await launchBrowser({ label: 'resilience-ui', timeoutMs: 15000 });
   const pageWsUrl = browser.pageWsUrl;
 
   const ws = new WebSocket(pageWsUrl);

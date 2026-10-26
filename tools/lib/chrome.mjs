@@ -140,7 +140,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  *                 (certificate ignoring, --no-first-run, ...)
  *   label:        names the profile dir and the timeout errors
  *   timeoutMs:    bound on chrome startup
- *   discoveryMs:  bound on /json/list discovery (capped by timeoutMs)
+ *   discoveryMs:  bound on /json/list discovery (its own bound; timeoutMs
+ *                 bounds the startup phase only - airhorn-sesh)
  *   profileDir:   use this directory instead of a fresh mkdtemp. A tool whose
  *                 stale-profile sweep keys on the mkdtemp SHAPE
  *                 (sweepStaleProfiles) passes its own; everyone else lets the
@@ -230,7 +231,11 @@ export async function launchChrome({
   let pageTarget = null;
   let port = null;
   const stderrLines = [];
-  const discoveryBound = Math.max(1, Math.min(discoveryMs, timeoutMs));
+  // Discovery is NOT capped by the startup bound any more (airhorn-sesh): they
+  // measure different phases (spawn -> ws URL, then ws URL -> /json/list), and a
+  // flat cap made the second phase inherit a budget sized for the first. A suite
+  // that wants a fast total failure passes both bounds explicitly.
+  const discoveryBound = Math.max(1, discoveryMs);
   try {
     await new Promise((resolve, reject) => {
       // A spawn that never produced a process reports through the 'error'
@@ -274,13 +279,22 @@ export async function launchChrome({
       // the connection and never answers is the third case: with no bound it
       // parked the launch until undici's 300s headers timeout - longer than any
       // suite or gate bound - so the practical outcome was a bound-kill with an
-      // unreaped browser (airhorn-4yhb). The bound is enforced twice: the abort
-      // frees the socket straight away, and the race holds even if the fetch in
-      // scope ignores an AbortSignal (a stub in a test, an older runtime). The
-      // clock starts here, not at spawn, so a slow chrome start cannot eat it.
-      const discoverySignal = AbortSignal.timeout(discoveryBound);
+      // unreaped browser (airhorn-4yhb).
+      //
+      // The wait is now a CONDITION retried until a bound, not one fetch inside a
+      // fixed window (airhorn-sesh). Chrome accepts the DevTools connection and
+      // then answers late on a starved box - measured as 'DevTools discovery
+      // timeout (5000ms)' at load 12.75 BEFORE any suite assertion ran - so a
+      // single 5 s (or 15 s) attempt was a machine-speed assertion. Each attempt
+      // gets a short timeout and is retried; the bound is the ceiling for the
+      // whole wait. A timeout, a refusal and a hung socket are all "not ready
+      // yet"; an ANSWER with no page target is not - that is the 9nea failure and
+      // is reported at once, without retrying.
+      const ATTEMPT_MS = 2500;
+      const POLL_MS = 100;
+      const discoveryDeadline = Date.now() + discoveryBound;
       let discoveryTimer = null;
-      const discoveryTimeout = new Promise((resolve, reject) => {
+      const discoveryTimeout = new Promise((_, reject) => {
         discoveryTimer = setTimeout(() => reject(new Error(
           `DevTools discovery timeout (${discoveryBound}ms) (${label}): /json/list never answered on port ${port}`)),
         discoveryBound);
@@ -289,22 +303,38 @@ export async function launchChrome({
       try {
         targets = await Promise.race([
           discoveryTimeout,
+          // The race above holds even if an attempt ignores its AbortSignal (a stub
+          // in a test, an older runtime) - the bound is enforced twice, as before.
           (async () => {
-            try {
-              const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: discoverySignal });
-              return await res.json();
-            } catch (err) {
-              // The abort fires at the same bound, so it can win the race: the
-              // failure must read the same however it lost.
-              if (discoverySignal.aborted) {
-                throw new Error(`DevTools discovery timeout (${discoveryBound}ms) (${label}): /json/list never answered on port ${port}`);
+            let lastErr = null;
+            let attempts = 0;
+            while (discoveryDeadline - Date.now() > 0) {
+              attempts += 1;
+              const attemptMs = Math.max(1, Math.min(ATTEMPT_MS, discoveryDeadline - Date.now()));
+              try {
+                const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(attemptMs) });
+                const list = await res.json();
+                if (!Array.isArray(list)) throw new Error(`/json/list answered with ${JSON.stringify(list)}`);
+                const types = list.map((t) => t.type);
+                if (types.includes('page')) return list;
+                return { noPageTarget: types };
+              } catch (err) {
+                lastErr = err;
               }
-              throw err;
+              if (discoveryDeadline - Date.now() > 0) await new Promise((r) => setTimeout(r, POLL_MS));
             }
+            return { exhausted: true, attempts, lastErr };
           })(),
         ]);
       } finally {
         clearTimeout(discoveryTimer);
+      }
+      if (targets && targets.noPageTarget) {
+        throw new Error(`no page target in /json/list (${label}): ${JSON.stringify(targets.noPageTarget)}`);
+      }
+      if (targets && targets.exhausted) {
+        const why = targets.lastErr ? ` (last of ${targets.attempts} attempts: ${targets.lastErr.message})` : '';
+        throw new Error(`DevTools discovery timeout (${discoveryBound}ms) (${label}): /json/list never answered on port ${port}${why}`);
       }
       pageTarget = targets.find((t) => t.type === 'page');
       if (!pageTarget) throw new Error(`no page target in /json/list (${label}): ${JSON.stringify(targets.map((t) => t.type))}`);

@@ -70,6 +70,26 @@ const discoveryPeer = () => new Promise((resolve) => {
   server.listen(0, '127.0.0.1', () => resolve({ port: server.address().port, close: () => new Promise((r) => server.close(r)) }));
 });
 
+// A DevTools endpoint that is not ready yet: it drops the first `failures`
+// connections, then answers like discoveryPeer. This is the measured shape of a
+// starved box - chrome's DevTools HTTP server accepts the connection and answers
+// late - which a single fetch reported as 'DevTools discovery timeout' before any
+// suite assertion ran (airhorn-sesh).
+const slowStartPeer = (failures) => new Promise((resolve) => {
+  let seen = 0;
+  const server = http.createServer((req, res) => {
+    seen += 1;
+    if (seen <= failures) { req.socket.destroy(); return; }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify([{ type: 'page', webSocketDebuggerUrl: 'ws://127.0.0.1:9/devtools/page/x' }]));
+  });
+  server.listen(0, '127.0.0.1', () => resolve({
+    port: server.address().port,
+    attempts: () => seen,
+    close: () => new Promise((r) => server.close(r)),
+  }));
+});
+
 // A stand-in for the chrome binary: prints the ws:// line the helper scrapes,
 // then idles so the launch reaches discovery. Chrome's own args are ignored.
 // trapsTerm: a stub that ignores SIGTERM, standing in for the real browser's
@@ -120,6 +140,30 @@ test('a stalled /json/list is bounded: the launch rejects, the browser and its p
     assert.ok(elapsed < 3000, `the discovery bound did not hold: launchBrowser took ${elapsed}ms against a 400ms bound`);
     assert.deepEqual(liveStubProcesses(stub), [], 'the stalled launch left its chrome process tree running');
     assert.deepEqual(profilesFor(label), [], 'the stalled launch left its /tmp profile behind');
+  } finally {
+    process.env.CHROME_BIN = realChromeBin;
+    await peer.close();
+    removeProfiles(label);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a /json/list that refuses its first attempts is retried until it answers (airhorn-sesh)', async () => {
+  const dir = marker();
+  const peer = await slowStartPeer(3);
+  const stub = stubChrome(dir, peer.port);
+  const label = runLabel('slow-start');
+  const realChromeBin = process.env.CHROME_BIN;
+  try {
+    process.env.CHROME_BIN = stub;
+    const browser = await launchBrowser({ label, discoveryMs: 8000, timeoutMs: 8000 });
+    try {
+      assert.ok(peer.attempts() > 3,
+        `discovery was not retried: /json/list answered on attempt ${peer.attempts()}, so the launch gave up on an endpoint that was merely not ready yet`);
+      assert.ok(browser.pageWsUrl, 'the retried discovery must still resolve the page target');
+    } finally {
+      await browser.close();
+    }
   } finally {
     process.env.CHROME_BIN = realChromeBin;
     await peer.close();
