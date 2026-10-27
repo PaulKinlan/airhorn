@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { commandBound } from './support/cdp.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EVIDENCE_DIR = '/tmp/airhorn-boot-watchdog';
@@ -148,10 +149,16 @@ async function testBootWatchdog() {
 
   const send = (method, params = {}) => {
     const id = msgId++;
-    return new Promise((resolve, reject) => {
+    const answered = new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
       ws.send(JSON.stringify({ id, method, params }));
     });
+    // Bounded (airhorn-uhdv): a command the browser never answers must fail and
+    // name itself, instead of parking the suite until the gate bound cancels
+    // every suite queued behind it - 1,092 s of a 1,200 s gate for one case.
+    // The condition polls have their own bounds; this is the command's.
+    const bound = commandBound({ method, onTimeout: () => pending.delete(id) });
+    return Promise.race([answered, bound.promise]).finally(bound.clear);
   };
 
   const evaluate = async (expression) => {
@@ -174,17 +181,25 @@ async function testBootWatchdog() {
   };
 
   // Poll a page expression until truthy. Evaluation errors (context not yet
-  // ready mid-navigation) are retried, not fatal.
+  // ready mid-navigation) are retried, not fatal - but the LAST one is reported
+  // with the timeout: when the command was bounded out (support/cdp.mjs) or the
+  // renderer stopped answering, "timed out waiting for X" alone does not say
+  // which resource wedged, and that was the whole of what a hung case could show.
   const waitUntil = async (expression, timeoutMs, label) => {
     const deadline = Date.now() + timeoutMs;
+    let lastError = null;
     for (;;) {
       try {
         if (await evaluate(expression)) return;
-      } catch {}
+        lastError = null;
+      } catch (err) {
+        lastError = err;
+      }
       if (Date.now() > deadline) {
         let last = null;
         try { last = await evaluate(expression); } catch {}
-        throw new Error(`Timed out after ${timeoutMs}ms waiting for: ${label} (last value: ${last})`);
+        throw new Error(`Timed out after ${timeoutMs}ms waiting for: ${label} (last value: ${last})`
+          + (lastError ? `; last error: ${lastError.message}` : ''));
       }
       await new Promise(r => setTimeout(r, 100));
     }
@@ -195,14 +210,19 @@ async function testBootWatchdog() {
   // object, so it would pass on the first poll without the answer arriving.
   const waitForAwait = async (expression, timeoutMs, label) => {
     const deadline = Date.now() + timeoutMs;
+    let lastError = null;
     for (;;) {
       let value;
       try {
         value = await evaluateAwaited(expression);
         if (value) return value;
-      } catch {}
+        lastError = null;
+      } catch (err) {
+        lastError = err;
+      }
       if (Date.now() > deadline) {
-        throw new Error(`Timed out after ${timeoutMs}ms waiting for: ${label} (last value: ${value})`);
+        throw new Error(`Timed out after ${timeoutMs}ms waiting for: ${label} (last value: ${value})`
+          + (lastError ? `; last error: ${lastError.message}` : ''));
       }
       await new Promise(r => setTimeout(r, 100));
     }
