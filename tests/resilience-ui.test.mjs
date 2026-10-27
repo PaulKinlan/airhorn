@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { hostSteal, stretchedBounds } from '../tools/lib/chrome.mjs';
 import { awaitSocketOpen, boundCommand } from './cdp-command-bound.mjs';
 import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 
@@ -635,7 +636,7 @@ async function testBootWatchdog() {
     // retraction beats this wait's first sample is a function of box load -
     // not of the unstyled page working (airhorn-ye54). The wait reads the
     // document-start record of the transition, so no sample can miss it.
-    const hornBox = await evaluate(`(() => {
+    const getHornBox = async () => evaluate(`(() => {
       const horn = document.querySelector('.horn');
       // Unstyled, the page is tall prose and the control can sit below the fold,
       // where a trusted press at its coordinates lands on nothing at all
@@ -658,23 +659,48 @@ async function testBootWatchdog() {
         found: !!horn
       };
     })()`);
+
+    const hornBox = await getHornBox();
     if (!hornBox.found || !hornBox.overHorn) {
       throw new Error(`the press point is not over the horn, so the press would prove nothing: ${JSON.stringify(hornBox)}`);
     }
-    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hornBox.x, y: hornBox.y, button: 'left', buttons: 1, clickCount: 1 });
-    // WAIT_TIMEOUT_MS, not a 3 s window (airhorn-uhdv): the bound is how long we
-    // are willing to wait for the record to show the transition, and on this box
-    // a single CDP round trip measured 13 s at load 10.5 - a 3 s window is two
-    // samples of a loaded renderer, i.e. a machine-state assertion, which is what
-    // airhorn-ye54 already fought here once. Nothing about the unstyled page is
-    // being given more room: the press either reaches the document-start record
-    // or it does not, and a slow box may only take longer to say so.
-    try {
-      await waitUntil(`window.__pressedLog.includes('true')`, WAIT_TIMEOUT_MS, `unstyled horn to respond to a trusted press at ${hornBox.x},${hornBox.y} (viewport ${hornBox.viewport.join('x')}, control top ${hornBox.top})`);
-    } catch (err) {
-      // A miss has to say which of the two things failed: the press never
-      // arriving (input log empty) or the app not recording the transition
-      // (input present, pressed log unchanged). airhorn-uhdv.
+
+    // Make the trusted press steal-aware and retry-aware (airhorn-0ghk):
+    // Under host contention, an Input.dispatchMouseEvent may be dropped before
+    // reaching the DOM (input:[]), or events may deliver late. Distinguish two
+    // distinct failure shapes:
+    //   1. events not delivered at all (input:[] -> machine contention)
+    //   2. events delivered but horn not responding (input:[...] -> product bug)
+    const steal = hostSteal();
+    const stretchedWait = stretchedBounds({ timeoutMs: WAIT_TIMEOUT_MS, steal }).timeoutMs;
+    const maxAttempts = 3;
+    const attemptTimeout = Math.max(5000, Math.round(stretchedWait / maxAttempts));
+
+    let pressedSuccess = false;
+    let lastBox = hornBox;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (attempt > 1) {
+        lastBox = await getHornBox();
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: lastBox.x, y: lastBox.y, button: 'left', buttons: 0, clickCount: 1 }).catch(() => {});
+      }
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: lastBox.x, y: lastBox.y, button: 'left', buttons: 1, clickCount: 1 });
+      try {
+        await waitUntil(`window.__pressedLog.includes('true')`, attemptTimeout,
+          `unstyled horn to respond to trusted press (attempt ${attempt}/${maxAttempts})`);
+        pressedSuccess = true;
+        break;
+      } catch {
+        const inputLen = await evaluate('window.__inputLog ? window.__inputLog.length : 0').catch(() => 0);
+        if (inputLen === 0) {
+          console.log(`  Case 7: attempt ${attempt}/${maxAttempts} timed out: no pointer event reached the page; retrying press`);
+        } else {
+          console.log(`  Case 7: attempt ${attempt}/${maxAttempts} timed out: input events reached the page (${inputLen}) but pressed stayed false`);
+        }
+      }
+    }
+
+    if (!pressedSuccess) {
       const diag = await evaluate(`(() => ({
         input: window.__inputLog || null,
         pressed: window.__pressedLog || null,
@@ -683,13 +709,17 @@ async function testBootWatchdog() {
         focused: document.hasFocus(),
         visibility: document.visibilityState
       }))()`);
-      throw new Error(`${err.message}; press diagnostics ${JSON.stringify(diag)}`);
+      if (Array.isArray(diag.input) && diag.input.length === 0) {
+        throw new Error(`no pointer event reached the page after ${maxAttempts} attempts (event delivery dropped under host contention; steal ${steal}); press diagnostics ${JSON.stringify(diag)}`);
+      }
+      throw new Error(`unstyled horn failed to respond to trusted press at ${lastBox.x},${lastBox.y} (pointer events delivered but horn stayed unpressed; steal ${steal}); press diagnostics ${JSON.stringify(diag)}`);
     }
-    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hornBox.x, y: hornBox.y, button: 'left', buttons: 0, clickCount: 1 });
+
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: lastBox.x, y: lastBox.y, button: 'left', buttons: 0, clickCount: 1 });
     // The release must retire the hold - the record carries the transition, so
     // this cannot be missed by a slow sample either.
     await waitUntil(`window.__pressedLog.lastIndexOf('false') > window.__pressedLog.lastIndexOf('true')`,
-      WAIT_TIMEOUT_MS, 'release to retire the unstyled hold');
+      stretchedWait, 'release to retire the unstyled hold');
     // airhorn-5yv: the critical fallback hides the installer, but must not
     // lock install away in the very mode it protects - once the prompt is
     // available the button is reachable even unstyled.
