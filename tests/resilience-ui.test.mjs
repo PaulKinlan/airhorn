@@ -600,9 +600,31 @@ async function testBootWatchdog() {
     // not of the unstyled page working (airhorn-ye54). The wait reads the
     // document-start record of the transition, so no sample can miss it.
     const hornBox = await evaluate(`(() => {
-      const r = document.querySelector('.horn').getBoundingClientRect();
-      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      const horn = document.querySelector('.horn');
+      // Unstyled, the page is tall prose and the control can sit below the fold,
+      // where a trusted press at its coordinates lands on nothing at all
+      // (airhorn-uhdv: the press then never reached the app and the case failed
+      // only as a 15 s timeout with no cause). Centre it first, and report what
+      // is actually at the press point so a miss names itself.
+      horn.scrollIntoView({ block: 'center' });
+      const r = horn.getBoundingClientRect();
+      const x = Math.round(r.left + r.width / 2);
+      const y = Math.round(r.top + r.height / 2);
+      const hit = document.elementFromPoint(x, y);
+      return {
+        x,
+        y,
+        overHorn: !!hit && !!hit.closest('.horn'),
+        hit: hit ? hit.tagName + (hit.id ? '#' + hit.id : '') + (hit.className && typeof hit.className === 'string' ? '.' + hit.className.trim().split(/\\s+/).join('.') : '') : null,
+        viewport: [innerWidth, innerHeight],
+        top: Math.round(r.top),
+        height: Math.round(r.height),
+        found: !!horn
+      };
     })()`);
+    if (!hornBox.found || !hornBox.overHorn) {
+      throw new Error(`the press point is not over the horn, so the press would prove nothing: ${JSON.stringify(hornBox)}`);
+    }
     await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hornBox.x, y: hornBox.y, button: 'left', buttons: 1, clickCount: 1 });
     // WAIT_TIMEOUT_MS, not a 3 s window (airhorn-uhdv): the bound is how long we
     // are willing to wait for the record to show the transition, and on this box
@@ -611,7 +633,7 @@ async function testBootWatchdog() {
     // airhorn-ye54 already fought here once. Nothing about the unstyled page is
     // being given more room: the press either reaches the document-start record
     // or it does not, and a slow box may only take longer to say so.
-    await waitUntil(`window.__pressedLog.includes('true')`, WAIT_TIMEOUT_MS, 'unstyled horn to respond to a trusted press');
+    await waitUntil(`window.__pressedLog.includes('true')`, WAIT_TIMEOUT_MS, `unstyled horn to respond to a trusted press at ${hornBox.x},${hornBox.y} (viewport ${hornBox.viewport.join('x')}, control top ${hornBox.top})`);
     await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hornBox.x, y: hornBox.y, button: 'left', buttons: 0, clickCount: 1 });
     // The release must retire the hold - the record carries the transition, so
     // this cannot be missed by a slow sample either.
