@@ -993,13 +993,48 @@ test('browser verification: right-click never starts the horn, and blur/contextm
       pressed: document.querySelector('.horn')?.getAttribute('aria-pressed') ?? null
     }))()`);
     // No fixed sleeps for state transitions: poll until the predicate holds.
-    const waitFor = async (predicate, what, tries = 50) => {
+    const waitForOrNull = async (predicate, tries = 50) => {
       for (let i = 0; i < tries; i++) {
         const s = await state();
         if (predicate(s)) return s;
         await new Promise(r => setTimeout(r, 100));
       }
-      throw new Error(`Timed out waiting for ${what}; last state ${JSON.stringify(await state())}`);
+      return null;
+    };
+    const waitFor = async (predicate, what, tries = 50) => {
+      const s = await waitForOrNull(predicate, tries);
+      if (s) return s;
+      throw new Error(`Timed out waiting for ${what}; last state ${JSON.stringify(await state())}${await audioReport()}`);
+    };
+    // Why a press produced no sound, in the page's own terms - the numbers a
+    // refusal is made of (airhorn-dxug: a resume that did not land inside the
+    // activated bound is refused and the pressed state retracted).
+    const audioReport = async () => {
+      const info = await evaluate(`(() => {
+        const probe = window.__audioProbe;
+        return {
+          activated: navigator.userActivation ? navigator.userActivation.hasBeenActive : null,
+          contexts: probe ? probe.ctxs.map((c) => [c.state, +c.currentTime.toFixed(3)]) : null,
+          oscStarts: probe ? probe.oscStarts : null,
+          status: document.getElementById('app-status')?.textContent || ''
+        };
+      })()`);
+      return `, audio ${JSON.stringify(info)}`;
+    };
+    // A press on a starved renderer can be REFUSED by the app on purpose: it
+    // resumes the audio graph and, if that has not landed inside its activated
+    // bound (airhorn-dxug), it retracts the pressed state and offers a tap
+    // instead of claiming a horn nobody can hear. A user taps again; so does the
+    // test - up to 3 times - and every case below then runs on a press that
+    // really produced a sound. If no attempt starts a blast the final waitFor
+    // still fails, so this cannot hide a horn that does not play.
+    const pressUntilSounding = async (what) => {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        await pressPrimary();
+        const sounding = await waitForOrNull((s) => s.playing, 20);
+        if (sounding) return sounding;
+      }
+      return waitFor((s) => s.playing, what);
     };
 
     await waitFor(s => s.booted, 'boot');
@@ -1052,8 +1087,7 @@ test('browser verification: right-click never starts the horn, and blur/contextm
 
     // Case 2: a pointer hold must be retired when the WINDOW loses focus -
     // its pointerup is then delivered to whatever got focus, not to the page.
-    await pressPrimary();
-    await waitFor(s => s.playing, 'horn to sound after primary press');
+    await pressUntilSounding('horn to sound after primary press');
     await evaluate(`window.dispatchEvent(new Event('blur')), true`);
     const afterBlur = await waitFor(s => !s.playing && !s.horning, 'horn to stop on window blur');
     assert.equal(afterBlur.playing, false, 'window blur must release a pointer hold');
@@ -1062,8 +1096,7 @@ test('browser verification: right-click never starts the horn, and blur/contextm
 
     // Case 3: a contextmenu mid-hold (long-press menu, or the release half of
     // any secondary gesture) must stop the horn.
-    await pressPrimary();
-    await waitFor(s => s.playing, 'horn to sound for the contextmenu case');
+    await pressUntilSounding('horn to sound for the contextmenu case');
     await evaluate(`document.querySelector('.horn').dispatchEvent(new Event('contextmenu', { bubbles: true, cancelable: true })), true`);
     const afterContextmenu = await waitFor(s => !s.playing && !s.horning, 'horn to stop on contextmenu');
     assert.equal(afterContextmenu.playing, false, 'contextmenu must release a pointer hold');
@@ -1071,16 +1104,14 @@ test('browser verification: right-click never starts the horn, and blur/contextm
 
     // Case 4: a release delivered at WINDOW level must end the hold. Bound to
     // documentElement, the listener never saw it.
-    await pressPrimary();
-    await waitFor(s => s.playing, 'horn to sound for the window-level pointerup case');
+    await pressUntilSounding('horn to sound for the window-level pointerup case');
     await evaluate(`window.dispatchEvent(new PointerEvent('pointerup')), true`);
     const afterWindowPointerup = await waitFor(s => !s.playing && !s.horning, 'horn to stop on window-level pointerup');
     assert.equal(afterWindowPointerup.playing, false, 'a window-level pointerup must release the hold');
     await releaseMouseElsewhere();
 
     // Case 5: same for pointercancel at window level.
-    await pressPrimary();
-    await waitFor(s => s.playing, 'horn to sound for the window-level pointercancel case');
+    await pressUntilSounding('horn to sound for the window-level pointercancel case');
     await evaluate(`window.dispatchEvent(new PointerEvent('pointercancel')), true`);
     const afterWindowPointercancel = await waitFor(s => !s.playing && !s.horning, 'horn to stop on window-level pointercancel');
     assert.equal(afterWindowPointercancel.playing, false, 'a window-level pointercancel must release the hold');
@@ -1089,8 +1120,7 @@ test('browser verification: right-click never starts the horn, and blur/contextm
     // Non-regression: a normal primary press + documentElement-bubbling
     // pointerup still behaves like a tap-hold (the release path every
     // existing suite drives).
-    await pressPrimary();
-    await waitFor(s => s.playing, 'horn to sound for the ordinary release case');
+    await pressUntilSounding('horn to sound for the ordinary release case');
     await evaluate(`document.documentElement.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })), true`);
     const afterOrdinaryRelease = await waitFor(s => !s.horning, 'horn to settle after an ordinary release');
     assert.equal(afterOrdinaryRelease.horning, false, 'an ordinary press/release still ends the hold');
