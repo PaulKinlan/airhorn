@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
-import { commandBound } from './cdp-command-bound.mjs';
+import { boundCommand } from './cdp-command-bound.mjs';
 import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -148,18 +148,20 @@ async function testBootWatchdog() {
     }
   };
 
+  // Bounded (airhorn-uhdv): a command the browser never answers must fail and name
+  // itself, instead of parking the suite until the gate bound cancels every suite
+  // queued behind it - 1,092 s of a 1,200 s gate for one case. The condition polls
+  // have their own bounds; this is the command's, and the composition (pending
+  // entry + bound + timer cleanup) lives in cdp-command-bound.mjs so its test holds
+  // the wiring rather than a copy of it.
   const send = (method, params = {}) => {
     const id = msgId++;
-    const answered = new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
-      ws.send(JSON.stringify({ id, method, params }));
+    return boundCommand({
+      method,
+      pending,
+      id,
+      fire: () => ws.send(JSON.stringify({ id, method, params }))
     });
-    // Bounded (airhorn-uhdv): a command the browser never answers must fail and
-    // name itself, instead of parking the suite until the gate bound cancels
-    // every suite queued behind it - 1,092 s of a 1,200 s gate for one case.
-    // The condition polls have their own bounds; this is the command's.
-    const bound = commandBound({ method, onTimeout: () => pending.delete(id) });
-    return Promise.race([answered, bound.promise]).finally(bound.clear);
   };
 
   const evaluate = async (expression) => {

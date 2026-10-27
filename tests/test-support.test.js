@@ -628,36 +628,52 @@ test('a caller-owned --out dir under the sweep prefix is never swept (airhorn-13
   }
 });
 
-test('a CDP command that never answers is bounded, not a parked suite (airhorn-uhdv)', async () => {
-  // The suites' send() settles only when the browser answers. When it does not -
-  // a renderer wedged behind a blocked stylesheet is the observed case - the
-  // suite cannot reach any of its own deadlines: resilience-ui sat in 'Case 7'
-  // for 1,092 s of a 1,200 s gate and the eleven suites behind it were cancelled
-  // without running. The bound is what turns that into one failing case.
-  const { commandBound, CDP_COMMAND_TIMEOUT_MS } = await import(
+test('a CDP command that never answers is bounded and leaves nothing pending (airhorn-uhdv)', async () => {
+  // The suites' send() settles only when the browser answers. When it does not - a
+  // renderer wedged behind a blocked stylesheet is the observed case - the suite
+  // cannot reach any of its own deadlines: resilience-ui sat in 'Case 7' for 1,092 s
+  // of a 1,200 s gate and the eleven suites behind it were cancelled without
+  // running. The bound turns that into one failing case.
+  //
+  // What is under test is the WIRING, not a callback: this drives the same
+  // composition the suite's send() uses (boundCommand: pending entry + bound +
+  // timer cleanup) against a real pending map, so dropping the cleanup that removes
+  // the dead entry fails here - an isolated onTimeout counter would keep passing.
+  const { boundCommand, CDP_COMMAND_TIMEOUT_MS } = await import(
     pathToFileURL(path.join(import.meta.dirname, 'cdp-command-bound.mjs')).href
   );
-  const never = () => new Promise(() => {});
 
-  let dropped = 0;
-  const bound = commandBound({ method: 'Page.navigate', timeoutMs: 60, onTimeout: () => { dropped += 1; } });
+  const pending = new Map();
   const started = Date.now();
   await assert.rejects(
-    () => Promise.race([never(), bound.promise]).finally(bound.clear),
+    () => boundCommand({ method: 'Page.navigate', pending, id: 'cmd-1', fire: () => {}, timeoutMs: 60 }),
     /CDP Page\.navigate did not answer within 60 ms/,
     'a silent command must reject, naming the method that wedged',
   );
+  assert.equal(
+    pending.size, 0,
+    `a command that is bounded out must not leave its entry in the pending table; found ${JSON.stringify([...pending.keys()])}`,
+  );
   const elapsed = Date.now() - started;
-  assert.equal(dropped, 1, 'the bound must drop the pending command entry before rejecting, not leave it to be answered');
   assert.ok(elapsed < 2000, `the bound must fire on its own timer; took ${elapsed} ms`);
 
-  // A command that answers first is untouched, and its timer is cleared so the
-  // bound never outlives the command it guarded.
-  const answeredBound = commandBound({ method: 'Runtime.evaluate', timeoutMs: 60 });
-  assert.equal(
-    await Promise.race([Promise.resolve('answered'), answeredBound.promise]).finally(answeredBound.clear),
-    'answered',
-  );
+  // A command that answers first settles normally, and the reply handler (the
+  // suite's ws.onmessage) is what drops its entry, so nothing is left behind on
+  // that path either.
+  const answered = new Map();
+  const value = await boundCommand({
+    method: 'Runtime.evaluate',
+    pending: answered,
+    id: 'cmd-2',
+    timeoutMs: 60,
+    fire: () => {
+      const entry = answered.get('cmd-2');
+      answered.delete('cmd-2');
+      entry.resolve('answered');
+    },
+  });
+  assert.equal(value, 'answered', 'a command that answers must resolve with its reply, untouched by the bound');
+  assert.equal(answered.size, 0, 'an answered command is dropped by its reply handler');
   await new Promise((r) => setTimeout(r, 120));
   assert.ok(Number(CDP_COMMAND_TIMEOUT_MS) > 1000, 'the shipped bound must be a generous kill window, not a budget');
 });

@@ -80,3 +80,30 @@ export function commandBound({ method, timeoutMs = CDP_COMMAND_TIMEOUT_MS, onTim
     }
   };
 }
+
+/**
+ * The composition every consumer uses: start the command against its own pending
+ * table, race it against the bound, and clear the timer once it settles.
+ *
+ * It lives here, rather than inlined in the suite, so that "a command that is
+ * bounded out leaves NOTHING behind" is a property the unit test can hold: if the
+ * cleanup wiring is dropped, the dead entry stays in the suite's pending table
+ * forever and the test fails. A test that only counts an isolated onTimeout
+ * callback would keep passing (airhorn-uhdv review).
+ *
+ * @param {object} options
+ * @param {string} options.method           the CDP method, named in the failure
+ * @param {Map} options.pending             the suite's id -> { resolve, reject } table
+ * @param {number|string} options.id        this command's id in that table
+ * @param {() => void} options.fire         sends the command; the reply settles the entry
+ * @param {number} [options.timeoutMs]      how long to wait (default CDP_COMMAND_TIMEOUT_MS)
+ * @returns {Promise<any>} the reply's value, or a rejection naming the method
+ */
+export function boundCommand({ method, pending, id, fire, timeoutMs }) {
+  const answered = new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    fire();
+  });
+  const bound = commandBound({ method, timeoutMs, onTimeout: () => pending.delete(id) });
+  return Promise.race([answered, bound.promise]).finally(bound.clear);
+}
