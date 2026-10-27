@@ -462,6 +462,15 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
         res.end('Not Found (forced fallback simulation)');
         return;
       }
+      if (reqUrl === '/src/horn.js') {
+        // The page imports the REAL module for the device-free render below, the
+        // same way tools/audio-parity.mjs measures the fallback: the bundle in
+        // dist/ is built from this file, and an OfflineAudioContext render of it
+        // involves no audio device, no pump and no clock to wait on.
+        res.writeHead(200, { 'Content-Type': 'application/javascript' });
+        fs.createReadStream(path.join(__dirname, '../src/horn.js')).pipe(res);
+        return;
+      }
       if (reqUrl === '/sw.js') {
         // Return a benign no-op service worker that does not cache or intercept mp3
         res.writeHead(200, {
@@ -545,117 +554,33 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
     await send('Page.enable');
     await send('Runtime.enable');
 
-    // The audio probe reads three things off the REAL graph (airhorn-ujwr):
+    // The app's own schedule, recorded from the REAL page: every AudioParam ramp
+    // and every oscillator start/stop, in audio-clock seconds. It is exact and
+    // jitter-free, which is what answers "was the blast cut short" without
+    // sampling anything (review of 20f9120).
     //
-    //   level    an AnalyserNode tapped off whatever node reaches
-    //            ctx.destination - so a graph that renders silence still reads 0,
-    //            and `taps > 0` proves the synth got as far as the output;
-    //   schedule every AudioParam ramp and oscillator start/stop the app writes,
-    //            in AUDIO-clock seconds, which is exact and jitter-free;
-    //   clock    ctx.currentTime, so a level sample can be related to how much
-    //            audio has actually been rendered rather than to wall time.
-    //
-    // That last distinction is the whole point. This box has no audio device
-    // (/dev/snd is absent), so headless Chromium renders the graph from a
-    // timer-driven null sink and the audio clock can run at a fraction of real
-    // time: measured here, 0.073 s of audio in ~1.4 s wall (~19x) and 0.163 s in
-    // 1.2 s (~7x). A 0.14 s attack therefore needs seconds of wall time, and the
-    // horn's own idle release (airhorn-1umb, 300 ms after the last sound) can
-    // suspend the context first - which freezes the clock mid-attack and makes
-    // the analyser read 0 with a perfectly healthy synth. Sampling the level
-    // inside a fixed wall-clock window therefore measured the render pump, not
-    // the horn, and that is what airhorn-ujwr tripped over (peak 0).
+    // There is deliberately NO live level reading any more. This VM has no audio
+    // device (/dev/snd is absent), so headless Chromium renders the graph from a
+    // timer-driven null sink and the audio clock runs at a fraction of real time -
+    // measured 0.073 s of audio in ~1.4 s wall (~19x) and 0.163 s in 1.2 s (~7x) -
+    // while the horn's own idle release (airhorn-1umb, 300 ms after the last
+    // sound) can suspend the context mid-attack and freeze the clock for good. Any
+    // assertion that waits for a live context to render a given amount of audio
+    // inside a wall-clock bound is a statement about the host's CPU, and it is how
+    // a working horn came to fail on "peak 0" (airhorn-ujwr). Audio production is
+    // asserted offline instead - see Part A(a) - where no device is involved.
     await send('Page.addScriptToEvaluateOnNewDocument', {
       source: `
         window.__audioProbe = {
-          peak: 0,
-          currentLevel: 0,
-          samples: 0,
           oscStarts: 0,
-          taps: [],
           sched: [],
-          ctxs: [],
           reset() {
-            this.peak = 0;
-            this.currentLevel = 0;
-            this.samples = 0;
             this.oscStarts = 0;
             this.sched = [];
-          },
-          // The level is read ON DEMAND, not accumulated by a timer: a 20 ms
-          // setInterval is fine on an idle machine and useless on a gate-under
-          // -load one, where a single timer sample of a 0.9 s blast can be
-          // starved past the whole blast and read as silence (airhorn-u7s).
-          read() {
-            let level = 0;
-            for (const tap of this.taps) {
-              try {
-                tap.analyser.getFloatTimeDomainData(tap.data);
-                for (let i = 0; i < tap.data.length; i++) {
-                  const abs = Math.abs(tap.data[i]);
-                  if (abs > level) level = abs;
-                }
-              } catch {}
-            }
-            this.currentLevel = level;
-            if (level > this.peak) this.peak = level;
-            this.samples += 1;
-            const ctx = this.ctxs[0];
-            return {
-              peak: this.peak,
-              currentLevel: level,
-              samples: this.samples,
-              oscStarts: this.oscStarts,
-              audioClock: ctx ? ctx.currentTime : null,
-              state: ctx ? ctx.state : null
-            };
-          },
-          synthStart() {
-            const start = this.sched.find((entry) => entry.op === 'osc.start' && typeof entry.t === 'number');
-            return start ? start.t : null;
-          },
-          // One in-page wait, not a CDP round trip per sample: on a starved
-          // renderer a single Runtime.evaluate can cost seconds, which is how a
-          // 30-sample loop became a 20 s test. It waits until the audio clock has
-          // rendered past the attack - the point at which the level means
-          // something, because a ramp that is 10% of the way up is not "audible" -
-          // and stops early only if the synth never started or at the wall bound,
-          // so "waited out a slow pump" and "rendered nothing" stay
-          // distinguishable in the failure message.
-          waitForAudible({ attackS = 0.2, timeoutMs = 20000, noSynthMs = 5000 } = {}) {
-            const t0 = performance.now();
-            return new Promise((resolve) => {
-              const tick = () => {
-                const probe = this.read();
-                const start = this.synthStart();
-                const rendered = start === null || probe.audioClock === null ? 0 : probe.audioClock - start;
-                const waitedMs = performance.now() - t0;
-                const done = rendered >= attackS
-                  || (start === null && waitedMs >= noSynthMs)
-                  || waitedMs >= timeoutMs;
-                if (done) {
-                  resolve({ ...probe, renderedAudioS: rendered, waitedMs, synthStart: start });
-                  return;
-                }
-                setTimeout(tick, 50);
-              };
-              tick();
-            });
           }
         };
         const AC = window.AudioContext || window.webkitAudioContext;
         if (AC) {
-          // Keep the context(s) so a sample can be compared with rendered audio
-          // time. Synthetic probes still go through the real constructor.
-          const wrapContext = function (...args) {
-            const ctx = new AC(...args);
-            window.__audioProbe.ctxs.push(ctx);
-            return ctx;
-          };
-          wrapContext.prototype = AC.prototype;
-          window.AudioContext = wrapContext;
-          window.webkitAudioContext = wrapContext;
-
           // The app's own schedule, in audio-clock seconds.
           const paramSet = AudioParam.prototype.setValueAtTime;
           const paramRamp = AudioParam.prototype.exponentialRampToValueAtTime;
@@ -666,31 +591,6 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
           AudioParam.prototype.exponentialRampToValueAtTime = function (value, time) {
             window.__audioProbe.sched.push({ op: 'ramp', value, time });
             return paramRamp.call(this, value, time);
-          };
-
-          const origConnect = AudioNode.prototype.connect;
-          AudioNode.prototype.connect = function (dest, ...rest) {
-            const ret = origConnect.apply(this, [dest, ...rest]);
-            if (dest && this.context && dest === this.context.destination && !this.__isProbeNode) {
-              this.__isProbeNode = true;
-              try {
-                const ctx = this.context;
-                const analyser = ctx.createAnalyser();
-                analyser.__isProbeNode = true;
-                analyser.fftSize = 2048;
-                const data = new Float32Array(analyser.fftSize);
-                const silentSink = ctx.createGain();
-                silentSink.__isProbeNode = true;
-                silentSink.gain.value = 0;
-                origConnect.call(this, analyser);
-                origConnect.call(analyser, silentSink);
-                origConnect.call(silentSink, ctx.destination);
-                window.__audioProbe.taps.push({ analyser, data });
-              } catch (e) {
-                console.error('Probe hook error', e);
-              }
-            }
-            return ret;
           };
           const origCreateOsc = AC.prototype.createOscillator;
           AC.prototype.createOscillator = function (...args) {
@@ -742,27 +642,114 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
       pointerType: 'mouse'
     });
 
-    // Part A: press, hold until the graph has RENDERED past the attack, release.
-    // Verifies the fallback synth starts on the forced 404, that it renders an
-    // audible level, and that the release does not truncate the blast - the last
-    // of those read off the schedule the app wrote (0.9 s of audio-clock blast
-    // from the synth's start), because the release instant is not what the check
-    // is about; it is whether the tap cuts the blast off (the old 100 ms
-    // truncation, commit 8cd71d0, and the 60 ms tap before it).
-    await send('Runtime.evaluate', { expression: 'window.__audioProbe.reset()' });
-    await press('mousePressed');
-    const audible = await send('Runtime.evaluate', {
-      expression: 'window.__audioProbe.waitForAudible({ attackS: 0.25, timeoutMs: 20000 })',
+    // Part A(a): does the fallback VOICE produce audio? This is the claim the old
+    // live analyser was trying to make, and it is made here device-free: the REAL
+    // module (src/horn.js, the file dist/ is built from) is driven into an
+    // OfflineAudioContext, which renders a fixed number of samples with no audio
+    // device, no null sink, no pump and no clock to wait on, and the rendered
+    // buffer is then read. A silenced fallback - level 0, oscillators never
+    // started, master gain never connected - renders silence and fails here; a
+    // host with no audio device cannot fail it, because nothing on this path
+    // touches one. (tools/audio-parity.mjs measures the same render for parity
+    // with the sample; this asserts only that it is audible.)
+    const rendered = await send('Runtime.evaluate', {
+      expression: `(async () => {
+        const { Horn } = await import('/src/horn.js');
+        const SR = 44100;
+        const ctx = new OfflineAudioContext(1, Math.round(SR * 1.2), SR);
+        // An offline port reports 'suspended' until startRendering(), and
+        // Horn.start() refuses to schedule into a suspended context on purpose
+        // (airhorn-x4l). In a tab the press itself resumes it, so the graph is a
+        // running one: only 'state' is overridden, every method bound to the real
+        // port (Web Audio refuses a foreign receiver). Same shim as
+        // tools/audio-parity.mjs.
+        const runningPort = new Proxy(ctx, {
+          get(target, key) {
+            if (key === 'state') return 'running';
+            const value = Reflect.get(target, key, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          }
+        });
+        // audioSrc is the URL the server above answers with 404, so this takes the
+        // production fallback path rather than the sample path.
+        const horn = new Horn({ audioContext: runningPort });
+        const started = await horn.start({ loop: false });
+        const buffer = await ctx.startRendering();
+        const data = buffer.getChannelData(0);
+        let peak = 0;
+        let audible = 0;
+        for (let i = 0; i < data.length; i++) {
+          const abs = Math.abs(data[i]);
+          if (abs > peak) peak = abs;
+          if (abs > 0.01) audible += 1;
+        }
+        return {
+          started,
+          usingFallback: horn.usingFallback === true,
+          peak,
+          audibleS: audible / SR,
+          durationS: data.length / SR
+        };
+      })()`,
       awaitPromise: true,
       returnByValue: true
     });
-    const playingWhileHeld = await send('Runtime.evaluate', {
-      expression: '!!(window.__airhorn && window.__airhorn.isPlaying())',
+    const render = rendered.result.value;
+    assert.equal(render.usingFallback, true, 'the forced 404 must take the synthesised fallback path');
+    assert.equal(render.started, true, 'the offline render must start; a refused context measures silence, not the horn');
+    assert.ok(
+      render.peak > 0.2,
+      `the fallback voice must render audibly, with no audio device involved; peak ${render.peak} ` +
+        `over ${render.durationS.toFixed(2)}s (audible ${render.audibleS.toFixed(3)}s)`,
+    );
+    assert.ok(
+      render.audibleS > 0.5,
+      `the rendered blast must last about the sample's ~0.8s; audible ${render.audibleS.toFixed(3)}s`,
+    );
+
+    // Part A(b): does the LIVE path work in the real page? The pressed state, the
+    // fallback engaging on the forced 404 (silence is the failure this replaces),
+    // start() resolving, and the blast the app schedules on the audio clock.
+    //
+    // A press the app honestly REFUSES is retried like a user retries it: resuming
+    // the audio graph is bounded by the app (airhorn-dxug) and a starved renderer
+    // can miss that bound, which is a slow host, not a horn that does not play.
+    // Three presses, each with a modest bound; if none of them sounds, the
+    // assertions below still fail.
+    await send('Runtime.evaluate', { expression: 'window.__audioProbe.reset()' });
+    let playingWhileHeld = false;
+    for (let attempt = 0; attempt < 3 && !playingWhileHeld; attempt += 1) {
+      await press('mousePressed');
+      for (let i = 0; i < 50; i += 1) {
+        const state = await send('Runtime.evaluate', {
+          expression: '!!(window.__airhorn && window.__airhorn.isPlaying())',
+          returnByValue: true
+        });
+        if (state.result.value) {
+          playingWhileHeld = true;
+          break;
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+      if (!playingWhileHeld) await press('mouseReleased');
+    }
+
+    const held = await send('Runtime.evaluate', {
+      expression: `(() => {
+        const horn = document.querySelector('.horn');
+        return {
+          playing: !!(window.__airhorn && window.__airhorn.isPlaying()),
+          usingFallback: window.__airhorn ? window.__airhorn.usingFallback === true : null,
+          horning: horn.classList.contains('horning'),
+          pressed: horn.getAttribute('aria-pressed'),
+          oscStarts: window.__audioProbe.oscStarts
+        };
+      })()`,
       returnByValue: true
     });
     await press('mouseReleased');
 
-    // Wait for blast duration to complete and settle
+    // Wait for the blast to complete and the UI to settle
     for (let i = 0; i < 30; i++) {
       const res = await send('Runtime.evaluate', {
         expression: `!window.__airhorn || !window.__airhorn.isPlaying()`,
@@ -782,7 +769,6 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
           airhornExists: !!window.__airhorn,
           isPlaying: window.__airhorn ? window.__airhorn.isPlaying() : null,
           isLooping: window.__airhorn ? window.__airhorn.isLooping() : null,
-          taps: window.__audioProbe.taps.length,
           oscStarts: window.__audioProbe.oscStarts,
           sched: window.__audioProbe.sched
         };
@@ -791,24 +777,16 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
     });
     const settled = settledResult.result.value;
 
-    // It rendered, on demand, in audio time: the peak is only read once the
-    // graph has produced the whole 0.14 s attack plus the analyser's 46 ms
-    // window (0.25 s of rendered audio), where the level is the synth's full
-    // loudness. A slow pump waits rather than failing; a silent one is silence.
-    assert.ok(
-      audible.result.value.peak > 0.2,
-      `Fallback synth must render an audible level; peak ${audible.result.value.peak} ` +
-        `after ${audible.result.value.renderedAudioS.toFixed(3)}s of rendered audio ` +
-        `(${Math.round(audible.result.value.waitedMs)}ms wall, context ${audible.result.value.state}, ` +
-        `${audible.result.value.oscStarts} oscillator(s) started)`,
-    );
-    assert.equal(playingWhileHeld.result.value, true, 'Horn must report playing while the press is held');
+    assert.equal(playingWhileHeld, true, `the horn must sound on a press in the live page; last state ${JSON.stringify(held.result.value)}`);
+    assert.equal(held.result.value.horning, true, 'a held press must show the pressed state');
+    assert.equal(held.result.value.pressed, 'true', 'a held press must set aria-pressed');
+    // The forced 404 must reach the SYNTH, not a quiet page (airhorn-ujwr).
+    assert.equal(held.result.value.usingFallback, true, 'the forced 404 must engage the synthesised fallback, not fall silent');
+    assert.ok(settled.oscStarts >= 3, `Expected at least 3 oscillators to start, got ${settled.oscStarts}`);
 
     assert.equal(settled.horning, false, 'UI should exit horning state after blast finishes');
     assert.equal(settled.pressed, 'false', 'aria-pressed should revert to false');
     assert.equal(settled.isPlaying, false, 'Audio should finish playing');
-    assert.ok(settled.taps > 0, 'Fallback synth must connect to the context destination; nothing would be audible otherwise');
-    assert.ok(settled.oscStarts >= 3, `Expected at least 3 oscillators to start, got ${settled.oscStarts}`);
 
     // The blast itself, in audio-clock seconds: 0.14 s attack (airhorn-n0sd) and
     // a release that leaves the 0.9 s blast scheduled instead of cutting it at
