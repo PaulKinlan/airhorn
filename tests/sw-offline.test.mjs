@@ -307,24 +307,35 @@ async function testSwAndManifest() {
 
     // Reload page while completely offline
     await send('Page.reload');
-    await new Promise(r => setTimeout(r, 1000));
 
-    // Verify offline load succeeded and DOM is fully functional
-    const offlineEval = await send('Runtime.evaluate', {
-      expression: `(() => {
-        const horn = document.querySelector('.horn');
-        return {
-          title: document.title,
-          hornPresent: !!horn,
-          hornAriaLabel: horn ? horn.getAttribute('aria-label') : null,
-          swController: !!navigator.serviceWorker.controller
-        };
-      })()`,
-      returnByValue: true
-    });
+    // Verify offline load succeeded and DOM is fully functional. This used to sleep a
+    // fixed 1000 ms and then assert: on a loaded host the reload plus the worker-served
+    // parse takes longer than a second, and the suite failed with hornPresent:false on a
+    // page that had simply not been built yet (airhorn-wqge: observed at 57.9% steal).
+    // Wait for the document to say it is ready, as a CONDITION.
+    const readOffline = async () => {
+      const r = await send('Runtime.evaluate', {
+        expression: `(() => {
+          const horn = document.querySelector('.horn');
+          return {
+            title: document.title,
+            hornPresent: !!horn,
+            hornAriaLabel: horn ? horn.getAttribute('aria-label') : null,
+            swController: !!navigator.serviceWorker.controller
+          };
+        })()`,
+        returnByValue: true
+      });
+      return r.result.value;
+    };
+    // A reload destroys the execution context, so an evaluate can fail outright while the
+    // new document boots - waitForCondition retries those, which is exactly the case here.
+    const off = await waitForCondition(async () => {
+      const seen = await readOffline();
+      return seen && seen.hornPresent && seen.hornAriaLabel === 'Air horn' ? seen : null;
+    }, { label: 'the offline page to load with its horn' });
 
-    console.log('Offline evaluation result:', offlineEval.result.value);
-    const off = offlineEval.result.value;
+    console.log('Offline evaluation result:', off);
     if (!off.hornPresent || off.hornAriaLabel !== 'Air horn') {
       throw new Error(`Offline load failed: ${JSON.stringify(off)}`);
     }
@@ -368,7 +379,14 @@ async function testSwAndManifest() {
       });
       const keys = keysResult.result.value;
       return Array.isArray(keys) && keys.includes('airhorner-2.0.0-build2') && !keys.includes('airhorner-0.7.1') ? keys : null;
-    }, { label: 'the activated worker to install its cache and delete the legacy one' });
+      // 60 s, not the shared 15 s default: this wait covers an install, an activate and the
+      // activate handler's deletions, all of them on a worker thread that queues behind other
+      // lanes. Measured at 16204 ms against the 15 s default on this VM, i.e. a correct worker
+      // reported as a stuck one (airhorn-wqge). It stops the moment the condition holds.
+    }, {
+      label: 'the activated worker to install its cache and delete the legacy one',
+      timeout: 60000,
+    });
     console.log('Caches after real SW update:', afterKeys);
 
     if (!afterKeys.includes('airhorner-2.0.0-build2')) {

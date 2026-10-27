@@ -477,10 +477,19 @@ async function run() {
       const horn = document.querySelector('.horn');
       const result = await window.__call('play_horn', {});
       const pressedImmediately = horn.getAttribute('aria-pressed');
-      const deadline = Date.now() + 5000;
-      while (Date.now() < deadline && horn.getAttribute('aria-pressed') === 'true') {
-        await new Promise((r) => setTimeout(r, 100));
-      }
+      // The blast ends on the AudioContext's clock, and the button is restored from the
+      // sample's own 'ended' (src/horn.js #playSample), so 'how long until it clears' is a
+      // property of the AUDIO clock, not of this VM's CPU. Starvation stretches that clock
+      // far beyond the CPU's steal figure: measured on a 2-core VM at 55% steal, a 1 s
+      // buffer's 'ended' fired at 14.8 s and this blast restored the button at 16.6 s -- so a
+      // fixed 5 s window here is a machine-state assertion that reads a correct app as a
+      // hung one (airhorn-wqge). Wait for the CONDITION instead, with a kill window (60 s)
+      // wide enough that a late audio clock cannot exhaust it.
+      await window.__waitFor(
+        () => (horn.getAttribute('aria-pressed') === 'false' ? { restored: true } : null),
+        'a single blast to restore the button state',
+        60000,
+      );
       return {
         result,
         pressedImmediately,
