@@ -462,6 +462,15 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
         res.end('Not Found (forced fallback simulation)');
         return;
       }
+      if (reqUrl === '/src/horn.js') {
+        // The page imports the REAL module for the device-free render below, the
+        // same way tools/audio-parity.mjs measures the fallback: the bundle in
+        // dist/ is built from this file, and an OfflineAudioContext render of it
+        // involves no audio device, no pump and no clock to wait on.
+        res.writeHead(200, { 'Content-Type': 'application/javascript' });
+        fs.createReadStream(path.join(__dirname, '../src/horn.js')).pipe(res);
+        return;
+      }
       if (reqUrl === '/sw.js') {
         // Return a benign no-op service worker that does not cache or intercept mp3
         res.writeHead(200, {
@@ -500,7 +509,11 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
     await new Promise(r => server.listen(0, '127.0.0.1', r));
     const port = server.address().port;
 
-    browser = await launchBrowser({ autoplay: true, label: 'horn', timeoutMs: 10000 });
+    // 20000, not 10000: the launch bound is a kill window, not a budget. This
+    // box starts Chrome from a cold profile in 1-2 s when idle and took >10 s at
+    // load 5 on 2 cores, and every other suite's browser already allows 15-20 s
+    // (airhorn-ujwr).
+    browser = await launchBrowser({ autoplay: true, label: 'horn', timeoutMs: 20000, discoveryMs: 40000 });
 
     const pageWsUrl = browser.pageWsUrl;
     ws = new WebSocket(pageWsUrl);
@@ -541,70 +554,57 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
     await send('Page.enable');
     await send('Runtime.enable');
 
-    // AnalyserNode tap to measure audibility (peak level > 0.01)
+    // The app's own schedule, recorded from the REAL page: every AudioParam ramp
+    // and every oscillator start/stop, in audio-clock seconds. It is exact and
+    // jitter-free, which is what answers "was the blast cut short" without
+    // sampling anything (review of 20f9120).
+    //
+    // There is deliberately NO live level reading any more. This VM has no audio
+    // device (/dev/snd is absent), so headless Chromium renders the graph from a
+    // timer-driven null sink and the audio clock runs at a fraction of real time -
+    // measured 0.073 s of audio in ~1.4 s wall (~19x) and 0.163 s in 1.2 s (~7x) -
+    // while the horn's own idle release (airhorn-1umb, 300 ms after the last
+    // sound) can suspend the context mid-attack and freeze the clock for good. Any
+    // assertion that waits for a live context to render a given amount of audio
+    // inside a wall-clock bound is a statement about the host's CPU, and it is how
+    // a working horn came to fail on "peak 0" (airhorn-ujwr). Audio production is
+    // asserted offline instead - see Part A(a) - where no device is involved.
     await send('Page.addScriptToEvaluateOnNewDocument', {
       source: `
-        window.__audioProbe = { peak: 0, currentLevel: 0, samples: 0, oscStarts: 0, taps: [] };
-        // The level is read ON DEMAND, not accumulated by a timer. A 20 ms
-        // setInterval is fine on an idle machine and useless on a gate-under-load
-        // one, where a single timer sample of a 0.9 s blast can be starved past
-        // the whole blast and read as silence (airhorn-u7s: that is exactly how
-        // this check flaked). read() samples every tap right now, so the caller
-        // controls when it looks instead of hoping a timer fired.
-        window.__audioProbe.read = () => {
-          let level = 0;
-          for (const tap of window.__audioProbe.taps) {
-            try {
-              tap.analyser.getFloatTimeDomainData(tap.data);
-              for (let i = 0; i < tap.data.length; i++) {
-                const abs = Math.abs(tap.data[i]);
-                if (abs > level) level = abs;
-              }
-            } catch {}
+        window.__audioProbe = {
+          oscStarts: 0,
+          sched: [],
+          reset() {
+            this.oscStarts = 0;
+            this.sched = [];
           }
-          window.__audioProbe.currentLevel = level;
-          if (level > window.__audioProbe.peak) window.__audioProbe.peak = level;
-          window.__audioProbe.samples++;
-          return {
-            peak: window.__audioProbe.peak,
-            currentLevel: level,
-            samples: window.__audioProbe.samples,
-            oscStarts: window.__audioProbe.oscStarts
-          };
         };
         const AC = window.AudioContext || window.webkitAudioContext;
         if (AC) {
-          const origConnect = AudioNode.prototype.connect;
-          AudioNode.prototype.connect = function (dest, ...rest) {
-            const ret = origConnect.apply(this, [dest, ...rest]);
-            if (dest && this.context && dest === this.context.destination && !this.__isProbeNode) {
-              this.__isProbeNode = true;
-              try {
-                const ctx = this.context;
-                const analyser = ctx.createAnalyser();
-                analyser.__isProbeNode = true;
-                analyser.fftSize = 2048;
-                const data = new Float32Array(analyser.fftSize);
-                const silentSink = ctx.createGain();
-                silentSink.__isProbeNode = true;
-                silentSink.gain.value = 0;
-                origConnect.call(this, analyser);
-                origConnect.call(analyser, silentSink);
-                origConnect.call(silentSink, ctx.destination);
-                window.__audioProbe.taps.push({ analyser, data });
-              } catch (e) {
-                console.error('Probe hook error', e);
-              }
-            }
-            return ret;
+          // The app's own schedule, in audio-clock seconds.
+          const paramSet = AudioParam.prototype.setValueAtTime;
+          const paramRamp = AudioParam.prototype.exponentialRampToValueAtTime;
+          AudioParam.prototype.setValueAtTime = function (value, time) {
+            window.__audioProbe.sched.push({ op: 'set', value, time });
+            return paramSet.call(this, value, time);
+          };
+          AudioParam.prototype.exponentialRampToValueAtTime = function (value, time) {
+            window.__audioProbe.sched.push({ op: 'ramp', value, time });
+            return paramRamp.call(this, value, time);
           };
           const origCreateOsc = AC.prototype.createOscillator;
           AC.prototype.createOscillator = function (...args) {
             const osc = origCreateOsc.apply(this, args);
             const origStart = osc.start.bind(osc);
+            const origStop = osc.stop.bind(osc);
             osc.start = function (...startArgs) {
               window.__audioProbe.oscStarts++;
+              window.__audioProbe.sched.push({ op: 'osc.start', t: startArgs[0] });
               return origStart(...startArgs);
+            };
+            osc.stop = function (...stopArgs) {
+              window.__audioProbe.sched.push({ op: 'osc.stop', t: stopArgs[0] });
+              return origStop(...stopArgs);
             };
             return osc;
           };
@@ -615,57 +615,150 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
     await new Promise(r => setTimeout(r, 600));
 
-    // Part A: Tap test with real gesture (pointerdown, 60ms, pointerup)
-    // Verifies synth starts, sounds audibly, does NOT truncate early, and rings out
-    await send('Runtime.evaluate', {
+    // A press has to be a TRUSTED input event, not a dispatched PointerEvent
+    // (airhorn-ujwr). A synthetic event grants no user activation, so
+    // navigator.userActivation.hasBeenActive stays false and the horn takes its
+    // UNACTIVATED resume bound - 100 ms (airhorn-dxug) - which a loaded renderer
+    // routinely exceeds. The press is then refused, no oscillator is ever
+    // created, and the suite reports silence from an app that is working: that
+    // is the other half of how this check went red. Input.dispatchMouseEvent
+    // produces real pointerdown/pointerup events and sets user activation, i.e.
+    // exactly the path a user's click takes.
+    const hornBox = await send('Runtime.evaluate', {
       expression: `(() => {
-        const horn = document.querySelector('.horn');
-        horn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
-        setTimeout(() => {
-          document.documentElement.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-        }, 60);
-      })()`
-    });
-
-    // Audibility: read the analyser on demand for up to 1.5 s, which covers the
-    // whole blast (0.9 s plus release) even on a loaded gate. A silent fallback
-    // still fails: nothing is ever above the floor.
-    const readProbe = async () => {
-      const probe = await send('Runtime.evaluate', {
-        expression: 'window.__audioProbe.read()',
-        returnByValue: true
-      });
-      return probe.result.value;
-    };
-    let audioPeak = 0;
-    for (let i = 0; i < 30; i++) {
-      const probe = await readProbe();
-      audioPeak = probe.peak;
-      if (audioPeak > 0.01) break;
-      await new Promise(r => setTimeout(r, 50));
-    }
-    assert.ok(audioPeak > 0.01, `Horn must sound audibly within 1.5s of the press; peak ${audioPeak}`);
-
-    // Far past the old 100ms truncation point, and past the 60ms tap: the horn
-    // must still be sounding, and still be playing.
-    await new Promise(r => setTimeout(r, 200));
-    const activeAt500 = await send('Runtime.evaluate', {
-      expression: `(() => ({
-        level: window.__audioProbe.read().currentLevel,
-        playing: !!(window.__airhorn && window.__airhorn.isPlaying())
-      }))()`,
+        const rect = document.querySelector('.horn').getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, width: rect.width };
+      })()`,
       returnByValue: true
     });
+    assert.ok(hornBox.result.value.width > 0, 'the horn control must be laid out to receive a press');
+    const press = (type) => send('Input.dispatchMouseEvent', {
+      type,
+      x: hornBox.result.value.x,
+      y: hornBox.result.value.y,
+      button: 'left',
+      buttons: type === 'mousePressed' ? 1 : 0,
+      clickCount: 1,
+      pointerType: 'mouse'
+    });
+    // A retry needs the button genuinely UP first: a mousePressed that arrives while
+    // it is still down is not a new press, so no fresh pointerdown reaches the app -
+    // and the app starts a hold on pointerdown (src/main.js). Release AWAY from the
+    // control at (2, 2): a release on the control also produces a click, and click is
+    // the app's own one-shot start path, so a retry would be reading a blast it did
+    // not ask for (airhorn-uhdv review).
+    const releaseElsewhere = () => send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: 2, y: 2, button: 'left', buttons: 0, clickCount: 1, pointerType: 'mouse'
+    });
+
+    // Part A(a): does the fallback VOICE produce audio? This is the claim the old
+    // live analyser was trying to make, and it is made here device-free: the REAL
+    // module (src/horn.js, the file dist/ is built from) is driven into an
+    // OfflineAudioContext, which renders a fixed number of samples with no audio
+    // device, no null sink, no pump and no clock to wait on, and the rendered
+    // buffer is then read. A silenced fallback - level 0, oscillators never
+    // started, master gain never connected - renders silence and fails here; a
+    // host with no audio device cannot fail it, because nothing on this path
+    // touches one. (tools/audio-parity.mjs measures the same render for parity
+    // with the sample; this asserts only that it is audible.)
+    const rendered = await send('Runtime.evaluate', {
+      expression: `(async () => {
+        const { Horn } = await import('/src/horn.js');
+        const SR = 44100;
+        const ctx = new OfflineAudioContext(1, Math.round(SR * 1.2), SR);
+        // An offline port reports 'suspended' until startRendering(), and
+        // Horn.start() refuses to schedule into a suspended context on purpose
+        // (airhorn-x4l). In a tab the press itself resumes it, so the graph is a
+        // running one: only 'state' is overridden, every method bound to the real
+        // port (Web Audio refuses a foreign receiver). Same shim as
+        // tools/audio-parity.mjs.
+        const runningPort = new Proxy(ctx, {
+          get(target, key) {
+            if (key === 'state') return 'running';
+            const value = Reflect.get(target, key, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          }
+        });
+        // audioSrc is the URL the server above answers with 404, so this takes the
+        // production fallback path rather than the sample path.
+        const horn = new Horn({ audioContext: runningPort });
+        const started = await horn.start({ loop: false });
+        const buffer = await ctx.startRendering();
+        const data = buffer.getChannelData(0);
+        let peak = 0;
+        let audible = 0;
+        for (let i = 0; i < data.length; i++) {
+          const abs = Math.abs(data[i]);
+          if (abs > peak) peak = abs;
+          if (abs > 0.01) audible += 1;
+        }
+        return {
+          started,
+          usingFallback: horn.usingFallback === true,
+          peak,
+          audibleS: audible / SR,
+          durationS: data.length / SR
+        };
+      })()`,
+      awaitPromise: true,
+      returnByValue: true
+    });
+    const render = rendered.result.value;
+    assert.equal(render.usingFallback, true, 'the forced 404 must take the synthesised fallback path');
+    assert.equal(render.started, true, 'the offline render must start; a refused context measures silence, not the horn');
     assert.ok(
-      activeAt500.result.value.level > 0.01,
-      `Horn must still be ringing out ~500ms after a 60ms tap; got level ${activeAt500.result.value.level}`,
+      render.peak > 0.2,
+      `the fallback voice must render audibly, with no audio device involved; peak ${render.peak} ` +
+        `over ${render.durationS.toFixed(2)}s (audible ${render.audibleS.toFixed(3)}s)`,
     );
     assert.ok(
-      activeAt500.result.value.playing,
-      'Horn must still report playing ~500ms after a 60ms tap',
+      render.audibleS > 0.5,
+      `the rendered blast must last about the sample's ~0.8s; audible ${render.audibleS.toFixed(3)}s`,
     );
 
-    // Wait for blast duration to complete and settle
+    // Part A(b): does the LIVE path work in the real page? The pressed state, the
+    // fallback engaging on the forced 404 (silence is the failure this replaces),
+    // start() resolving, and the blast the app schedules on the audio clock.
+    //
+    // A press the app honestly REFUSES is retried like a user retries it: resuming
+    // the audio graph is bounded by the app (airhorn-dxug) and a starved renderer
+    // can miss that bound, which is a slow host, not a horn that does not play.
+    // Three presses, each with a modest bound; if none of them sounds, the
+    // assertions below still fail.
+    await send('Runtime.evaluate', { expression: 'window.__audioProbe.reset()' });
+    let playingWhileHeld = false;
+    for (let attempt = 0; attempt < 3 && !playingWhileHeld; attempt += 1) {
+      await press('mousePressed');
+      for (let i = 0; i < 50; i += 1) {
+        const state = await send('Runtime.evaluate', {
+          expression: '!!(window.__airhorn && window.__airhorn.isPlaying())',
+          returnByValue: true
+        });
+        if (state.result.value) {
+          playingWhileHeld = true;
+          break;
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+      if (!playingWhileHeld) await releaseElsewhere();
+    }
+
+    const held = await send('Runtime.evaluate', {
+      expression: `(() => {
+        const horn = document.querySelector('.horn');
+        return {
+          playing: !!(window.__airhorn && window.__airhorn.isPlaying()),
+          usingFallback: window.__airhorn ? window.__airhorn.usingFallback === true : null,
+          horning: horn.classList.contains('horning'),
+          pressed: horn.getAttribute('aria-pressed'),
+          oscStarts: window.__audioProbe.oscStarts
+        };
+      })()`,
+      returnByValue: true
+    });
+    await press('mouseReleased');
+
+    // Wait for the blast to complete and the UI to settle
     for (let i = 0; i < 30; i++) {
       const res = await send('Runtime.evaluate', {
         expression: `!window.__airhorn || !window.__airhorn.isPlaying()`,
@@ -685,30 +778,54 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
           airhornExists: !!window.__airhorn,
           isPlaying: window.__airhorn ? window.__airhorn.isPlaying() : null,
           isLooping: window.__airhorn ? window.__airhorn.isLooping() : null,
-          audioPeak: window.__audioProbe?.peak || 0,
-          oscStarts: window.__audioProbe?.oscStarts || 0
+          oscStarts: window.__audioProbe.oscStarts,
+          sched: window.__audioProbe.sched
         };
       })()`,
       returnByValue: true
     });
+    const settled = settledResult.result.value;
 
-    assert.equal(settledResult.result.value.horning, false, 'UI should exit horning state after blast finishes');
-    assert.equal(settledResult.result.value.pressed, 'false', 'aria-pressed should revert to false');
-    assert.equal(settledResult.result.value.isPlaying, false, 'Audio should finish playing');
-    assert.ok(settledResult.result.value.audioPeak > 0.01, `Fallback synth must be audible: peak was ${settledResult.result.value.audioPeak}`);
-    assert.ok(settledResult.result.value.oscStarts >= 3, `Expected at least 3 oscillators to start, got ${settledResult.result.value.oscStarts}`);
+    assert.equal(playingWhileHeld, true, `the horn must sound on a press in the live page; last state ${JSON.stringify(held.result.value)}`);
+    assert.equal(held.result.value.horning, true, 'a held press must show the pressed state');
+    assert.equal(held.result.value.pressed, 'true', 'a held press must set aria-pressed');
+    // The forced 404 must reach the SYNTH, not a quiet page (airhorn-ujwr).
+    assert.equal(held.result.value.usingFallback, true, 'the forced 404 must engage the synthesised fallback, not fall silent');
+    assert.ok(settled.oscStarts >= 3, `Expected at least 3 oscillators to start, got ${settled.oscStarts}`);
 
-    // Part B: Release-before-start race condition with delayed 404
+    assert.equal(settled.horning, false, 'UI should exit horning state after blast finishes');
+    assert.equal(settled.pressed, 'false', 'aria-pressed should revert to false');
+    assert.equal(settled.isPlaying, false, 'Audio should finish playing');
+
+    // The blast itself, in audio-clock seconds: 0.14 s attack (airhorn-n0sd) and
+    // a release that leaves the 0.9 s blast scheduled instead of cutting it at
+    // whatever moment the pointerup arrived.
+    const synthStarts = settled.sched.filter((e) => e.op === 'osc.start' && typeof e.t === 'number');
+    const attackRamps = settled.sched.filter((e) => e.op === 'ramp' && typeof e.value === 'number' && e.value >= 0.5);
+    const stopTimes = settled.sched.filter((e) => e.op === 'osc.stop' && typeof e.t === 'number').map((e) => e.t);
+    assert.ok(synthStarts.length >= 3, `Expected >=3 scheduled oscillator starts, got ${synthStarts.length}`);
+    const synthStart = synthStarts[0].t;
+    assert.ok(attackRamps.length > 0, 'Fallback synth must schedule an attack ramp to its loudness');
+    assert.ok(
+      Math.abs(attackRamps[0].time - synthStart - 0.14) < 0.02,
+      `Attack must reach full level 0.14s after the start, not step there; ramp ended ` +
+        `${(attackRamps[0].time - synthStart).toFixed(3)}s after the start`,
+    );
+    assert.ok(stopTimes.length > 0, 'Fallback synth must schedule the blast\'s end on the audio clock');
+    assert.ok(
+      Math.max(...stopTimes) - synthStart >= 0.7,
+      `Releasing must not truncate the blast: last scheduled stop is ` +
+        `${(Math.max(...stopTimes) - synthStart).toFixed(3)}s after the synth started, expected >= 0.7s`,
+    );
+
+    // Part B: Release-before-start race condition with delayed 404. The press is
+    // trusted for the same reason as Part A: a synthetic event gets no user
+    // activation, so a loaded renderer can refuse the press before the race is
+    // ever exercised and this case would pass vacuously.
     delayMp3 = 250;
-    await send('Runtime.evaluate', {
-      expression: `(() => {
-        const horn = document.querySelector('.horn');
-        horn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
-        setTimeout(() => {
-          document.documentElement.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-        }, 50);
-      })()`
-    });
+    await press('mousePressed');
+    await new Promise(r => setTimeout(r, 50));
+    await press('mouseReleased');
 
     // Wait until start resolves or sound starts playing
     for (let i = 0; i < 20; i++) {
@@ -815,7 +932,7 @@ test('browser verification: right-click never starts the horn, and blur/contextm
     await new Promise(r => server.listen(0, '127.0.0.1', r));
     const port = server.address().port;
 
-    browser = await launchBrowser({ autoplay: true, label: 'horn-stuck', timeoutMs: 10000 });
+    browser = await launchBrowser({ autoplay: true, label: 'horn-stuck', timeoutMs: 20000, discoveryMs: 40000 });
     ws = new WebSocket(browser.pageWsUrl);
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('WebSocket onopen timeout')), 5000);
@@ -852,6 +969,36 @@ test('browser verification: right-click never starts the horn, and blur/contextm
 
     await send('Page.enable');
     await send('Runtime.enable');
+    // Case 0 has to PROVE the retry delivered a fresh press, so record every
+    // pointerdown/pointerup from document start in the capture phase (nothing can
+    // swallow one first), with whether it landed on the control, and keep the
+    // AudioContext so the first attempt can be forced into the app's honest
+    // refusal path (airhorn-uhdv review).
+    await send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `
+        window.__pointerEvents = [];
+        window.__ctxs = [];
+        const record = (type) => (e) => {
+          window.__pointerEvents.push({
+            type,
+            onHorn: !!(e.target && e.target.closest && e.target.closest('.horn'))
+          });
+        };
+        document.addEventListener('pointerdown', record('down'), true);
+        document.addEventListener('pointerup', record('up'), true);
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) {
+          const wrap = function (...args) {
+            const ctx = new AC(...args);
+            window.__ctxs.push(ctx);
+            return ctx;
+          };
+          wrap.prototype = AC.prototype;
+          window.AudioContext = wrap;
+          window.webkitAudioContext = wrap;
+        }
+      `
+    });
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
 
     const evaluate = async (expression) =>
@@ -863,23 +1010,152 @@ test('browser verification: right-click never starts the horn, and blur/contextm
       pressed: document.querySelector('.horn')?.getAttribute('aria-pressed') ?? null
     }))()`);
     // No fixed sleeps for state transitions: poll until the predicate holds.
-    const waitFor = async (predicate, what, tries = 50) => {
+    const waitForOrNull = async (predicate, tries = 50) => {
       for (let i = 0; i < tries; i++) {
         const s = await state();
         if (predicate(s)) return s;
         await new Promise(r => setTimeout(r, 100));
       }
-      throw new Error(`Timed out waiting for ${what}; last state ${JSON.stringify(await state())}`);
+      return null;
+    };
+    const waitFor = async (predicate, what, tries = 50) => {
+      const s = await waitForOrNull(predicate, tries);
+      if (s) return s;
+      throw new Error(`Timed out waiting for ${what}; last state ${JSON.stringify(await state())}${await audioReport()}`);
+    };
+    // Why a press produced no sound, in the page's own terms - the numbers a
+    // refusal is made of (airhorn-dxug: a resume that did not land inside the
+    // activated bound is refused and the pressed state retracted).
+    const audioReport = async () => {
+      const info = await evaluate(`(() => {
+        const probe = window.__audioProbe;
+        return {
+          activated: navigator.userActivation ? navigator.userActivation.hasBeenActive : null,
+          contexts: probe ? probe.ctxs.map((c) => [c.state, +c.currentTime.toFixed(3)]) : null,
+          oscStarts: probe ? probe.oscStarts : null,
+          status: document.getElementById('app-status')?.textContent || ''
+        };
+      })()`);
+      return `, audio ${JSON.stringify(info)}`;
+    };
+    // A press on a starved renderer can be REFUSED by the app on purpose: it
+    // resumes the audio graph and, if that has not landed inside its activated
+    // bound (airhorn-dxug), it retracts the pressed state and offers a tap
+    // instead of claiming a horn nobody can hear. A user taps again; so does the
+    // test - up to 3 times - and every case below then runs on a press that
+    // really produced a sound. If no attempt starts a blast the final waitFor
+    // still fails, so this cannot hide a horn that does not play.
+    const pressUntilSounding = async (what) => {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        await pressPrimary();
+        const sounding = await waitForOrNull((s) => s.playing, 20);
+        if (sounding) return sounding;
+        // The button must be genuinely UP before the next press: the app starts a
+        // hold on pointerdown, and a press that arrives while the button is still
+        // down is not a new one - so a retry with no release between the two cannot
+        // work, which is precisely the case it exists for. Away from the control,
+        // where the click cannot start a blast of its own (airhorn-uhdv review).
+        await releaseMouseElsewhere();
+      }
+      return waitFor((s) => s.playing, what);
     };
 
     await waitFor(s => s.booted, 'boot');
 
-    const pressPrimary = () => evaluate(
-      `document.querySelector('.horn').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 })), true`
+    // The presses below are TRUSTED input events, not dispatched PointerEvents
+    // (airhorn-ujwr). A synthetic event grants no user activation, so the horn
+    // takes its unactivated resume bound - 100 ms, airhorn-dxug - which a loaded
+    // renderer exceeds: the press is refused, no sound ever starts, and every
+    // "wait for the horn to sound" case times out on a working app (that is how
+    // this suite went red). The RELEASES stay synthetic on purpose: a release
+    // delivered at window/documentElement level, and not to the control, is
+    // exactly what these cases are about, and no trusted event can be delivered
+    // "at window level" without also being a release of the control.
+    const horn = (await send('Runtime.evaluate', {
+      expression: `(() => {
+        const rect = document.querySelector('.horn').getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      })()`,
+      returnByValue: true
+    })).result.value;
+    const pressPrimary = () => send('Input.dispatchMouseEvent', {
+      type: 'mousePressed', x: horn.x, y: horn.y, button: 'left', buttons: 1, clickCount: 1, pointerType: 'mouse'
+    });
+    // Chrome still believes the button is down when a case releases the hold with
+    // a synthetic event, so each case ends by releasing it for real - AT (2, 2),
+    // where the press did not happen: the click then lands on the document rather
+    // than on the control, so it cannot start a blast of its own. It runs after
+    // the case's assertion, so it can never stand in for the release under test.
+    const releaseMouseElsewhere = () => send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: 2, y: 2, button: 'left', buttons: 0, clickCount: 1, pointerType: 'mouse'
+    });
+
+    // Case 0 (airhorn-uhdv P1): the retry must deliver a FRESH press, and that means
+    // the refused one was RELEASED first, away from the control. The app starts a
+    // hold on pointerdown, so a retry issued while the button is still down is not a
+    // new press - and a retry is exactly what a refused press needs.
+    //
+    // Attempt 1 is forced into the app's honest refusal path: suspend the graph and
+    // let the FIRST resume() answer later than the app's activated bound
+    // (airhorn-dxug), so start() refuses and retracts the pressed state. The record
+    // then has to show, in order: a down on the control, an up that did NOT land on
+    // the control, and a second down - plus the retry actually sounding.
+    await evaluate(`(async () => {
+      window.__pointerEvents.length = 0;
+      window.__resumeCalls = 0;
+      const ctx = window.__ctxs[0];
+      const realResume = ctx.resume.bind(ctx);
+      await ctx.suspend();
+      ctx.resume = () => {
+        window.__resumeCalls += 1;
+        // Only the first call is slow - the press that gets refused. Every later one
+        // is the real thing, so the retry can actually play.
+        return window.__resumeCalls === 1
+          ? new Promise((resolve) => setTimeout(() => resolve(realResume()), 2500))
+          : realResume();
+      };
+      return true;
+    })()`);
+    const retried = await pressUntilSounding('horn to sound on the retry after a refused press');
+    const retryRecord = await evaluate(`({
+      playing: !!(window.__airhorn && window.__airhorn.isPlaying()),
+      events: window.__pointerEvents,
+      resumeCalls: window.__resumeCalls
+    })`);
+    assert.ok(retried.playing, 'the retry must produce sound after a refused press');
+    const downs = retryRecord.events.filter((e) => e.type === 'down');
+    assert.ok(
+      downs.length >= 2,
+      `the retry must deliver a second pointerdown, not press an already-held button; the page saw ${JSON.stringify(retryRecord.events)}`,
     );
+    const between = retryRecord.events.slice(
+      retryRecord.events.indexOf(downs[0]),
+      retryRecord.events.indexOf(downs[1]),
+    );
+    assert.ok(
+      between.some((e) => e.type === 'up'),
+      `the refused press must be RELEASED before the retry presses again; events between the two downs: ${JSON.stringify(between)}`,
+    );
+    assert.ok(
+      between.filter((e) => e.type === 'up').every((e) => e.onHorn === false),
+      `the release between attempts must be away from the control, or its click starts a blast of its own; events between the two downs: ${JSON.stringify(between)}`,
+    );
+    assert.ok(
+      retryRecord.resumeCalls >= 2,
+      `the refused press must be retried (a second start/resume), not given up on; the page saw ${retryRecord.resumeCalls}`,
+    );
+    await evaluate(`window.dispatchEvent(new PointerEvent('pointerup')), true`);
+    await waitFor(s => !s.playing && !s.horning, 'the retried hold to retire');
+    await releaseMouseElsewhere();
 
     // Case 1: a RIGHT-click must not start the horn at all. Its release is a
-    // contextmenu, so on the old code the loop it started never ended.
+    // contextmenu, so on the old code the loop it started never ended. This one
+    // press stays synthetic: a trusted right press makes Chrome fire its own
+    // contextmenu immediately, which on the old code would stop the loop before
+    // the case could see it and the guard would pass vacuously. The `horning`
+    // assertion is what carries it here - start() lights the pressed state
+    // synchronously, before any audio resolves, so a missing `button !== 0`
+    // guard shows up whether or not a device-less renderer ever plays the sound.
     await evaluate(`document.querySelector('.horn').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 2 })), true`);
     await evaluate(`document.querySelector('.horn').dispatchEvent(new Event('contextmenu', { bubbles: true, cancelable: true })), true`);
     // Give a wrongly-started loop time to prove it is playing (fetch + decode
@@ -892,44 +1168,44 @@ test('browser verification: right-click never starts the horn, and blur/contextm
 
     // Case 2: a pointer hold must be retired when the WINDOW loses focus -
     // its pointerup is then delivered to whatever got focus, not to the page.
-    await pressPrimary();
-    await waitFor(s => s.playing, 'horn to sound after primary press');
+    await pressUntilSounding('horn to sound after primary press');
     await evaluate(`window.dispatchEvent(new Event('blur')), true`);
     const afterBlur = await waitFor(s => !s.playing && !s.horning, 'horn to stop on window blur');
     assert.equal(afterBlur.playing, false, 'window blur must release a pointer hold');
     assert.equal(afterBlur.horning, false, 'window blur must clear the pressed state');
+    await releaseMouseElsewhere();
 
     // Case 3: a contextmenu mid-hold (long-press menu, or the release half of
     // any secondary gesture) must stop the horn.
-    await pressPrimary();
-    await waitFor(s => s.playing, 'horn to sound for the contextmenu case');
+    await pressUntilSounding('horn to sound for the contextmenu case');
     await evaluate(`document.querySelector('.horn').dispatchEvent(new Event('contextmenu', { bubbles: true, cancelable: true })), true`);
     const afterContextmenu = await waitFor(s => !s.playing && !s.horning, 'horn to stop on contextmenu');
     assert.equal(afterContextmenu.playing, false, 'contextmenu must release a pointer hold');
+    await releaseMouseElsewhere();
 
     // Case 4: a release delivered at WINDOW level must end the hold. Bound to
     // documentElement, the listener never saw it.
-    await pressPrimary();
-    await waitFor(s => s.playing, 'horn to sound for the window-level pointerup case');
+    await pressUntilSounding('horn to sound for the window-level pointerup case');
     await evaluate(`window.dispatchEvent(new PointerEvent('pointerup')), true`);
     const afterWindowPointerup = await waitFor(s => !s.playing && !s.horning, 'horn to stop on window-level pointerup');
     assert.equal(afterWindowPointerup.playing, false, 'a window-level pointerup must release the hold');
+    await releaseMouseElsewhere();
 
     // Case 5: same for pointercancel at window level.
-    await pressPrimary();
-    await waitFor(s => s.playing, 'horn to sound for the window-level pointercancel case');
+    await pressUntilSounding('horn to sound for the window-level pointercancel case');
     await evaluate(`window.dispatchEvent(new PointerEvent('pointercancel')), true`);
     const afterWindowPointercancel = await waitFor(s => !s.playing && !s.horning, 'horn to stop on window-level pointercancel');
     assert.equal(afterWindowPointercancel.playing, false, 'a window-level pointercancel must release the hold');
+    await releaseMouseElsewhere();
 
     // Non-regression: a normal primary press + documentElement-bubbling
     // pointerup still behaves like a tap-hold (the release path every
     // existing suite drives).
-    await pressPrimary();
-    await waitFor(s => s.playing, 'horn to sound for the ordinary release case');
+    await pressUntilSounding('horn to sound for the ordinary release case');
     await evaluate(`document.documentElement.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })), true`);
     const afterOrdinaryRelease = await waitFor(s => !s.horning, 'horn to settle after an ordinary release');
     assert.equal(afterOrdinaryRelease.horning, false, 'an ordinary press/release still ends the hold');
+    await releaseMouseElsewhere();
 
     assert.deepEqual(consoleErrors, [], 'No uncaught exceptions or console errors during the stuck-honk cases');
   } finally {
