@@ -641,6 +641,15 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
       clickCount: 1,
       pointerType: 'mouse'
     });
+    // A retry needs the button genuinely UP first: a mousePressed that arrives while
+    // it is still down is not a new press, so no fresh pointerdown reaches the app -
+    // and the app starts a hold on pointerdown (src/main.js). Release AWAY from the
+    // control at (2, 2): a release on the control also produces a click, and click is
+    // the app's own one-shot start path, so a retry would be reading a blast it did
+    // not ask for (airhorn-uhdv review).
+    const releaseElsewhere = () => send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: 2, y: 2, button: 'left', buttons: 0, clickCount: 1, pointerType: 'mouse'
+    });
 
     // Part A(a): does the fallback VOICE produce audio? This is the claim the old
     // live analyser was trying to make, and it is made here device-free: the REAL
@@ -731,7 +740,7 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
         }
         await new Promise(r => setTimeout(r, 100));
       }
-      if (!playingWhileHeld) await press('mouseReleased');
+      if (!playingWhileHeld) await releaseElsewhere();
     }
 
     const held = await send('Runtime.evaluate', {
@@ -960,6 +969,36 @@ test('browser verification: right-click never starts the horn, and blur/contextm
 
     await send('Page.enable');
     await send('Runtime.enable');
+    // Case 0 has to PROVE the retry delivered a fresh press, so record every
+    // pointerdown/pointerup from document start in the capture phase (nothing can
+    // swallow one first), with whether it landed on the control, and keep the
+    // AudioContext so the first attempt can be forced into the app's honest
+    // refusal path (airhorn-uhdv review).
+    await send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `
+        window.__pointerEvents = [];
+        window.__ctxs = [];
+        const record = (type) => (e) => {
+          window.__pointerEvents.push({
+            type,
+            onHorn: !!(e.target && e.target.closest && e.target.closest('.horn'))
+          });
+        };
+        document.addEventListener('pointerdown', record('down'), true);
+        document.addEventListener('pointerup', record('up'), true);
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) {
+          const wrap = function (...args) {
+            const ctx = new AC(...args);
+            window.__ctxs.push(ctx);
+            return ctx;
+          };
+          wrap.prototype = AC.prototype;
+          window.AudioContext = wrap;
+          window.webkitAudioContext = wrap;
+        }
+      `
+    });
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
 
     const evaluate = async (expression) =>
@@ -1011,6 +1050,12 @@ test('browser verification: right-click never starts the horn, and blur/contextm
         await pressPrimary();
         const sounding = await waitForOrNull((s) => s.playing, 20);
         if (sounding) return sounding;
+        // The button must be genuinely UP before the next press: the app starts a
+        // hold on pointerdown, and a press that arrives while the button is still
+        // down is not a new one - so a retry with no release between the two cannot
+        // work, which is precisely the case it exists for. Away from the control,
+        // where the click cannot start a blast of its own (airhorn-uhdv review).
+        await releaseMouseElsewhere();
       }
       return waitFor((s) => s.playing, what);
     };
@@ -1044,6 +1089,64 @@ test('browser verification: right-click never starts the horn, and blur/contextm
     const releaseMouseElsewhere = () => send('Input.dispatchMouseEvent', {
       type: 'mouseReleased', x: 2, y: 2, button: 'left', buttons: 0, clickCount: 1, pointerType: 'mouse'
     });
+
+    // Case 0 (airhorn-uhdv P1): the retry must deliver a FRESH press, and that means
+    // the refused one was RELEASED first, away from the control. The app starts a
+    // hold on pointerdown, so a retry issued while the button is still down is not a
+    // new press - and a retry is exactly what a refused press needs.
+    //
+    // Attempt 1 is forced into the app's honest refusal path: suspend the graph and
+    // let the FIRST resume() answer later than the app's activated bound
+    // (airhorn-dxug), so start() refuses and retracts the pressed state. The record
+    // then has to show, in order: a down on the control, an up that did NOT land on
+    // the control, and a second down - plus the retry actually sounding.
+    await evaluate(`(async () => {
+      window.__pointerEvents.length = 0;
+      window.__resumeCalls = 0;
+      const ctx = window.__ctxs[0];
+      const realResume = ctx.resume.bind(ctx);
+      await ctx.suspend();
+      ctx.resume = () => {
+        window.__resumeCalls += 1;
+        // Only the first call is slow - the press that gets refused. Every later one
+        // is the real thing, so the retry can actually play.
+        return window.__resumeCalls === 1
+          ? new Promise((resolve) => setTimeout(() => resolve(realResume()), 2500))
+          : realResume();
+      };
+      return true;
+    })()`);
+    const retried = await pressUntilSounding('horn to sound on the retry after a refused press');
+    const retryRecord = await evaluate(`({
+      playing: !!(window.__airhorn && window.__airhorn.isPlaying()),
+      events: window.__pointerEvents,
+      resumeCalls: window.__resumeCalls
+    })`);
+    assert.ok(retried.playing, 'the retry must produce sound after a refused press');
+    const downs = retryRecord.events.filter((e) => e.type === 'down');
+    assert.ok(
+      downs.length >= 2,
+      `the retry must deliver a second pointerdown, not press an already-held button; the page saw ${JSON.stringify(retryRecord.events)}`,
+    );
+    const between = retryRecord.events.slice(
+      retryRecord.events.indexOf(downs[0]),
+      retryRecord.events.indexOf(downs[1]),
+    );
+    assert.ok(
+      between.some((e) => e.type === 'up'),
+      `the refused press must be RELEASED before the retry presses again; events between the two downs: ${JSON.stringify(between)}`,
+    );
+    assert.ok(
+      between.filter((e) => e.type === 'up').every((e) => e.onHorn === false),
+      `the release between attempts must be away from the control, or its click starts a blast of its own; events between the two downs: ${JSON.stringify(between)}`,
+    );
+    assert.ok(
+      retryRecord.resumeCalls >= 2,
+      `the refused press must be retried (a second start/resume), not given up on; the page saw ${retryRecord.resumeCalls}`,
+    );
+    await evaluate(`window.dispatchEvent(new PointerEvent('pointerup')), true`);
+    await waitFor(s => !s.playing && !s.horning, 'the retried hold to retire');
+    await releaseMouseElsewhere();
 
     // Case 1: a RIGHT-click must not start the horn at all. Its release is a
     // contextmenu, so on the old code the loop it started never ended. This one
