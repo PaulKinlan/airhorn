@@ -282,6 +282,17 @@ async function testBootWatchdog() {
         // sample moved to 46-83ms). Record the transition from document start
         // so the assertion is about the event that happened, never about a
         // sample landing inside a window the app owns.
+        // airhorn-uhdv: if a trusted press never reaches the app, the ONLY
+        // question worth asking is whether the event arrived at all. Record every
+        // pointer/mouse event at document start (capture phase, so nothing can
+        // swallow it before it is seen) and the case reports this on a miss.
+        window.__inputLog = [];
+        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'click']) {
+          document.addEventListener(type, (e) => {
+            const t = e.target;
+            window.__inputLog.push(type + ':button=' + e.button + ':target=' + (t?.className || t?.tagName));
+          }, true);
+        }
         window.__pressedLog = [];
         const hookHorn = () => {
           const horn = document.querySelector('.horn');
@@ -633,7 +644,22 @@ async function testBootWatchdog() {
     // airhorn-ye54 already fought here once. Nothing about the unstyled page is
     // being given more room: the press either reaches the document-start record
     // or it does not, and a slow box may only take longer to say so.
-    await waitUntil(`window.__pressedLog.includes('true')`, WAIT_TIMEOUT_MS, `unstyled horn to respond to a trusted press at ${hornBox.x},${hornBox.y} (viewport ${hornBox.viewport.join('x')}, control top ${hornBox.top})`);
+    try {
+      await waitUntil(`window.__pressedLog.includes('true')`, WAIT_TIMEOUT_MS, `unstyled horn to respond to a trusted press at ${hornBox.x},${hornBox.y} (viewport ${hornBox.viewport.join('x')}, control top ${hornBox.top})`);
+    } catch (err) {
+      // A miss has to say which of the two things failed: the press never
+      // arriving (input log empty) or the app not recording the transition
+      // (input present, pressed log unchanged). airhorn-uhdv.
+      const diag = await evaluate(`(() => ({
+        input: window.__inputLog || null,
+        pressed: window.__pressedLog || null,
+        activation: navigator.userActivation ? navigator.userActivation.hasBeenActive : null,
+        booted: typeof window.__airhorn,
+        focused: document.hasFocus(),
+        visibility: document.visibilityState
+      }))()`);
+      throw new Error(`${err.message}; press diagnostics ${JSON.stringify(diag)}`);
+    }
     await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hornBox.x, y: hornBox.y, button: 'left', buttons: 0, clickCount: 1 });
     // The release must retire the hold - the record carries the transition, so
     // this cannot be missed by a slow sample either.
