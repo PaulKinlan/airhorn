@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
 import { commandBound } from './support/cdp.mjs';
+import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EVIDENCE_DIR = '/tmp/airhorn-boot-watchdog';
@@ -602,13 +603,20 @@ async function testBootWatchdog() {
       const r = document.querySelector('.horn').getBoundingClientRect();
       return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
     })()`);
-    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hornBox.x, y: hornBox.y, button: 'left', clickCount: 1 });
-    await waitUntil(`window.__pressedLog.includes('true')`, 3000, 'unstyled horn to respond to a trusted press');
-    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hornBox.x, y: hornBox.y, button: 'left', clickCount: 1 });
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hornBox.x, y: hornBox.y, button: 'left', buttons: 1, clickCount: 1 });
+    // WAIT_TIMEOUT_MS, not a 3 s window (airhorn-uhdv): the bound is how long we
+    // are willing to wait for the record to show the transition, and on this box
+    // a single CDP round trip measured 13 s at load 10.5 - a 3 s window is two
+    // samples of a loaded renderer, i.e. a machine-state assertion, which is what
+    // airhorn-ye54 already fought here once. Nothing about the unstyled page is
+    // being given more room: the press either reaches the document-start record
+    // or it does not, and a slow box may only take longer to say so.
+    await waitUntil(`window.__pressedLog.includes('true')`, WAIT_TIMEOUT_MS, 'unstyled horn to respond to a trusted press');
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hornBox.x, y: hornBox.y, button: 'left', buttons: 0, clickCount: 1 });
     // The release must retire the hold - the record carries the transition, so
     // this cannot be missed by a slow sample either.
     await waitUntil(`window.__pressedLog.lastIndexOf('false') > window.__pressedLog.lastIndexOf('true')`,
-      3000, 'release to retire the unstyled hold');
+      WAIT_TIMEOUT_MS, 'release to retire the unstyled hold');
     // airhorn-5yv: the critical fallback hides the installer, but must not
     // lock install away in the very mode it protects - once the prompt is
     // available the button is reachable even unstyled.
