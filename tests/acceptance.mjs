@@ -26,6 +26,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser, chromeBin } from './support/browser.mjs';
+import { awaitSocketOpen } from './cdp-command-bound.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, '../dist');
@@ -272,14 +273,17 @@ async function run() {
     /* -------------------------------- browser -------------------------------- */
     browser = await launchBrowser({ autoplay: true, webmcp: true, label: 'acceptance', timeoutMs: 20000 });
     ws = new WebSocket(browser.pageWsUrl);
-    await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
+    // Bounded (airhorn-eabw): an unbounded onopen await parks the suite if the
+    // socket never opens; this also rejects on error/close so the refusal is named.
+    await awaitSocketOpen(ws, { url: browser.pageWsUrl });
 
     // Browser-level connection: creating and activating a real second tab is
     // how the keyboard-hold case produces a genuine window blur and tab-hide
     // (airhorn-ay73).
     const version = await (await fetch(`http://127.0.0.1:${browser.port}/json/version`)).json();
     browserWs = new WebSocket(version.webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => { browserWs.onopen = resolve; browserWs.onerror = reject; });
+    // Bounded (airhorn-eabw): same unbounded-onopen defect on the browser-level socket.
+    await awaitSocketOpen(browserWs, { url: version.webSocketDebuggerUrl });
     let browserMsgId = 1;
     const browserPending = new Map();
     browserWs.onmessage = (event) => {

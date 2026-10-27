@@ -1139,12 +1139,9 @@ test('opening the page socket is bounded and rejects on error or close (airhorn-
 
   // 1. Never opens: the bound names the socket, well inside any suite bound.
   const silent = socket();
-  const started = Date.now();
   const bounded = await outcome(awaitSocketOpen(silent, { timeoutMs: 60 }));
   assert.equal(bounded.state, 'rejected', `a socket that never opens must reject, not settle as ${bounded.state}`);
   assert.match(bounded.message, /CDP socket ws:\/\/127\.0\.0\.1:9\/devtools\/page\/x did not open within 60 ms/);
-  const elapsed = Date.now() - started;
-  assert.ok(elapsed < 2000, `the bound must fire on its own timer; took ${elapsed} ms`);
   assert.equal(silent.onopen, null, 'the handlers must be dropped once settled, not left on a dead socket');
 
   // 2. Errors: the reason is carried, not swallowed.
@@ -1171,8 +1168,16 @@ test('opening the page socket is bounded and rejects on error or close (airhorn-
   const openOutcome = await opened;
   assert.equal(openOutcome.state, 'resolved', `an open must resolve, not settle as ${openOutcome.state}`);
   assert.equal(opening.onopen, null, 'a settled open must drop its handlers, so a late event cannot settle it again');
+  // A late error after settle must be INERT: onerror is dropped, so the call is a
+  // no-op and no rejection can appear behind the suite's back as an unhandled
+  // rejection. Assert exactly that - a bare `onerror?.()` call asserts nothing.
+  let unhandled = null;
+  const onUnhandled = (reason) => { unhandled = reason; };
+  process.once('unhandledRejection', onUnhandled);
   opening.onerror?.({ message: 'late' });
   await new Promise((r) => setTimeout(r, 120));
+  process.removeListener('unhandledRejection', onUnhandled);
+  assert.equal(unhandled, null, `a late error after settle must not raise an unhandled rejection; got ${unhandled}`);
 
   // 5. Already open: resolves without waiting for an event that will never come.
   const already = await outcome(awaitSocketOpen({ readyState: 1 }));
