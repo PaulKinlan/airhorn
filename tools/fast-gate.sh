@@ -371,6 +371,74 @@ report_cases() { # $1 = suite, $2 = log
   return 0
 }
 
+# Report failure diagnostics and preserve the suite log for post-mortem analysis (airhorn-rumq).
+# For node:test TAP suites, extracts the full `not ok` YAML failure blocks (including assertion error,
+# expected/actual, and stack trace) so assertions buried before trailing passing tests are never lost.
+# For script suites or pre-test crashes, prints the output tail (or full log if short).
+# Preserves failing suite logs in RESULTS_DIR/failing-suites/ and ~/.fleet/checks/<tree>.fast.failing-suites/.
+report_suite_failure() { # $1 = suite, $2 = key, $3 = log
+  local s=$1 key=$2 log=$3
+  local tap_fails
+  tap_fails=$(awk '
+    /^not ok / { in_fail=1 }
+    in_fail { print; if (/^[ \t]*\.\.\.[ \t]*$/) in_fail=0 }
+  ' "$log" 2>/dev/null | head -n 250)
+
+  if [ -n "$tap_fails" ]; then
+    echo "fast-gate:   failing case diagnostics for $s:"
+    sed 's/^/      /' <<< "$tap_fails"
+    local summary
+    summary=$(tail -n 15 "$log" 2>/dev/null | grep -E '^# (tests|pass|fail|duration_ms|cancelled|skipped|todo)' || true)
+    if [ -n "$summary" ]; then
+      echo "fast-gate:   summary for $s:"
+      sed 's/^/      /' <<< "$summary"
+    fi
+  else
+    local line_count
+    line_count=$(wc -l < "$log" 2>/dev/null || echo 0)
+    if [ "$line_count" -le 60 ]; then
+      echo "fast-gate:   suite output ($line_count lines):"
+      sed 's/^/      /' "$log" 2>/dev/null
+    else
+      echo "fast-gate:   suite output (tail 50 of $line_count lines):"
+      tail -n 50 "$log" 2>/dev/null | sed 's/^/      /'
+    fi
+  fi
+
+  # Preserve failing suite output in durable locations (size-capped at 512KB)
+  local tree dest_dirs=()
+  dest_dirs+=("$RESULTS_DIR/failing-suites")
+  local checks_dir="${AIRHORN_CHECKS_DIR:-$HOME/.fleet/checks}"
+  tree=$(git rev-parse -q --verify 'HEAD^{tree}' 2>/dev/null || true)
+  if [ -n "$tree" ] && [ -d "$checks_dir" ]; then
+    dest_dirs+=("$checks_dir/$tree.fast.failing-suites")
+  fi
+  if [ -n "${AIRHORN_FAILING_SUITES_DIR:-}" ]; then
+    dest_dirs+=("$AIRHORN_FAILING_SUITES_DIR")
+  fi
+  for d in "${dest_dirs[@]}"; do
+    mkdir -p "$d" 2>/dev/null || true
+    tail -c 524288 "$log" > "$d/$key.log" 2>/dev/null || true
+    echo "fast-gate: suite log preserved at $d/$key.log"
+  done
+
+  # If running under fleet-check and the JSON check record exists, embed failing suite info
+  if [ -n "$tree" ] && [ -d "$checks_dir" ]; then
+    local rec="$checks_dir/$tree.fast.json"
+    if [ -f "$rec" ] && command -v jq >/dev/null 2>&1; then
+      local snippet
+      snippet=$(awk '
+        /^not ok / { in_fail=1 }
+        in_fail { print; if (/^[ \t]*\.\.\.[ \t]*$/) in_fail=0 }
+      ' "$log" 2>/dev/null | head -n 30)
+      [ -n "$snippet" ] || snippet=$(tail -n 25 "$log" 2>/dev/null)
+      jq --arg s "$s" --arg p "$checks_dir/$tree.fast.failing-suites/$key.log" --arg snip "$snippet" \
+        '.failing_suites = ((.failing_suites // {}) + {($s): {log: $p, snippet: $snip}})' \
+        "$rec" > "$rec.tmp.$$" 2>/dev/null && mv -f "$rec.tmp.$$" "$rec" || rm -f "$rec.tmp.$$"
+    fi
+  fi
+}
+
 rc=0
 for s in "${RUN[@]}"; do
   key=$(printf '%s' "$s" | tr '/.' '__')
@@ -384,10 +452,11 @@ for s in "${RUN[@]}"; do
     # exit 0 but nothing reported: the suite cannot prove what it ran.
     echo "fast-gate: failed: $s (exit 0 but no result; reporting is broken)"
     echo "fast-gate: a selected suite must report its cases; silence is not a pass" >&2
+    report_suite_failure "$s" "$key" "$TMP/$key.log"
     rc=1
   else
     echo "fast-gate: failed: $s"
-    sed 's/^/    /' "$TMP/$key.log" 2>/dev/null | tail -40
+    report_suite_failure "$s" "$key" "$TMP/$key.log"
     rc=1
   fi
 done
