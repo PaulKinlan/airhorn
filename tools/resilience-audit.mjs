@@ -569,15 +569,43 @@ function summarise(state) {
 
 const results = [];
 
+// A browser that cannot START is not a scenario result - but it IS a finding, and
+// the report is where findings live (airhorn-w1wh review, round 3). So the launch
+// catch records an ERROR row and returns; one launch failure marks the audit
+// failed, and every later scenario is recorded as unmeasured rather than
+// relaunching a browser the host has already refused.
+let launchFailed = false;
+
 async function withBrowser(id, name, fn) {
+  if (launchFailed) {
+    const result = { id, name, status: 'ERROR', error: 'not measured: the browser could not start earlier in this audit' };
+    results.push(result);
+    console.log(`[${id}] ${name}\n  ERROR ${result.error}`);
+    return;
+  }
   let browser = null;
   let result = { id, name };
   try {
     browser = await launchBrowser();
-    const collectors = makeCollectors(browser.cdp);
-    result = { id, name, ...(await fn(browser, collectors)) };
   } catch (err) {
-    result = { id, name, error: String((err && err.message) || err) };
+    launchFailed = true;
+    const why = String((err && err.message) || err);
+    result = {
+      id,
+      name,
+      status: 'ERROR',
+      error: `cannot launch a browser for the audit, so no scenario was measured: ${why}`,
+      launchError: true,
+    };
+    results.push(result);
+    console.log(`[${id}] ${name}\n  ERROR ${result.error}`);
+    return;
+  }
+  try {
+    const collectors = makeCollectors(browser.cdp);
+    result = { id, name, status: 'OK', ...(await fn(browser, collectors)) };
+  } catch (err) {
+    result = { id, name, status: 'ERROR', error: String((err && err.message) || err) };
   } finally {
     await closeBrowser(browser);
   }
@@ -602,7 +630,40 @@ async function runAudit() {
   const only = (process.env.RESILIENCE_ONLY || '').split(',').map((s) => s.trim()).filter(Boolean);
   const want = (id) => only.length === 0 || only.includes(id);
 
+  // Test seam (airhorn-w1wh review, rounds 3 and 4): a scenario error is otherwise
+  // unreachable without a working browser, so a spawned run can stage exactly one
+  // failing row. It is honoured ONLY under RESILIENCE_TEST_MODE=1 (airhorn-w1wh
+  // round 4, P1): this is a production entry point, and a stray
+  // RESILIENCE_STUB_SCENARIO in the environment must never be able to replace a
+  // real audit with a single fabricated row.
+  const stub = (process.env.RESILIENCE_STUB_SCENARIO || '').trim();
+  const testMode = process.env.RESILIENCE_TEST_MODE === '1';
+  if (stub && !testMode) {
+    console.warn('RESILIENCE_STUB_SCENARIO is honoured only with RESILIENCE_TEST_MODE=1 - ignoring it and running the real scenarios.');
+  }
+  const useStub = Boolean(stub) && testMode;
+
   try {
+    if (useStub) {
+      // Two shapes, because the exit contract has two halves that must be told apart
+      // (airhorn-w1wh review): a scenario that could not be measured (ERROR -> the
+      // audit fails) and one that completed and FOUND PROBLEMS (OK -> the audit
+      // succeeds). RESILIENCE_STUB_SCENARIO=ok-finding stages the second.
+      if (/^ok-finding/.test(stub)) {
+        results.push({
+          id: 'stub',
+          name: 'stubbed completed scenario with a finding',
+          status: 'OK',
+          renders: false,
+          hornVisible: false,
+          hornUsable: false,
+          explainsItself: false,
+          explanationEvidence: 'none',
+        });
+      } else {
+        results.push({ id: 'stub', name: 'stubbed failing scenario', status: 'ERROR', error: `the scenario failed on purpose: ${stub}` });
+      }
+    } else {
     /* ---- 1. real offline after first load ---- */
     if (want('offline')) await withBrowser('offline', 'offline after first load', async ({ cdp }, collectors) => {
       reset();
@@ -978,12 +1039,34 @@ async function runAudit() {
         pageErrors: [...afterJsCorruption.errors, ...afterShellCorruption.errors],
       };
     });
+    }
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
 
   /* ------------------------------------------------------------ reporting */
 
+  // The exit contract is applied HERE, by the entry point: writeReport() only
+  // writes and reports, so importing it cannot change a caller's exit code.
+  process.exitCode = writeReport(results);
+}
+
+/*
+ * The audit's exit contract (airhorn-w1wh review, round 3): a report row with an
+ * error - a browser that would not start, or a scenario that threw - is a FAILED
+ * audit, not a green one. An empty selection (nothing wanted, RESILIENCE_ONLY=none)
+ * measured nothing on purpose and stays 0, which is the one case where zero errors
+ * means nothing to report rather than a pass.
+ */
+export function auditExitCode(scenarios) {
+  return (scenarios || []).some((row) => row && (row.status === 'ERROR' || row.error)) ? 1 : 0;
+}
+
+// Extracted from runAudit so a browser-free test can hand it a stubbed failing
+// scenario and check the row really lands in the file, not just in memory.
+export function writeReport(scenarios, outDir = OUT) {
+  const results = scenarios;
+  const OUT = outDir;
   const report = {
     target: 'airhorn',
     auditedAt: new Date().toISOString(),
@@ -995,7 +1078,7 @@ async function runAudit() {
   const row = (r) => [
     r.id,
     r.name,
-    r.error ? 'ERROR' : (r.renders ? 'yes' : 'NO'),
+    (r.status === 'ERROR' || r.error) ? 'ERROR' : (r.renders ? 'yes' : 'NO'),
     r.error ? '-' : (r.hornVisible ? 'yes' : 'NO'),
     r.error ? '-' : (r.hornUsable ? 'yes' : 'NO'),
     r.error ? '-' : (r.explainsItself ? `yes (${r.explanationEvidence})` : 'NO'),
@@ -1025,7 +1108,11 @@ async function runAudit() {
 
   console.log(`\n${lines.slice(5, 6 + results.length).join('\n')}\n`);
   console.log(`Evidence: ${OUT}`);
-  console.log('\nThis is an audit: exit 0 whatever it found. File findings against the bead, do not gate on it.');
+  const exitCode = auditExitCode(results);
+  console.log(exitCode === 0
+    ? '\nThis is an audit: every selected scenario was measured and none reported an error.'
+    : '\nThis audit MEASURED NOTHING OR FOUND ERRORS (see the ERROR rows): exiting nonzero so a starved host or a broken scenario is not read as a green audit.');
+  return exitCode;
 }
 
 // Only drive the audit when this file is the entry point: importing it (to
