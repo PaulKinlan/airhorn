@@ -51,6 +51,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { awaitSocketOpen } from './cdp-command-bound.mjs';
 import { installSignalExit } from './support/signal-exit.mjs';
 
 // A bound-kill (SIGTERM first, then the grace bound) bypasses the try/finally
@@ -118,10 +119,9 @@ function startServer() {
 
 async function connectCdp(wsUrl) {
   const ws = new WebSocket(wsUrl);
-  await new Promise((resolve, reject) => {
-    ws.onopen = resolve;
-    ws.onerror = () => reject(new Error('cannot connect to Chrome'));
-  });
+  // Bounded (airhorn-eabw): an unbounded onopen await parks the suite if the
+  // socket never opens; this also rejects on error/close so the refusal is named.
+  await awaitSocketOpen(ws, { url: wsUrl });
   let nextId = 1;
   const pending = new Map();
   const waiters = new Set();

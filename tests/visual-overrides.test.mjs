@@ -46,6 +46,7 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { awaitSocketOpen } from './cdp-command-bound.mjs';
 import { WAIT_TIMEOUT_MS, waitForCondition } from './support/poll.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -101,7 +102,9 @@ async function run() {
     browser = await launchBrowser({ label: 'visual-overrides', timeoutMs: 15000 });
 
     const ws = new WebSocket(browser.pageWsUrl);
-    await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
+    // Bounded (airhorn-eabw): an unbounded onopen await parks the suite if the
+    // socket never opens; this also rejects on error/close so the refusal is named.
+    await awaitSocketOpen(ws, { url: browser.pageWsUrl });
 
     let msgId = 1;
     const pending = new Map();
