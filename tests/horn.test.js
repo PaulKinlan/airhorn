@@ -1004,12 +1004,42 @@ test('browser verification: right-click never starts the horn, and blur/contextm
 
     await waitFor(s => s.booted, 'boot');
 
-    const pressPrimary = () => evaluate(
-      `document.querySelector('.horn').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 })), true`
-    );
+    // The presses below are TRUSTED input events, not dispatched PointerEvents
+    // (airhorn-ujwr). A synthetic event grants no user activation, so the horn
+    // takes its unactivated resume bound - 100 ms, airhorn-dxug - which a loaded
+    // renderer exceeds: the press is refused, no sound ever starts, and every
+    // "wait for the horn to sound" case times out on a working app (that is how
+    // this suite went red). The RELEASES stay synthetic on purpose: a release
+    // delivered at window/documentElement level, and not to the control, is
+    // exactly what these cases are about, and no trusted event can be delivered
+    // "at window level" without also being a release of the control.
+    const horn = (await send('Runtime.evaluate', {
+      expression: `(() => {
+        const rect = document.querySelector('.horn').getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      })()`,
+      returnByValue: true
+    })).result.value;
+    const pressPrimary = () => send('Input.dispatchMouseEvent', {
+      type: 'mousePressed', x: horn.x, y: horn.y, button: 'left', buttons: 1, clickCount: 1, pointerType: 'mouse'
+    });
+    // Chrome still believes the button is down when a case releases the hold with
+    // a synthetic event, so each case ends by releasing it for real - AT (2, 2),
+    // where the press did not happen: the click then lands on the document rather
+    // than on the control, so it cannot start a blast of its own. It runs after
+    // the case's assertion, so it can never stand in for the release under test.
+    const releaseMouseElsewhere = () => send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: 2, y: 2, button: 'left', buttons: 0, clickCount: 1, pointerType: 'mouse'
+    });
 
     // Case 1: a RIGHT-click must not start the horn at all. Its release is a
-    // contextmenu, so on the old code the loop it started never ended.
+    // contextmenu, so on the old code the loop it started never ended. This one
+    // press stays synthetic: a trusted right press makes Chrome fire its own
+    // contextmenu immediately, which on the old code would stop the loop before
+    // the case could see it and the guard would pass vacuously. The `horning`
+    // assertion is what carries it here - start() lights the pressed state
+    // synchronously, before any audio resolves, so a missing `button !== 0`
+    // guard shows up whether or not a device-less renderer ever plays the sound.
     await evaluate(`document.querySelector('.horn').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 2 })), true`);
     await evaluate(`document.querySelector('.horn').dispatchEvent(new Event('contextmenu', { bubbles: true, cancelable: true })), true`);
     // Give a wrongly-started loop time to prove it is playing (fetch + decode
@@ -1028,6 +1058,7 @@ test('browser verification: right-click never starts the horn, and blur/contextm
     const afterBlur = await waitFor(s => !s.playing && !s.horning, 'horn to stop on window blur');
     assert.equal(afterBlur.playing, false, 'window blur must release a pointer hold');
     assert.equal(afterBlur.horning, false, 'window blur must clear the pressed state');
+    await releaseMouseElsewhere();
 
     // Case 3: a contextmenu mid-hold (long-press menu, or the release half of
     // any secondary gesture) must stop the horn.
@@ -1036,6 +1067,7 @@ test('browser verification: right-click never starts the horn, and blur/contextm
     await evaluate(`document.querySelector('.horn').dispatchEvent(new Event('contextmenu', { bubbles: true, cancelable: true })), true`);
     const afterContextmenu = await waitFor(s => !s.playing && !s.horning, 'horn to stop on contextmenu');
     assert.equal(afterContextmenu.playing, false, 'contextmenu must release a pointer hold');
+    await releaseMouseElsewhere();
 
     // Case 4: a release delivered at WINDOW level must end the hold. Bound to
     // documentElement, the listener never saw it.
@@ -1044,6 +1076,7 @@ test('browser verification: right-click never starts the horn, and blur/contextm
     await evaluate(`window.dispatchEvent(new PointerEvent('pointerup')), true`);
     const afterWindowPointerup = await waitFor(s => !s.playing && !s.horning, 'horn to stop on window-level pointerup');
     assert.equal(afterWindowPointerup.playing, false, 'a window-level pointerup must release the hold');
+    await releaseMouseElsewhere();
 
     // Case 5: same for pointercancel at window level.
     await pressPrimary();
@@ -1051,6 +1084,7 @@ test('browser verification: right-click never starts the horn, and blur/contextm
     await evaluate(`window.dispatchEvent(new PointerEvent('pointercancel')), true`);
     const afterWindowPointercancel = await waitFor(s => !s.playing && !s.horning, 'horn to stop on window-level pointercancel');
     assert.equal(afterWindowPointercancel.playing, false, 'a window-level pointercancel must release the hold');
+    await releaseMouseElsewhere();
 
     // Non-regression: a normal primary press + documentElement-bubbling
     // pointerup still behaves like a tap-hold (the release path every
@@ -1060,6 +1094,7 @@ test('browser verification: right-click never starts the horn, and blur/contextm
     await evaluate(`document.documentElement.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })), true`);
     const afterOrdinaryRelease = await waitFor(s => !s.horning, 'horn to settle after an ordinary release');
     assert.equal(afterOrdinaryRelease.horning, false, 'an ordinary press/release still ends the hold');
+    await releaseMouseElsewhere();
 
     assert.deepEqual(consoleErrors, [], 'No uncaught exceptions or console errors during the stuck-honk cases');
   } finally {
