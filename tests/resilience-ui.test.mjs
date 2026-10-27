@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
-import { commandBound } from './support/cdp.mjs';
+import { commandBound } from './cdp-command-bound.mjs';
 import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -192,7 +192,7 @@ async function testBootWatchdog() {
 
   // Poll a page expression until truthy. Evaluation errors (context not yet
   // ready mid-navigation) are retried, not fatal - but the LAST one is reported
-  // with the timeout: when the command was bounded out (support/cdp.mjs) or the
+  // with the timeout: when the command was bounded out (cdp-command-bound.mjs) or the
   // renderer stopped answering, "timed out waiting for X" alone does not say
   // which resource wedged, and that was the whole of what a hung case could show.
   const waitUntil = async (expression, timeoutMs, label) => {

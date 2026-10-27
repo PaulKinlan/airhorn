@@ -1,5 +1,12 @@
 /*
- * tests/support/cdp.mjs — a CDP command is WAITED FOR WITH A BOUND (airhorn-uhdv).
+ * tests/cdp-command-bound.mjs — a CDP command is WAITED FOR WITH A BOUND (airhorn-uhdv).
+ *
+ * It lives HERE, not in tests/support/, on purpose: the map sends every
+ * tests/support/** change to all fifteen browser suites at once (a shared support
+ * module really can affect them all), and this helper has exactly one consumer -
+ * measured: with the module under tests/support/ the fast gate selected 19 suites
+ * and was killed at its 900 s bound having run a fraction of them
+ * (airhorn-uhdv). A suite-local helper is mapped to its own consumers instead.
  *
  * The suites' `send()` returns a promise that settles only when the browser
  * answers. When the browser does not answer, that promise never settles - and

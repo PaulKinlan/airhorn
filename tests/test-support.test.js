@@ -635,7 +635,7 @@ test('a CDP command that never answers is bounded, not a parked suite (airhorn-u
   // for 1,092 s of a 1,200 s gate and the eleven suites behind it were cancelled
   // without running. The bound is what turns that into one failing case.
   const { commandBound, CDP_COMMAND_TIMEOUT_MS } = await import(
-    pathToFileURL(path.join(import.meta.dirname, 'support', 'cdp.mjs')).href
+    pathToFileURL(path.join(import.meta.dirname, 'cdp-command-bound.mjs')).href
   );
   const never = () => new Promise(() => {});
 
