@@ -166,7 +166,25 @@ async function killedMidRun(tool, args) {
 
     let result;
     try {
-      await waitFor(() => oursProcesses(marker, runDir).length > 0, { label: `${tool}'s browser (marker ${marker.value})` });
+      // A starved host makes launchChrome() REFUSE at once (airhorn-w1wh), so the tool dies
+      // without ever creating a browser. Waiting the full 40 s bound for a browser that will
+      // never exist spent 80 s of a gate run and then reported "timed out waiting for
+      // <tool>.mjs's browser" while the actual refusal sat unread in `output` (airhorn-wqge).
+      // Race the condition against the child's own exit, fail fast, and always show what the
+      // tool said.
+      let up;
+      try {
+        up = await Promise.race([
+          waitFor(() => oursProcesses(marker, runDir).length > 0,
+            { label: `${tool}'s browser (marker ${marker.value})` }).then(() => 'browser'),
+          exited.then((how) => ({ how })),
+        ]);
+      } catch (err) {
+        throw new Error(`${err.message}\nThe tool is still running but never produced a browser. Tool output:\n${output.slice(-1200)}`);
+      }
+      if (up !== 'browser') {
+        throw new Error(`${tool} exited (${JSON.stringify(up.how)}) before its browser appeared, so this run never got as far as a bound kill. Tool output:\n${output.slice(-1200)}`);
+      }
       child.kill('SIGTERM'); // exactly what the gate's bound sends
 
       let timer = null;
