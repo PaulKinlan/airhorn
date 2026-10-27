@@ -181,6 +181,15 @@ async function testBootWatchdog() {
     return res.result.value;
   };
 
+  // Every wait here uses support/poll.mjs's one policy - WAIT_TIMEOUT_MS, how
+  // long we are willing to wait for a resource or a state, not a claim about how
+  // long the app takes (airhorn-uhdv). The suite used to hardcode 5-12 s windows,
+  // which is the machine-state assertion poll.mjs exists to remove: on this box a
+  // single CDP round trip measured 13 s at load 10.5, so a 10 s window could be
+  // one sample of a loaded renderer and the banner it was watching for had not
+  // been given its chance yet. Worst case the file now waits ~15 s per case, well
+  // inside the gate bound; AIRHORN_WAIT_MS raises it for a host under real load.
+
   // Poll a page expression until truthy. Evaluation errors (context not yet
   // ready mid-navigation) are retried, not fatal - but the LAST one is reported
   // with the timeout: when the command was bounded out (support/cdp.mjs) or the
@@ -324,7 +333,7 @@ async function testBootWatchdog() {
     // --- Case 1: healthy boot must stay silent --------------------------------
     console.log('--- Case 1: healthy boot, banner must stay hidden');
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil('typeof window.__airhorn !== "undefined"', 8000, 'app to boot');
+    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot');
     // Painted invisibility is the assertion, not the hidden attribute: the
     // card's own display value once beat the UA [hidden] rule (caught by the
     // noscript screenshot), so check layout and computed display.
@@ -393,7 +402,7 @@ async function testBootWatchdog() {
     console.log('--- Case 2: module bundle blocked (filter/proxy)');
     await send('Network.setBlockedURLs', { urls: ['*assets/*.js', '*src/main.js*'] });
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil(`!document.getElementById('boot-failure').hidden`, 10000, 'blocked-bundle banner to appear');
+    await waitUntil(`!document.getElementById('boot-failure').hidden`, WAIT_TIMEOUT_MS, 'blocked-bundle banner to appear');
     const blocked = await evaluate(`(() => {
       const banner = document.getElementById('boot-failure');
       const retry = document.getElementById('boot-retry');
@@ -425,7 +434,7 @@ async function testBootWatchdog() {
     // Every paused request is fulfilled with a corrupt body by the
     // Fetch.requestPaused branch in onmessage above.
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil(`!document.getElementById('boot-failure').hidden`, 10000, 'corrupt-bundle banner to appear');
+    await waitUntil(`!document.getElementById('boot-failure').hidden`, WAIT_TIMEOUT_MS, 'corrupt-bundle banner to appear');
     const corrupt = await evaluate(`(() => ({
       booted: typeof window.__airhorn !== 'undefined',
       retryPresent: !!document.getElementById('boot-retry') && !document.getElementById('boot-retry').disabled,
@@ -445,7 +454,7 @@ async function testBootWatchdog() {
     await waitUntil(`(() => {
       const el = document.querySelector('noscript .boot-alert');
       return !!el && el.getClientRects().length > 0;
-    })()`, 5000, 'noscript notice to render');
+    })()`, WAIT_TIMEOUT_MS, 'noscript notice to render');
     const noscript = await evaluate(`(() => {
       const el = document.querySelector('noscript .boot-alert');
       const banner = document.getElementById('boot-failure');
@@ -470,29 +479,29 @@ async function testBootWatchdog() {
     // Fresh navigation so main.js (with its listeners) runs: the noscript
     // page above never executed any script.
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil('typeof window.__airhorn !== "undefined"', 8000, 'app to boot');
+    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot');
     await send('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 });
-    await waitUntil(`window.__statusLog.some(m => /no connection/i.test(m))`, 5000, 'offline notice');
+    await waitUntil(`window.__statusLog.some(m => /no connection/i.test(m))`, WAIT_TIMEOUT_MS, 'offline notice');
     await shot('offline-notice');
     await send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
-    await waitUntil(`window.__statusLog.some(m => /back online/i.test(m))`, 5000, 'back-online notice');
+    await waitUntil(`window.__statusLog.some(m => /back online/i.test(m))`, WAIT_TIMEOUT_MS, 'back-online notice');
     console.log('  offline/online: both transitions announced');
 
     // --- Case 6: service worker update over an existing controller -------------
     console.log('--- Case 6: service worker update');
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil('typeof window.__airhorn !== "undefined"', 8000, 'app to boot before update');
+    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot before update');
     if ((await evaluate(`!!navigator.serviceWorker.controller`)) !== true) {
       throw new Error('stub SW did not claim the page; the update case needs a controller');
     }
     swBody = swV2;
     // Fire and forget: reg.update() is polled below, not awaited here.
     await evaluate(`navigator.serviceWorker.getRegistration().then(reg => reg.update())`);
-    await waitUntil(`window.__statusLog.some(m => /new version|updating/i.test(m))`, 10000, 'update notice');
+    await waitUntil(`window.__statusLog.some(m => /new version|updating/i.test(m))`, WAIT_TIMEOUT_MS, 'update notice');
     // airhorn-d5q: the 'Updating...' notice must actually fire - at
     // updatefound the worker is already 'installing', so the announcement
     // happens outside the statechange listener.
-    await waitUntil(`window.__statusLog.some(m => /updating/i.test(m))`, 5000, 'installing-phase notice');
+    await waitUntil(`window.__statusLog.some(m => /updating/i.test(m))`, WAIT_TIMEOUT_MS, 'installing-phase notice');
     const updateMsgs = await evaluate(`window.__statusLog.filter(m => /new version|updating/i.test(m))`);
     console.log('  update notice(s):', JSON.stringify(updateMsgs));
     // airhorn-swq: a SUCCESSFUL update replaces the old worker, whose
@@ -507,8 +516,8 @@ async function testBootWatchdog() {
     // for v2 to be the active controller, then confirm the fresh page boots
     // and is silent again.
     await waitUntil(`navigator.serviceWorker.controller
-      && navigator.serviceWorker.controller.state === 'activated'`, 15000, 'v2 to activate');
-    await waitUntil('typeof window.__airhorn !== "undefined"', 8000, 'app to boot after update');
+      && navigator.serviceWorker.controller.state === 'activated'`, WAIT_TIMEOUT_MS, 'v2 to activate');
+    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot after update');
     if ((await evaluate(`document.getElementById('app-status').textContent`)) !== '') {
       throw new Error('status region not empty on the freshly updated page');
     }
@@ -519,7 +528,7 @@ async function testBootWatchdog() {
     console.log('--- Case 7: stylesheet blocked');
     await send('Network.setBlockedURLs', { urls: ['*styles/*.css', '*assets/*.css'] });
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil('typeof window.__airhorn !== "undefined"', 8000, 'app to boot unstyled');
+    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot unstyled');
     const unstyled = await evaluate(`(() => {
       const horn = document.querySelector('.horn');
       const r = horn.getBoundingClientRect();
@@ -726,7 +735,7 @@ async function testBootWatchdog() {
     await evaluate(`window.__case8Outgoing = true`);
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
     await waitUntil(`!window.__case8Outgoing && typeof window.__airhornBooted === 'function'`,
-      10000, 'case 8 navigation to commit a fresh document');
+      WAIT_TIMEOUT_MS, 'case 8 navigation to commit a fresh document');
     for (let i = 0; i < 30 && heldRequests.length === 0; i++) {
       await new Promise(r => setTimeout(r, 100));
     }
@@ -735,7 +744,7 @@ async function testBootWatchdog() {
     // synthetic load event runs the same arm -> grace -> show chain.
     await evaluate(`window.dispatchEvent(new Event('load'))`);
     try {
-      await waitUntil(`!document.getElementById('boot-failure').hidden`, 8000, 'banner while the bundle stalls');
+      await waitUntil(`!document.getElementById('boot-failure').hidden`, WAIT_TIMEOUT_MS, 'banner while the bundle stalls');
     } catch (err) {
       // On timeout, say WHICH invariant broke: the app booting early (a cache
       // hit bypassing the interception) reads differently from the watchdog
@@ -748,7 +757,7 @@ async function testBootWatchdog() {
     for (const id of heldRequests.splice(0)) fulfillBody(id, 'window.__airhornBooted && window.__airhornBooted();');
     fetchHold = false;
     await waitUntil(`document.getElementById('boot-failure').hidden === true
-      && document.getElementById('boot-failure').getClientRects().length === 0`, 5000, 'banner to retire on the late boot');
+      && document.getElementById('boot-failure').getClientRects().length === 0`, WAIT_TIMEOUT_MS, 'banner to retire on the late boot');
     await send('Fetch.disable');
     await shot('late-bundle-retires-banner');
     console.log('  slow bundle: banner revealed while stalled, retired when the app booted');
@@ -766,7 +775,7 @@ async function testBootWatchdog() {
     // app is usable - so only the watchdog's arm+grace can speak.
     for (const id of heldRequests.splice(0)) fulfillBody(id, 'const x = 1; throw new Error("setup boom");');
     fetchHold = false;
-    await waitUntil(`!document.getElementById('boot-failure').hidden`, 12000, 'banner for a bundle that ran and failed');
+    await waitUntil(`!document.getElementById('boot-failure').hidden`, WAIT_TIMEOUT_MS, 'banner for a bundle that ran and failed');
     const stillDead = await evaluate(`typeof window.__airhorn === 'undefined'`);
     if (!stillDead) throw new Error('app booted although the bundle threw during setup');
     await send('Fetch.disable');
@@ -791,7 +800,7 @@ async function testBootWatchdog() {
     // a beat to drop the registration before the fresh navigation.
     await new Promise(r => setTimeout(r, 500));
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil('typeof window.__airhorn !== "undefined"', 8000, 'fresh page to boot (v1 generation)');
+    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'fresh page to boot (v1 generation)');
     if ((await evaluate(`window.__hadControllerAtParse`)) !== false) {
       throw new Error('expected a page with no controller at parse for the no-reload update generation');
     }
@@ -812,7 +821,7 @@ async function testBootWatchdog() {
       `navigator.serviceWorker.getRegistration()
         .then(r => !!r && !!r.active && !r.installing && !r.waiting)
         .catch(() => false)`,
-      10000, 'the boot registration to settle before publishing v2');
+      WAIT_TIMEOUT_MS, 'the boot registration to settle before publishing v2');
     swBody = swV2;
     await evaluate(`navigator.serviceWorker.getRegistration().then(reg => reg.update())`);
     // Completion gates on a VERSION-TRUE signal from the v2 worker itself:
@@ -825,7 +834,7 @@ async function testBootWatchdog() {
     // it exists before any generation can announce itself (airhorn-ye54); the
     // announcement is still observed and logged, and the swq false-failure
     // check still polices its copy.
-    await waitUntil('window.__v2active', 10000,
+    await waitUntil('window.__v2active', WAIT_TIMEOUT_MS,
       'the v2 worker itself to report active and claiming (version-true ground truth)');
     const announcement = await evaluate(`window.__statusLog.filter(m => /new version is ready/i.test(m))`);
     console.log('  swq: v2 active and claiming; announcement chain so far:', JSON.stringify(announcement));
@@ -848,7 +857,7 @@ async function testBootWatchdog() {
     // (airhorn-906). This case lives in a suite the page row DOES select, so
     // the branch is covered where it is authored. The real worker's own
     // quota-denied upgrade stays sw-failover's job (public/sw.js row).
-    await waitUntil('!!navigator.serviceWorker.controller', 10000, 'a controller to update over');
+    await waitUntil('!!navigator.serviceWorker.controller', WAIT_TIMEOUT_MS, 'a controller to update over');
     const controllerBefore = await evaluate(`navigator.serviceWorker.controller && navigator.serviceWorker.controller.scriptURL`);
     // An install that is denied, the way a failed precache write denies one.
     // A byte-different body is enough for reg.update() to start a new worker;
@@ -862,7 +871,7 @@ async function testBootWatchdog() {
     await evaluate(`navigator.serviceWorker.getRegistration()
       .then((reg) => reg.update()).then(() => true).catch(() => false)`);
     await waitUntil(`window.__statusLog.some((m) => /app could not update/i.test(m))`,
-      10000, 'the lost-upgrade announcement');
+      WAIT_TIMEOUT_MS, 'the lost-upgrade announcement');
     const lost = await evaluate(`(() => {
       const region = document.getElementById('app-status');
       return {
