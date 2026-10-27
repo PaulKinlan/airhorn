@@ -100,6 +100,10 @@
  "tests/support/browser.mjs": [
   "tests/test-support.test.js"
  ],
+ "tests/cdp-command-bound.mjs": [
+  "tests/test-support.test.js",
+  "tests/resilience-ui.test.mjs"
+ ],
  "tests/support/signal-exit.mjs": [
   "tests/test-support.test.js"
  ],
