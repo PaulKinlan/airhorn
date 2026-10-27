@@ -209,8 +209,13 @@ export class Horn {
             }
           });
         })
+        .then(buffer => {
+          this.#usingFallback = false;
+          return buffer;
+        })
         .catch(err => {
           this.#bufferPromise = null;
+          this.#usingFallback = true;
           throw err;
         });
     }
@@ -219,6 +224,7 @@ export class Horn {
 
   async start({ loop = false } = {}) {
     if (!this.#audioCtx) return false;
+    const isOffline = typeof this.#audioCtx.startRendering === 'function';
 
     const startOp = {
       loop,
@@ -231,7 +237,7 @@ export class Horn {
     this.#pendingStarts.add(startOp);
 
     try {
-      if (typeof this.#audioCtx.resume === 'function') {
+      if (!isOffline && typeof this.#audioCtx.resume === 'function') {
         // A press is not the only caller: an autoplay link or a WebMCP tool call
         // can get here in a document that has never been touched, where the
         // context stays suspended and waiting cannot help (airhorn-dxug).
@@ -249,7 +255,7 @@ export class Horn {
       // into it would (a) report a horn nobody can hear and (b) fire a delayed
       // blast whenever the context is later resumed by an unrelated click.
       // Report "did not start" instead - the next real press starts normally.
-      if (this.#audioCtx.state === 'suspended') {
+      if (!isOffline && this.#audioCtx.state === 'suspended') {
         return false;
       }
 
@@ -267,7 +273,7 @@ export class Horn {
         if (startOp.stopRequested && (Date.now() - (startOp.stopTime || startOp.startTime) > 1000)) {
           return false;
         }
-        if (!startOp.loop && (Date.now() - startOp.startTime > 1500)) {
+        if (!isOffline && !startOp.loop && (Date.now() - startOp.startTime > 1500)) {
           return false;
         }
         if (!buffer) throw new Error('No audio buffer decoded');
@@ -275,6 +281,7 @@ export class Horn {
         const playLoop = startOp.stopRequested ? false : startOp.loop;
         return this.#playSample(buffer, { loop: playLoop });
       } catch (err) {
+        this.#usingFallback = true;
         if (startOp.cancelled || (startOp.stopRequested && startOp.immediateStop)) {
           return false;
         }
@@ -283,10 +290,9 @@ export class Horn {
         if (startOp.stopRequested && (Date.now() - (startOp.stopTime || startOp.startTime) > 1000)) {
           return false;
         }
-        if (!startOp.loop && (Date.now() - startOp.startTime > 1500)) {
+        if (!isOffline && !startOp.loop && (Date.now() - startOp.startTime > 1500)) {
           return false;
         }
-        this.#usingFallback = true;
         const playLoop = startOp.stopRequested ? false : startOp.loop;
         return this.#playSynth({ loop: playLoop });
       }

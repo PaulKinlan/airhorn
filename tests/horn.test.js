@@ -675,6 +675,7 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
         const runningPort = new Proxy(ctx, {
           get(target, key) {
             if (key === 'state') return 'running';
+            if (key === 'resume') return () => Promise.resolve();
             const value = Reflect.get(target, key, target);
             return typeof value === 'function' ? value.bind(target) : value;
           }
@@ -704,8 +705,8 @@ test('browser verification: forced mp3 404 still activates synth, sounds audibly
       returnByValue: true
     });
     const render = rendered.result.value;
-    assert.equal(render.usingFallback, true, 'the forced 404 must take the synthesised fallback path');
     assert.equal(render.started, true, 'the offline render must start; a refused context measures silence, not the horn');
+    assert.equal(render.usingFallback, true, 'the forced 404 must take the synthesised fallback path');
     assert.ok(
       render.peak > 0.2,
       `the fallback voice must render audibly, with no audio device involved; peak ${render.peak} ` +
