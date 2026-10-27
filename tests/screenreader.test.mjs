@@ -216,7 +216,14 @@ async function launch({ label = 'screenreader' } = {}) {
   const ws = new WebSocket(browser.pageWsUrl);
   // Bounded (airhorn-eabw): an unbounded onopen await parks the suite if the
   // socket never opens; this also rejects on error/close so the refusal is named.
-  await awaitSocketOpen(ws, { url: browser.pageWsUrl });
+  // The rejection fires before any try/finally owns the browser, so close it here
+  // or the fast failure leaks the browser (reaper evidence on airhorn-eabw).
+  try {
+    await awaitSocketOpen(ws, { url: browser.pageWsUrl });
+  } catch (err) {
+    await browser.close();
+    throw err;
+  }
 
   let id = 1;
   const pending = new Map();

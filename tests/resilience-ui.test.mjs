@@ -115,7 +115,16 @@ async function testBootWatchdog() {
   // none of its deadlines can fire, and a socket that neither opens nor errors parks
   // the suite for the rest of the gate. It also rejects on error/close, so a socket
   // the browser refused says so instead of hanging to the gate bound.
-  await awaitSocketOpen(ws, { url: pageWsUrl });
+  // The rejection fires BEFORE the try/finally below exists, so close the browser
+  // and server here or the fast failure leaks them (reaper killed just such an
+  // orphaned chrome 45 min after the proof run - airhorn-eabw).
+  try {
+    await awaitSocketOpen(ws, { url: pageWsUrl });
+  } catch (err) {
+    await browser.close();
+    server.close();
+    throw err;
+  }
 
   let msgId = 1;
   const pending = new Map();

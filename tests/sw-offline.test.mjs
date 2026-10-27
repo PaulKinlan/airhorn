@@ -146,7 +146,16 @@ async function testSwAndManifest() {
   const ws = new WebSocket(pageWsUrl);
   // Bounded (airhorn-eabw): an unbounded onopen await parks the suite if the
   // socket never opens; this also rejects on error/close so the refusal is named.
-  await awaitSocketOpen(ws, { url: pageWsUrl });
+  // The rejection fires before the try/finally below owns the browser and server,
+  // so close both here or the fast failure leaks them (reaper evidence on
+  // airhorn-eabw).
+  try {
+    await awaitSocketOpen(ws, { url: pageWsUrl });
+  } catch (err) {
+    await browser.close();
+    server.close();
+    throw err;
+  }
 
   let msgId = 1;
   const pending = new Map();
