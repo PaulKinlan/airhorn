@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 import { quiescenceProbe, waitForQuiescence, lateErrorMutant } from './support/quiescence.mjs';
 import { waitForCondition } from './support/poll.mjs';
 import { launchBrowser } from './support/browser.mjs';
+import { awaitSocketOpen } from './cdp-command-bound.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -143,7 +144,18 @@ async function testSwAndManifest() {
   const pageWsUrl = browser.pageWsUrl;
 
   const ws = new WebSocket(pageWsUrl);
-  await new Promise(r => ws.onopen = r);
+  // Bounded (airhorn-eabw): an unbounded onopen await parks the suite if the
+  // socket never opens; this also rejects on error/close so the refusal is named.
+  // The rejection fires before the try/finally below owns the browser and server,
+  // so close both here or the fast failure leaks them (reaper evidence on
+  // airhorn-eabw).
+  try {
+    await awaitSocketOpen(ws, { url: pageWsUrl });
+  } catch (err) {
+    await browser.close();
+    server.close();
+    throw err;
+  }
 
   let msgId = 1;
   const pending = new Map();

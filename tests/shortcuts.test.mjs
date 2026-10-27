@@ -36,6 +36,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { awaitSocketOpen } from './cdp-command-bound.mjs';
 import { installSignalExit } from './support/signal-exit.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -183,10 +184,16 @@ async function launch({ autoplay, label }) {
   const browser = await launchBrowser({ autoplay, label, timeoutMs: 15000 });
 
   const ws = new WebSocket(browser.pageWsUrl);
-  await new Promise((resolve, reject) => {
-    ws.onopen = resolve;
-    ws.onerror = reject;
-  });
+  // Bounded (airhorn-eabw): an unbounded onopen await parks the suite if the
+  // socket never opens; this also rejects on error/close so the refusal is named.
+  // The rejection fires before any try/finally owns the browser, so close it here
+  // or the fast failure leaks the browser (reaper evidence on airhorn-eabw).
+  try {
+    await awaitSocketOpen(ws, { url: browser.pageWsUrl });
+  } catch (err) {
+    await browser.close();
+    throw err;
+  }
 
   let id = 1;
   const pending = new Map();
