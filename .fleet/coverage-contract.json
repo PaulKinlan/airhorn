@@ -5,14 +5,58 @@
   "tests/shortcuts.test.mjs"
  ],
  "src/main.js": [
+  "tests/modules.test.js",
+  "tests/resilience-ui.test.mjs",
+  "tests/webmcp-browser.test.mjs"
+ ],
+ "src/airhorn.js": [
+  "tests/modules.test.js",
   "tests/horn.test.js",
   "tests/a11y.test.mjs",
-  "tests/sw-failover.test.mjs",
-  "tests/webmcp-browser.test.mjs",
-  "tests/resilience-ui.test.mjs",
-  "tests/shortcuts.test.mjs",
   "tests/keyboard.test.mjs",
-  "tests/screenreader.test.mjs"
+  "tests/screenreader.test.mjs",
+  "tests/shortcuts.test.mjs",
+  "tests/reflow-zoom.test.mjs",
+  "tests/visual-overrides.test.mjs",
+  "tests/webmcp-browser.test.mjs",
+  "tests/resilience-ui.test.mjs"
+ ],
+ "src/input.js": [
+  "tests/modules.test.js",
+  "tests/horn.test.js",
+  "tests/keyboard.test.mjs",
+  "tests/a11y.test.mjs",
+  "tests/screenreader.test.mjs",
+  "tests/visual-overrides.test.mjs",
+  "tests/reflow-zoom.test.mjs"
+ ],
+ "src/badge.js": [
+  "tests/modules.test.js",
+  "tests/multitab.test.mjs",
+  "tests/webmcp-browser.test.mjs"
+ ],
+ "src/install.js": [
+  "tests/modules.test.js",
+  "tests/a11y.test.mjs",
+  "tests/keyboard.test.mjs",
+  "tests/resilience-ui.test.mjs",
+  "tests/reflow-zoom.test.mjs"
+ ],
+ "src/launch.js": [
+  "tests/modules.test.js",
+  "tests/shortcuts.test.mjs",
+  "tests/multitab.test.mjs"
+ ],
+ "src/status.js": [
+  "tests/modules.test.js",
+  "tests/screenreader.test.mjs",
+  "tests/keyboard.test.mjs",
+  "tests/multitab.test.mjs",
+  "tests/resilience-ui.test.mjs",
+  "tests/visual-overrides.test.mjs"
+ ],
+ "src/analytics.js": [
+  "tests/modules.test.js"
  ],
  "src/webmcp.js": [
   "tests/webmcp.test.mjs",

@@ -151,11 +151,64 @@ test('a worker change selects the offline + failover suites', () => {
 });
 
 test('a page change selects the page suites', () => {
+  // Since the split (airhorn-1l04) src/main.js is the COMPOSITION root: what a
+  // change there can break is the wiring itself, so its row is the structural
+  // suite that pins the wiring plus the two browser suites that assert the
+  // composition contract no static check can see (the boot marker and the
+  // WebMCP registration). Behavioural coverage moved to the concern rows below.
   const input = 'src/main.js';
   assert.ok(fs.existsSync(path.join(root, input)), `selector input ${input} is missing from the tree`);
+  // One real selector run, then both directions are read off it: `--list` costs
+  // ~0.5 s, and this suite is on the tools/* row.
   const suites = listFor(input);
-  for (const s of ['tests/a11y.test.mjs', 'tests/webmcp-browser.test.mjs', 'tests/resilience-ui.test.mjs']) {
+  for (const s of ['tests/modules.test.js', 'tests/webmcp-browser.test.mjs', 'tests/resilience-ui.test.mjs']) {
     assert.ok(suites.includes(s), `src/main.js must select ${s}, got ${JSON.stringify(suites)}`);
+  }
+  // The other direction: the composition row must NOT be paying for the app.
+  for (const s of ['tests/horn.test.js', 'tests/multitab.test.mjs', 'tests/shortcuts.test.mjs']) {
+    assert.ok(!suites.includes(s), `src/main.js must not select the concern suite ${s}, got ${JSON.stringify(suites)}`);
+  }
+});
+
+test('the split gives every concern its own row, and the gate cost tracks blast radius (airhorn-1l04)', () => {
+  // Read the map through y7mx's single-sourced derivation (deriveMapOpinion), not
+  // by spawning `fast-gate.sh --list` once per path and not with a second parser:
+  // each spawn costs ~0.5 s, and a local parseSuiteMap copy was deleted when the
+  // mapping was single-sourced (airhorn-48ce) - which is exactly how this test
+  // rebased onto a ReferenceError. The SELECTOR is exercised for real by the
+  // page-change test above; this one is about the rows.
+  const byPattern = deriveMapOpinion(fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8'), { root });
+  const selectorsFor = (file) => [...(byPattern.get(file) || [])];
+
+  // Every module under src/ is mapped: a new module with no row would make the
+  // fast gate report 'unmapped' - loud, but only once someone edited it. This is
+  // the cheap direction of the same check, at rest.
+  const modules = fs.readdirSync(path.join(root, 'src')).filter((f) => f.endsWith('.js')).sort();
+  assert.ok(modules.length >= 8, `src/ must hold the split modules, found ${JSON.stringify(modules)}`);
+  const unmapped = modules.filter((f) => selectorsFor(`src/${f}`).length === 0);
+  assert.deepEqual(unmapped, [], `these src modules select no suite: ${unmapped.join(', ')}`);
+
+  // The point of the split, as a measurable: a concern-only change runs its own
+  // suites, not the eight the single module used to select. These two are the
+  // narrowest concerns - a badge fix and a deep-link fix - and both must stay
+  // off the horn's interaction suites.
+  const badge = selectorsFor('src/badge.js');
+  assert.ok(badge.includes('tests/multitab.test.mjs'),
+    `a badge change must run multitab, got ${JSON.stringify(badge)}`);
+  for (const s of ['tests/keyboard.test.mjs', 'tests/horn.test.js', 'tests/a11y.test.mjs', 'tests/shortcuts.test.mjs']) {
+    assert.ok(!badge.includes(s), `a badge change must not run ${s}, got ${JSON.stringify(badge)}`);
+  }
+  const launch = selectorsFor('src/launch.js');
+  assert.ok(launch.includes('tests/shortcuts.test.mjs'),
+    `a deep-link change must run shortcuts, got ${JSON.stringify(launch)}`);
+  for (const s of ['tests/horn.test.js', 'tests/a11y.test.mjs', 'tests/resilience-ui.test.mjs']) {
+    assert.ok(!launch.includes(s), `a deep-link change must not run ${s}, got ${JSON.stringify(launch)}`);
+  }
+
+  // And the concerns that share a signal are not accidentally duplicated: the
+  // structural suite is the only thing every module row has in common.
+  for (const m of ['src/input.js', 'src/badge.js', 'src/launch.js', 'src/install.js', 'src/status.js', 'src/analytics.js']) {
+    assert.ok(selectorsFor(m).includes('tests/modules.test.js'), `${m} must be pinned by the structural suite`);
   }
 });
 
@@ -178,11 +231,29 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
     assert.ok(page.includes(copy), `index.html must author the lost-upgrade copy "${copy}"`);
     assert.ok(suite.includes(copy), `resilience-ui must assert the page's lost-upgrade copy "${copy}"`);
   }
-  // The worker's own upgrade story is still the failover suite's job.
-  assert.ok(listFor('src/main.js').includes('tests/sw-failover.test.mjs'),
-    'src/main.js must still select the failover suite');
+  // The worker's own failure story is still the failover suite's job, and the
+  // suite still has a row owner (the worker). No page module carries worker code
+  // since the split (airhorn-1l04): the registration handler is inline in
+  // index.html, which is why the page row above carries the copy assertions.
   assert.ok(listFor('public/sw.js').includes('tests/sw-failover.test.mjs'),
     'public/sw.js must still select the failover suite');
+  // (c) the REPLACEMENT coverage, asserted here rather than left implied. Before
+  // the split this test's "covered anyway" half was `src/main.js` selecting
+  // sw-failover, which the split made false. Dropping it must not leave the
+  // composition root ungated: if main.js stops selecting the suites that actually
+  // exercise it, this must fail. The pointer/keyboard path it wires is input.js's
+  // (its row owns the interaction suites), and main.js's own wiring is pinned by
+  // the browser-free structural suite - so both ends are named, not assumed.
+  const compositionRow = listFor('src/main.js');
+  for (const s of ['tests/modules.test.js', 'tests/resilience-ui.test.mjs']) {
+    assert.ok(compositionRow.includes(s),
+      `src/main.js must still select ${s} - the composition root cannot lose its coverage when the page row drops a suite, got ${JSON.stringify(compositionRow)}`);
+  }
+  const inputRow = listFor('src/input.js');
+  for (const s of ['tests/keyboard.test.mjs', 'tests/horn.test.js']) {
+    assert.ok(inputRow.includes(s),
+      `src/input.js must still select ${s} - the P0 pointer/keyboard semantics live there, got ${JSON.stringify(inputRow)}`);
+  }
 });
 
 test('the fleet coverage contract restates the map, not a stale opinion (airhorn-ona)', () => {
@@ -232,11 +303,14 @@ test('the drift check fails when the two files disagree (airhorn-ona)', () => {
   const contract = readContract();
   const stale = structuredClone(contract);
   stale['index.html'] = [...stale['index.html'], 'tests/sw-failover.test.mjs'];
-  stale['src/main.js'] = stale['src/main.js'].filter((s) => s !== 'tests/sw-failover.test.mjs');
+  // After the split, src/badge.js is the sole carrier of the cross-tab count, so
+  // that is the row the under-naming direction is exercised on; master's version
+  // mutated src/main.js/sw-failover, which is no longer that pair (airhorn-1l04).
+  stale['src/badge.js'] = stale['src/badge.js'].filter((s) => s !== 'tests/multitab.test.mjs');
   const problems = contractDrift(stale);
   assert.ok(problems.some((p) => p.startsWith('index.html:') && /sw-failover/.test(p) && /does not run it/.test(p)),
     `an over-named suite must be reported: ${JSON.stringify(problems)}`);
-  assert.ok(problems.some((p) => p.startsWith('src/main.js:') && /sw-failover/.test(p) && /omits it/.test(p)),
+  assert.ok(problems.some((p) => p.startsWith('src/badge.js:') && /multitab/.test(p) && /omits it/.test(p)),
     `an under-named suite must be reported: ${JSON.stringify(problems)}`);
   delete stale['server.ts'];
   assert.ok(contractDrift(stale).some((p) => p.startsWith('server.ts:') && /no entry/.test(p)),
