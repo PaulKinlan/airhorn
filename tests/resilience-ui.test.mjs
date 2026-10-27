@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
-import { boundCommand } from './cdp-command-bound.mjs';
+import { awaitSocketOpen, boundCommand } from './cdp-command-bound.mjs';
 import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -110,7 +110,12 @@ async function testBootWatchdog() {
   const pageWsUrl = browser.pageWsUrl;
 
   const ws = new WebSocket(pageWsUrl);
-  await new Promise(r => ws.onopen = r);
+  // Bounded (airhorn-2q3m): an unbounded `await new Promise(r => ws.onopen = r)` is
+  // the command-bound defect one step earlier - nothing in the suite exists yet, so
+  // none of its deadlines can fire, and a socket that neither opens nor errors parks
+  // the suite for the rest of the gate. It also rejects on error/close, so a socket
+  // the browser refused says so instead of hanging to the gate bound.
+  await awaitSocketOpen(ws, { url: pageWsUrl });
 
   let msgId = 1;
   const pending = new Map();

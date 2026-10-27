@@ -1110,3 +1110,71 @@ test('a CDP command that never answers is bounded and leaves nothing pending (ai
   await new Promise((r) => setTimeout(r, 120));
   assert.ok(Number(CDP_COMMAND_TIMEOUT_MS) > 1000, 'the shipped bound must be a generous kill window, not a budget');
 });
+
+test('opening the page socket is bounded and rejects on error or close (airhorn-2q3m)', async () => {
+  // `await new Promise(r => ws.onopen = r)` is unbounded and blind to the two ways
+  // an open FAILS. Nothing inside a suite exists at that point, so no deadline of
+  // the suite's can fire: a socket that never opens parks the run, and one that
+  // errors hangs instead of saying why. awaitSocketOpen settles once, on whichever
+  // of open/error/close/the bound happens first.
+  //
+  // Every expectation below is bounded by `outcome()` on purpose: if a mutation
+  // removes the bound or a rejection path, this test must FAIL ('hung'), not hang -
+  // hanging is the defect itself, and a test that hangs in the fast gate is the
+  // disease it is meant to catch.
+  const { awaitSocketOpen } = await import(
+    pathToFileURL(path.join(import.meta.dirname, 'cdp-command-bound.mjs')).href
+  );
+  const outcome = (promise) => Promise.race([
+    promise.then((value) => ({ state: 'resolved', value }), (error) => ({ state: 'rejected', message: error.message })),
+    new Promise((r) => setTimeout(() => r({ state: 'hung' }), 1500)),
+  ]);
+  const socket = () => ({
+    readyState: 0,
+    url: 'ws://127.0.0.1:9/devtools/page/x',
+    onopen: null,
+    onerror: null,
+    onclose: null,
+  });
+
+  // 1. Never opens: the bound names the socket, well inside any suite bound.
+  const silent = socket();
+  const started = Date.now();
+  const bounded = await outcome(awaitSocketOpen(silent, { timeoutMs: 60 }));
+  assert.equal(bounded.state, 'rejected', `a socket that never opens must reject, not settle as ${bounded.state}`);
+  assert.match(bounded.message, /CDP socket ws:\/\/127\.0\.0\.1:9\/devtools\/page\/x did not open within 60 ms/);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2000, `the bound must fire on its own timer; took ${elapsed} ms`);
+  assert.equal(silent.onopen, null, 'the handlers must be dropped once settled, not left on a dead socket');
+
+  // 2. Errors: the reason is carried, not swallowed.
+  const failing = socket();
+  const erroring = outcome(awaitSocketOpen(failing, { timeoutMs: 5000 }));
+  failing.onerror({ message: 'connect ECONNREFUSED' });
+  const errored = await erroring;
+  assert.equal(errored.state, 'rejected', `an error must reject, not settle as ${errored.state}`);
+  assert.match(errored.message, /failed to open: connect ECONNREFUSED/);
+
+  // 3. Closes before it opens.
+  const closing = socket();
+  const closingOutcome = outcome(awaitSocketOpen(closing, { timeoutMs: 5000 }));
+  closing.onclose({ code: 1006 });
+  const closed = await closingOutcome;
+  assert.equal(closed.state, 'rejected', `a close before open must reject, not settle as ${closed.state}`);
+  assert.match(closed.message, /closed before it opened \(code 1006\)/);
+
+  // 4. Opens: resolves, and nothing settles afterwards - a rejection arriving after
+  //    the suite moved on would surface much later as an unhandled rejection.
+  const opening = socket();
+  const opened = outcome(awaitSocketOpen(opening, { timeoutMs: 60 }));
+  opening.onopen();
+  const openOutcome = await opened;
+  assert.equal(openOutcome.state, 'resolved', `an open must resolve, not settle as ${openOutcome.state}`);
+  assert.equal(opening.onopen, null, 'a settled open must drop its handlers, so a late event cannot settle it again');
+  opening.onerror?.({ message: 'late' });
+  await new Promise((r) => setTimeout(r, 120));
+
+  // 5. Already open: resolves without waiting for an event that will never come.
+  const already = await outcome(awaitSocketOpen({ readyState: 1 }));
+  assert.equal(already.state, 'resolved', `an already-open socket must resolve, not settle as ${already.state}`);
+});

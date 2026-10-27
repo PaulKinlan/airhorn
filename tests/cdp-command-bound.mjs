@@ -107,3 +107,50 @@ export function boundCommand({ method, pending, id, fire, timeoutMs }) {
   const bound = commandBound({ method, timeoutMs, onTimeout: () => pending.delete(id) });
   return Promise.race([answered, bound.promise]).finally(bound.clear);
 }
+
+/**
+ * Opening the page's CDP socket is WAITED FOR WITH A BOUND too (airhorn-2q3m).
+ *
+ * `const ws = new WebSocket(url); await new Promise(r => ws.onopen = r)` is the
+ * same defect one step earlier than the command bound: nothing inside the suite
+ * exists yet, so no deadline of the suite's can fire, and a socket that neither
+ * opens nor errors parks the suite for the rest of the gate. The unbounded await
+ * is also blind to the two ways the open can FAIL - `error` and `close` - so the
+ * reason (a launch that never produced a page target, a socket the browser
+ * refused) is lost.
+ *
+ * This settles once, whatever happens first: open resolves, error/close reject
+ * with the reason, and the bound rejects naming the socket if neither arrives.
+ *
+ * @param {WebSocket} ws                    the socket, already constructed
+ * @param {object} [options]
+ * @param {string} [options.url]            the socket's URL, named in the failure
+ * @param {number} [options.timeoutMs]      how long to wait (default CDP_COMMAND_TIMEOUT_MS)
+ * @returns {Promise<void>} resolves when the socket is open
+ */
+export function awaitSocketOpen(ws, { url = ws?.url || 'page target', timeoutMs = CDP_COMMAND_TIMEOUT_MS } = {}) {
+  if (ws?.readyState === 1) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.onopen = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => finish(new Error(
+      `CDP socket ${url} did not open within ${timeoutMs} ms (airhorn-2q3m)`
+    )), timeoutMs);
+    ws.onopen = () => finish(null);
+    ws.onerror = (event) => finish(new Error(
+      `CDP socket ${url} failed to open: ${event?.message || event?.error?.message || 'error'} (airhorn-2q3m)`
+    ));
+    ws.onclose = (event) => finish(new Error(
+      `CDP socket ${url} closed before it opened (code ${event?.code ?? 'unknown'}) (airhorn-2q3m)`
+    ));
+  });
+}
