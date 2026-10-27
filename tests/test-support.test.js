@@ -1168,18 +1168,24 @@ test('opening the page socket is bounded and rejects on error or close (airhorn-
   const openOutcome = await opened;
   assert.equal(openOutcome.state, 'resolved', `an open must resolve, not settle as ${openOutcome.state}`);
   assert.equal(opening.onopen, null, 'a settled open must drop its handlers, so a late event cannot settle it again');
-  // A late error after settle must be INERT: onerror is dropped, so the call is a
-  // no-op and no rejection can appear behind the suite's back as an unhandled
-  // rejection. Assert exactly that - a bare `onerror?.()` call asserts nothing.
-  let unhandled = null;
-  const onUnhandled = (reason) => { unhandled = reason; };
-  process.once('unhandledRejection', onUnhandled);
-  opening.onerror?.({ message: 'late' });
-  await new Promise((r) => setTimeout(r, 120));
-  process.removeListener('unhandledRejection', onUnhandled);
-  assert.equal(unhandled, null, `a late error after settle must not raise an unhandled rejection; got ${unhandled}`);
+  // 5. An error that arrives AFTER the helper has started waiting must reject the
+  //    wait, naming the socket - a helper that swallowed the error or resolved
+  //    anyway would pass a suite that never connected.
+  const erring = socket();
+  const errWait = awaitSocketOpen(erring, { timeoutMs: 5000 });
+  erring.onerror({ message: 'late' });
+  await assert.rejects(errWait, /CDP socket ws:\/\/127\.0\.0\.1:9\/devtools\/page\/x failed to open: late/);
 
-  // 5. Already open: resolves without waiting for an event that will never come.
+  // 6. An error that arrived BEFORE the wait leaves a dead socket: no open event is
+  //    coming, so the bound must reject and name the socket, never resolve.
+  const dead = socket();
+  dead.readyState = 3;
+  await assert.rejects(
+    awaitSocketOpen(dead, { timeoutMs: 60 }),
+    /CDP socket ws:\/\/127\.0\.0\.1:9\/devtools\/page\/x did not open within 60 ms/
+  );
+
+  // 7. Already open: resolves without waiting for an event that will never come.
   const already = await outcome(awaitSocketOpen({ readyState: 1 }));
   assert.equal(already.state, 'resolved', `an already-open socket must resolve, not settle as ${already.state}`);
 });
