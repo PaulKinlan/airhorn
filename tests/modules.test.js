@@ -13,6 +13,12 @@
  *   - src/airhorn.js still exposes the surface src/webmcp.js and the suites
  *     drive through window.__airhorn.
  *
+ * There is deliberately no "the entry points exist" case: a module that stops
+ * exporting the binder main.js imports fails AT IMPORT, naming the file, before
+ * any test body runs - so such an assertion could never be the thing that failed
+ * (airhorn-auoa). What is worth asserting is that main.js CALLS them with the
+ * right arguments, which the wiring test below does.
+ *
  * Browser-free and sub-second on purpose: it is named on every module row, so
  * it must never be the reason a row gets slow.
  */
@@ -25,11 +31,6 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { AirHorn } from '../src/airhorn.js';
-import { BlastBadge } from '../src/badge.js';
-import { bindHornInput } from '../src/input.js';
-import { bindInstaller } from '../src/install.js';
-import { bindLaunch } from '../src/launch.js';
-import { bindStatus } from '../src/status.js';
 import { trackEvent } from '../src/analytics.js';
 
 const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
@@ -225,14 +226,6 @@ test('main.js passes the app\'s real targets and callbacks, not just the binder 
     delete globalThis.__wire;
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-});
-
-test('each concern module exports the entry point main.js calls', () => {
-  assert.equal(typeof bindStatus, 'function', 'src/status.js must export bindStatus');
-  assert.equal(typeof bindHornInput, 'function', 'src/input.js must export bindHornInput');
-  assert.equal(typeof bindInstaller, 'function', 'src/install.js must export bindInstaller');
-  assert.equal(typeof bindLaunch, 'function', 'src/launch.js must export bindLaunch');
-  assert.equal(typeof BlastBadge, 'function', 'src/badge.js must export BlastBadge');
 });
 
 test('src/airhorn.js keeps the surface window.__airhorn exposes', () => {
