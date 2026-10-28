@@ -254,6 +254,35 @@ async function testBootWatchdog() {
     }
   };
 
+  // Navigate to the app and wait for the FRESH document to boot.
+  //
+  // Page.navigate resolves when the browser ACCEPTS the navigation, not when
+  // the new document commits (airhorn-ie0b, airhorn-byl0), and every case here
+  // navigates to the SAME url - so on this origin the previous document already
+  // defines window.__airhorn and a bare boot wait passes INSTANTLY on it. The
+  // probe that follows then lands in the fresh document mid-parse, where the
+  // DOM the case queries does not exist yet, and the case fails with a null
+  // dereference that says nothing about the app (Case 7 lost a green run this
+  // way at 47% steal).
+  //
+  // Mark the outgoing document, so the marker's absence can only mean a
+  // document that started after the marker was set; require the boot signal
+  // too, so the wait cannot end mid-parse (__airhorn comes from the deferred
+  // bundle, which cannot have run before the parse completes). Case 8 does
+  // this by hand; this is the same guard for every other navigation.
+  const navigateFresh = async (label, booted = 'typeof window.__airhorn !== "undefined"') => {
+    // Only a page that has booted can steal the wait, so only a page that has
+    // booted needs marking - and there, failing to mark it is fatal: an
+    // unmarked previous document is exactly the race this exists to close.
+    if (await evaluate('typeof window.__airhorn !== "undefined"').catch(() => false)) {
+      const marked = await evaluate('window.__outgoingDocument = true; 1').catch(() => false);
+      if (!marked) throw new Error(`${label}: could not mark the outgoing document before navigating`);
+    }
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+    await waitUntil(`!window.__outgoingDocument && (${booted})`, WAIT_TIMEOUT_MS,
+      `${label}: a fresh document to commit and boot`);
+  };
+
   const shot = async (name) => {
     const res = await send('Page.captureScreenshot', { format: 'png' });
     const file = path.join(EVIDENCE_DIR, `${name}.png`);
@@ -348,8 +377,7 @@ async function testBootWatchdog() {
 
     // --- Case 1: healthy boot must stay silent --------------------------------
     console.log('--- Case 1: healthy boot, banner must stay hidden');
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot');
+    await navigateFresh('case 1');
     // Painted invisibility is the assertion, not the hidden attribute: the
     // card's own display value once beat the UA [hidden] rule (caught by the
     // noscript screenshot), so check layout and computed display.
@@ -494,8 +522,7 @@ async function testBootWatchdog() {
     console.log('--- Case 5: connection drops and returns');
     // Fresh navigation so main.js (with its listeners) runs: the noscript
     // page above never executed any script.
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot');
+    await navigateFresh('case 5');
     await send('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 });
     await waitUntil(`window.__statusLog.some(m => /no connection/i.test(m))`, WAIT_TIMEOUT_MS, 'offline notice');
     await shot('offline-notice');
@@ -505,8 +532,7 @@ async function testBootWatchdog() {
 
     // --- Case 6: service worker update over an existing controller -------------
     console.log('--- Case 6: service worker update');
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot before update');
+    await navigateFresh('case 6');
     if ((await evaluate(`!!navigator.serviceWorker.controller`)) !== true) {
       throw new Error('stub SW did not claim the page; the update case needs a controller');
     }
@@ -815,8 +841,7 @@ async function testBootWatchdog() {
     // The old worker dies with its last client (this page); give the browser
     // a beat to drop the registration before the fresh navigation.
     await new Promise(r => setTimeout(r, 500));
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'fresh page to boot (v1 generation)');
+    await navigateFresh('case 10 v1 generation');
     if ((await evaluate(`window.__hadControllerAtParse`)) !== false) {
       throw new Error('expected a page with no controller at parse for the no-reload update generation');
     }
