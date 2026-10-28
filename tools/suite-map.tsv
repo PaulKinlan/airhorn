@@ -144,6 +144,9 @@ tests/webmcp-fuzz.test.mjs	tests/webmcp-fuzz.test.mjs
 tests/resilience-ui.test.mjs	tests/resilience-ui.test.mjs
 # The navigation guard's failure paths, browser-free (airhorn-xl1t): a change to the
 # test must run it, and the suite that uses the guard is on the support row below.
+# Cost: ~3s and no browser - it is on the support row, so every support/** change
+# pays it (paid deliberately: the guard's fail-open case is unreachable from a
+# browser, so nothing else can gate it).
 tests/nav-guard.test.mjs	tests/nav-guard.test.mjs
 tests/visual-overrides.test.mjs	tests/visual-overrides.test.mjs
 tests/reflow-zoom.test.mjs	tests/reflow-zoom.test.mjs
