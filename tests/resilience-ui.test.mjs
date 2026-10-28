@@ -255,30 +255,30 @@ async function testBootWatchdog() {
     }
   };
 
-  // Navigate to the app and wait for the FRESH document to boot. The flow (and
-  // every failure it has to survive) lives in support/nav-guard.mjs, because a
-  // browser cannot be made to refuse a boot check on demand and the fail-open
-  // regression airhorn-xl1t found is only reachable with a transport that does;
-  // tests/nav-guard.test.mjs drives those lines, including a mutated fail-open
-  // copy of them.
+  // Navigate to Case 6's fresh document. The flow (and every failure it has to
+  // survive) lives in support/nav-guard.mjs, because a browser cannot be made to
+  // refuse a boot check on demand and the fail-open regression airhorn-xl1t found
+  // is only reachable with a transport that does; tests/nav-guard.test.mjs drives
+  // those lines, including a mutated fail-open copy of them.
   //
-  // Which sites this actually changes (airhorn-1x2d): Case 6 is the only site
-  // this sweep covers that was genuinely racy - it navigates away from the
-  // Case 5 page, which is a booted app document. Case 1 starts from
-  // about:blank, Case 5 from the Case 4 noscript document, and Case 10 from the
-  // Case 9 page, which is deliberately left UNBOOTED (Case 9 replaces the
-  // bundle with one that throws during setup and asserts __airhorn is
-  // undefined). None of those three could lose the wait. They go through the
-  // helper anyway, because the invariant worth keeping is "every same-origin
-  // navigation to the app waits this way", and a rule with exceptions is the
-  // one the next inserted case will miss.
+  // Case 6 is the ONLY navigation in this suite that this helper guards, and it is
+  // guarded because it is genuinely racy (airhorn-1x2d): it leaves the Case 5 page,
+  // which is a booted app document, so a bare `typeof window.__airhorn` wait can be
+  // answered by the document being left (airhorn-ie0b). The other navigations keep
+  // the waits they had, because their outgoing document cannot satisfy that wait:
+  // Case 1 starts from about:blank; Case 5 follows the Case 4 noscript page, where
+  // scripting is disabled and no bundle ran; Case 10 follows the Case 9 page, which
+  // the suite asserts is unbooted (:827-828). Guarding those
+  // three would be a rule the code cannot justify - fewer guards, each with a
+  // reason, is the deliverable.
   //
-  // What this sweep does NOT cover, so nobody reads the invariant as done:
-  // Case 7's unstyled navigation keeps its own marker-based wait from
-  // fleet/retry-guard (airhorn-byl0, airhorn-0ghk) - touching those lines here
-  // would only make the two deltas conflict - and the wait after Case 6's
-  // self-reload is not a Page.navigate by this suite at all, so the marker this
-  // helper sets cannot help it.
+  // What is NOT guarded here, said plainly so this comment cannot be read as
+  // coverage it does not have: Case 7's unstyled navigation still waits bare
+  // (:578-579) - its marker-based fix is a separate delta on fleet/retry-guard
+  // (airhorn-byl0, airhorn-0ghk), and editing those lines here would only make the
+  // two deltas conflict - and Case 8 uses its own `__case8Outgoing` marker (:783)
+  // rather than this helper, because its post-boot signal is `__airhornBooted` and
+  // its marker has to be set after the fetch hold is armed.
   const navigateFresh = createNavigateFresh({
     evaluate,
     send,
@@ -381,7 +381,8 @@ async function testBootWatchdog() {
 
     // --- Case 1: healthy boot must stay silent --------------------------------
     console.log('--- Case 1: healthy boot, banner must stay hidden');
-    await navigateFresh('case 1');
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot');
     // Painted invisibility is the assertion, not the hidden attribute: the
     // card's own display value once beat the UA [hidden] rule (caught by the
     // noscript screenshot), so check layout and computed display.
@@ -526,7 +527,8 @@ async function testBootWatchdog() {
     console.log('--- Case 5: connection drops and returns');
     // Fresh navigation so main.js (with its listeners) runs: the noscript
     // page above never executed any script.
-    await navigateFresh('case 5');
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot');
     await send('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 });
     await waitUntil(`window.__statusLog.some(m => /no connection/i.test(m))`, WAIT_TIMEOUT_MS, 'offline notice');
     await shot('offline-notice');
@@ -845,7 +847,8 @@ async function testBootWatchdog() {
     // The old worker dies with its last client (this page); give the browser
     // a beat to drop the registration before the fresh navigation.
     await new Promise(r => setTimeout(r, 500));
-    await navigateFresh('case 10 v1 generation');
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'fresh page to boot (v1 generation)');
     if ((await evaluate(`window.__hadControllerAtParse`)) !== false) {
       throw new Error('expected a page with no controller at parse for the no-reload update generation');
     }

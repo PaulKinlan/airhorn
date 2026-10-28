@@ -242,10 +242,10 @@ test('a marker write that cannot be proven REFUSES to navigate', async () => {
 });
 
 test('an outgoing document that never booted needs no marker, and the wait still requires the fresh boot', async () => {
-  // Case 1 (from about:blank) and Case 5 (from the noscript page): the previous
-  // document cannot answer the wait, so marking it is pointless - but the wait
-  // must still end in the fresh, booted document, not at the first absence of
-  // the marker.
+  // The helper's other branch: a caller arrives from a document that never booted
+  // (an about:blank start, a script-disabled page). Marking it is pointless - but
+  // the wait must still end in the fresh, BOOTED document, not at the first
+  // absence of the marker.
   const sim = createSim({ outgoingBooted: false });
   await guardFor(sim)('case 1');
   assert.equal(sim.markAttempts(), 0, 'an unbooted document is not marked');
@@ -254,8 +254,9 @@ test('an outgoing document that never booted needs no marker, and the wait still
 });
 
 test("a case's own post-boot signal does not relax the fresh-document requirement", async () => {
-  // Case 8 waits for __airhornBooted, not the app marker; the guard must still
-  // refuse to end on the outgoing document, whose own signal it also carries.
+  // A caller may wait on its own post-boot signal (__airhornBooted) rather than the
+  // app marker; the guard must still refuse to end on the outgoing document, whose
+  // own signal it also carries.
   const sim = createSim();
   await guardFor(sim)('case 8', 'typeof window.__airhornBooted === "function"');
   assert.equal(sim.unknownSignals() > 0, true, 'the simulator saw the case-specific signal (it was modelled)');

@@ -14,9 +14,11 @@
  * So: mark the outgoing document, so the marker's absence can only mean a
  * document that started after the marker was set; require the boot signal too,
  * so the wait cannot end mid-parse (window.__airhorn comes from the deferred
- * bundle, which cannot have run before the parse completes). Case 8 in
- * resilience-ui does this by hand; this is the same guard for every other
- * navigation.
+ * bundle, which cannot have run before the parse completes). In resilience-ui
+ * exactly one navigation needs it - Case 6, which leaves the booted Case 5 page;
+ * Case 8 does the same thing by hand with its own marker, and the rest of the
+ * suite's navigations start from documents that cannot answer the bare wait, so
+ * they are deliberately left alone (airhorn-1x2d review).
  *
  * Why this is a module rather than a closure in the suite that uses it: the
  * guard exists for its FAILURE paths, and a real CDP surface will not refuse a
