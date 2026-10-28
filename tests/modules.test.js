@@ -9,15 +9,19 @@
  *   - every relative import resolves, and the module graph is acyclic;
  *   - src/main.js imports the concern modules and nothing else, calls each
  *     binder, and contains no behaviour of its own;
- *   - each concern module exports the entry point main.js calls;
+ *   - each concern module exports the entry point main.js calls AS A CALLABLE;
  *   - src/airhorn.js still exposes the surface src/webmcp.js and the suites
  *     drive through window.__airhorn.
  *
- * There is deliberately no "the entry points exist" case: a module that stops
- * exporting the binder main.js imports fails AT IMPORT, naming the file, before
- * any test body runs - so such an assertion could never be the thing that failed
- * (airhorn-auoa). What is worth asserting is that main.js CALLS them with the
- * right arguments, which the wiring test below does.
+ * The callable-export case is narrow on purpose and it is NOT import-existence
+ * coverage: a module that stops exporting the binder main.js imports fails at
+ * import, naming the file, before any test body runs, so that half needs no
+ * assertion. A named export that exists and is NOT CALLABLE does not fail the
+ * import - `export const bindStatus = 42` loads cleanly and src/main.js throws at
+ * CALL time, in the browser, which no browser-free suite here would see (the
+ * wiring test below substitutes stub modules for exactly these files, so it
+ * cannot catch it either). That is the whole of what the case below covers; what
+ * main.js DOES with these functions is the wiring test's job.
  *
  * Browser-free and sub-second on purpose: it is named on every module row, so
  * it must never be the reason a row gets slow.
@@ -31,6 +35,11 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { AirHorn } from '../src/airhorn.js';
+import { BlastBadge } from '../src/badge.js';
+import { bindHornInput } from '../src/input.js';
+import { bindInstaller } from '../src/install.js';
+import { bindLaunch } from '../src/launch.js';
+import { bindStatus } from '../src/status.js';
 import { trackEvent } from '../src/analytics.js';
 
 const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
@@ -225,6 +234,27 @@ test('main.js passes the app\'s real targets and callbacks, not just the binder 
     globalThis.document = savedDocument;
     delete globalThis.__wire;
     fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('the entry point each concern module exports is CALLABLE, not merely present (airhorn-auoa)', () => {
+  // Not import-existence coverage - see the header. The import above already
+  // fails loudly for a missing export; what it cannot see is an export that
+  // exists as a non-function (`export const bindStatus = 42`), which loads fine
+  // and only throws in the browser when src/main.js calls it. The reviewer that
+  // reversed the earlier cut proved the path: src/status.js:23 -> a non-callable
+  // bindStatus, import OK, src/main.js:43 throws at call time, every browser-free
+  // suite stays green, because the wiring test substitutes these modules.
+  const entryPoints = {
+    bindStatus: ['src/status.js', bindStatus],
+    bindHornInput: ['src/input.js', bindHornInput],
+    bindInstaller: ['src/install.js', bindInstaller],
+    bindLaunch: ['src/launch.js', bindLaunch],
+    BlastBadge: ['src/badge.js', BlastBadge],
+  };
+  for (const [name, [file, value]] of Object.entries(entryPoints)) {
+    assert.equal(typeof value, 'function',
+      `${file} must export ${name} as a callable; a non-function export loads fine and throws only when main.js calls it`);
   }
 });
 
