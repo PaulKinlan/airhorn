@@ -1445,17 +1445,59 @@ test('slow resume: an activated document waits for the graph instead of refusing
   }));
 });
 
-test('slow resume: an unactivated document still refuses promptly and never claims to play', async () => {
+// Drain the microtask queue so a promise chain that is waiting on no timer at
+// all (parked on the resume race) is observably parked. No timer involved, so
+// this is deterministic on any host.
+const flushMicrotasks = async (rounds = 20) => {
+  for (let i = 0; i < rounds; i += 1) await Promise.resolve();
+};
+
+test('slow resume: an unactivated document still refuses promptly and never claims to play', async (t) => {
+  /*
+   * airhorn-ynld: this case used to assert a WALL CLOCK - `elapsed < 250` - on a
+   * 100 ms bound against a 300 ms resume. Those three numbers cannot coexist on
+   * a loaded box: a 100 ms timer on a host at >80% steal fires late, and the
+   * full gate measured the refusal at 404 ms while the very same code passed at
+   * 102-195 ms in a focused bisect. That is a machine-state assertion, which is
+   * exactly the pathology the suites must not contain.
+   *
+   * The property this case actually wants is ORDERING, not duration: the refusal
+   * must be decided by the bound while the slow resume is still IN FLIGHT, never
+   * by waiting for the graph to come up - and once it has been refused, the late
+   * resume must change nothing. Virtual timers pin that to the millisecond with
+   * no dependence on the host: 100 ms of virtual time is 100 ms on a starved VM
+   * too, and the test spends no real time at all.
+   */
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   await withFakeFetch(() => withUserActivation(false, async () => {
     const ctx = new LateResumeContext(300);
     const horn = new Horn({ audioContext: ctx });
     const began = Date.now();
-    const started = await horn.start({ loop: true });
-    const elapsed = Date.now() - began;
-    assert.equal(started, false, 'a context that cannot resume must not be reported as playing');
-    assert.equal(horn.isPlaying(), false, 'nothing may be scheduled into a suspended context');
+    let outcome = 'pending';
+    horn.start({ loop: true }).then((value) => { outcome = value; }, () => { outcome = 'rejected'; });
+
+    await flushMicrotasks();
+    assert.equal(ctx.resumed, false, 'setup: the resume must still be in flight');
+    assert.equal(outcome, 'pending', 'nothing may be decided before the bound is due');
+
+    // One millisecond short of the 100 ms bound: still legitimately in flight.
+    t.mock.timers.tick(99);
+    await flushMicrotasks();
+    assert.equal(outcome, 'pending', 'the refusal must not land early - the bound is the whole grace period');
+
+    t.mock.timers.tick(1);
+    await flushMicrotasks();
+    assert.equal(outcome, false, 'a context that cannot resume must not be reported as playing');
+    assert.equal(Date.now() - began, 100, 'the refusal must be the bound firing, not the 300 ms resume completing');
+    assert.equal(ctx.resumed, false, 'the answer must arrive while the graph is still suspended - waiting longer is what the activated case is for');
+    assert.equal(horn.isPlaying(), false, 'nothing may be reported as playing');
+
+    // Let the slow resume land at last: the refusal must stand unchanged.
+    t.mock.timers.tick(200);
+    await flushMicrotasks();
+    assert.equal(ctx.state, 'running', 'setup: the late resume did eventually land');
     assert.equal(ctx.sources.length, 0, 'a refused press must not create a source');
-    assert.ok(elapsed < 250, `the refusal must stay prompt, took ${elapsed} ms`);
+    assert.equal(horn.isPlaying(), false, 'nothing may be scheduled into a context that was suspended when the press was refused');
   }));
 });
 
