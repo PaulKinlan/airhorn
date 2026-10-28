@@ -434,10 +434,12 @@ report_suite_failure() { # $1 = suite, $2 = key, $3 = log
     if [ "$d" = "$checks_dir/$tree.fast.failing-suites" ] && [ -n "$attempt_suffix" ]; then
       target_file="$d/$key$attempt_suffix.log"
     fi
+    rm -f "$target_file" 2>/dev/null || true
     if tail -c 524288 "$log" > "$target_file" 2>/dev/null && [ -s "$target_file" ]; then
       echo "fast-gate: suite log preserved at $target_file"
       if [ "$target_file" != "$d/$key.log" ]; then
-        ln -sf "$key$attempt_suffix.log" "$d/$key.log" 2>/dev/null || cp -f "$target_file" "$d/$key.log" 2>/dev/null || true
+        rm -f "$d/$key.log" 2>/dev/null || true
+        cp -f "$target_file" "$d/$key.log" 2>/dev/null || true
       fi
     else
       echo "fast-gate: warning: suite log could not be preserved at $target_file" >&2
