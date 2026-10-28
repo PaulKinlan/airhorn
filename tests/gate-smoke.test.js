@@ -156,7 +156,10 @@ const buildGateProbe = () => {
     '!*.md',
     '',
   ].join('\n'));
-  for (const args of [['init'], ['config', 'user.email', 'probe@example.invalid'], ['config', 'user.name', 'probe'], ['add', '-A'], ['commit', '-m', 'probe']]) {
+  // `branch -M master`: the gate resolves its default base from origin/master, master, origin/main,
+  // main (fast-gate.sh:132-138), so a probe repo whose init default is anything else would test
+  // NOTHING about base resolution while still exiting 1 - the vacuous pass this replaces.
+  for (const args of [['init'], ['config', 'user.email', 'probe@example.invalid'], ['config', 'user.name', 'probe'], ['add', '-A'], ['commit', '-m', 'probe'], ['branch', '-M', 'master']]) {
     const g = spawnSync('git', ['-C', probe, ...args], { encoding: 'utf8' });
     assert.equal(g.status, 0, `probe git ${args[0]} failed: ${g.stderr}`);
   }
@@ -722,8 +725,37 @@ test('an ambient FAST_GATE_RUNNER cannot replace the pinned runner (airhorn-v6th
   try {
     // The same class one knob over: an ambient FAST_GATE_BASE decides what is EXAMINED, and a base at
     // or after the change selects nothing - the 'no changed files' line, which the fleet contract
-    // certifies as a no-work pass (defined here for now; the base-resolution form arrives in the next
-    // commit, which is where the --changed bypass this leg used to have is fixed).
+    // certifies as a no-work pass. Refused here for the same reason (--base is the recorded spelling).
+    //
+    // This leg must run BASE RESOLUTION: `--changed` bypasses it entirely (fast-gate.sh:133), so the
+    // earlier version of this probe passed two of its three assertions even while FAST_GATE_BASE was
+    // honoured - only the stderr check bit (review finding). So: a COMMITTED change and no --changed,
+    // with the sensitivity proved first - without the export, the same invocation must really select
+    // the suite, otherwise a refusal proves nothing about what the base would have done.
+    // The change goes on its OWN branch: committing it to master would move the base with it, leaving
+    // "no changed files" for the honest run too, and the sensitivity check below would be vacuous.
+    const branch = spawnSync('git', ['-C', probe, 'checkout', '-b', 'lane'], { encoding: 'utf8' });
+    assert.equal(branch.status, 0, `probe git checkout failed: ${branch.stderr}`);
+    fs.writeFileSync(path.join(probe, 'src', 'a.js'), '// a committed change\n');
+    // Only the source file is committed: the probe directory also holds the forged runner, an
+    // untracked file that `add -A` would put in the delta and the gate would rightly call unmapped.
+    for (const args of [['add', 'src/a.js'], ['commit', '-m', 'a committed change']]) {
+      const g = spawnSync('git', ['-C', probe, ...args], { encoding: 'utf8' });
+      assert.equal(g.status, 0, `probe git ${args[0]} failed: ${g.stderr}`);
+    }
+    const resolved = run([]);
+    assert.equal(resolved.status, 0, `the committed change must be selected by base resolution: ${resolved.stdout}${resolved.stderr}`);
+    assert.ok(resolved.stdout.includes('fast-gate: PASS (1 suite(s), 1 changed file(s))'),
+      `base resolution must see the committed change, or the refusal below proves nothing: ${resolved.stdout}`);
+
+    const ambientBase = run([], { FAST_GATE_BASE: 'HEAD' });
+    assert.equal(ambientBase.status, 1,
+      `an ambient FAST_GATE_BASE must not decide what is examined: ${ambientBase.stdout}${ambientBase.stderr}`);
+    assert.ok(!ambientBase.stdout.includes('fast-gate: no changed files'),
+      `no no-work verdict line may be printed: ${ambientBase.stdout}`);
+    assert.ok(ambientBase.stderr.includes('FAST_GATE_BASE') && ambientBase.stderr.includes('--base'),
+      `the refusal must name the knob and the sanctioned spelling: ${ambientBase.stderr}`);
+
     // The finding's repro, with its baseline first: a RED suite selected by a source shape.
     fs.writeFileSync(path.join(probe, 'tests', 'fail.test.js'),
       "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('one failing case', () => { assert.equal(1, 2); });\n");
@@ -764,12 +796,6 @@ test('an ambient FAST_GATE_RUNNER cannot replace the pinned runner (airhorn-v6th
     assert.equal(narrowed.status, 1, `a narrowed runner must not be honoured: ${narrowed.stdout}${narrowed.stderr}`);
     assert.ok(narrowed.stderr.includes('--test-only'), `the refusal must quote the exported value: ${narrowed.stderr}`);
     assert.ok(!fs.existsSync(marker), 'the narrowed runner must not have executed either');
-
-    // The same class one knob over: an ambient FAST_GATE_BASE decides what is EXAMINED.
-    const ambientBase = run(['--changed', 'src/fail-src.js'], { FAST_GATE_BASE: 'HEAD' });
-    assert.equal(ambientBase.status, 1, `an ambient FAST_GATE_BASE must not decide what is examined: ${ambientBase.stdout}`);
-    assert.ok(ambientBase.stderr.includes('FAST_GATE_BASE') && ambientBase.stderr.includes('--base'),
-      `the refusal must name the knob and the sanctioned spelling: ${ambientBase.stderr}`);
 
     // An export that AGREES with the pin changes nothing, so it stays allowed: the real pinned runner
     // runs the real suite and the pinned verdict line is unchanged.
