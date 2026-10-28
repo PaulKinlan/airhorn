@@ -258,18 +258,25 @@ async function testBootWatchdog() {
   //
   // Page.navigate resolves when the browser ACCEPTS the navigation, not when
   // the new document commits (airhorn-ie0b, airhorn-byl0), and every case here
-  // navigates to the SAME url - so on this origin the previous document already
-  // defines window.__airhorn and a bare boot wait passes INSTANTLY on it. The
-  // probe that follows then lands in the fresh document mid-parse, where the
-  // DOM the case queries does not exist yet, and the case fails with a null
-  // dereference that says nothing about the app (Case 7 lost a green run this
-  // way at 47% steal).
+  // navigates to the SAME url - so where the previous document is itself a
+  // booted app page, it defines window.__airhorn too and a bare boot wait
+  // passes INSTANTLY on it. The probe that follows then lands in the fresh
+  // document mid-parse, where the DOM the case queries does not exist yet, and
+  // the case fails with a null dereference that says nothing about the app
+  // (Case 7 lost a green run this way at 47% steal).
   //
   // Mark the outgoing document, so the marker's absence can only mean a
   // document that started after the marker was set; require the boot signal
   // too, so the wait cannot end mid-parse (__airhorn comes from the deferred
   // bundle, which cannot have run before the parse completes). Case 8 does
   // this by hand; this is the same guard for every other navigation.
+  //
+  // Which sites this actually changes (airhorn-1x2d): Cases 6 and 10 navigate
+  // away from a booted app page and were genuinely racy. Case 1 starts from
+  // about:blank and Case 5 starts from the Case 4 noscript document, so neither
+  // could lose the wait - they go through the helper anyway, because the rule
+  // worth keeping is "every same-origin navigation to the app waits this way",
+  // and a rule with two exceptions is one the next inserted case will miss.
   const navigateFresh = async (label, booted = 'typeof window.__airhorn !== "undefined"') => {
     // Only a page that has booted can steal the wait, so only a page that has
     // booted needs marking - and there, failing to mark it is fatal: an
