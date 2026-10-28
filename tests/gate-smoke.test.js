@@ -388,7 +388,8 @@ test('fast-gate failure preserves failing-suite output and assertion text (airho
     // Probe's git tree hash
     const tree = spawnSync('git', ['-C', probe, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).stdout.trim();
     const fakeRec = path.join(fakeChecksDir, `${tree}.fast.json`);
-    fs.writeFileSync(fakeRec, JSON.stringify({ state: 'RUNNING', tree }));
+    const attemptTime1 = '2026-10-27T18:32:36Z';
+    fs.writeFileSync(fakeRec, JSON.stringify({ state: 'RUNNING', tree, at: attemptTime1 }));
 
     const res = run(['--changed', 'fail-src.js'], {
       AIRHORN_RESULTS_DIR: failingResultsDir,
@@ -416,7 +417,9 @@ test('fast-gate failure preserves failing-suite output and assertion text (airho
       `results dir log must contain the assertion failure:\n${resultsContent}`
     );
 
-    // 3. Preserved failing-suite log in checks_dir/<tree>.fast.failing-suites/
+    // 3. Preserved failing-suite log in checks_dir/<tree>.fast.failing-suites/ scoped by attempt (airhorn-4o5m)
+    const suffixedLog1 = path.join(fakeChecksDir, `${tree}.fast.failing-suites`, 'tests_fail_test_js.20261027T183236Z.log');
+    assert.ok(fs.existsSync(suffixedLog1), `attempt-scoped log must exist at ${suffixedLog1}`);
     const preservedChecksLog = path.join(fakeChecksDir, `${tree}.fast.failing-suites`, 'tests_fail_test_js.log');
     assert.ok(fs.existsSync(preservedChecksLog), `checks dir log must exist at ${preservedChecksLog}`);
     const checksContent = fs.readFileSync(preservedChecksLog, 'utf8');
@@ -425,15 +428,57 @@ test('fast-gate failure preserves failing-suite output and assertion text (airho
       `checks dir log must contain the assertion failure:\n${checksContent}`
     );
 
-    // 4. Record JSON updated with failing_suites
+    // 4. Record JSON updated with failing_suites citing attempt-scoped log
     const recContent = JSON.parse(fs.readFileSync(fakeRec, 'utf8'));
     assert.ok(recContent.failing_suites, 'record JSON must contain failing_suites');
     assert.ok(recContent.failing_suites['tests/fail.test.js'], 'failing_suites must contain tests/fail.test.js');
-    assert.equal(recContent.failing_suites['tests/fail.test.js'].log, preservedChecksLog);
+    assert.equal(recContent.failing_suites['tests/fail.test.js'].log, suffixedLog1);
     assert.ok(
       recContent.failing_suites['tests/fail.test.js'].snippet.includes('AIRHORN_RUMQ_ASSERTION_MARKER_TEST_FAILURE'),
       `snippet must contain the assertion failure:\n${recContent.failing_suites['tests/fail.test.js'].snippet}`
     );
+
+    // 5. Re-gate of same tree does not overwrite earlier attempt's log (airhorn-4o5m)
+    const fakeRec1 = path.join(fakeChecksDir, `${tree}.fast.json.1`);
+    fs.copyFileSync(fakeRec, fakeRec1);
+    const attemptTime2 = '2026-10-27T19:45:00Z';
+    fs.writeFileSync(fakeRec, JSON.stringify({ state: 'RUNNING', tree, at: attemptTime2 }));
+    const res2 = run(['--changed', 'fail-src.js'], {
+      AIRHORN_RESULTS_DIR: failingResultsDir,
+      AIRHORN_CHECKS_DIR: fakeChecksDir,
+    });
+    assert.equal(res2.status, 1);
+    const suffixedLog2 = path.join(fakeChecksDir, `${tree}.fast.failing-suites`, 'tests_fail_test_js.20261027T194500Z.log');
+    assert.ok(fs.existsSync(suffixedLog2), `second attempt log must exist at ${suffixedLog2}`);
+    assert.ok(fs.existsSync(suffixedLog1), `first attempt log must still survive after re-gate at ${suffixedLog1}`);
+    const rotatedRec = JSON.parse(fs.readFileSync(fakeRec1, 'utf8'));
+    assert.equal(rotatedRec.failing_suites['tests/fail.test.js'].log, suffixedLog1,
+      'rotated record still points to the first attempt log, not overwritten');
+
+    // 6. Failing-suites destination where write fails does not cite missing log (airhorn-xw3i)
+    const roChecksDir = path.join(probe, 'ro-checks');
+    fs.mkdirSync(roChecksDir, { recursive: true });
+    const roSubdir = path.join(roChecksDir, `${tree}.fast.failing-suites`);
+    fs.mkdirSync(roSubdir, { recursive: true });
+    fs.chmodSync(roSubdir, 0o500); // read-only subdir; file cannot be written inside
+    const roRec = path.join(roChecksDir, `${tree}.fast.json`);
+    fs.writeFileSync(roRec, JSON.stringify({ state: 'RUNNING', tree, at: attemptTime1 }));
+    const resRo = run(['--changed', 'fail-src.js'], {
+      AIRHORN_RESULTS_DIR: failingResultsDir,
+      AIRHORN_CHECKS_DIR: roChecksDir,
+    });
+    fs.chmodSync(roSubdir, 0o700); // restore for cleanup
+    assert.equal(resRo.status, 1);
+    assert.ok(!resRo.stdout.includes(roSubdir),
+      `gate must not claim log is preserved when write failed:\n${resRo.stdout}`);
+    assert.ok(resRo.stderr.includes('warning: suite log could not be preserved'),
+      `gate must warn when write fails:\n${resRo.stderr}`);
+    const roRecContent = JSON.parse(fs.readFileSync(roRec, 'utf8'));
+    assert.ok(roRecContent.failing_suites['tests/fail.test.js'], 'failing_suites must be recorded');
+    assert.strictEqual(roRecContent.failing_suites['tests/fail.test.js'].log, undefined,
+      'must not cite a dead path in .log when write failed');
+    assert.ok(roRecContent.failing_suites['tests/fail.test.js'].snippet.includes('AIRHORN_RUMQ_ASSERTION_MARKER_TEST_FAILURE'),
+      'snippet survives in record even when log write failed');
   } finally {
     fs.rmSync(probe, { recursive: true, force: true });
   }

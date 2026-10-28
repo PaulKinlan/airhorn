@@ -753,35 +753,62 @@ report_suite_failure() { # $1 = suite, $2 = key, $3 = log
     fi
   fi
 
-  # Preserve failing suite output in durable locations (size-capped at 512KB)
+  # Preserve failing suite output in durable locations (size-capped at 512KB).
+  # If a check record exists, scope the log name with the record's attempt timestamp (airhorn-4o5m)
+  # so a re-gate of the same tree does not overwrite the log cited by earlier rotated records.
   local tree dest_dirs=()
   dest_dirs+=("$RESULTS_DIR/failing-suites")
   local checks_dir="${AIRHORN_CHECKS_DIR:-$HOME/.fleet/checks}"
   tree=$(git rev-parse -q --verify 'HEAD^{tree}' 2>/dev/null || true)
+  local rec="" attempt_suffix=""
   if [ -n "$tree" ] && [ -d "$checks_dir" ]; then
     dest_dirs+=("$checks_dir/$tree.fast.failing-suites")
+    rec="$checks_dir/$tree.fast.json"
+    if [ -f "$rec" ] && command -v jq >/dev/null 2>&1; then
+      local rec_at
+      rec_at=$(jq -r '.at // empty' "$rec" 2>/dev/null || true)
+      if [ -n "$rec_at" ]; then
+        attempt_suffix=".$(printf '%s' "$rec_at" | tr -dc '0-9A-Za-z')"
+      fi
+    fi
   fi
   if [ -n "${AIRHORN_FAILING_SUITES_DIR:-}" ]; then
     dest_dirs+=("$AIRHORN_FAILING_SUITES_DIR")
   fi
+
   for d in "${dest_dirs[@]}"; do
     mkdir -p "$d" 2>/dev/null || true
-    tail -c 524288 "$log" > "$d/$key.log" 2>/dev/null || true
-    echo "fast-gate: suite log preserved at $d/$key.log"
+    local target_file="$d/$key.log"
+    if [ "$d" = "$checks_dir/$tree.fast.failing-suites" ] && [ -n "$attempt_suffix" ]; then
+      target_file="$d/$key$attempt_suffix.log"
+    fi
+    if tail -c 524288 "$log" > "$target_file" 2>/dev/null && [ -s "$target_file" ]; then
+      echo "fast-gate: suite log preserved at $target_file"
+      if [ "$target_file" != "$d/$key.log" ]; then
+        ln -sf "$key$attempt_suffix.log" "$d/$key.log" 2>/dev/null || cp -f "$target_file" "$d/$key.log" 2>/dev/null || true
+      fi
+    else
+      echo "fast-gate: warning: suite log could not be preserved at $target_file" >&2
+    fi
   done
 
-  # If running under fleet-check and the JSON check record exists, embed failing suite info
-  if [ -n "$tree" ] && [ -d "$checks_dir" ]; then
-    local rec="$checks_dir/$tree.fast.json"
-    if [ -f "$rec" ] && command -v jq >/dev/null 2>&1; then
-      local snippet
-      snippet=$(awk '
-        /^not ok / { in_fail=1 }
-        in_fail { print; if (/^[ \t]*\.\.\.[ \t]*$/) in_fail=0 }
-      ' "$log" 2>/dev/null | head -n 30)
-      [ -n "$snippet" ] || snippet=$(tail -n 25 "$log" 2>/dev/null)
-      jq --arg s "$s" --arg p "$checks_dir/$tree.fast.failing-suites/$key.log" --arg snip "$snippet" \
+  # If running under fleet-check and the JSON check record exists, embed failing suite info.
+  # Only cite the preserved log path if the file was actually written to disk (airhorn-xw3i).
+  if [ -n "$rec" ] && [ -f "$rec" ] && command -v jq >/dev/null 2>&1; then
+    local snippet
+    snippet=$(awk '
+      /^not ok / { in_fail=1 }
+      in_fail { print; if (/^[ \t]*\.\.\.[ \t]*$/) in_fail=0 }
+    ' "$log" 2>/dev/null | head -n 30)
+    [ -n "$snippet" ] || snippet=$(tail -n 25 "$log" 2>/dev/null)
+    local cited_path="$checks_dir/$tree.fast.failing-suites/$key${attempt_suffix:-}.log"
+    if [ -s "$cited_path" ]; then
+      jq --arg s "$s" --arg p "$cited_path" --arg snip "$snippet" \
         '.failing_suites = ((.failing_suites // {}) + {($s): {log: $p, snippet: $snip}})' \
+        "$rec" > "$rec.tmp.$$" 2>/dev/null && mv -f "$rec.tmp.$$" "$rec" || rm -f "$rec.tmp.$$"
+    else
+      jq --arg s "$s" --arg snip "$snippet" \
+        '.failing_suites = ((.failing_suites // {}) + {($s): {snippet: $snip}})' \
         "$rec" > "$rec.tmp.$$" 2>/dev/null && mv -f "$rec.tmp.$$" "$rec" || rm -f "$rec.tmp.$$"
     fi
   fi
