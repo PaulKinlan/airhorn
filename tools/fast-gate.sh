@@ -28,6 +28,14 @@
 #   FAST_GATE_ALLOW_ZERO=1 bash tools/fast-gate.sh  # bless a suite-free change (every ignored file:
 #                                                #   an exemption row or a deleted suite)
 #
+# FAST_GATE_RUNNER is NOT a knob (airhorn-v6th): the runner is pinned by tools/gate.conf. An exported
+# FAST_GATE_RUNNER that DIFFERS from the pin exits 1 before anything runs (an export equal to the pin
+# is a no-op). It used to win unconditionally, so `FAST_GATE_RUNNER=/tmp/fakerun.sh` turned a RED
+# suite into a green verdict with a normal PASS line and no trace, and a leftover `--test-only`
+# produced a genuine TAP summary over a SUBSET of cases. Changing the runner is an edit to gate.conf
+# - a reviewed, committed diff - or your own gate.conf in your copy of tools/ (how the probes do it).
+# FAST_GATE_BASE is refused the same way: '--base <ref>' is the sanctioned spelling for a base.
+#
 # Exit codes: 0 = every selected suite passed (or nothing was affected, or a zero-execution verdict
 # was explicitly acknowledged with FAST_GATE_ALLOW_ZERO=1: every changed file exempt or a deleted
 # suite, or every selected suite '~'-pending); 1 = a suite failed, a mapped suite is missing, a changed file is
@@ -41,12 +49,39 @@ MAP="$HERE/suite-map.tsv"
 CONF="$HERE/gate.conf"
 
 [ -f "$MAP" ] || { echo "fast-gate: no $MAP — the map IS the gate; refusing to guess" >&2; exit 1; }
-# An explicitly exported FAST_GATE_RUNNER wins over gate.conf's.
-_ENV_FAST=${FAST_GATE_RUNNER-}
+# The runner comes from gate.conf ONLY (airhorn-v6th). This knob decides WHAT EXECUTES, so an
+# ambient export used to weaken every verdict the fleet takes from this repo (airhorn-bt55 closed
+# the same class for FAST_GATE_SKIP_BUILD; GSM_TOOLS_ROOT followed the same rule - honoured only
+# under the minted test guard). Here the rule is stricter and cheaper, because nothing in the tree
+# exports it (git grep: only tools/fast-gate.sh and tools/gate.conf) and a probe that needs a
+# different runner copies tools/ and writes its own gate.conf (tests/gate-smoke.test.js does).
+# An export equal to the pin is a no-op; one that differs FAILS, here, before any suite runs, so a
+# forged runner cannot green a RED suite and a narrowed one cannot silently skip cases.
+_ENV_RUNNER=${FAST_GATE_RUNNER-}
+_ENV_BASE=${FAST_GATE_BASE-}
 # shellcheck disable=SC1090
 [ -f "$CONF" ] && . "$CONF"
-[ -n "$_ENV_FAST" ] && FAST_GATE_RUNNER=$_ENV_FAST
 FAST_GATE_RUNNER=${FAST_GATE_RUNNER:-node --test}
+if [ -n "$_ENV_RUNNER" ] && [ "$_ENV_RUNNER" != "$FAST_GATE_RUNNER" ]; then
+  echo "fast-gate: FAIL - FAST_GATE_RUNNER is exported as '$_ENV_RUNNER', but the runner is pinned by" >&2
+  echo "fast-gate: $CONF as '$FAST_GATE_RUNNER'. An ambient export must not decide what executes:" >&2
+  echo "fast-gate: a forged runner greens a RED suite with a normal PASS line, and a leftover" >&2
+  echo "fast-gate: '--test-only' greens a subset of cases (airhorn-v6th). Unset FAST_GATE_RUNNER and" >&2
+  echo "fast-gate: re-run; to really change the runner, edit tools/gate.conf in a reviewed diff." >&2
+  exit 1
+fi
+# FAST_GATE_BASE is the same class one knob over, so it is refused the same way (airhorn-v6th):
+# the base decides WHAT IS EXAMINED, and a base at or after the change selects no path at all -
+# which prints 'fast-gate: no changed files', a line the fleet contract certifies as a no-work
+# pass, so an ambient base could green a change nothing ran. '--base <ref>' is the sanctioned
+# spelling: it is on the command line, so the choice is in the record instead of inherited.
+if [ -n "$_ENV_BASE" ]; then
+  echo "fast-gate: FAIL - FAST_GATE_BASE is exported as '$_ENV_BASE'. An ambient base decides what is" >&2
+  echo "fast-gate: examined: a base at or after the change selects nothing and prints 'no changed" >&2
+  echo "fast-gate: files', which certifies as a no-work pass (airhorn-v6th). Unset FAST_GATE_BASE and" >&2
+  echo "fast-gate: re-run, or pass '--base <ref>' on the command line where the choice is recorded." >&2
+  exit 1
+fi
 # Parallelism FALLBACK: one suite per core. This value only applies to a tree
 # with no tools/gate.conf - this repo pins FAST_GATE_JOBS=1 there on purpose,
 # because its browser suites each launch a headless Chrome and the fleet rule is
@@ -86,7 +121,7 @@ runner_for() {
   esac
 }
 
-LIST=0; BASE="${FAST_GATE_BASE:-}"; EXPLICIT=()
+LIST=0; BASE=""; EXPLICIT=()
 while [ $# -gt 0 ]; do
   case $1 in
     --list)    LIST=1; shift ;;

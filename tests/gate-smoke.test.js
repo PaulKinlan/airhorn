@@ -670,6 +670,78 @@ test('ambient GSM_TOOLS_ROOT redirection is impossible without the minted guard 
   }
 });
 
+test('an ambient FAST_GATE_RUNNER cannot replace the pinned runner (airhorn-v6th)', {
+  // FAST_GATE_RUNNER decides WHAT EXECUTES, and it used to win over tools/gate.conf unconditionally:
+  // a four-line script printing a TAP header greened a RED suite with a normal PASS line and left no
+  // trace in the record, and a leftover '--test-only' in an exported runner still emitted a genuine
+  // TAP summary over a SUBSET of cases - the accident the finding expected to happen in a lane shell.
+  // The runner is now pinned by gate.conf alone: an export that DIFFERS exits 1 before any suite
+  // runs, and an export equal to the pin is a no-op. Both legs run the REAL gate in a throwaway
+  // repo (buildGateProbe copies tools/gate.conf, so the pin under test is the real one).
+  skip: guardActive() ? 'self-invocation guard' : false,
+}, () => {
+  const { probe, run } = buildGateProbe();
+  try {
+    // The finding's repro, with its baseline first: a RED suite selected by a source shape.
+    fs.writeFileSync(path.join(probe, 'tests', 'fail.test.js'),
+      "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('one failing case', () => { assert.equal(1, 2); });\n");
+    fs.writeFileSync(path.join(probe, 'src', 'fail-src.js'), '// fail');
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'src/fail-src.js\ttests/fail.test.js\n');
+
+    const redBaseline = run(['--changed', 'src/fail-src.js']);
+    assert.equal(redBaseline.status, 1, `the RED suite must fail the gate unaided: ${redBaseline.stdout}`);
+    assert.ok(redBaseline.stdout.includes('fast-gate: failed: tests/fail.test.js'),
+      `the baseline must name the failing suite: ${redBaseline.stdout}`);
+
+    const marker = path.join(probe, 'fakerun.ran');
+    const fakeRunner = path.join(probe, 'fakerun.sh');
+    // The forged runner prints exactly what report_cases() reads as a real pass, so this pin fails if
+    // the gate ever honours the export again (the pre-fix gate greened the RED suite above with a
+    // normal 'fast-gate: PASS' line from this same script). The marker file proves it never ran.
+    fs.writeFileSync(fakeRunner,
+      `#!/usr/bin/env bash\n: > "${marker}"\necho 'TAP version 13'\necho '1..1'\necho 'ok 1 - forged'\necho '# pass 1'\necho '# fail 0'\n`);
+    fs.chmodSync(fakeRunner, 0o755);
+
+    const forged = run(['--changed', 'src/fail-src.js'], { FAST_GATE_RUNNER: fakeRunner });
+    assert.equal(forged.status, 1, `a forged FAST_GATE_RUNNER must not green a RED suite: ${forged.stdout}${forged.stderr}`);
+    assert.ok(!forged.stdout.includes('fast-gate: PASS'), `no PASS line may be printed: ${forged.stdout}`);
+    assert.ok(!forged.stdout.includes('fast-gate: passed:'), `no suite may be reported as passed: ${forged.stdout}`);
+    assert.ok(forged.stderr.includes('FAST_GATE_RUNNER'), `the refusal must name the override: ${forged.stderr}`);
+    assert.ok(forged.stderr.includes(path.join('tools', 'gate.conf')),
+      `the refusal must name the single source: ${forged.stderr}`);
+    assert.ok(!fs.existsSync(marker), 'the forged runner must never have been executed');
+
+    // A REAL runner narrowed to a subset of cases is refused the same way: being genuine is not the
+    // test, agreeing with the pin is.
+    const narrowed = run(['--changed', 'src/fail-src.js'],
+      { FAST_GATE_RUNNER: 'node --test --test-reporter=tap --test-only' });
+    assert.equal(narrowed.status, 1, `a narrowed runner must not be honoured: ${narrowed.stdout}${narrowed.stderr}`);
+    assert.ok(narrowed.stderr.includes('--test-only'), `the refusal must quote the exported value: ${narrowed.stderr}`);
+    assert.ok(!fs.existsSync(marker), 'the narrowed runner must not have executed either');
+
+    // The same class one knob over: an ambient FAST_GATE_BASE decides what is EXAMINED, and a base at
+    // or after the change selects nothing - the 'no changed files' line, which the fleet contract
+    // certifies as a no-work pass. Refused here for the same reason (--base is the recorded spelling).
+    const ambientBase = run(['--changed', 'src/fail-src.js'], { FAST_GATE_BASE: 'HEAD' });
+    assert.equal(ambientBase.status, 1, `an ambient FAST_GATE_BASE must not decide what is examined: ${ambientBase.stdout}`);
+    assert.ok(!ambientBase.stdout.includes('fast-gate: no changed files'),
+      `no no-work verdict line may be printed: ${ambientBase.stdout}`);
+    assert.ok(ambientBase.stderr.includes('FAST_GATE_BASE') && ambientBase.stderr.includes('--base'),
+      `the refusal must name the knob and the sanctioned spelling: ${ambientBase.stderr}`);
+
+    // An export that AGREES with the pin changes nothing, so it stays allowed: the real pinned runner
+    // runs the real suite and the pinned verdict line is unchanged.
+    const pinned = /^FAST_GATE_RUNNER=["']?(.*?)["']?$/m
+      .exec(fs.readFileSync(path.join(probe, 'tools', 'gate.conf'), 'utf8'))[1];
+    const agreeing = run(['--changed', 'src/a.js'], { FAST_GATE_RUNNER: pinned });
+    assert.equal(agreeing.status, 0, `an export equal to the pin must be a no-op: ${agreeing.stderr}`);
+    assert.ok(agreeing.stdout.includes('fast-gate: PASS (1 suite(s), 1 changed file(s))'),
+      `the pinned verdict line must be unchanged: ${agreeing.stdout}`);
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
 // The audit's render instrument as a decision TABLE (airhorn-0w9, -cpi, -9py,
 // -7s3, -4jw, -s52). Every fact below is what Chrome 155 MEASURED for that
 // arrangement - checkVisibility without visibilityProperty ('boxChain'), the
