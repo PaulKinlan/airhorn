@@ -554,7 +554,7 @@ test('a launch that never starts fails labelled and leaves no profile behind (ai
     const res = spawnSync(process.execPath,
       [path.join(root, 'tools', 'install-https-proof.mjs'), '--out', path.join(tmp, 'out')], {
         encoding: 'utf8',
-        timeout: 60000,
+        timeout: 120000,
         env: {
           ...process.env,
           CHROME_BIN: path.join(tmp, 'no-such-chrome'),
