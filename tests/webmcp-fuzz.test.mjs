@@ -100,6 +100,13 @@ async function withTools(airhorn, options, fn) {
   return fn(modelContext);
 }
 
+// Drain the microtask queue so a tool call parked on its own timer is
+// observably parked. No timer is involved in the drain itself, so this cannot
+// vary with the host (airhorn-9sbz).
+const flushMicrotasks = async (rounds = 30) => {
+  for (let i = 0; i < rounds; i += 1) await Promise.resolve();
+};
+
 const hex = (length) => 'x'.repeat(length);
 
 // --- input validation: refusals name the type, never the payload -------------
@@ -133,19 +140,38 @@ test('play_horn refuses wrong-typed input with a structured error instead of coe
   }
 });
 
-test('a hostile megabyte payload is refused quickly and never echoed back', async () => {
+/*
+ * airhorn-9sbz: this case used to end with `elapsed < 100`, and that is not a
+ * measurement of this code. The delta spanned an await boundary, so it measured
+ * how long the HOST kept the process from running: at 95% steal one deschedule
+ * between the two Date.now() calls turns a correct refusal red, while the work
+ * being timed is a typeof check - there is nothing there to measure (the same
+ * class as airhorn-ynld and airhorn-wqge).
+ *
+ * So the clock is gone and the claim in the name went with it: this case now
+ * proves what it can, without the host's help. Nothing about the megabyte may
+ * reach the answer - the refusal is byte-for-byte the one a ONE-CHARACTER
+ * payload gets, and the payload never appears in it - and nothing is scheduled.
+ */
+test('a hostile megabyte payload is refused without processing or echoing it', async () => {
   const payload = hex(1_000_000);
   const airhorn = createFakeAirHorn();
   await withTools(airhorn, {}, async (modelContext) => {
-    const started = Date.now();
+    const small = await modelContext.executeTool('play_horn', { loop: 'x' });
     const result = await modelContext.executeTool('play_horn', { loop: payload });
-    const elapsed = Date.now() - started;
 
     assert.equal(result.code, 'invalid_input');
     assert.ok(result.error.length < 200, `error message must stay small, got ${result.error.length} chars`);
     assert.ok(!result.error.includes(payload.slice(0, 32)), 'the payload must not be repeated in the error');
-    assert.ok(elapsed < 100, `a megabyte of junk must be refused promptly, took ${elapsed}ms`);
-    assert.equal(airhorn.state.starts, 0);
+    // Size cannot change the answer: whatever the caller sent, the refusal is
+    // decided by the TYPE. A refusal that grew with the payload would show up
+    // here even though it would still have been under the 200-char bound.
+    assert.deepEqual(
+      { code: result.code, error: result.error },
+      { code: small.code, error: small.error },
+      'a megabyte and a single character must be refused identically',
+    );
+    assert.equal(airhorn.state.starts, 0, 'a refused call must not sound the horn');
   });
 });
 
@@ -316,16 +342,40 @@ test('stop_horn is never rate limited and answers immediately during a play floo
 
 // --- audio graph not ready, unreachable, or slow ----------------------------
 
-test('a start that never settles times out as a structured error and is silenced', async () => {
+/*
+ * airhorn-9sbz: this case used to end with `elapsed < 1000` around a 25 ms
+ * timeout, and it went red on this VM at 95% steal - measured 1799 ms on a
+ * 2026-10-28 run while the tool did exactly the right thing. The delta spanned
+ * an await, so it timed the host, not the tool: 40x margin buys nothing when the
+ * process can be descheduled for a second between the two Date.now() calls.
+ *
+ * Virtual timers pin the claim exactly and cost no real time: the tool answers
+ * AT its configured timeout and not one millisecond sooner, which is a stronger
+ * statement than "answered inside a second".
+ */
+test('a start that never settles times out on its own timer and is silenced', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   const airhorn = createFakeAirHorn({ startImpl: () => new Promise(() => {}) });
   await withTools(airhorn, { startTimeoutMs: 25 }, async (modelContext) => {
-    const started = Date.now();
-    const result = await modelContext.executeTool('play_horn', { loop: true });
-    const elapsed = Date.now() - started;
+    const began = Date.now();
+    let outcome = 'pending';
+    modelContext.executeTool('play_horn', { loop: true })
+      .then((value) => { outcome = value; }, () => { outcome = 'rejected'; });
 
-    assert.equal(result.code, 'timeout');
-    assert.match(result.error, /did not start/);
-    assert.ok(elapsed < 1000, `the tool must not hang on a stuck start, took ${elapsed}ms`);
+    await flushMicrotasks();
+    assert.equal(outcome, 'pending', 'a stuck start must not be answered before its timeout is due');
+
+    t.mock.timers.tick(24);
+    await flushMicrotasks();
+    assert.equal(outcome, 'pending', 'the tool must give the start its full timeout');
+
+    t.mock.timers.tick(1);
+    await flushMicrotasks();
+    assert.notEqual(outcome, 'pending', 'the tool must not hang on a start that never settles');
+    assert.notEqual(outcome, 'rejected', 'the tool must resolve with a structured error, never reject');
+    assert.equal(outcome.code, 'timeout');
+    assert.match(outcome.error, /did not start/);
+    assert.equal(Date.now() - began, 25, 'the answer must be the configured timeout, not a lucky host');
     assert.ok(airhorn.state.stops >= 1, 'the abandoned start must be stopped, not left to blast later');
   });
 });
