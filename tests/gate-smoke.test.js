@@ -479,6 +479,17 @@ test('fast-gate failure preserves failing-suite output and assertion text (airho
       'must not cite a dead path in .log when write failed');
     assert.ok(roRecContent.failing_suites['tests/fail.test.js'].snippet.includes('AIRHORN_RUMQ_ASSERTION_MARKER_TEST_FAILURE'),
       'snippet survives in record even when log write failed');
+
+    // 7. Record-less re-gate cannot overwrite earlier attempt log through the alias (airhorn-4hph)
+    fs.rmSync(fakeRec, { force: true });
+    const resNoRec = run(['--changed', 'fail-src.js'], {
+      AIRHORN_RESULTS_DIR: failingResultsDir,
+      AIRHORN_CHECKS_DIR: fakeChecksDir,
+    });
+    assert.equal(resNoRec.status, 1);
+    const attempt1Bytes = fs.readFileSync(suffixedLog1, 'utf8');
+    assert.ok(attempt1Bytes.includes('AIRHORN_RUMQ_ASSERTION_MARKER_TEST_FAILURE'),
+      'attempt 1 log content survives record-less re-gate without being overwritten via alias');
   } finally {
     fs.rmSync(probe, { recursive: true, force: true });
   }
