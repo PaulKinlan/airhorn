@@ -46,6 +46,11 @@ const SUPPORT = pathToFileURL(path.join(import.meta.dirname, 'support', 'browser
 const { launchBrowser, launchChrome, connectPage } = await import(SUPPORT);
 const { stretchedBounds } = await import(
   pathToFileURL(path.join(import.meta.dirname, '..', 'tools', 'lib', 'chrome.mjs')).href);
+// Steal-aware waits and the grace allowance read the real host through the
+// support module (airhorn-dwbl) — NOT this file's CHROME_STEAL_OVERRIDE pin,
+// which exists to keep the launch tests deterministic.
+const { stretchMs } = await import(
+  pathToFileURL(path.join(import.meta.dirname, 'support', 'bounds.mjs')).href);
 
 // The host-steal preflight (airhorn-w1wh) is driven through its env seam, so a
 // test states the host instead of asserting the machine it happens to run on
@@ -137,8 +142,16 @@ const profilesFor = (label) => fs.readdirSync(os.tmpdir()).filter((name) => name
 const removeProfiles = (label) => {
   for (const name of profilesFor(label)) fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
 };
-const waitFor = async (fn, ms = 5000) => {
-  const end = Date.now() + ms;
+const waitFor = async (fn, ms = 5000, { steal } = {}) => {
+  // The bound states the host's condition (airhorn-dwbl): these waits time REAL
+  // child processes (a spawn execing, a stub appearing in ps), so the default
+  // 5000ms is stretched by the machine's measured steal. That reading is the
+  // real host via tests/support/bounds.mjs — deliberately NOT this file's
+  // CHROME_STEAL_OVERRIDE pin, which exists to keep the launch tests
+  // deterministic and must not mask the machine from its waits. Inject `steal`
+  // to drive both branches from a test; a healthy or unknown host keeps the
+  // base bound exactly.
+  const end = Date.now() + stretchMs(ms, steal);
   while (Date.now() < end) {
     if (await fn()) return true;
     await new Promise((r) => setTimeout(r, 50));
@@ -159,7 +172,10 @@ test('a stalled /json/list is bounded: the launch rejects, the browser and its p
       /DevTools discovery timeout \(400ms\) .*never answered/,
       'a peer that accepts and never answers must reject at the discovery bound, not park the launch');
     const elapsed = Date.now() - startedAt;
-    assert.ok(elapsed < 3000, `the discovery bound did not hold: launchBrowser took ${elapsed}ms against a 400ms bound`);
+    // The message above already proves the 400ms bound fired; this line only
+    // catches a launch that overshot it. The allowance is steal-stretched
+    // (airhorn-dwbl): a starved host's scheduling must not read as a violation.
+    assert.ok(elapsed < stretchMs(3000), `the discovery bound did not hold: launchBrowser took ${elapsed}ms against a 400ms bound`);
     assert.deepEqual(liveStubProcesses(stub), [], 'the stalled launch left its chrome process tree running');
     assert.deepEqual(profilesFor(label), [], 'the stalled launch left its /tmp profile behind');
   } finally {
@@ -411,7 +427,9 @@ test('connectPage bounds the page ws handshake instead of parking the caller (ai
       connectPage(`ws://127.0.0.1:${peer.port}/devtools/page/x`, { label: 'ws-bound', timeoutMs: 300 }),
       /DevTools ws handshake timeout \(ws-bound\): the page socket never opened within 300ms/);
     const elapsed = Date.now() - startedAt;
-    assert.ok(elapsed < 3000, `the ws bound did not hold: connectPage took ${elapsed}ms against a 300ms bound`);
+    // The message above already proves the 300ms bound fired; steal-stretched
+    // allowance so a starved host's scheduling is not a violation (airhorn-dwbl).
+    assert.ok(elapsed < stretchMs(3000), `the ws bound did not hold: connectPage took ${elapsed}ms against a 300ms bound`);
   } finally {
     await peer.close();
   }
@@ -504,12 +522,17 @@ const runStandIn = ({ signal, graceMs, cleanup }) => new Promise((resolve) => {
     ${signal === 'SIGTERM' ? "process.kill(process.pid, 'SIGTERM');" : ''}
   `], { stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
-  child.stdout.on('data', (d) => { out += d.toString(); });
+  let readyAt = null;
+  child.stdout.on('data', (d) => {
+    out += d.toString();
+    if (readyAt === null && out.includes('ready')) readyAt = Date.now();
+  });
   const startedAt = Date.now();
   child.on('exit', (code, sig) => {
     const runs = fs.existsSync(seen) ? fs.readFileSync(seen, 'utf8').split('\n').filter(Boolean).length : 0;
     fs.rmSync(dir, { recursive: true, force: true });
-    resolve({ code, signal: sig, runs, elapsed: Date.now() - startedAt, out });
+    resolve({ code, signal: sig, runs, elapsed: Date.now() - startedAt,
+      graceElapsed: readyAt === null ? null : Date.now() - readyAt, out });
   });
 });
 
@@ -939,7 +962,32 @@ test('SIGINT exits 130, not SIGTERM’s 143 (airhorn-4vfn)', async () => {
 test('a wedged cleanup cannot hold the process past the grace bound (airhorn-4vfn)', async () => {
   const result = await runStandIn({ signal: 'SIGTERM', graceMs: 250, cleanup: 'await new Promise(() => {});' });
   assert.equal(result.code, 128 + 15, `the grace bound must still exit 143: ${JSON.stringify(result)}`);
-  assert.ok(result.elapsed < 3000, `a wedged cleanup held the process for ${result.elapsed}ms against a 250ms grace bound`);
+  // ready->exit is the window the grace contract owns: the child's own 50ms
+  // pre-signal delay plus the 250ms grace, both slowed by the host the child
+  // runs on. The old assertion measured spawn->exit against a flat 3000ms, so a
+  // starved host failed a CORRECT child on node's boot time (airhorn-dwbl). The
+  // measured window is stretched by the same 1/(1-steal), capped at 8x, plus
+  // fixed slack for signal delivery and exit propagation; on a healthy host the
+  // allowance is 1050ms against a measured ~350ms.
+  const allowed = stretchMs(300) + 750;
+  assert.ok(result.graceElapsed !== null && result.graceElapsed < allowed,
+    `a wedged cleanup held the process ${result.graceElapsed}ms past ready against a 250ms grace bound ` +
+    `(allowed ${allowed}ms): ${JSON.stringify(result)}`);
+});
+
+test('waitFor stretches its bound on a starved host and keeps it on a healthy one (airhorn-dwbl)', async () => {
+  // Starved branch, forced: the predicate turns true at ~250ms — past a 100ms
+  // base bound, inside the 800ms a 0.96 reading stretches it to.
+  const slowT0 = Date.now();
+  assert.ok(await waitFor(() => Date.now() - slowT0 >= 250, 100, { steal: 0.96 }),
+    'a predicate that comes true late must pass on the stretched bound');
+  // Healthy branch, forced: a never-true predicate expires AT the base bound,
+  // not at a stretched one — the stretch must cost a failing test nothing.
+  const falseT0 = Date.now();
+  assert.equal(await waitFor(() => false, 100, { steal: 0 }), false);
+  const spent = Date.now() - falseT0;
+  assert.ok(spent >= 100 && spent < 500,
+    `an expired wait must end at the base bound (spent ${spent}ms against a 100ms bound)`);
 });
 
 /* ------------------------------------------------------- tools/lib/reap.mjs */
@@ -1088,7 +1136,9 @@ test('a CDP command that never answers is bounded and leaves nothing pending (ai
     `a command that is bounded out must not leave its entry in the pending table; found ${JSON.stringify([...pending.keys()])}`,
   );
   const elapsed = Date.now() - started;
-  assert.ok(elapsed < 2000, `the bound must fire on its own timer; took ${elapsed} ms`);
+  // The regex above already proves the 60ms bound fired; steal-stretched
+  // allowance so a starved host's scheduling is not a violation (airhorn-dwbl).
+  assert.ok(elapsed < stretchMs(2000), `the bound must fire on its own timer; took ${elapsed} ms`);
 
   // A command that answers first settles normally, and the reply handler (the
   // suite's ws.onmessage) is what drops its entry, so nothing is left behind on

@@ -45,6 +45,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { fetchUntil, stretchMs, hostStealOnce } from './support/bounds.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -102,6 +103,9 @@ const forceEphemeralPort = (recipe) => (/\bPORT=\d+\b/.test(recipe)
 // line. Every wait is bounded so a wedged server fails the case, not the gate.
 function runRecipe(recipe, readyTimeoutMs = 30000) {
   const command = forceEphemeralPort(recipe);
+  // The ready bound states the host's condition (airhorn-dwbl), stretched by the
+  // measured steal; a healthy or unknown host keeps it exactly.
+  const readyBoundMs = stretchMs(readyTimeoutMs);
   const env = { ...process.env };
   for (const key of ['APP_VERSION', 'GIT_COMMIT', 'COMMIT_SHA', 'BUILD_TIMESTAMP']) delete env[key];
 
@@ -111,10 +115,10 @@ function runRecipe(recipe, readyTimeoutMs = 30000) {
     let stderr = '';
     let ready = false;
     const timer = setTimeout(() => {
-      reject(new Error(`the documented command did not report a port in ${readyTimeoutMs}ms\n` +
+      reject(new Error(`the documented command did not report a port in ${readyBoundMs}ms (base ${readyTimeoutMs}ms, steal ${JSON.stringify(hostStealOnce())})\n` +
         `command: ${command}\nstdout: ${stdout}\nstderr: ${stderr}`));
       child.kill('SIGKILL');
-    }, readyTimeoutMs);
+    }, readyBoundMs);
     const onData = (chunk) => {
       stdout += chunk;
       if (ready) return;
@@ -127,7 +131,10 @@ function runRecipe(recipe, readyTimeoutMs = 30000) {
       resolve({
         port,
         command,
-        fetch: (p, init) => fetch(url + p, { ...init, signal: AbortSignal.timeout(5000) }),
+        // retry-with-deadline (airhorn-dwbl): a slow-but-correct server eventually
+        // answers; any response is returned untouched, so a wrong payload still
+        // fails fast. Base 5000ms is this suite's bound on a healthy host.
+        fetch: (p, init) => fetchUntil(url + p, init, { baseMs: 5000 }),
         kill: async () => {
           child.kill('SIGTERM');
           const exited = new Promise((done) => child.once('exit', done));
