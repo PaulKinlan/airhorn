@@ -271,12 +271,16 @@ async function testBootWatchdog() {
   // bundle, which cannot have run before the parse completes). Case 8 does
   // this by hand; this is the same guard for every other navigation.
   //
-  // Which sites this actually changes (airhorn-1x2d): Cases 6 and 10 navigate
-  // away from a booted app page and were genuinely racy. Case 1 starts from
-  // about:blank and Case 5 starts from the Case 4 noscript document, so neither
-  // could lose the wait - they go through the helper anyway, because the rule
-  // worth keeping is "every same-origin navigation to the app waits this way",
-  // and a rule with two exceptions is one the next inserted case will miss.
+  // Which sites this actually changes (airhorn-1x2d): Case 6 is the only one
+  // beyond Case 7 that was genuinely racy - it navigates away from the Case 5
+  // page, which is a booted app document. Case 1 starts from about:blank, Case 5
+  // from the Case 4 noscript document, and Case 10 from the Case 9 page, which
+  // is deliberately left UNBOOTED (Case 9 replaces the bundle with one that
+  // throws during setup and asserts __airhorn is undefined). None of those three
+  // could lose the wait. They go through the helper anyway, because the
+  // invariant worth keeping is "every same-origin navigation to the app waits
+  // this way", and a rule with exceptions is the one the next inserted case
+  // will miss.
   const navigateFresh = async (label, booted = 'typeof window.__airhorn !== "undefined"') => {
     // Whether the outgoing document booted decides whether it needs a marker,
     // and UNKNOWN must never be read as "not booted": a transient evaluate
