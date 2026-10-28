@@ -262,16 +262,23 @@ async function testBootWatchdog() {
   // tests/nav-guard.test.mjs drives those lines, including a mutated fail-open
   // copy of them.
   //
-  // Which sites this actually changes (airhorn-1x2d): Case 6 is the only one
-  // beyond Case 7 that was genuinely racy - it navigates away from the Case 5
-  // page, which is a booted app document. Case 1 starts from about:blank, Case 5
-  // from the Case 4 noscript document, and Case 10 from the Case 9 page, which
-  // is deliberately left UNBOOTED (Case 9 replaces the bundle with one that
-  // throws during setup and asserts __airhorn is undefined). None of those three
-  // could lose the wait. They go through the helper anyway, because the
-  // invariant worth keeping is "every same-origin navigation to the app waits
-  // this way", and a rule with exceptions is the one the next inserted case
-  // will miss.
+  // Which sites this actually changes (airhorn-1x2d): Case 6 is the only site
+  // this sweep covers that was genuinely racy - it navigates away from the
+  // Case 5 page, which is a booted app document. Case 1 starts from
+  // about:blank, Case 5 from the Case 4 noscript document, and Case 10 from the
+  // Case 9 page, which is deliberately left UNBOOTED (Case 9 replaces the
+  // bundle with one that throws during setup and asserts __airhorn is
+  // undefined). None of those three could lose the wait. They go through the
+  // helper anyway, because the invariant worth keeping is "every same-origin
+  // navigation to the app waits this way", and a rule with exceptions is the
+  // one the next inserted case will miss.
+  //
+  // What this sweep does NOT cover, so nobody reads the invariant as done:
+  // Case 7's unstyled navigation keeps its own marker-based wait from
+  // fleet/retry-guard (airhorn-byl0, airhorn-0ghk) - touching those lines here
+  // would only make the two deltas conflict - and the wait after Case 6's
+  // self-reload is not a Page.navigate by this suite at all, so the marker this
+  // helper sets cannot help it.
   const navigateFresh = createNavigateFresh({
     evaluate,
     send,
