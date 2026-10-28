@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
 import { awaitSocketOpen, boundCommand } from './cdp-command-bound.mjs';
+import { createNavigateFresh } from './support/nav-guard.mjs';
 import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -254,22 +255,12 @@ async function testBootWatchdog() {
     }
   };
 
-  // Navigate to the app and wait for the FRESH document to boot.
-  //
-  // Page.navigate resolves when the browser ACCEPTS the navigation, not when
-  // the new document commits (airhorn-ie0b, airhorn-byl0), and every case here
-  // navigates to the SAME url - so where the previous document is itself a
-  // booted app page, it defines window.__airhorn too and a bare boot wait
-  // passes INSTANTLY on it. The probe that follows then lands in the fresh
-  // document mid-parse, where the DOM the case queries does not exist yet, and
-  // the case fails with a null dereference that says nothing about the app
-  // (Case 7 lost a green run this way at 47% steal).
-  //
-  // Mark the outgoing document, so the marker's absence can only mean a
-  // document that started after the marker was set; require the boot signal
-  // too, so the wait cannot end mid-parse (__airhorn comes from the deferred
-  // bundle, which cannot have run before the parse completes). Case 8 does
-  // this by hand; this is the same guard for every other navigation.
+  // Navigate to the app and wait for the FRESH document to boot. The flow (and
+  // every failure it has to survive) lives in support/nav-guard.mjs, because a
+  // browser cannot be made to refuse a boot check on demand and the fail-open
+  // regression airhorn-xl1t found is only reachable with a transport that does;
+  // tests/nav-guard.test.mjs drives those lines, including a mutated fail-open
+  // copy of them.
   //
   // Which sites this actually changes (airhorn-1x2d): Case 6 is the only one
   // beyond Case 7 that was genuinely racy - it navigates away from the Case 5
@@ -281,35 +272,13 @@ async function testBootWatchdog() {
   // invariant worth keeping is "every same-origin navigation to the app waits
   // this way", and a rule with exceptions is the one the next inserted case
   // will miss.
-  const navigateFresh = async (label, booted = 'typeof window.__airhorn !== "undefined"') => {
-    // Whether the outgoing document booted decides whether it needs a marker,
-    // and UNKNOWN must never be read as "not booted": a transient evaluate
-    // failure there would skip the marker, and the wait would then be answered
-    // by the unmarked previous document - i.e. silently restore the race this
-    // helper exists to remove (airhorn-xl1t). So both reads are retried (a CDP
-    // blip is not a test failure) and then FATAL (a page we cannot read is not
-    // a page we can prove unmarked).
-    const readOutgoing = async (expression, what) => {
-      let lastError = null;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          return await evaluate(expression);
-        } catch (err) {
-          lastError = err;
-          await new Promise(r => setTimeout(r, 50));
-        }
-      }
-      throw new Error(`${label}: could not ${what} (${lastError && lastError.message}) - refusing to navigate, `
-        + 'because an unreadable document is not an unbooted one');
-    };
-    if (await readOutgoing('typeof window.__airhorn !== "undefined"', 'read the outgoing document')) {
-      const marked = await readOutgoing('window.__outgoingDocument = true; 1', 'mark the outgoing document');
-      if (!marked) throw new Error(`${label}: could not mark the outgoing document before navigating`);
-    }
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil(`!window.__outgoingDocument && (${booted})`, WAIT_TIMEOUT_MS,
-      `${label}: a fresh document to commit and boot`);
-  };
+  const navigateFresh = createNavigateFresh({
+    evaluate,
+    send,
+    waitUntil,
+    port,
+    timeoutMs: WAIT_TIMEOUT_MS,
+  });
 
   const shot = async (name) => {
     const res = await send('Page.captureScreenshot', { format: 'png' });
