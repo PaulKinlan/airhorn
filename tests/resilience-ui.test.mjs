@@ -545,9 +545,22 @@ async function testBootWatchdog() {
     console.log('--- Case 7: stylesheet blocked');
     await send('Network.setBlockedURLs', { urls: ['*styles/*.css', '*assets/*.css'] });
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot unstyled');
+    // Mark the outgoing document first (the Case 8 pattern, airhorn-ie0b):
+    // Page.navigate resolves when the browser ACCEPTS the navigation, so a
+    // bare '__airhorn' wait passes INSTANTLY on the previous page (the Case 6
+    // v2 page defines it too), and the unstyled probe below then lands in the
+    // fresh document mid-parse, where .horn does not exist yet - observed as
+    // 'Cannot read properties of null (reading getBoundingClientRect)' on a
+    // 47%-steal run. The marker dies with the old document, so marker absent
+    // + app booted proves the FRESH document both committed and booted (and
+    // __airhorn comes from the deferred bundle, so it proves the parse is
+    // complete - .horn cannot be missing from a booted document).
+    await evaluate(`window.__case7Outgoing = true`);
+    await waitUntil(`!window.__case7Outgoing && typeof window.__airhorn !== 'undefined'`,
+      WAIT_TIMEOUT_MS, 'case 7 navigation to commit a fresh unstyled document');
     const unstyled = await evaluate(`(() => {
       const horn = document.querySelector('.horn');
+      if (!horn) throw new Error('the fresh unstyled document booted without a .horn element');
       const r = horn.getBoundingClientRect();
       const label = document.querySelector('.horn-label');
       const lr = label ? label.getBoundingClientRect() : null;
