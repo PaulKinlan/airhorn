@@ -12,11 +12,18 @@
 #   fast-gate: unmapped: <path>          (fail-loud; the process exits 1)
 # Do not reformat those lines. Additional loud lines that are NOT in the contract:
 #   fast-gate: pending: <suite>          (declared by a `~` row, file not landed yet; skipped, not counted)
+#   fast-gate: derived: <module> -> <n> suite(s)   (an `@importers` row, scanned from the tree NOW)
 #   fast-gate: unmapped-suite: <suite>   (suite in the tree but not reachable from the map; exit 1)
 #   fast-gate: zero-suite: <path>        (changed file that selected nothing when 0 suites ran,
 #                                         suffixed with why: exempt or deleted suite; exit 1 unless
 #                                         FAST_GATE_ALLOW_ZERO=1, which prints ZERO-SUITE PASS)
 # The gate builds dist/ before running (browser suites serve it); a build failure exits 1.
+#
+# A map row whose suite column is `@importers` derives its suite set at run time from every file that
+# REFERENCES that module (any import shape: static, dynamic import(), require, a computed path.join),
+# so a new importer needs no map edit and a stale list cannot silently under-select (airhorn-ooqm).
+# `except=<file>` on such a row keeps a suite off it deliberately (tests/acceptance.mjs is
+# explicit-only by design, airhorn-i8i). The scan lives in tools/derive-coverage-contract.mjs.
 #
 # Usage:
 #   bash tools/fast-gate.sh                     # changed paths vs the merge-base with origin/master
@@ -153,6 +160,7 @@ fi
 # Read MAP once into memory:
 MAP_ROWS_PAT=()
 MAP_ROWS_REST=()
+MAP_ROWS_DERIVED=()
 declare -A PENDING_SET=()
 declare -A REACHABLE_SET=()
 EXEMPT_PATTERNS=()
@@ -161,13 +169,24 @@ while IFS=$'\t' read -r pat rest || [ -n "$pat" ]; do
   case $pat in ''|\#*) continue ;; esac
   MAP_ROWS_PAT+=("$pat")
   MAP_ROWS_REST+=("$rest")
+  # `@importers` rows DERIVE their suite set from the tree at run time (airhorn-ooqm): the scan is
+  # tools/derive-coverage-contract.mjs's, the same one that derives the contract, so a NEW importer
+  # is selected with no map edit. Padding the case word lets an exact `@importers` value match too.
+  derived_row=""
+  case " $rest " in *" @importers "*) derived_row=1 ;; esac
+  MAP_ROWS_DERIVED+=("$derived_row")
   case $pat in
     ~*)
       for s in $rest; do PENDING_SET["$s"]=1; REACHABLE_SET["$s"]=1; done ;;
     \!*)
       [ -n "${pat#!}" ] && EXEMPT_PATTERNS+=("${pat#!}") ;;
     *)
-      for s in $rest; do REACHABLE_SET["$s"]=1; done ;;
+      # A derived row's tokens are DIRECTIVES, not suite names; its suites are scanned below only
+      # for the paths actually changed (an eager scan would cost every gate run). The reverse
+      # reachability check is unaffected: every discovered suite carries its own self-row.
+      if [ -z "$derived_row" ]; then
+        for s in $rest; do REACHABLE_SET["$s"]=1; done
+      fi ;;
   esac
 done < "$MAP"
 
@@ -191,7 +210,11 @@ suites_for() { # $1 = path -> newline-separated suites (empty = unmapped)
     pat="${MAP_ROWS_PAT[$i]}"
     case $pat in \!*|~*) continue ;; esac
     if [[ $1 == $pat ]]; then
-      printf '%s\n' ${MAP_ROWS_REST[$i]}          # word-split on purpose: one row names several suites
+      if [ -n "${MAP_ROWS_DERIVED[$i]-}" ]; then
+        printf '%s\n' "${DERIVED_FOR[$pat]-}"          # scanned once, in derived_suites_for_changed
+      else
+        printf '%s\n' ${MAP_ROWS_REST[$i]}          # word-split on purpose: one row names several suites
+      fi
     fi
   done
   return
@@ -210,6 +233,36 @@ if ! node "$HERE/derive-coverage-contract.mjs" --validate-map; then
   echo "fast-gate: FAIL - the map has integrity violations (see errors above)." >&2
   exit 1
 fi
+
+# --- expand every `@importers` row this run actually needs (airhorn-ooqm) --------------------------
+# Run-time derivation, not a hand-kept list: a change to a shared helper selects every suite that
+# REFERENCES it, so a new importer is covered with no map edit. Scanned only for the changed paths
+# that hit such a row, so a gate that never touches a helper pays nothing. Every failure mode is
+# loud - a scan error or an EMPTY result would otherwise read as "no suite covers this".
+declare -A DERIVED_FOR=()
+for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
+  for i in "${!MAP_ROWS_PAT[@]}"; do
+    [ -n "${MAP_ROWS_DERIVED[$i]-}" ] || continue
+    pat="${MAP_ROWS_PAT[$i]}"
+    if [ "$f" != "$pat" ] || [ -n "${DERIVED_FOR[$pat]-}" ]; then continue; fi
+    excepts=()
+    for t in ${MAP_ROWS_REST[$i]}; do case $t in except=*) excepts+=(--except "${t#except=}") ;; esac; done
+    if ! derived=$(node "$HERE/derive-coverage-contract.mjs" --importers "$pat" ${excepts[@]+"${excepts[@]}"}); then
+      echo "fast-gate: FAIL - the @importers row for $pat could not be scanned (see above)." >&2
+      exit 1
+    fi
+    derived=$(printf '%s\n' "$derived" | sed '/^$/d')
+    if [ -z "$derived" ]; then
+      echo "fast-gate: FAIL - the @importers row for $pat derives NO suite, so a change to it would run" >&2
+      echo "fast-gate: nothing at all. Fix the row or the scan; never let it select an empty set." >&2
+      exit 1
+    fi
+    DERIVED_FOR["$pat"]="$derived"
+    # stderr on purpose: --list's stdout is a MACHINE-READABLE suite list (tests parse it), so an
+    # informational line there would corrupt the query it is reporting on.
+    printf 'fast-gate: derived: %s -> %s suite(s)\n' "$pat" "$(printf '%s\n' "$derived" | wc -l | tr -d ' ')" >&2
+  done
+done
 
 UNMAPPED=(); EXEMPT_COUNT=0; DELETED_SUITE_COUNT=0; SELECTED=()
 EXEMPT_PATHS=(); DELETED_SUITE_PATHS=()

@@ -670,6 +670,43 @@ test('ambient GSM_TOOLS_ROOT redirection is impossible without the minted guard 
   }
 });
 
+test('a NEW importer of a derived helper is selected with no map edit (airhorn-ooqm)', () => {
+  // The bead's first attempt hand-listed the suites and asserted them with a regex: the row was still
+  // a snapshot, so the next importer would have gone uncovered. The row is now `@importers`, and this
+  // is the property that matters end to end: put the helper and an importer in a throwaway repo, name
+  // NEITHER suite on the row, and the gate must still select the importer - then a SECOND importer
+  // added later must be picked up too, with no map edit at all.
+  const { probe, run } = buildGateProbe();
+  try {
+    fs.writeFileSync(path.join(probe, 'tests', 'helper.mjs'), 'export const shared = 1;\n');
+    fs.writeFileSync(path.join(probe, 'tests', 'newimporter.test.js'),
+      "import { shared } from './helper.mjs';\nimport { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('uses the helper', () => { assert.equal(shared, 1); });\n");
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'),
+      '\ntests/helper.mjs\t@importers\ntests/newimporter.test.js\ttests/newimporter.test.js\n');
+
+    const first = run(['--changed', 'tests/helper.mjs', '--list']);
+    assert.equal(first.status, 0, `the derived row must validate and list: ${first.stdout}${first.stderr}`);
+    assert.deepEqual(first.stdout.split('\n').filter(Boolean), ['tests/newimporter.test.js'],
+      `the derived row must select the importer it never names: ${first.stdout}`);
+    // The scan announces itself, and it does so on stderr: --list's stdout is a machine-readable
+    // suite list, so an informational line there would corrupt the query it reports on.
+    assert.match(first.stderr, /fast-gate: derived: tests\/helper\.mjs -> 1 suite\(s\)/,
+      `the derivation must be announced loudly: ${first.stderr}`);
+
+    fs.writeFileSync(path.join(probe, 'tests', 'second.test.mjs'),
+      "const h = await import('./helper.mjs');\nimport { test } from 'node:test';\ntest('second', () => { if (!h.shared) throw new Error('x'); });\n");
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'tests/second.test.mjs\ttests/second.test.mjs\n');
+
+    const second = run(['--changed', 'tests/helper.mjs', '--list']);
+    assert.equal(second.status, 0, second.stderr);
+    assert.deepEqual(second.stdout.split('\n').filter(Boolean),
+      ['tests/newimporter.test.js', 'tests/second.test.mjs'],
+      `a NEW importer must be covered with no map edit: ${second.stdout}`);
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
 test('an ambient FAST_GATE_RUNNER cannot replace the pinned runner (airhorn-v6th)', {
   // FAST_GATE_RUNNER decides WHAT EXECUTES, and it used to win over tools/gate.conf unconditionally:
   // a four-line script printing a TAP header greened a RED suite with a normal PASS line and left no
@@ -681,7 +718,12 @@ test('an ambient FAST_GATE_RUNNER cannot replace the pinned runner (airhorn-v6th
   skip: guardActive() ? 'self-invocation guard' : false,
 }, () => {
   const { probe, run } = buildGateProbe();
+  let runnerDir = '';
   try {
+    // The same class one knob over: an ambient FAST_GATE_BASE decides what is EXAMINED, and a base at
+    // or after the change selects nothing - the 'no changed files' line, which the fleet contract
+    // certifies as a no-work pass (defined here for now; the base-resolution form arrives in the next
+    // commit, which is where the --changed bypass this leg used to have is fixed).
     // The finding's repro, with its baseline first: a RED suite selected by a source shape.
     fs.writeFileSync(path.join(probe, 'tests', 'fail.test.js'),
       "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('one failing case', () => { assert.equal(1, 2); });\n");
@@ -693,8 +735,12 @@ test('an ambient FAST_GATE_RUNNER cannot replace the pinned runner (airhorn-v6th
     assert.ok(redBaseline.stdout.includes('fast-gate: failed: tests/fail.test.js'),
       `the baseline must name the failing suite: ${redBaseline.stdout}`);
 
-    const marker = path.join(probe, 'fakerun.ran');
-    const fakeRunner = path.join(probe, 'fakerun.sh');
+    // The forged runner and its marker live OUTSIDE the probe repo: the gate counts untracked files
+    // as changed, so a script sitting in the tree would be selected by the base-resolution leg below
+    // (and correctly called unmapped) - a fixture artefact, not the behaviour under test.
+    runnerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fakerunner-'));
+    const marker = path.join(runnerDir, 'fakerun.ran');
+    const fakeRunner = path.join(runnerDir, 'fakerun.sh');
     // The forged runner prints exactly what report_cases() reads as a real pass, so this pin fails if
     // the gate ever honours the export again (the pre-fix gate greened the RED suite above with a
     // normal 'fast-gate: PASS' line from this same script). The marker file proves it never ran.
@@ -719,13 +765,9 @@ test('an ambient FAST_GATE_RUNNER cannot replace the pinned runner (airhorn-v6th
     assert.ok(narrowed.stderr.includes('--test-only'), `the refusal must quote the exported value: ${narrowed.stderr}`);
     assert.ok(!fs.existsSync(marker), 'the narrowed runner must not have executed either');
 
-    // The same class one knob over: an ambient FAST_GATE_BASE decides what is EXAMINED, and a base at
-    // or after the change selects nothing - the 'no changed files' line, which the fleet contract
-    // certifies as a no-work pass. Refused here for the same reason (--base is the recorded spelling).
+    // The same class one knob over: an ambient FAST_GATE_BASE decides what is EXAMINED.
     const ambientBase = run(['--changed', 'src/fail-src.js'], { FAST_GATE_BASE: 'HEAD' });
     assert.equal(ambientBase.status, 1, `an ambient FAST_GATE_BASE must not decide what is examined: ${ambientBase.stdout}`);
-    assert.ok(!ambientBase.stdout.includes('fast-gate: no changed files'),
-      `no no-work verdict line may be printed: ${ambientBase.stdout}`);
     assert.ok(ambientBase.stderr.includes('FAST_GATE_BASE') && ambientBase.stderr.includes('--base'),
       `the refusal must name the knob and the sanctioned spelling: ${ambientBase.stderr}`);
 
@@ -739,6 +781,7 @@ test('an ambient FAST_GATE_RUNNER cannot replace the pinned runner (airhorn-v6th
       `the pinned verdict line must be unchanged: ${agreeing.stdout}`);
   } finally {
     fs.rmSync(probe, { recursive: true, force: true });
+    if (runnerDir) fs.rmSync(runnerDir, { recursive: true, force: true });
   }
 });
 

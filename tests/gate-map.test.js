@@ -34,7 +34,7 @@ import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
 import { makeRenderModel } from '../tools/render-model.mjs';
 import { READ_STATE } from '../tools/resilience-audit.mjs';
-import { main as deriveContractMain, deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites, isPendingSuite } from '../tools/derive-coverage-contract.mjs';
+import { main as deriveContractMain, deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites, isPendingSuite, importersOf } from '../tools/derive-coverage-contract.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const gate = path.join(root, 'tools', 'fast-gate.sh');
@@ -452,6 +452,79 @@ test('every script-tier suite is gated by a tests/support change (airhorn-dco)',
     `the support row must select exactly the script-tier suites:\n  row: ${JSON.stringify(selected)}\n  expected: ${JSON.stringify(scriptTier)}`);
 });
 
+test('a shared helper\'s selection is DERIVED from the tree, not hand-listed (airhorn-ooqm)', () => {
+  // The first attempt at this bead hand-edited the row and then asserted it with a regex that only
+  // understood `from '...'`/`require('...')`. It therefore missed the COMPUTED reference
+  // (tests/test-support.test.js: path.join(import.meta.dirname, 'cdp-command-bound.mjs')) and the
+  // DYNAMIC one (tests/horn.test.js: await import('./support/browser.mjs')), and because it only
+  // asserted "every importer I found is selected" it would have stayed green even if the row had lost
+  // suites - a false green inside the fix for false greens. What is pinned now:
+  //   1. the scan itself, on fixtures in each import SHAPE (static, require, dynamic, template,
+  //      computed path.join) and on a prose mention that must NOT count;
+  //   2. the TRUE reference count in this tree, by name of the suites (13 for cdp-command-bound.mjs);
+  //   3. the gate's selection for that module == that set minus the explicit-only acceptance pass
+  //      (12), as EXACT set equality - over- and under-selection both fail;
+  //   4. the row is an `@importers` row, so re-hand-listing it fails here;
+  //   5. the derived contract restates the same set, so the fleet oracle cannot drift from the gate.
+  const tsv = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
+  const helper = 'tests/cdp-command-bound.mjs';
+  const EXPLICIT_ONLY = ['tests/acceptance.mjs'];
+
+  // 1. the scan is import-shape-agnostic. A fixture tree, not this repo, so the shapes are deliberate.
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'importers-'));
+  try {
+    fs.mkdirSync(path.join(fixture, 'tests'), { recursive: true });
+    fs.writeFileSync(path.join(fixture, 'tests', 'helper.mjs'), 'export const x = 1;\n');
+    const shapes = {
+      'tests/static.test.mjs': "import { x } from './helper.mjs';\n",
+      'tests/require.test.js': "const { x } = require('./helper.mjs');\n",
+      'tests/dynamic.test.mjs': "const { x } = await import('./helper.mjs');\n",
+      'tests/dynamictpl.test.mjs': 'const { x } = await import(`./helper.mjs`);\n',
+      'tests/computed.test.js': "const h = await import(pathToFileURL(path.join(import.meta.dirname, 'helper.mjs')).href);\n",
+      // NOT dependencies, and each one is a shape that would fool a looser scan:
+      'tests/prose.test.mjs': "// this suite never imports helper.mjs (see path.join(dir, 'helper.mjs'))\nimport assert from 'node:assert/strict';\nassert.ok(true);\n",
+      'tests/naming.test.mjs': "const row = 'helper.mjs';\nconst label = \"helper.mjs is the bounded CDP helper\";\n",
+    };
+    for (const [rel, body] of Object.entries(shapes)) fs.writeFileSync(path.join(fixture, rel), body);
+    const fixtureMap = ['tests/helper.mjs\t@importers', ...Object.keys(shapes).map((r) => `${r}\t${r}`), ''].join('\n');
+    const found = importersOf('tests/helper.mjs', { root: fixture, tsvText: fixtureMap });
+    for (const rel of ['tests/static.test.mjs', 'tests/require.test.js', 'tests/dynamic.test.mjs', 'tests/dynamictpl.test.mjs', 'tests/computed.test.js']) {
+      assert.ok(found.includes(rel), `the scan must see the ${path.basename(rel)} import shape, got ${JSON.stringify(found)}`);
+    }
+    assert.ok(!found.includes('tests/prose.test.mjs'), `a comment that spells a resolution is not a dependency, got ${JSON.stringify(found)}`);
+    assert.ok(!found.includes('tests/naming.test.mjs'), `naming the file without resolving it is not a dependency, got ${JSON.stringify(found)}`);
+    assert.equal(found.length, 5, `exactly the five resolution shapes must be found, got ${JSON.stringify(found)}`);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+
+  // 2. the true reference count in THIS tree, spelled out: losing a caller from the row must fail.
+  const all = importersOf(helper, { root, tsvText: tsv });
+  assert.equal(all.length, 13, `every suite that references ${helper} must be found, got ${JSON.stringify(all, null, 2)}`);
+  assert.ok(all.includes('tests/test-support.test.js'),
+    'the computed path.join reference in tests/test-support.test.js must count - it is the one the old regex missed');
+  assert.ok(!all.includes('tests/horn.test.js'), 'tests/horn.test.js references the browser helper, not this one');
+  const expected = all.filter((s) => !EXPLICIT_ONLY.includes(s));
+  assert.equal(expected.length, 12, `12 suites minus the explicit-only acceptance pass must remain, got ${JSON.stringify(expected)}`);
+
+  // 3. what the REAL gate does, as exact set equality.
+  const selected = listFor(helper);
+  assert.deepEqual(selected, expected,
+    `the gate must select exactly the referencing suites (acceptance excepted):\n  selected: ${JSON.stringify(selected)}\n  expected: ${JSON.stringify(expected)}`);
+
+  // 4. the row is the derivation, not a list: a hand-edit back to names fails here.
+  const row = tsv.split('\n').find((line) => line.split('\t')[0] === helper);
+  assert.ok(row, `${helper} must have a map row`);
+  assert.ok(row.split('\t').slice(1).join(' ').includes('@importers'),
+    `the row must stay an @importers row, not a list that goes stale: ${row}`);
+  assert.equal(row.split('\t').slice(1).join(' ').split(/\s+/).filter((t) => t === 'except=tests/acceptance.mjs').length, 1,
+    `the acceptance exception must stay explicit and singular: ${row}`);
+
+  // 5. the derived contract restates the same set.
+  const contractEntry = deriveCoverageContract(tsv, { root })[helper];
+  assert.deepEqual(contractEntry, expected,
+    `.fleet/coverage-contract.json must restate the derived set for ${helper}: ${JSON.stringify(contractEntry)}`);
+});
 test('the render model: shown IS visible text; a skipped node contributes nothing (airhorn-0w9, -cpi, -9py, -s52)', () => {
   const model = makeRenderModel();
   const base = { boxChain: true, visibility: 'visible', opacity: 1 };
