@@ -278,11 +278,28 @@ async function testBootWatchdog() {
   // worth keeping is "every same-origin navigation to the app waits this way",
   // and a rule with two exceptions is one the next inserted case will miss.
   const navigateFresh = async (label, booted = 'typeof window.__airhorn !== "undefined"') => {
-    // Only a page that has booted can steal the wait, so only a page that has
-    // booted needs marking - and there, failing to mark it is fatal: an
-    // unmarked previous document is exactly the race this exists to close.
-    if (await evaluate('typeof window.__airhorn !== "undefined"').catch(() => false)) {
-      const marked = await evaluate('window.__outgoingDocument = true; 1').catch(() => false);
+    // Whether the outgoing document booted decides whether it needs a marker,
+    // and UNKNOWN must never be read as "not booted": a transient evaluate
+    // failure there would skip the marker, and the wait would then be answered
+    // by the unmarked previous document - i.e. silently restore the race this
+    // helper exists to remove (airhorn-xl1t). So both reads are retried (a CDP
+    // blip is not a test failure) and then FATAL (a page we cannot read is not
+    // a page we can prove unmarked).
+    const readOutgoing = async (expression, what) => {
+      let lastError = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          return await evaluate(expression);
+        } catch (err) {
+          lastError = err;
+          await new Promise(r => setTimeout(r, 50));
+        }
+      }
+      throw new Error(`${label}: could not ${what} (${lastError && lastError.message}) - refusing to navigate, `
+        + 'because an unreadable document is not an unbooted one');
+    };
+    if (await readOutgoing('typeof window.__airhorn !== "undefined"', 'read the outgoing document')) {
+      const marked = await readOutgoing('window.__outgoingDocument = true; 1', 'mark the outgoing document');
       if (!marked) throw new Error(`${label}: could not mark the outgoing document before navigating`);
     }
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
