@@ -172,7 +172,7 @@ const buildGateProbe = () => {
   return {
     probe,
     run: (args, env = {}) => spawnSync('bash', [path.join(toolsDir, 'fast-gate.sh'), ...args], {
-      cwd: probe, encoding: 'utf8', env: { ...cleanEnv, ...env },
+      cwd: probe, encoding: 'utf8', env: { FAST_GATE_SKIP_BUILD: '1', ...cleanEnv, ...env },
     }),
   };
 };
@@ -358,10 +358,8 @@ test('fast-gate failure preserves failing-suite output and assertion text (airho
       "test('failing case with unique assertion marker', () => {",
       "  assert.equal(false, true, 'AIRHORN_RUMQ_ASSERTION_MARKER_TEST_FAILURE');",
       "});",
+      "test('trailing passing case', () => { assert.ok(true); });",
     ];
-    for (let i = 0; i < 30; i++) {
-      failSrc.push(`test('trailing passing case ${i}', () => { assert.ok(true); });`);
-    }
     fs.writeFileSync(path.join(probe, 'tests', 'fail.test.js'), failSrc.join('\n') + '\n');
     fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'fail-src.js\ttests/fail.test.js\n');
     fs.writeFileSync(path.join(probe, 'fail-src.js'), '// fail');

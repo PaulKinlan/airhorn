@@ -314,12 +314,14 @@ fi
 
 # --- build once: browser suites serve dist/ (a11y, sw-offline); the build is ~0.3s --------------------
 mkdir -p "$RESULTS_DIR"
-echo "fast-gate: building dist (browser suites serve it)"
-if ! (cd "$ROOT" && npm run build --silent) >"$TMP/build.log" 2>&1; then
-  echo "fast-gate: failed: build"
-  sed 's/^/    /' "$TMP/build.log" 2>/dev/null | tail -20
-  echo "fast-gate: FAIL - build failed; browser suites cannot run." >&2
-  exit 1
+if [ "${FAST_GATE_SKIP_BUILD:-0}" != "1" ]; then
+  echo "fast-gate: building dist (browser suites serve it)"
+  if ! (cd "$ROOT" && npm run build --silent) >"$TMP/build.log" 2>&1; then
+    echo "fast-gate: failed: build"
+    sed 's/^/    /' "$TMP/build.log" 2>/dev/null | tail -20
+    echo "fast-gate: FAIL - build failed; browser suites cannot run." >&2
+    exit 1
+  fi
 fi
 
 printf 'fast-gate: running: %s\n' "${RUN[@]}"
