@@ -464,15 +464,25 @@ test('fast-gate failure preserves failing-suite output and assertion text (airho
       'snippet survives in record even when log write failed');
 
     // 7. Record-less re-gate cannot overwrite earlier attempt log through the alias (airhorn-4hph)
+    fs.appendFileSync(suffixedLog2, '\nSENTINEL_ATTEMPT_2_UNTOUCHED\n');
+    fs.writeFileSync(path.join(probe, 'tests', 'fail.test.js'), [
+      "import { test } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "test('failing case with unique assertion marker', () => {",
+      "  assert.equal(false, true, 'AIRHORN_ATTEMPT_3_DIFFERENT_MARKER');",
+      "});",
+    ].join('\n') + '\n');
     fs.rmSync(fakeRec, { force: true });
     const resNoRec = run(['--changed', 'fail-src.js'], {
       AIRHORN_RESULTS_DIR: failingResultsDir,
       AIRHORN_CHECKS_DIR: fakeChecksDir,
     });
     assert.equal(resNoRec.status, 1);
-    const attempt1Bytes = fs.readFileSync(suffixedLog1, 'utf8');
-    assert.ok(attempt1Bytes.includes('AIRHORN_RUMQ_ASSERTION_MARKER_TEST_FAILURE'),
-      'attempt 1 log content survives record-less re-gate without being overwritten via alias');
+    const attempt2Bytes = fs.readFileSync(suffixedLog2, 'utf8');
+    assert.ok(attempt2Bytes.includes('SENTINEL_ATTEMPT_2_UNTOUCHED'),
+      'attempt 2 log content survives record-less re-gate without being overwritten via alias');
+    assert.ok(!attempt2Bytes.includes('AIRHORN_ATTEMPT_3_DIFFERENT_MARKER'),
+      'attempt 2 log must not be clobbered by attempt 3 output via alias');
   } finally {
     fs.rmSync(probe, { recursive: true, force: true });
   }
