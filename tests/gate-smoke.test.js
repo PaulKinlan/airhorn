@@ -1271,4 +1271,20 @@ test('waitForSw distinguishes active, redundant, unsupported, evaluate error, an
   assert.match(timeoutRes.detail, /service worker never activated/);
   assert.throws(() => assertSwActive(timeoutRes, 'offline'),
     /cannot score offline scenario: service worker failed to activate \(timed_out\)/);
+
+  // 6. Starting installation (empty slots) is treated as pending and waits, not premature redundant failure
+  let attemptCount = 0;
+  const startingCdp = {
+    send: async () => {
+      attemptCount++;
+      if (attemptCount < 3) {
+        return { result: { value: { status: 'pending', detail: 'installing=null waiting=null active=null' } } };
+      }
+      return { result: { value: { status: 'activated' } } };
+    },
+  };
+  const startingRes = await waitForSw(startingCdp, 's6', 5, noopSleep);
+  assert.equal(startingRes.active, true);
+  assert.equal(startingRes.state, 'activated');
+  assert.equal(attemptCount, 3);
 });

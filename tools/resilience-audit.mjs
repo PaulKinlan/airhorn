@@ -498,7 +498,7 @@ export async function waitForSw(cdp, sessionId, attempts = 40, sleepFn = sleep) 
           const installing = reg.installing ? reg.installing.state : null;
           const waiting = reg.waiting ? reg.waiting.state : null;
           const active = reg.active ? reg.active.state : null;
-          if (installing === 'redundant' || (!installing && !waiting && !active && reg.active === null)) {
+          if (installing === 'redundant' || waiting === 'redundant' || active === 'redundant') {
             return {
               status: 'redundant',
               error: 'service worker entered redundant state during boot or install',
