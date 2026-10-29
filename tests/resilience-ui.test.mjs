@@ -6,6 +6,7 @@ import { launchBrowser } from './support/browser.mjs';
 import { hostSteal, stretchedBounds } from '../tools/lib/chrome.mjs';
 import { awaitSocketOpen, boundCommand } from './cdp-command-bound.mjs';
 import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
+import { checkPressPoint, readInputLog, classifyPressTimeout } from './support/press-guard.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EVIDENCE_DIR = '/tmp/airhorn-boot-watchdog';
@@ -674,9 +675,10 @@ async function testBootWatchdog() {
     })()`);
 
     const hornBox = await getHornBox();
-    if (!hornBox.found || !hornBox.overHorn) {
-      throw new Error(`the press point is not over the horn, so the press would prove nothing: ${JSON.stringify(hornBox)}`);
-    }
+    // The SAME check guards every re-measured box before a retry below
+    // (airhorn-8wh1): an off-horn press proves nothing, and reporting host
+    // contention for it would misname a coordinate problem as a machine fault.
+    checkPressPoint(hornBox, 'the press point');
 
     // Make the trusted press retry-aware (airhorn-0ghk) but ONLY for the
     // machine's failure, never the app's (airhorn-fl70). A timeout whose input
@@ -702,13 +704,10 @@ async function testBootWatchdog() {
       focused: document.hasFocus(),
       visibility: document.visibilityState
     }))()`);
-    // The log itself, never a collapsed length: an absent or unreadable log is
-    // a broken instrumentation state and must not read as "delivery dropped"
-    // (airhorn-l2c3). Resolves to an array, or to 'unreadable' when delivery
-    // cannot be judged.
-    const readInputLog = () => evaluate('window.__inputLog').then(
-      (v) => (Array.isArray(v) ? v : 'unreadable'),
-      () => 'unreadable');
+    // Where each attempt actually pressed (validated over the horn BEFORE the
+    // dispatch), carried into the terminal diagnostics so a contention verdict
+    // can say what was under every press point (airhorn-8wh1).
+    const pressPoints = [];
 
     let pressedSuccess = false;
     let lastBox = hornBox;
@@ -720,13 +719,12 @@ async function testBootWatchdog() {
         // check the first one did - a retry landing off the horn would prove
         // nothing, and reporting host contention for it would misname a
         // coordinate problem as a machine fault.
-        if (!lastBox.found || !lastBox.overHorn) {
-          throw new Error(`the retried press point is not over the horn, so the retry would prove nothing (attempt ${attempt}/${maxAttempts}): ${JSON.stringify(lastBox)}`);
-        }
+        checkPressPoint(lastBox, `the retried press point (attempt ${attempt}/${maxAttempts})`);
         // Retire a press that DID land before re-pressing, so the next
         // transition reads as a press, not a bounce.
         await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: lastBox.x, y: lastBox.y, button: 'left', buttons: 0, clickCount: 1 }).catch(() => {});
       }
+      pressPoints.push({ attempt, x: lastBox.x, y: lastBox.y, overHorn: lastBox.overHorn, hit: lastBox.hit });
       await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: lastBox.x, y: lastBox.y, button: 'left', buttons: 1, clickCount: 1 });
       try {
         await waitUntil(`window.__pressedLog.includes('true')`, attemptTimeout,
@@ -734,11 +732,13 @@ async function testBootWatchdog() {
         pressedSuccess = true;
         break;
       } catch {
-        const inputLog = await readInputLog();
-        if (inputLog === 'unreadable') {
+        // The log itself, never a collapsed length (airhorn-l2c3): three
+        // shapes, three owners, and only 'dropped' may retry (airhorn-fl70).
+        const shape = classifyPressTimeout(await readInputLog(evaluate));
+        if (shape === 'unreadable') {
           throw new Error(`could not read the page's input log after trusted press at ${lastBox.x},${lastBox.y} (attempt ${attempt}/${maxAttempts}), so whether delivery was dropped cannot be judged; press diagnostics ${JSON.stringify(await pressDiagnostics())}`);
         }
-        if (inputLog.length > 0) {
+        if (shape === 'delivered-unpressed') {
           throw new Error(`unstyled horn failed to respond to trusted press at ${lastBox.x},${lastBox.y} (pointer events delivered but the horn stayed unpressed - the app ignored a trusted press, the product bug this case exists to catch; steal ${steal}); press diagnostics ${JSON.stringify(await pressDiagnostics())}`);
         }
         console.log(`  Case 7: attempt ${attempt}/${maxAttempts} timed out: no pointer event reached the page (delivery dropped); retrying press`);
@@ -746,7 +746,7 @@ async function testBootWatchdog() {
     }
 
     if (!pressedSuccess) {
-      throw new Error(`no pointer event reached the page after ${maxAttempts} attempts (every trusted press was dropped before delivery; steal ${steal}); press diagnostics ${JSON.stringify(await pressDiagnostics())}`);
+      throw new Error(`no pointer event reached the page after ${maxAttempts} attempts (every trusted press was dropped before delivery; steal ${steal}); press points ${JSON.stringify(pressPoints)}; press diagnostics ${JSON.stringify(await pressDiagnostics())}`);
     }
 
     await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: lastBox.x, y: lastBox.y, button: 'left', buttons: 0, clickCount: 1 });
