@@ -177,6 +177,51 @@ const buildGateProbe = () => {
   };
 };
 
+test('a git that cannot be read fails the gate instead of greening "no changed files" (airhorn-epbp)', () => {
+  // Discovery used to run its three git commands under `2>/dev/null`, so a git that failed produced an
+  // EMPTY changed set and the gate then printed its rc-0 'no changed files' verdict: a green run that
+  // tested nothing. The two worlds must be distinguishable: unchanged means git answered with nothing;
+  // unreadable means the gate refuses, loudly, before anything runs.
+  const { probe, run } = buildGateProbe();
+  // bash imports exported functions from BASH_FUNC_<name>%% - i.e. `export -f git` in the parent.
+  const gitFails = (body) => ({ 'BASH_FUNC_git%%': body });
+  try {
+    // 1. control: a genuinely unchanged tree still takes the ordinary rc-0 path, with that exact line.
+    const clean = run([]);
+    assert.equal(clean.status, 0, `an unchanged tree must still exit 0: ${clean.stdout}${clean.stderr}`);
+    assert.match(clean.stdout, /^fast-gate: no changed files$/m,
+      `an unchanged tree must still say so: ${clean.stdout}`);
+
+    // 2. git that runs for rev-parse but fails for diff/ls-files - the shape that greened any change.
+    const partial = run([], gitFails('() { if [ "$1" = "-C" ]; then shift 2; fi; case "$1" in diff|ls-files) return 128;; esac; command git "$@"; }'));
+    assert.equal(partial.status, 1,
+      `an unreadable diff must fail the gate, not green it: rc=${partial.status} stdout=${partial.stdout}`);
+    assert.match(partial.stderr, /git discovery \(diff <base>\.\.HEAD\) failed \(git diff exited 128\)/,
+      `the refusal must name the discovery command that failed: ${partial.stderr}`);
+    assert.match(partial.stderr, /UNKNOWN, and UNKNOWN is not EMPTY/,
+      `the refusal must distinguish unknown from empty: ${partial.stderr}`);
+    assert.ok(!partial.stdout.includes('fast-gate: no changed files'),
+      `an unreadable git must never reach the no-changed-files verdict: ${partial.stdout}`);
+    assert.ok(!partial.stdout.includes('fast-gate: running:'),
+      `nothing may run when discovery failed: ${partial.stdout}`);
+
+    // 3. git that cannot run at all - used to be misreported as "no base ref (no origin/master, no main)".
+    const broken = run([], gitFails('() { return 128; }'));
+    assert.equal(broken.status, 1, `a git that cannot run must fail the gate: ${broken.stdout}`);
+    assert.match(broken.stderr, /git discovery \(rev-parse --git-dir\) failed/,
+      `the refusal must blame git, not a missing branch: ${broken.stderr}`);
+    assert.ok(!broken.stderr.includes('no base ref'),
+      `a broken git must not be reported as a missing base ref: ${broken.stderr}`);
+
+    // 4. the escape hatch stays: --changed bypasses discovery, so it needs no git at all.
+    const bypass = run(['--list', '--changed', 'tests/pass.test.js'], gitFails('() { return 128; }'));
+    assert.equal(bypass.status, 0, `--changed must not depend on git: ${bypass.stdout}${bypass.stderr}`);
+    assert.match(bypass.stdout, /^tests\/pass\.test\.js$/m, bypass.stdout);
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
 test('a change that selects ZERO suites fails loudly, green only by explicit acknowledgement (airhorn-n0jd)', () => {
   // CONTRIBUTING.md matches the !*.md exemption row: no suite covers it. (README.md
   // used to be the example; it now selects tests/docs-recipe.test.mjs because its

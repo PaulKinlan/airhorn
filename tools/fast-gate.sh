@@ -96,21 +96,55 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --- git discovery must NOT swallow errors (airhorn-epbp) ------------------------------------------
+# The discovery block used to end in `2>/dev/null`, so a git that failed for any reason produced an
+# empty CHANGED set - and the gate then printed `fast-gate: no changed files` and exited 0, having
+# tested nothing. A git that works for `rev-parse` but not for `diff`/`ls-files` (a corrupt index, a
+# shim that refuses, a repo mid-repair) therefore greened ANY change. Discovery failures are fatal and
+# named now, so the one world that reaches `no changed files` is the one where git answered.
+FG_OUT=''
+git_discover() { # <purpose> <git args...>; sets FG_OUT, or exits 1 with a refusal
+  # Deliberately NOT a command substitution on the caller's side: `x=$(git_discover ...)` would run this
+  # body in a subshell, where `exit 1` kills only the substitution and the gate would carry on with an
+  # empty value - the very bug this function exists to close. Callers read $FG_OUT instead.
+  local purpose=$1; shift
+  local out rc
+  out=$(git -C "$ROOT" "$@" 2>&1); rc=$?     # only git runs in the subshell; the refusal does not
+  if [ "$rc" -ne 0 ]; then
+    echo "fast-gate: FAIL - git discovery ($purpose) failed (git $1 exited $rc), so the changed set is" >&2
+    echo "fast-gate: UNKNOWN, and UNKNOWN is not EMPTY. Refusing to report a verdict: 'no changed files'" >&2
+    echo "fast-gate: would be a guess about a tree nothing read. Fix git in this checkout, or pass" >&2
+    echo "fast-gate: --changed <path> to skip discovery entirely. git said:" >&2
+    printf '%s\n' "$out" | sed 's/^/    /' >&2
+    exit 1
+  fi
+  FG_OUT=$out
+}
+
 # --- the base: origin/master (this repo's default), then main variants, then HEAD~1. Never "everything".
 if [ "${#EXPLICIT[@]}" -eq 0 ]; then
+  # Prove git itself runs BEFORE probing for a base ref: `--verify --quiet` is silent by design (it asks
+  # "does this ref exist?"), so a git that cannot run at all used to be reported as "no base ref" - a
+  # message that names the wrong cause and sends the reader hunting for a missing branch.
+  git_discover 'rev-parse --git-dir' rev-parse --git-dir
   if [ -z "$BASE" ]; then
     for b in origin/master master origin/main main; do
       git -C "$ROOT" rev-parse --verify --quiet "$b" >/dev/null 2>&1 && { BASE=$b; break; }
     done
   fi
   [ -n "$BASE" ] || { echo "fast-gate: no base ref (no origin/master, no main) and no --changed given" >&2; exit 1; }
-  MB=$(git -C "$ROOT" merge-base "$BASE" HEAD) || { echo "fast-gate: cannot merge-base $BASE..HEAD" >&2; exit 1; }
+  git_discover "merge-base $BASE..HEAD" merge-base "$BASE" HEAD
+  MB=$FG_OUT
   # Committed, uncommitted and untracked all count. Over-inclusion is deliberate: a selector that MISSES
   # a file you just wrote is the defect this script exists to prevent.
-  mapfile -t CHANGED < <( { git -C "$ROOT" diff --name-only "$MB"..HEAD
-                            git -C "$ROOT" diff --name-only
-                            git -C "$ROOT" ls-files --others --exclude-standard; } 2>/dev/null \
-                          | sed '/^$/d' | sort -u )
+  git_discover 'diff <base>..HEAD' diff --name-only "$MB"..HEAD
+  _fg_committed=$FG_OUT
+  git_discover 'diff (working tree)' diff --name-only
+  _fg_worktree=$FG_OUT
+  git_discover 'ls-files --others' ls-files --others --exclude-standard
+  _fg_untracked=$FG_OUT
+  mapfile -t CHANGED < <(printf '%s\n%s\n%s\n' "$_fg_committed" "$_fg_worktree" "$_fg_untracked" \
+                          | sed '/^$/d' | sort -u)
 else
   CHANGED=("${EXPLICIT[@]}")
 fi
