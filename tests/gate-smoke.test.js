@@ -698,6 +698,61 @@ test('ambient GSM_TOOLS_ROOT redirection is impossible without the minted guard 
 // node's own text (so a visibility override below it survives), 'text'
 // collects.
 
+test('--build-plan answers for an exempt-only or unmapped change, without building (airhorn-ocqw)', () => {
+  // The query used to sit at the BOTTOM of the script, below the unmapped and zero-suite exits, so
+  // the two changes a human most wants to ask "would this build?" about were the two that exited
+  // before answering. It now answers first and names WHY the selection is empty. It must also stay
+  // READ-ONLY: build_decision inspects, and the query exits before the build section - proved here
+  // by pointing the probe's own build script at a marker file that must never appear.
+  const { probe, run } = buildGateProbe();
+  try {
+    // Read-only proof: if anything ever builds, this file appears. Committed, so the probe tree is
+    // still CLEAN - an uncommitted fixture file is itself a changed path, and the empty-change leg
+    // below must genuinely have nothing to report.
+    fs.writeFileSync(path.join(probe, 'package.json'),
+      JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'touch built.marker' } }));
+    for (const args of [['add', 'package.json'], ['commit', '-m', 'marker build']]) {
+      const g = spawnSync('git', ['-C', probe, ...args], { encoding: 'utf8' });
+      assert.equal(g.status, 0, `probe git ${args[0]} failed: ${g.stderr}`);
+    }
+
+    // 1. exempt-only: the real gate exits zero-suite (below); the QUERY must answer and name the row.
+    const exempt = run(['--build-plan', '--changed', 'exempt.md']);
+    assert.equal(exempt.status, 0, `an exempt-only --build-plan must answer, not exit: ${exempt.stdout}${exempt.stderr}`);
+    assert.match(exempt.stdout, /^fast-gate: build-plan: (build|keep) \(/m,
+      `the query must report the decision: ${exempt.stdout}`);
+    assert.match(exempt.stdout, /^fast-gate: build-plan: exempt: exempt\.md /m,
+      `the answer must name the exemption, not just go quiet: ${exempt.stdout}`);
+    assert.ok(!exempt.stdout.includes('ZERO-SUITE PASS') && !exempt.stdout.includes('fast-gate: zero-suite:'),
+      `a QUERY must not print a verdict: ${exempt.stdout}`);
+
+    // 2. unmapped: same, and the answer must name the file and say the real gate fails it.
+    const unmapped = run(['--build-plan', '--changed', 'unmapped.txt']);
+    assert.equal(unmapped.status, 0, `an unmapped --build-plan must answer, not exit: ${unmapped.stdout}${unmapped.stderr}`);
+    assert.match(unmapped.stdout, /^fast-gate: build-plan: (build|keep) \(/m, unmapped.stdout);
+    assert.match(unmapped.stdout, /^fast-gate: build-plan: unmapped: unmapped\.txt \(no row and no exemption/m,
+      `the answer must name the unmapped file: ${unmapped.stdout}`);
+    assert.ok(!unmapped.stderr.includes('FAIL'), `the query must not fail the change it is asked about: ${unmapped.stderr}`);
+
+    // 3. a genuinely empty change set may still say so - as an answer, with rc 0.
+    const empty = run(['--build-plan']);
+    assert.equal(empty.status, 0, `an empty-change query must answer: ${empty.stdout}${empty.stderr}`);
+    assert.match(empty.stdout, /^fast-gate: build-plan: no changed files \(nothing to decide\)$/m, empty.stdout);
+
+    // 4. and the VERDICT paths are untouched: the same two changes still fail as before.
+    const exemptVerdict = run(['--changed', 'exempt.md']);
+    assert.equal(exemptVerdict.status, 1, `the real gate must still refuse an exempt-only change: ${exemptVerdict.stdout}`);
+    const unmappedVerdict = run(['--changed', 'unmapped.txt']);
+    assert.equal(unmappedVerdict.status, 1, `the real gate must still refuse an unmapped change: ${unmappedVerdict.stdout}`);
+
+    // 5. nothing built, nothing written.
+    assert.ok(!fs.existsSync(path.join(probe, 'built.marker')),
+      '--build-plan must never build: the probe build script left its marker');
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
 test('an unstamped dist/ is never reused, whatever its mtime says (airhorn-k8sd)', () => {
   // The reviewer's design: reuse requires a stamp that binds the working-tree build
   // inputs AND the dist/ bytes. A dist/ with no stamp is unverified, even if it looks

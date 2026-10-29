@@ -277,6 +277,101 @@ for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
   fi
 done
 
+# --- the dist/ build decision, in ONE place (airhorn-k8sd, airhorn-5pqg) -----------
+# Two callers ask this question: --build-plan (the millisecond query) and the gate
+# itself. A rule that exists twice drifts, so both call build_decision and only the
+# printing differs. The freshness arm is the fix for airhorn-k8sd: after rebasing onto
+# an advancing master, CHANGED contains only the lane's own delta, so "did this delta
+# touch a build input" is the WRONG question - dist/ can be stale while the delta is
+# tests-only. Comparing build-input mtimes against dist/index.html asks the question
+# that actually matters: was dist/ built from the tree we are about to test?
+# Does any selected suite actually READ dist/? A suite that never touches dist/ does
+# not care whether it is fresh, so a tree that only selects those must not pay for a
+# build (and must not fail for want of one). Conservative on purpose: a suite that
+# merely MENTIONS dist/ counts, because gate-smoke spawns the gate in its own pins.
+suites_need_dist() {
+  # Match the TOKEN `dist`, not the literal "dist/" (airhorn-nh8y): suites build the
+  # path as path.join(__dirname, '../dist'), so a slash-only pattern misses them and the
+  # gate would keep - or refuse to make - a dist/ they read. Bounded so `distribution`
+  # and `distDir` (which contains the token as a prefix only) do not count as a whole
+  # word: uppercase D after dist is a different identifier, not a path segment.
+  local s
+  for s in "$@"; do
+    [ -f "$ROOT/$s" ] || continue
+    grep -qE '(^|[^[:alnum:]_])dist([^[:alnum:]_]|$)|/dist([/"'\'']|$)' "$ROOT/$s" 2>/dev/null && return 0
+    # A suite that spawns the gate can make a child gate serve dist/ even when the
+    # suite's own text never names it (the airhorn-0ct pin does exactly that).
+    grep -qE 'fast-gate\.sh' "$ROOT/$s" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+build_decision() { # [suite...]; prints "<build|keep> <reason>"; never builds, never exits
+  # The suite list is an ARGUMENT so the --build-plan query can ask the question before the
+  # gate has split the selection into RUN/PENDING/MISSING (airhorn-ocqw). Absent an argument
+  # the gate's own selection is used, exactly as before. suites_need_dist skips files that do
+  # not exist, so a list that still contains pending suites answers the same as RUN would.
+  local suites=(${1+"$@"})
+  if [ "${#suites[@]}" -eq 0 ]; then suites=(${RUN[@]+"${RUN[@]}"}); fi
+  if [ "${FAST_GATE_FORCE_BUILD:-0}" = "1" ]; then
+    echo "build FAST_GATE_FORCE_BUILD=1"; return
+  fi
+  if ! suites_need_dist ${suites[@]+"${suites[@]}"}; then
+    echo "keep no selected suite reads dist/"; return
+  fi
+  if [ ! -f "$ROOT/dist/index.html" ]; then
+    echo "build no dist/index.html to reuse"; return
+  fi
+  local stamp want_in want_out
+  stamp=$(read_stamp)
+  if [ -z "$stamp" ]; then
+    echo "build dist/ carries no stamp, so its bytes are unverified"; return
+  fi
+  want_in=$(inputs_digest)
+  want_out=$(outputs_digest)
+  if [ "${stamp#*inputs=}" != "$want_in" ] && [[ " $stamp " != *" inputs=$want_in "* ]]; then
+    echo "build the working-tree build inputs changed (stamp $stamp, now inputs=$want_in)"; return
+  fi
+  if [[ " $stamp " != *" outputs=$want_out "* ]]; then
+    echo "build the bytes in dist/ changed since the stamp (now outputs=$want_out)"; return
+  fi
+  echo "keep dist/ is stamped for these inputs and these output bytes (inputs=$want_in)"
+}
+# --- `--build-plan` is a QUERY, not a verdict: answer BEFORE any verdict exit (airhorn-ocqw) ---------
+# It used to sit at the bottom of the script, after the unmapped and zero-suite exits, so the two
+# changes a human is most likely to ask about - an exempt-only change and an unmapped one - exited
+# before the question was answered. The answer now names WHY the selection is empty (the exemption
+# row, the unmapped path, the deleted suite), so the query always reports something actionable.
+# READ-ONLY: build_decision only inspects (no build, no fetch, no stamp write), and this block exits
+# before the build section - `--stamp-dist` is the only flag that ever writes, and it is not reached.
+build_plan_answer() {
+  local _decision
+  if [ "${#CHANGED[@]}" -eq 0 ]; then
+    echo "fast-gate: build-plan: no changed files (nothing to decide)"
+    return 0
+  fi
+  # SELECTED, not RUN: this runs before the pending/missing split, and suites_need_dist ignores
+  # suites that are not on disk, so the answer is the same one the gate would act on.
+  _decision=$(build_decision ${SELECTED[@]+"${SELECTED[@]}"})
+  echo "fast-gate: build-plan: ${_decision%% *} (${_decision#* })"
+  local f
+  for f in ${UNMAPPED[@]+"${UNMAPPED[@]}"}; do
+    echo "fast-gate: build-plan: unmapped: $f (no row and no exemption - the real gate FAILS this change; nothing is selected for it)"
+  done
+  for f in ${EXEMPT_PATHS[@]+"${EXEMPT_PATHS[@]}"}; do
+    echo "fast-gate: build-plan: exempt: $f (matched a '!' row - no suite covers it, so it selects nothing)"
+  done
+  for f in ${DELETED_SUITE_PATHS[@]+"${DELETED_SUITE_PATHS[@]}"}; do
+    echo "fast-gate: build-plan: deleted-suite: $f (no file left to run, so it selects nothing)"
+  done
+  return 0
+}
+
+if [ "$BUILD_PLAN" -eq 1 ]; then
+  build_plan_answer
+  exit 0
+fi
+
 # --- fail loudly on anything unmapped, BEFORE running a subset that would look green ------------------
 if [ "${#UNMAPPED[@]}" -gt 0 ]; then
   mapfile -t _unmapped_sorted < <(printf '%s\n' "${UNMAPPED[@]}" | sort -u)
@@ -383,70 +478,6 @@ if [ "${#RUN[@]}" -eq 0 ]; then
   exit 0
 fi
 
-# --- the dist/ build decision, in ONE place (airhorn-k8sd, airhorn-5pqg) -----------
-# Two callers ask this question: --build-plan (the millisecond query) and the gate
-# itself. A rule that exists twice drifts, so both call build_decision and only the
-# printing differs. The freshness arm is the fix for airhorn-k8sd: after rebasing onto
-# an advancing master, CHANGED contains only the lane's own delta, so "did this delta
-# touch a build input" is the WRONG question - dist/ can be stale while the delta is
-# tests-only. Comparing build-input mtimes against dist/index.html asks the question
-# that actually matters: was dist/ built from the tree we are about to test?
-# Does any selected suite actually READ dist/? A suite that never touches dist/ does
-# not care whether it is fresh, so a tree that only selects those must not pay for a
-# build (and must not fail for want of one). Conservative on purpose: a suite that
-# merely MENTIONS dist/ counts, because gate-smoke spawns the gate in its own pins.
-suites_need_dist() {
-  # Match the TOKEN `dist`, not the literal "dist/" (airhorn-nh8y): suites build the
-  # path as path.join(__dirname, '../dist'), so a slash-only pattern misses them and the
-  # gate would keep - or refuse to make - a dist/ they read. Bounded so `distribution`
-  # and `distDir` (which contains the token as a prefix only) do not count as a whole
-  # word: uppercase D after dist is a different identifier, not a path segment.
-  local s
-  for s in "$@"; do
-    [ -f "$ROOT/$s" ] || continue
-    grep -qE '(^|[^[:alnum:]_])dist([^[:alnum:]_]|$)|/dist([/"'\'']|$)' "$ROOT/$s" 2>/dev/null && return 0
-    # A suite that spawns the gate can make a child gate serve dist/ even when the
-    # suite's own text never names it (the airhorn-0ct pin does exactly that).
-    grep -qE 'fast-gate\.sh' "$ROOT/$s" 2>/dev/null && return 0
-  done
-  return 1
-}
-
-build_decision() { # prints "<build|keep> <reason>"; never builds, never exits
-  local f
-  if [ "${FAST_GATE_FORCE_BUILD:-0}" = "1" ]; then
-    echo "build FAST_GATE_FORCE_BUILD=1"; return
-  fi
-  if ! suites_need_dist ${RUN[@]+"${RUN[@]}"}; then
-    echo "keep no selected suite reads dist/"; return
-  fi
-  if [ ! -f "$ROOT/dist/index.html" ]; then
-    echo "build no dist/index.html to reuse"; return
-  fi
-  local stamp want_in want_out
-  stamp=$(read_stamp)
-  if [ -z "$stamp" ]; then
-    echo "build dist/ carries no stamp, so its bytes are unverified"; return
-  fi
-  want_in=$(inputs_digest)
-  want_out=$(outputs_digest)
-  if [ "${stamp#*inputs=}" != "$want_in" ] && [[ " $stamp " != *" inputs=$want_in "* ]]; then
-    echo "build the working-tree build inputs changed (stamp $stamp, now inputs=$want_in)"; return
-  fi
-  if [[ " $stamp " != *" outputs=$want_out "* ]]; then
-    echo "build the bytes in dist/ changed since the stamp (now outputs=$want_out)"; return
-  fi
-  echo "keep dist/ is stamped for these inputs and these output bytes (inputs=$want_in)"
-}
-
-# --build-plan is a QUERY like --list: it says whether the build WOULD run, and never
-# runs it (airhorn-onz0b). It exists so the decision is testable in milliseconds
-# instead of by spawning whole gates, and so a human can ask "why did it build?".
-if [ "$BUILD_PLAN" -eq 1 ]; then
-  _decision=$(build_decision)
-  echo "fast-gate: build-plan: ${_decision%% *} (${_decision#* })"
-  exit 0
-fi
 
 # --- build once: the browser suites serve dist/ (a11y, sw-offline). ---------
 # Measured on a loaded 2-core VM: 48 s wall for `npm run build` (20.5 s in vite, the
