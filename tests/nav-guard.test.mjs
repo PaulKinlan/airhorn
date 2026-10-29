@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createNavigateFresh, FRESH_BOOT } from './support/nav-guard.mjs';
+import { createNavigateFresh, createReloadFresh, FRESH_BOOT } from './support/nav-guard.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const guardPath = path.join(here, 'support', 'nav-guard.mjs');
@@ -291,4 +291,174 @@ test('MUTATION: the fail-open read (the pre-airhorn-xl1t guard) lets the wait re
   assert.equal(satisfied[0].gen, 0,
     'ON THE OUTGOING DOCUMENT - this is airhorn-xl1t exactly: an unreadable document read as unbooted, '
     + 'the marker skipped, and the wait handed back to the page the case is leaving');
+});
+
+/*
+ * The reload guard's page timeline (airhorn-ajzf): no Page.navigate at all.
+ * The page reloads ITSELF (Case 6's controllerchange), so the marker is written
+ * FIRST, while no reload can be in flight, and the reload arrives later on the
+ * page's own schedule - or never, if the update is reverted.
+ *
+ *   now 0        pre-update document (generation 0), booted: the case just
+ *                proved the boot before publishing the update
+ *   markOutgoing() writes the marker into generation 0
+ *   reloadAt     the page reloads itself (generation 1 commits, unmarked);
+ *                null models the mutation the false-green risk was called out
+ *                with: the update reverted, the old document stays
+ *   +bootMs      the reloaded document's deferred bundle has run
+ */
+const createReloadSim = ({
+  reloadAt = 100,
+  bootMs = 300,
+  pollMs = 10,
+  roundTripMs = 3,
+  markFails = false,
+} = {}) => {
+  let now = 0;
+  let gen = 0;
+  let bootAt = null;
+  let markAttempts = 0;
+  let markAt = null;
+  const marked = new Map([[0, false]]);
+  const polls = [];
+
+  const settle = () => {
+    if (reloadAt !== null && gen === 0 && now >= reloadAt) {
+      gen = 1;
+      marked.set(1, false);
+      bootAt = now + bootMs;
+    }
+  };
+
+  // The pre-update document is booted by precondition (the case waited for it
+  // before publishing v2); the reloaded document boots bootMs after the reload.
+  const booted = () => {
+    settle();
+    if (gen === 0) return true;
+    return bootAt !== null && now >= bootAt;
+  };
+
+  const evaluate = async (expression) => {
+    now += roundTripMs;
+    settle();
+    if (expression === MARK_OUTGOING) {
+      if (markFails) throw new Error('CDP: target closed');
+      markAttempts += 1;
+      markAt = now;
+      marked.set(gen, true);
+      return 1;
+    }
+    const guarded = expression.match(/^!window\.__outgoingDocument && \((.*)\)$/s);
+    if (guarded) {
+      const satisfied = !marked.get(gen) && (guarded[1] === FRESH_BOOT ? booted() : false);
+      polls.push({ at: now, gen, booted: booted(), marked: marked.get(gen), satisfied });
+      return satisfied;
+    }
+    // A mutant whose marker conjunct was stripped asks for the bare boot signal.
+    if (expression === `(${FRESH_BOOT})`) {
+      const satisfied = booted();
+      polls.push({ at: now, gen, booted: booted(), marked: marked.get(gen), satisfied });
+      return satisfied;
+    }
+    throw new Error(`this simulator does not model the expression the guard asked for: ${expression}`);
+  };
+
+  const waitUntil = async (expression, timeoutMs, label) => {
+    const deadline = now + timeoutMs;
+    let lastError = null;
+    for (;;) {
+      try {
+        if (await evaluate(expression)) return { at: now, gen };
+        lastError = null;
+      } catch (err) {
+        lastError = err;
+      }
+      if (now > deadline) {
+        throw new Error(`sim: timed out after ${timeoutMs}ms waiting for ${label}`
+          + (lastError ? ` (last error: ${lastError.message})` : ''));
+      }
+      now += pollMs;
+    }
+  };
+
+  return {
+    evaluate,
+    waitUntil,
+    timeoutMs: 15000,
+    markAttempts: () => markAttempts,
+    markAt: () => markAt,
+    polls,
+    satisfied: () => polls.filter((p) => p.satisfied),
+  };
+};
+
+const reloadGuardFor = (sim, create = createReloadFresh) => create({
+  evaluate: sim.evaluate,
+  waitUntil: sim.waitUntil,
+  timeoutMs: sim.timeoutMs,
+  retryDelayMs: 0,
+});
+
+test('reload guard: the wait resolves only in the reloaded, booted document', async () => {
+  const sim = createReloadSim({ reloadAt: 100 });
+  await reloadGuardFor(sim).markOutgoing('case 6');
+  assert.equal(sim.markAttempts(), 1, 'the pre-update document is marked exactly once');
+  assert.ok(sim.markAt() < 100,
+    'the marker is written BEFORE the page can reload itself - after the trigger there would be nothing to order it against');
+  const resolved = await reloadGuardFor(sim).waitFresh('case 6 post-update');
+  assert.equal(resolved.gen, 1, 'the wait resolves in the reloaded document');
+  const satisfied = sim.satisfied();
+  assert.equal(satisfied[0].gen, 1, 'the first satisfied poll is in the reloaded document');
+  assert.equal(satisfied[0].booted, true, 'and only after its deferred bundle ran');
+  assert.equal(sim.polls.filter((p) => p.gen === 0 && p.satisfied).length, 0,
+    'the marked pre-update document must never answer this wait');
+});
+
+test('reload guard goes RED when the update is reverted: the stale document cannot satisfy it', async () => {
+  // The mutation the false-green risk was called out with (airhorn-ajzf):
+  // serve the old document / revert the update, modelled as the reload never
+  // arriving. The booted pre-update document is still right there answering
+  // polls - a bare boot wait would pass on it - so if this wait resolves, the
+  // marker is not load-bearing.
+  const sim = createReloadSim({ reloadAt: null });
+  await reloadGuardFor(sim).markOutgoing('case 6');
+  await assert.rejects(
+    () => reloadGuardFor(sim).waitFresh('case 6 post-update'),
+    /timed out after 15000ms waiting for case 6 post-update: the reloaded document to commit and boot/,
+    'with no reload, the wait must time out RED and name the case - never pass on the stale document');
+  assert.equal(sim.satisfied().length, 0,
+    'no poll was ever satisfied: every one of them ran against the booted, MARKED pre-update document');
+});
+
+test('reload guard: a marker write that cannot be proven refuses to wait', async () => {
+  const sim = createReloadSim({ markFails: true });
+  await assert.rejects(() => reloadGuardFor(sim).markOutgoing('case 6'),
+    /case 6: could not mark the outgoing document \(CDP: target closed\) - refusing to wait for the reload/,
+    'an unmarked document leaves nothing to tell the two generations apart, so this is fatal, not a skip');
+});
+
+test('MUTATION: stripping the marker conjunct lets the STALE pre-update document answer (the airhorn-ajzf false green)', async () => {
+  // Remove `!window.__outgoingDocument && ` from the one expression builder the
+  // shipped guards share, leaving a bare boot wait - the exact pre-ajzf Case 6
+  // shape. Everything else (mark, retry, wait) is the shipped code. With the
+  // update reverted (no reload), the mutant wait must visibly resolve on the
+  // stale document; if it ever stops doing so, the reload-guard checks above
+  // have stopped testing anything.
+  const source = fs.readFileSync(guardPath, 'utf8');
+  const conjunct = '!window.__outgoingDocument && (${booted})';
+  assert.ok(source.includes(conjunct),
+    'the mutation anchor must still be the expression builder both guards share: without it this check '
+    + 'silently mutates nothing and passes for the wrong reason');
+  const mutantSource = source.replace(conjunct, '(${booted})');
+  assert.notEqual(mutantSource, source, 'the mutation must actually differ from the shipped source');
+  const { createReloadFresh: createMutant } = await import(
+    `data:text/javascript;base64,${Buffer.from(mutantSource, 'utf8').toString('base64')}`
+  );
+
+  const sim = createReloadSim({ reloadAt: null });
+  await reloadGuardFor(sim, createMutant).markOutgoing('case 6');
+  const resolved = await reloadGuardFor(sim, createMutant).waitFresh('case 6 post-update');
+  assert.equal(resolved.gen, 0,
+    'the mutant resolves ON THE STALE PRE-UPDATE DOCUMENT - the false green airhorn-ajzf reported: the case '
+    + 'would pass without the post-update page being tested at all');
 });

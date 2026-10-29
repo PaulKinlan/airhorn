@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
 import { awaitSocketOpen, boundCommand } from './cdp-command-bound.mjs';
-import { createNavigateFresh } from './support/nav-guard.mjs';
+import { createNavigateFresh, createReloadFresh } from './support/nav-guard.mjs';
 import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -286,6 +286,13 @@ async function testBootWatchdog() {
     port,
     timeoutMs: WAIT_TIMEOUT_MS,
   });
+  // The same outgoing-document guard for the one navigation the PAGE issues
+  // itself: Case 6's controllerchange reload (airhorn-ajzf).
+  const reloadFresh = createReloadFresh({
+    evaluate,
+    waitUntil,
+    timeoutMs: WAIT_TIMEOUT_MS,
+  });
 
   const shot = async (name) => {
     const res = await send('Page.captureScreenshot', { format: 'png' });
@@ -542,6 +549,19 @@ async function testBootWatchdog() {
     if ((await evaluate(`!!navigator.serviceWorker.controller`)) !== true) {
       throw new Error('stub SW did not claim the page; the update case needs a controller');
     }
+    // airhorn-ajzf: the page reloads ITSELF on controllerchange (index.html) -
+    // a navigation this suite does not issue, so navigateFresh's pre-navigate
+    // marker cannot cover it, and a bare `typeof window.__airhorn` wait after
+    // the update can be answered by THIS (pre-update) document; the app-status
+    // assertion below would then read the same stale page and the case would go
+    // green without testing the post-update document at all. Option (b) -
+    // documenting the gap and waiting bare - was rejected: the two documents
+    // CAN be told apart, because window properties do not survive a reload, so
+    // an unfalsifiable wait is a choice, not a limitation (option a). Mark this
+    // document NOW, while no reload can be in flight: the reload needs the v2
+    // body published, installed, activated and claiming, so nothing before
+    // `swBody = swV2` can race the marker onto the wrong document.
+    await reloadFresh.markOutgoing('case 6');
     swBody = swV2;
     // Fire and forget: reg.update() is polled below, not awaited here.
     await evaluate(`navigator.serviceWorker.getRegistration().then(reg => reg.update())`);
@@ -560,12 +580,18 @@ async function testBootWatchdog() {
       throw new Error(`successful update announced a failure: ${JSON.stringify(falseFailure)}`);
     }
     await shot('update-notice');
-    // The page updates itself via the existing controllerchange reload; wait
-    // for v2 to be the active controller, then confirm the fresh page boots
-    // and is silent again.
+    // The page updates itself via the existing controllerchange reload. The
+    // wait this replaces read the STALE document twice over: a bare boot wait
+    // is answered by the pre-update page (airhorn-ajzf), and 'controller.state
+    // === "activated"' cannot tell the generations apart either - v1 is already
+    // activated. The marker wait does the distinguishing: it resolves only in a
+    // booted document that never carried the pre-update marker, i.e. the
+    // reloaded page. The controller assertion then runs in THAT document, where
+    // the controller is v2 by construction (v2 had to be activated and
+    // controlling for controllerchange to reload the page at all).
+    await reloadFresh.waitFresh('case 6 post-update');
     await waitUntil(`navigator.serviceWorker.controller
-      && navigator.serviceWorker.controller.state === 'activated'`, WAIT_TIMEOUT_MS, 'v2 to activate');
-    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot after update');
+      && navigator.serviceWorker.controller.state === 'activated'`, WAIT_TIMEOUT_MS, 'v2 controller on the reloaded page');
     if ((await evaluate(`document.getElementById('app-status').textContent`)) !== '') {
       throw new Error('status region not empty on the freshly updated page');
     }
