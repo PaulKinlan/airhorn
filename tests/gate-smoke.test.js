@@ -474,7 +474,7 @@ test('an audit whose browser never starts reports a labelled ERROR row and keeps
   try {
     const res = spawnSync(process.execPath, [path.join(root, 'tools', 'resilience-audit.mjs')], {
       encoding: 'utf8',
-      timeout: 120000,
+      timeout: 60000,
       env: {
         ...process.env,
         RESILIENCE_ONLY: 'liefi',
