@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
 import { awaitSocketOpen, boundCommand } from './cdp-command-bound.mjs';
+import { createNavigateFresh } from './support/nav-guard.mjs';
 import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -253,6 +254,38 @@ async function testBootWatchdog() {
       await new Promise(r => setTimeout(r, 100));
     }
   };
+
+  // Navigate to Case 6's fresh document. The flow (and every failure it has to
+  // survive) lives in support/nav-guard.mjs, because a browser cannot be made to
+  // refuse a boot check on demand and the fail-open regression airhorn-xl1t found
+  // is only reachable with a transport that does; tests/nav-guard.test.mjs drives
+  // those lines, including a mutated fail-open copy of them.
+  //
+  // Case 6 is the ONLY navigation in this suite that this helper guards, and it is
+  // guarded because it is genuinely racy (airhorn-1x2d): it leaves the Case 5 page,
+  // which is a booted app document, so a bare `typeof window.__airhorn` wait can be
+  // answered by the document being left (airhorn-ie0b). The other navigations keep
+  // the waits they had, because their outgoing document cannot satisfy that wait:
+  // Case 1 starts from about:blank; Case 5 follows the Case 4 noscript page, where
+  // scripting is disabled and no bundle ran; Case 10 follows the Case 9 page, which
+  // the suite asserts is unbooted (:827-828). Guarding those
+  // three would be a rule the code cannot justify - fewer guards, each with a
+  // reason, is the deliverable.
+  //
+  // What is NOT guarded here, said plainly so this comment cannot be read as
+  // coverage it does not have: Case 7's unstyled navigation still waits bare
+  // (:578-579) - its marker-based fix is a separate delta on fleet/retry-guard
+  // (airhorn-byl0, airhorn-0ghk), and editing those lines here would only make the
+  // two deltas conflict - and Case 8 uses its own `__case8Outgoing` marker (:783)
+  // rather than this helper, because its post-boot signal is `__airhornBooted` and
+  // its marker has to be set after the fetch hold is armed.
+  const navigateFresh = createNavigateFresh({
+    evaluate,
+    send,
+    waitUntil,
+    port,
+    timeoutMs: WAIT_TIMEOUT_MS,
+  });
 
   const shot = async (name) => {
     const res = await send('Page.captureScreenshot', { format: 'png' });
@@ -505,8 +538,7 @@ async function testBootWatchdog() {
 
     // --- Case 6: service worker update over an existing controller -------------
     console.log('--- Case 6: service worker update');
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot before update');
+    await navigateFresh('case 6');
     if ((await evaluate(`!!navigator.serviceWorker.controller`)) !== true) {
       throw new Error('stub SW did not claim the page; the update case needs a controller');
     }

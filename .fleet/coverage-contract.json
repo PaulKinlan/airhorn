@@ -190,6 +190,7 @@
   "tests/health.test.mjs",
   "tests/keyboard.test.mjs",
   "tests/multitab.test.mjs",
+  "tests/nav-guard.test.mjs",
   "tests/reflow-zoom.test.mjs",
   "tests/resilience-ui.test.mjs",
   "tests/screenreader.test.mjs",
