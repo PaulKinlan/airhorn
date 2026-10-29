@@ -790,6 +790,34 @@ test('a build that changes its own inputs leaves NO stamp, so the next run rebui
   }
 });
 
+test('a symlinked build input fails the digest loudly instead of blinding the stamp (airhorn-bt55 a)', () => {
+  // `find -type f` skips a symlink, so a symlinked input contributes NOTHING to the digest: the
+  // stamp stays "current" while the bytes it claims to cover change underneath it - reuse forever.
+  // It must fail loudly and the decision must be REBUILD.
+  const { probe, run } = buildGateProbe();
+  try {
+    fs.writeFileSync(path.join(probe, 'package.json'), JSON.stringify({
+      name: 'gate-contract-probe', private: true,
+      scripts: { build: 'mkdir -p dist && echo BUILT > dist/index.html' },
+    }));
+    const built = run(['--changed', 'tests/pass.test.js']);
+    assert.equal(built.status, 0, `${built.stdout}${built.stderr}`);
+    assert.ok(fs.existsSync(path.join(probe, 'dist', '.fast-gate-stamp')), 'the control build must stamp dist/');
+    assert.match(run(['--build-plan', '--changed', 'tests/pass.test.js']).stdout, /build-plan: keep \(/,
+      'control: a current stamp is reused');
+
+    fs.rmSync(path.join(probe, 'src', 'a.js'));
+    fs.symlinkSync(path.join(probe, 'package.json'), path.join(probe, 'src', 'a.js'));
+    const plan = run(['--build-plan', '--changed', 'tests/pass.test.js']);
+    assert.match(plan.stderr, /fast-gate: digest: cannot read src\/a\.js \(it is a symlink/,
+      `an unreadable input must be named loudly, not hashed around: ${plan.stderr}`);
+    assert.match(plan.stdout, /^fast-gate: build-plan: build \(/m,
+      `and the decision must be REBUILD, never reuse: ${plan.stdout}`);
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
 test('an unstamped dist/ is never reused, whatever its mtime says (airhorn-k8sd)', () => {
   // The reviewer's design: reuse requires a stamp that binds the working-tree build
   // inputs AND the dist/ bytes. A dist/ with no stamp is unverified, even if it looks

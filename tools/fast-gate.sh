@@ -16,7 +16,9 @@
 #   fast-gate: zero-suite: <path>        (changed file that selected nothing when 0 suites ran,
 #                                         suffixed with why: exempt or deleted suite; exit 1 unless
 #                                         FAST_GATE_ALLOW_ZERO=1, which prints ZERO-SUITE PASS)
-# The gate builds dist/ before running (browser suites serve it); a build failure exits 1.
+# The gate builds dist/ before running the browser suites that serve it, and only when the build
+# decision says a build is needed (no dist/, an unstamped dist/, changed inputs, or changed dist/
+# bytes): a build failure exits 1, and a build that changes its own inputs is not stamped.
 #
 # Usage:
 #   bash tools/fast-gate.sh                     # changed paths vs the merge-base with origin/master
@@ -24,6 +26,9 @@
 #   bash tools/fast-gate.sh --list              # print the suites it WOULD run, run nothing
 #   bash tools/fast-gate.sh --build-plan --changed <path>  # would this build dist? (never builds)
 #   bash tools/fast-gate.sh --base <ref>        # compare against another base
+#   bash tools/fast-gate.sh --stamp-dist        # TEST/REPAIR ONLY: stamp whatever is in dist/ as
+#                                                # current, without building - it can bless bytes no
+#                                                # build produced. Nothing in the fleet path uses it.
 #   FAST_GATE_JOBS=1 bash tools/fast-gate.sh    # serial: one suite at a time
 #                                                # (fallback when gate.conf sets none: one per core)
 #   FAST_GATE_ALLOW_ZERO=1 bash tools/fast-gate.sh  # bless a suite-free change (every ignored file:
@@ -38,6 +43,9 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
+# One temp dir for the whole run, created here so the digest helpers below can capture the
+# pipeline's OWN stderr and report it (airhorn-bt55 (a)).
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 MAP="$HERE/suite-map.tsv"
 CONF="$HERE/gate.conf"
 
@@ -131,6 +139,13 @@ fi
 # Cost on this repo: 27 input files (~344K) and 27 output files (~332K), tens of ms.
 FP_FILE_NAME='.fast-gate-stamp'
 
+# DOCUMENTED LIMITATION (airhorn-bt55 (b)): the stamp describes ONLY the paths named here. Vite also
+# reads .env, .env.local/.env.<mode>, and VITE_*/NODE_ENV from the environment, and node_modules/ -
+# none of which are hashed. Today that costs nothing: this repo has no .env* file, the dependency
+# tree is pinned by package.json/package-lock.json/deno.lock (which ARE hashed), and VITE_*/NODE_ENV
+# change what is built only through the env the gate itself runs with (an ambient VITE_* that changes
+# the bundle would not be seen here). If a .env* file ever lands, add it to the list below or the
+# stamp will describe a tree that was not the one built. Deliberate, not an oversight.
 input_paths() { # existing build-input paths, relative to ROOT
   local p
   for p in src public index.html package.json package-lock.json deno.lock; do
@@ -141,14 +156,40 @@ input_paths() { # existing build-input paths, relative to ROOT
   done
 }
 
+digest_fail() { echo "fast-gate: digest: cannot read $1" >&2; return 1; }
+
 content_digest() { # $1 = directory to walk from, rest = paths inside it
   local base=$1; shift
-  [ "$#" -gt 0 ] || { echo "empty"; return; }
-  ( cd "$base" 2>/dev/null || exit 0
-    find "$@" -type f -print0 2>/dev/null \
-      | LC_ALL=C sort -z \
-      | xargs -0 -r sha256sum 2>/dev/null \
-      | sha256sum | awk '{print $1}' )
+  [ "$#" -gt 0 ] || { echo "empty"; return 0; }
+  # A hole in the digest reads as "unchanged", and "unchanged" is REUSE - so an unreadable or
+  # symlinked input used to make the stamp blind to it forever instead of failing (airhorn-bt55
+  # (a)). Every named path must exist, be readable, and be a real file: the bytes hashed have to
+  # be the bytes built, or there is no honest digest to take.
+  local p
+  for p in "$@"; do
+    [ -L "$base/$p" ] && { digest_fail "$p (it is a symlink, so the bytes hashed here are not the bytes built)"; return 1; }
+    [ -r "$base/$p" ] || { digest_fail "$p (missing or unreadable)"; return 1; }
+  done
+  # A symlink ANYWHERE under the hashed paths is the same hole one level down (`find -type f` does
+  # not descend it, so its bytes are simply absent from the digest). Name it and refuse.
+  local link
+  link=$( cd "$base" 2>/dev/null && find "$@" -type l -print 2>/dev/null | LC_ALL=C sort | head -1 )
+  [ -n "$link" ] && { digest_fail "$link (it is a symlink, so the bytes hashed here are not the bytes built)"; return 1; }
+  local out rc
+  : > "$TMP/digest.err"
+  out=$( cd "$base" || exit 1
+         set -o pipefail
+         find "$@" -type f -print0 2>>"$TMP/digest.err" \
+           | LC_ALL=C sort -z \
+           | xargs -0 -r sha256sum 2>>"$TMP/digest.err" \
+           | sha256sum 2>>"$TMP/digest.err" | awk '{print $1}' )
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    sed 's/^/fast-gate: digest: /' "$TMP/digest.err" 2>/dev/null >&2
+    digest_fail "the build inputs under $base (pipeline exit $rc)"
+    return 1
+  fi
+  printf '%s\n' "$out"
 }
 
 inputs_digest() {
@@ -158,12 +199,22 @@ inputs_digest() {
 }
 
 outputs_digest() { # everything in dist/ except the stamp itself
-  [ -d "$ROOT/dist" ] || { echo "empty"; return; }
-  ( cd "$ROOT/dist" || exit 0
-    find . -type f ! -name "$FP_FILE_NAME" -print0 2>/dev/null \
-      | LC_ALL=C sort -z \
-      | xargs -0 -r sha256sum 2>/dev/null \
-      | sha256sum | awk '{print $1}' )
+  [ -d "$ROOT/dist" ] || { echo "empty"; return 0; }
+  local out rc
+  : > "$TMP/digest-out.err"
+  out=$( cd "$ROOT/dist" || exit 1
+         set -o pipefail
+         find . -type f ! -name "$FP_FILE_NAME" -print0 2>>"$TMP/digest-out.err" \
+           | LC_ALL=C sort -z \
+           | xargs -0 -r sha256sum 2>>"$TMP/digest-out.err" \
+           | sha256sum 2>>"$TMP/digest-out.err" | awk '{print $1}' )
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    sed 's/^/fast-gate: digest: /' "$TMP/digest-out.err" 2>/dev/null >&2
+    digest_fail "dist/ (pipeline exit $rc)"
+    return 1
+  fi
+  printf '%s\n' "$out"
 }
 
 read_stamp() { # prints "inputs=<h> outputs=<h>" from the stamp, or nothing
@@ -178,15 +229,21 @@ read_stamp() { # prints "inputs=<h> outputs=<h>" from the stamp, or nothing
 write_stamp() { # [$1 = the PRE-build inputs digest]; without it, digest the inputs now
   # The caller in the build path passes the digest it took BEFORE the build (airhorn-bt55 P1):
   # a stamp must describe the tree the build READ, never the tree it left behind. --stamp-dist
-  # passes nothing, because it stamps an existing dist/ without building.
+  # passes nothing, because it stamps an existing dist/ without building - test/repair only.
   local want_in=${1:-}
-  if [ -z "$want_in" ]; then want_in=$(inputs_digest); fi
+  if [ -z "$want_in" ]; then want_in=$(inputs_digest) || return 1; fi
   mkdir -p "$ROOT/dist"
-  { echo "inputs $want_in"; echo "outputs $(outputs_digest)"; } > "$ROOT/dist/$FP_FILE_NAME"
+  local want_out
+  want_out=$(outputs_digest) || return 1
+  { echo "inputs $want_in"; echo "outputs $want_out"; } > "$ROOT/dist/$FP_FILE_NAME"
 }
 
+# --stamp-dist is TEST/REPAIR ONLY (airhorn-bt55 (c)): it stamps whatever is in dist/ as if a build
+# had just produced it, WITHOUT building - so it can bless bytes no build ever made, and reuse them
+# until an input changes. It exists so the pins can set up a stamped dist/ in milliseconds. It is
+# not a way to make a tree green; the gate itself always stamps from a build it just ran.
 if [ "$STAMP_DIST" -eq 1 ]; then
-  write_stamp
+  write_stamp || { echo "fast-gate: FAIL - --stamp-dist could not digest dist/ (see above)." >&2; exit 1; }
   echo "fast-gate: stamped dist/ ($(read_stamp))"
   exit 0
 fi
@@ -288,8 +345,9 @@ done
 # printing differs. The freshness arm is the fix for airhorn-k8sd: after rebasing onto
 # an advancing master, CHANGED contains only the lane's own delta, so "did this delta
 # touch a build input" is the WRONG question - dist/ can be stale while the delta is
-# tests-only. Comparing build-input mtimes against dist/index.html asks the question
-# that actually matters: was dist/ built from the tree we are about to test?
+# tests-only. Comparing the WORKING-TREE CONTENT DIGESTS of the build inputs and of dist/ against
+# the stamp asks the question that actually matters: was dist/ built from the bytes we are about
+# to test? (mtimes were the first attempt and were dropped: a checkout rewrites them.)
 # Does any selected suite actually READ dist/? A suite that never touches dist/ does
 # not care whether it is fresh, so a tree that only selects those must not pay for a
 # build (and must not fail for want of one). Conservative on purpose: a suite that
@@ -334,7 +392,10 @@ build_decision() { # [suite...]; prints "<build|keep> <reason>"; never builds, n
   fi
   want_in=$(inputs_digest)
   want_out=$(outputs_digest)
-  if [ "${stamp#*inputs=}" != "$want_in" ] && [[ " $stamp " != *" inputs=$want_in "* ]]; then
+  # The stamp always carries "inputs=... outputs=...", so `${stamp#*inputs=}` can never equal a bare
+  # digest - that half of this test was dead and only made the live half look redundant
+  # (airhorn-bt55 (d)). One test, the one that works.
+  if [[ " $stamp " != *" inputs=$want_in "* ]]; then
     echo "build the working-tree build inputs changed (stamp $stamp, now inputs=$want_in)"; return
   fi
   if [[ " $stamp " != *" outputs=$want_out "* ]]; then
@@ -451,7 +512,6 @@ fi
 # --- split selected suites: RUN (exists) vs PENDING (declared by a `~` row, not landed yet) ----------
 # A selected suite whose file is missing is a STALE map (fail) unless a `~` row declares it as pending
 # (arriving with a sibling branch) - then it is skipped loudly and simply not counted.
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 RUN=(); PENDING=(); MISSING=()
 for s in "${SELECTED[@]}"; do
   if [ -f "$ROOT/$s" ]; then RUN+=("$s");
@@ -485,12 +545,12 @@ fi
 
 
 # --- build once: the browser suites serve dist/ (a11y, sw-offline). ---------
-# Measured on a loaded 2-core VM: 48 s wall for `npm run build` (20.5 s in vite, the
-# rest npm startup), which is most of a fast gate for a change that cannot affect the
-# bundle. So build only when something the build READS changed (airhorn-onz0b,
-# sanctioned by coord as docs/speed.md R2); a tools/, tests/ or docs-only change reuses
-# the dist/ already on disk, and the browser suites serve the same bytes they would have
-# got. FAST_GATE_FORCE_BUILD=1 overrides.
+# The first measurement of `npm run build` on a loaded 2-core VM was 48 s wall; the author's own
+# timing of the settled script is 0.6-1.2 s (vite bundle + copy, `npm run` startup included). Even at
+# the higher figure it is most of a fast gate for a change that cannot affect the bundle. So build
+# only when something the build READS changed (airhorn-onz0b, sanctioned by coord as docs/speed.md
+# R2); a tools/, tests/ or docs-only change reuses the dist/ already on disk, and the browser suites
+# serve the same bytes they would have got. FAST_GATE_FORCE_BUILD=1 overrides.
 mkdir -p "$RESULTS_DIR"
 _decision=$(build_decision)
 if [ "${_decision%% *}" = "keep" ]; then
@@ -517,8 +577,8 @@ if [ "${_decision%% *}" != "keep" ]; then
     echo "fast-gate: not stamping dist/: the pre-build input digest could not be taken, so no stamp describes these bytes; the next run rebuilds" >&2
   elif [ "$post_in" != "$pre_in" ]; then
     echo "fast-gate: not stamping dist/: the build changed its own inputs (before=$pre_in after=${post_in:-unreadable}), so no stamp describes a dist/ built from these bytes; the next run rebuilds" >&2
-  else
-    write_stamp "$pre_in"
+  elif ! write_stamp "$pre_in"; then
+    echo "fast-gate: not stamping dist/: the built bytes could not be digested (see above); the next run rebuilds" >&2
   fi
 fi
 
