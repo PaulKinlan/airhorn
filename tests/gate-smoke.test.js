@@ -753,6 +753,43 @@ test('--build-plan answers for an exempt-only or unmapped change, without buildi
   }
 });
 
+test('a build that changes its own inputs leaves NO stamp, so the next run rebuilds (airhorn-bt55 P1)', () => {
+  // The stamp used to be written with a digest taken AFTER the build, so a build that edits its own
+  // inputs stamped the tree it LEFT BEHIND over a dist/ built from the tree it READ - and the next
+  // run reused it. That is a stale-dist green, which tools/fast-gate.sh's own rule forbids.
+  const { probe, run } = buildGateProbe();
+  try {
+    const pkg = (build) => JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build } });
+    // The probe's own build appends to src/a.js - the exact shape: inputs move while the build runs.
+    fs.writeFileSync(path.join(probe, 'package.json'),
+      pkg("mkdir -p dist && echo BUILT > dist/index.html && printf '// built\\n' >> src/a.js"));
+    const first = run(['--changed', 'tests/pass.test.js']);
+    assert.equal(first.status, 0, `the gate must still run its suite: ${first.stdout}${first.stderr}`);
+    assert.match(first.stdout, /fast-gate: building dist/, first.stdout);
+    assert.match(first.stderr, /not stamping dist\/: the build changed its own inputs/, first.stderr);
+    assert.ok(!fs.existsSync(path.join(probe, 'dist', '.fast-gate-stamp')),
+      'a build that moved its own inputs must leave NO stamp: any stamp here describes the tree it left behind');
+    // The consequence: the NEXT decision must rebuild, not reuse a dist/ no stamp describes.
+    const plan = run(['--build-plan', '--changed', 'tests/pass.test.js']);
+    assert.equal(plan.status, 0, plan.stderr);
+    assert.match(plan.stdout, /^fast-gate: build-plan: build \(/m,
+      `the next run must rebuild, not reuse: ${plan.stdout}`);
+
+    // Control: the same build that does NOT touch its inputs DOES stamp, and the next query reuses.
+    // Without this, the assertion above would pass for a gate that never stamps at all.
+    fs.writeFileSync(path.join(probe, 'package.json'),
+      pkg('mkdir -p dist && echo BUILT > dist/index.html'));
+    const second = run(['--changed', 'tests/pass.test.js']);
+    assert.equal(second.status, 0, `${second.stdout}${second.stderr}`);
+    assert.ok(fs.existsSync(path.join(probe, 'dist', '.fast-gate-stamp')),
+      'an honest build must stamp dist/, or the no-stamp assertion above proves nothing');
+    const keep = run(['--build-plan', '--changed', 'tests/pass.test.js']);
+    assert.match(keep.stdout, /^fast-gate: build-plan: keep \(/m, keep.stdout);
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
 test('an unstamped dist/ is never reused, whatever its mtime says (airhorn-k8sd)', () => {
   // The reviewer's design: reuse requires a stamp that binds the working-tree build
   // inputs AND the dist/ bytes. A dist/ with no stamp is unverified, even if it looks

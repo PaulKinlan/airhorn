@@ -175,9 +175,14 @@ read_stamp() { # prints "inputs=<h> outputs=<h>" from the stamp, or nothing
   return 0
 }
 
-write_stamp() {
+write_stamp() { # [$1 = the PRE-build inputs digest]; without it, digest the inputs now
+  # The caller in the build path passes the digest it took BEFORE the build (airhorn-bt55 P1):
+  # a stamp must describe the tree the build READ, never the tree it left behind. --stamp-dist
+  # passes nothing, because it stamps an existing dist/ without building.
+  local want_in=${1:-}
+  if [ -z "$want_in" ]; then want_in=$(inputs_digest); fi
   mkdir -p "$ROOT/dist"
-  { echo "inputs $(inputs_digest)"; echo "outputs $(outputs_digest)"; } > "$ROOT/dist/$FP_FILE_NAME"
+  { echo "inputs $want_in"; echo "outputs $(outputs_digest)"; } > "$ROOT/dist/$FP_FILE_NAME"
 }
 
 if [ "$STAMP_DIST" -eq 1 ]; then
@@ -494,13 +499,27 @@ else
   echo "fast-gate: building dist (${_decision#* })"
 fi
 if [ "${_decision%% *}" != "keep" ]; then
+  # The stamp must describe the tree the build READ, not the tree it left behind (airhorn-bt55 P1).
+  # write_stamp used to re-digest the inputs AFTER the build, so a build that modifies its own inputs
+  # (a codegen step, a formatter, a lockfile touch) stamped POST-build bytes over a dist/ built from
+  # PRE-build ones - and the next run reused it: a stale-dist green, which this file's own rule says
+  # is worse than a slow gate. So take the digest BEFORE, and if the build moved the inputs, write NO
+  # stamp at all: nothing describes these bytes, and the next run rebuilds.
+  pre_in=$(inputs_digest) || pre_in=''
   if ! (cd "$ROOT" && npm run build --silent) >"$TMP/build.log" 2>&1; then
     echo "fast-gate: failed: build"
     sed 's/^/    /' "$TMP/build.log" 2>/dev/null | tail -20
     echo "fast-gate: FAIL - build failed; browser suites cannot run." >&2
     exit 1
   fi
-  write_stamp || true
+  post_in=$(inputs_digest) || post_in=''
+  if [ -z "$pre_in" ]; then
+    echo "fast-gate: not stamping dist/: the pre-build input digest could not be taken, so no stamp describes these bytes; the next run rebuilds" >&2
+  elif [ "$post_in" != "$pre_in" ]; then
+    echo "fast-gate: not stamping dist/: the build changed its own inputs (before=$pre_in after=${post_in:-unreadable}), so no stamp describes a dist/ built from these bytes; the next run rebuilds" >&2
+  else
+    write_stamp "$pre_in"
+  fi
 fi
 
 printf 'fast-gate: running: %s\n' "${RUN[@]}"
