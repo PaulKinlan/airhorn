@@ -235,4 +235,5 @@ tests/support/browser.mjs	@importers except=tests/acceptance.mjs
 tests/cdp-command-bound.mjs	@importers except=tests/acceptance.mjs
 tests/support/signal-exit.mjs	@importers except=tests/acceptance.mjs
 tests/test-support.test.js	tests/test-support.test.js
-tests/support/**	tests/a11y.test.mjs tests/docs-recipe.test.mjs tests/health.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/nav-guard.test.mjs tests/reflow-zoom.test.mjs tests/resilience-ui.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs tests/tool-bound-kill.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp.test.mjs
+tests/support/**	tests/a11y.test.mjs tests/docs-recipe.test.mjs tests/health.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/nav-guard.test.mjs tests/press-guard.test.mjs tests/reflow-zoom.test.mjs tests/resilience-ui.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs tests/tool-bound-kill.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp.test.mjs
+tests/press-guard.test.mjs	tests/press-guard.test.mjs

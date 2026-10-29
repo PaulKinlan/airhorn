@@ -345,6 +345,88 @@ test('map honesty in fast-gate rejects a literal missing path even with --list (
   }
 });
 
+test('fast-gate failure preserves failing-suite output and assertion text (airhorn-rumq)', () => {
+  // When a suite fails, fast-gate.sh must:
+  // 1. Extract and print the exact failing case assertion/error text into stdout so it is
+  //    preserved in the cached log and visible without rerunning (not truncated by tail -40
+  //    when buried before trailing passing tests).
+  // 2. Preserve the failing suite's full output in RESULTS_DIR/failing-suites/ and alongside
+  //    the check record in <checks_dir>/<tree>.fast.failing-suites/.
+  // 3. Embed failing suite metadata into <checks_dir>/<tree>.fast.json if present.
+  const { probe, run } = buildGateProbe();
+  try {
+    const failSrc = [
+      "import { test } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "test('failing case with unique assertion marker', () => {",
+      "  assert.equal(false, true, 'AIRHORN_RUMQ_ASSERTION_MARKER_TEST_FAILURE');",
+      "});",
+    ];
+    for (let i = 0; i < 30; i++) {
+      failSrc.push(`test('trailing passing case ${i}', () => { assert.ok(true); });`);
+    }
+    fs.writeFileSync(path.join(probe, 'tests', 'fail.test.js'), failSrc.join('\n') + '\n');
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'fail-src.js\ttests/fail.test.js\n');
+    fs.writeFileSync(path.join(probe, 'fail-src.js'), '// fail');
+
+    const failingResultsDir = path.join(probe, 'custom-results');
+    const fakeChecksDir = path.join(probe, 'fake-checks');
+    fs.mkdirSync(fakeChecksDir, { recursive: true });
+
+    // Probe's git tree hash
+    const tree = spawnSync('git', ['-C', probe, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).stdout.trim();
+    const fakeRec = path.join(fakeChecksDir, `${tree}.fast.json`);
+    fs.writeFileSync(fakeRec, JSON.stringify({ state: 'RUNNING', tree }));
+
+    const res = run(['--changed', 'fail-src.js'], {
+      AIRHORN_RESULTS_DIR: failingResultsDir,
+      AIRHORN_CHECKS_DIR: fakeChecksDir,
+    });
+
+    assert.equal(res.status, 1, `fast-gate must exit 1 on failing suite: ${res.stdout}`);
+
+    // 1. Exact assertion text must be present in stdout despite 30 trailing passing tests
+    assert.ok(
+      res.stdout.includes('AIRHORN_RUMQ_ASSERTION_MARKER_TEST_FAILURE'),
+      `assertion text must be in gate output even when buried before 30 passing tests:\n${res.stdout}`
+    );
+    assert.ok(
+      res.stdout.includes('fast-gate:   failing case diagnostics for tests/fail.test.js:'),
+      `diagnostics header must appear in output:\n${res.stdout}`
+    );
+
+    // 2. Preserved failing-suite log in RESULTS_DIR/failing-suites/
+    const preservedResultsLog = path.join(failingResultsDir, 'failing-suites', 'tests_fail_test_js.log');
+    assert.ok(fs.existsSync(preservedResultsLog), `preserved log must exist at ${preservedResultsLog}`);
+    const resultsContent = fs.readFileSync(preservedResultsLog, 'utf8');
+    assert.ok(
+      resultsContent.includes('AIRHORN_RUMQ_ASSERTION_MARKER_TEST_FAILURE'),
+      `results dir log must contain the assertion failure:\n${resultsContent}`
+    );
+
+    // 3. Preserved failing-suite log in checks_dir/<tree>.fast.failing-suites/
+    const preservedChecksLog = path.join(fakeChecksDir, `${tree}.fast.failing-suites`, 'tests_fail_test_js.log');
+    assert.ok(fs.existsSync(preservedChecksLog), `checks dir log must exist at ${preservedChecksLog}`);
+    const checksContent = fs.readFileSync(preservedChecksLog, 'utf8');
+    assert.ok(
+      checksContent.includes('AIRHORN_RUMQ_ASSERTION_MARKER_TEST_FAILURE'),
+      `checks dir log must contain the assertion failure:\n${checksContent}`
+    );
+
+    // 4. Record JSON updated with failing_suites
+    const recContent = JSON.parse(fs.readFileSync(fakeRec, 'utf8'));
+    assert.ok(recContent.failing_suites, 'record JSON must contain failing_suites');
+    assert.ok(recContent.failing_suites['tests/fail.test.js'], 'failing_suites must contain tests/fail.test.js');
+    assert.equal(recContent.failing_suites['tests/fail.test.js'].log, preservedChecksLog);
+    assert.ok(
+      recContent.failing_suites['tests/fail.test.js'].snippet.includes('AIRHORN_RUMQ_ASSERTION_MARKER_TEST_FAILURE'),
+      `snippet must contain the assertion failure:\n${recContent.failing_suites['tests/fail.test.js'].snippet}`
+    );
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
 test('every tools script parses - recognised extensions at any depth (airhorn-7lm, airhorn-7z5, airhorn-h19)', () => {
   // Glob, not names (airhorn-v1n), and every RECOGNISED script extension,
   // not just .mjs (airhorn-h19: .cjs and .ts were unparseable, extensionless
