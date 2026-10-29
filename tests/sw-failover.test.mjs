@@ -64,6 +64,12 @@ const mimeTypes = {
 // A connection that answers late and then dies: the classic lie-fi.
 const LIE_FI_DELAY_MS = 7000;
 
+// SW navigation budget from public/sw.js:178: bounded to 4000ms so the worker
+// answers before the connection dies. Must stay strictly below LIE_FI_DELAY_MS
+// (7000ms) so waiting out the hung connection fails (airhorn-sf0o).
+const NAVIGATION_TIMEOUT_MS = 4000;
+const LIE_FI_NAV_BOUND_MS = 6000;
+
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -230,8 +236,8 @@ async function run() {
     state.hang = false;
     assert(hornAfterLieFi,
       `a lie-fi navigation did not fall back to the cached shell (loaded=${lieFi.loaded} after ${lieFi.ms}ms)`);
-    assert(lieFi.ms < 8000,
-      `a lie-fi navigation took ${lieFi.ms}ms before the app appeared: it should never wait out the connection`);
+    assert(lieFi.ms < LIE_FI_NAV_BOUND_MS,
+      `a lie-fi navigation took ${lieFi.ms}ms before the app appeared: it should never wait out the connection (bound ${LIE_FI_NAV_BOUND_MS}ms, socket dies at ${LIE_FI_DELAY_MS}ms)`);
     console.log(`Lie-fi navigation rendered the app in ${lieFi.ms}ms.`);
 
     /* ---------------- B. lie-fi subresource: bounded, never hangs open ------- */
