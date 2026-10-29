@@ -205,11 +205,19 @@ test('the split gives every concern its own row, and the gate cost tracks blast 
     assert.ok(!launch.includes(s), `a deep-link change must not run ${s}, got ${JSON.stringify(launch)}`);
   }
 
-  // And the concerns that share a signal are not accidentally duplicated: the
-  // structural suite is the only thing every module row has in common.
-  for (const m of ['src/input.js', 'src/badge.js', 'src/launch.js', 'src/install.js', 'src/status.js', 'src/analytics.js']) {
-    assert.ok(selectorsFor(m).includes('tests/modules.test.js'), `${m} must be pinned by the structural suite`);
-  }
+  // And the concerns that share a signal are not accidentally duplicated: across
+  // THIS set of rows the structural suite must be the only thing they have in
+  // common. Asserted, not just described (airhorn-auoa): the previous version
+  // only checked that each row includes it, so a second suite quietly added to
+  // all six - the over-naming drift that re-widens the gate - would have passed.
+  // horn.js and webmcp.js are deliberately outside this set: their rows are not
+  // pinned by the structural suite (horn is the interaction suites' business,
+  // webmcp the tool suites'), so "every module row" would have been false.
+  const pinned = ['src/input.js', 'src/badge.js', 'src/launch.js', 'src/install.js', 'src/status.js', 'src/analytics.js'];
+  const rows = pinned.map((m) => new Set(selectorsFor(m)));
+  const shared = [...rows[0]].filter((suite) => rows.every((row) => row.has(suite))).sort();
+  assert.deepEqual(shared, ['tests/modules.test.js'],
+    `the structural suite must be the only suite shared by these rows; shared: ${JSON.stringify(shared)}`);
 });
 
 test('the page row keeps the failover suite off it - and the branch it lost is covered anyway (airhorn-906)', () => {

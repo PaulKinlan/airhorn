@@ -348,9 +348,10 @@ async function testSwAndManifest() {
     }, { label: 'the offline page to load with its horn' });
 
     console.log('Offline evaluation result:', off);
-    if (!off.hornPresent || off.hornAriaLabel !== 'Air horn') {
-      throw new Error(`Offline load failed: ${JSON.stringify(off)}`);
-    }
+    // The condition above IS the offline-load assertion: it only returns `seen` when the
+    // horn is present and labelled, and waitForCondition throws at its bound naming what
+    // it observed. Re-testing those two fields here was unreachable code (airhorn-auoa).
+    // The service-worker check below is a separate claim and does bite.
     if (!off.swController) {
       throw new Error('Offline page not controlled by service worker');
     }
