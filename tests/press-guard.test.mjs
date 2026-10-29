@@ -85,23 +85,42 @@ test('MUTATION: the pre-airhorn-8wh1 retry (no re-check) lets an off-horn press 
 });
 
 test('MUTATION: the pre-airhorn-l2c3 fold reads an unread instrument as host contention', async () => {
-  // Remove the 'unreadable' branch from the shipped classifier, i.e. the old
-  // two-message shape: an unreadable/absent log fell through to whichever
-  // message the length check produced. The mutant must visibly attribute an
-  // unknown instrument to the machine.
+  // The pre-l2c3 defect lived in the READ: a rejected or non-array evaluate was
+  // folded into an empty log (length 0), and empty means 'no pointer event
+  // reached the page' - host contention. Mutate readInputLog to do exactly that
+  // fold, then run the SHIPPED classifier on the mutant's output: an unread
+  // instrument must come out as 'dropped' where the shipped read says
+  // 'unreadable'. That contrast is what makes the readInputLog checks above
+  // load-bearing; a mutant that cannot produce the wrong verdict proves nothing.
   const source = fs.readFileSync(guardPath, 'utf8');
-  const branch = "if (inputLog === 'unreadable') return 'unreadable';";
-  assert.ok(source.includes(branch),
-    'the mutation anchor must still be the unknown-state branch: without it this check silently mutates nothing');
-  const mutantSource = source.replace(branch, '');
+  const absentFold = "(v) => (Array.isArray(v) ? v : 'unreadable')";
+  const rejectFold = "() => 'unreadable'";
+  assert.ok(source.includes(absentFold) && source.includes(rejectFold),
+    'the mutation anchors must still be the two unreadable-producing arms of readInputLog: without them '
+    + 'this check silently mutates nothing and passes for the wrong reason');
+  const mutantSource = source
+    .replace(absentFold, '(v) => (Array.isArray(v) ? v : [])')
+    .replace(rejectFold, '() => []');
   assert.notEqual(mutantSource, source, 'the mutation must actually differ from the shipped source');
-  const { classifyPressTimeout: mutantClassify } = await import(
+  const { readInputLog: mutantRead } = await import(
     `data:text/javascript;base64,${Buffer.from(mutantSource, 'utf8').toString('base64')}`
   );
-  // The old code read a collapsed LENGTH, so an unread instrument arrived as
-  // 0/empty; feeding the mutant the same "nothing readable" state shows what
-  // it would have claimed:
-  assert.equal(mutantClassify([]), 'dropped',
+
+  const rejecting = async () => { throw new Error('CDP: target closed'); };
+  const absent = async () => undefined;
+
+  // The shipped path: an unknown instrument stays unknown, and the classifier
+  // says so - never a machine verdict.
+  assert.equal(classifyPressTimeout(await readInputLog(rejecting)), 'unreadable');
+  assert.equal(classifyPressTimeout(await readInputLog(absent)), 'unreadable');
+
+  // The mutant: both unknown states fold into an empty log, and the shipped
+  // classifier then attributes them to the MACHINE.
+  assert.deepEqual(await mutantRead(rejecting), [], 'the mutant folds a rejected read into an empty log');
+  assert.deepEqual(await mutantRead(absent), [], 'the mutant folds an absent log into an empty log');
+  assert.equal(classifyPressTimeout(await mutantRead(rejecting)), 'dropped',
     'the mutant blames the MACHINE for a state that may be a broken instrument - the misattribution '
     + 'airhorn-l2c3 was filed against, reproduced');
+  assert.equal(classifyPressTimeout(await mutantRead(absent)), 'dropped',
+    'and an absent instrument takes the same wrong verdict');
 });
