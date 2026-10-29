@@ -27,7 +27,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
 import { makeRenderModel } from '../tools/render-model.mjs';
-import { READ_STATE } from '../tools/resilience-audit.mjs';
+import { READ_STATE, waitForSw, assertSwActive } from '../tools/resilience-audit.mjs';
 import { main as deriveContractMain, deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites, isPendingSuite } from '../tools/derive-coverage-contract.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -685,3 +685,82 @@ test('ambient GSM_TOOLS_ROOT redirection is impossible without the minted guard 
 // verdict is three-state: 'none' prunes a subtree, 'own' drops only this
 // node's own text (so a visibility override below it survives), 'text'
 // collects.
+
+test('waitForSw distinguishes active, redundant, unsupported, evaluate error, and timeout (airhorn-nxuv.1)', async () => {
+  const noopSleep = () => Promise.resolve();
+
+  // 1. Activated service worker
+  const activeCdp = {
+    send: async () => ({ result: { value: { status: 'activated' } } }),
+  };
+  const activeRes = await waitForSw(activeCdp, 's1', 5, noopSleep);
+  assert.equal(activeRes.active, true);
+  assert.equal(activeRes.state, 'activated');
+  assert.doesNotThrow(() => assertSwActive(activeRes, 'offline'));
+
+  // 2. Redundant worker (sw.js threw or install rejected)
+  const redundantCdp = {
+    send: async () => ({
+      result: {
+        value: {
+          status: 'redundant',
+          error: 'service worker entered redundant state during boot or install',
+        },
+      },
+    }),
+  };
+  const redundantRes = await waitForSw(redundantCdp, 's2', 5, noopSleep);
+  assert.equal(redundantRes.active, false);
+  assert.equal(redundantRes.reason, 'no_sw_redundant');
+  assert.match(redundantRes.detail, /redundant state/);
+  assert.throws(() => assertSwActive(redundantRes, 'offline'),
+    /cannot score offline scenario: service worker failed to activate \(no_sw_redundant\)/);
+
+  // 3. Unsupported
+  const unsupportedCdp = {
+    send: async () => ({
+      result: {
+        value: {
+          status: 'unsupported',
+          error: 'navigator.serviceWorker is not supported in this browser context',
+        },
+      },
+    }),
+  };
+  const unsupportedRes = await waitForSw(unsupportedCdp, 's3', 5, noopSleep);
+  assert.equal(unsupportedRes.active, false);
+  assert.equal(unsupportedRes.reason, 'unsupported');
+  assert.throws(() => assertSwActive(unsupportedRes, 'offline'),
+    /cannot score offline scenario: service worker failed to activate \(unsupported\)/);
+
+  // 4. CDP evaluate error (unreadable evaluate)
+  const evaluateErrorCdp = {
+    send: async () => ({
+      exceptionDetails: { exception: { description: 'Target crashed during evaluate' } },
+    }),
+  };
+  const evalErrorRes = await waitForSw(evaluateErrorCdp, 's4', 3, noopSleep);
+  assert.equal(evalErrorRes.active, false);
+  assert.equal(evalErrorRes.reason, 'unreadable_evaluate');
+  assert.match(evalErrorRes.detail, /evaluate failed/);
+  assert.throws(() => assertSwActive(evalErrorRes, 'offline'),
+    /cannot score offline scenario: service worker failed to activate \(unreadable_evaluate\)/);
+
+  // 5. Timed out waiting
+  const timeoutCdp = {
+    send: async () => ({
+      result: {
+        value: {
+          status: 'pending',
+          detail: 'installing=null waiting=null active=null',
+        },
+      },
+    }),
+  };
+  const timeoutRes = await waitForSw(timeoutCdp, 's5', 3, noopSleep);
+  assert.equal(timeoutRes.active, false);
+  assert.equal(timeoutRes.reason, 'timed_out');
+  assert.match(timeoutRes.detail, /service worker never activated/);
+  assert.throws(() => assertSwActive(timeoutRes, 'offline'),
+    /cannot score offline scenario: service worker failed to activate \(timed_out\)/);
+});
