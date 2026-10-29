@@ -148,13 +148,40 @@
   "tests/docs-recipe.test.mjs"
  ],
  "tests/support/browser.mjs": [
-  "tests/test-support.test.js"
+  "tests/a11y.test.mjs",
+  "tests/horn.test.js",
+  "tests/keyboard.test.mjs",
+  "tests/multitab.test.mjs",
+  "tests/reflow-zoom.test.mjs",
+  "tests/resilience-ui.test.mjs",
+  "tests/screenreader.test.mjs",
+  "tests/shortcuts.test.mjs",
+  "tests/sw-failover.test.mjs",
+  "tests/sw-offline.test.mjs",
+  "tests/test-support.test.js",
+  "tests/visual-overrides.test.mjs",
+  "tests/webmcp-browser.test.mjs"
  ],
  "tests/cdp-command-bound.mjs": [
+  "tests/a11y.test.mjs",
+  "tests/keyboard.test.mjs",
+  "tests/multitab.test.mjs",
+  "tests/reflow-zoom.test.mjs",
+  "tests/resilience-ui.test.mjs",
+  "tests/screenreader.test.mjs",
+  "tests/shortcuts.test.mjs",
+  "tests/sw-failover.test.mjs",
+  "tests/sw-offline.test.mjs",
   "tests/test-support.test.js",
-  "tests/resilience-ui.test.mjs"
+  "tests/visual-overrides.test.mjs",
+  "tests/webmcp-browser.test.mjs"
  ],
  "tests/support/signal-exit.mjs": [
+  "tests/keyboard.test.mjs",
+  "tests/multitab.test.mjs",
+  "tests/screenreader.test.mjs",
+  "tests/shortcuts.test.mjs",
+  "tests/sw-failover.test.mjs",
   "tests/test-support.test.js"
  ],
  "tests/support/**": [
@@ -163,6 +190,8 @@
   "tests/health.test.mjs",
   "tests/keyboard.test.mjs",
   "tests/multitab.test.mjs",
+  "tests/nav-guard.test.mjs",
+  "tests/press-guard.test.mjs",
   "tests/reflow-zoom.test.mjs",
   "tests/resilience-ui.test.mjs",
   "tests/screenreader.test.mjs",

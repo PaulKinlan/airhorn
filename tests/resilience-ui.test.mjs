@@ -3,8 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { hostSteal, stretchedBounds } from '../tools/lib/chrome.mjs';
 import { awaitSocketOpen, boundCommand } from './cdp-command-bound.mjs';
+import { createNavigateFresh, createReloadFresh } from './support/nav-guard.mjs';
 import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
+import { checkPressPoint, readInputLog, classifyPressTimeout } from './support/press-guard.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EVIDENCE_DIR = '/tmp/airhorn-boot-watchdog';
@@ -253,6 +256,45 @@ async function testBootWatchdog() {
       await new Promise(r => setTimeout(r, 100));
     }
   };
+
+  // Navigate to Case 6's fresh document. The flow (and every failure it has to
+  // survive) lives in support/nav-guard.mjs, because a browser cannot be made to
+  // refuse a boot check on demand and the fail-open regression airhorn-xl1t found
+  // is only reachable with a transport that does; tests/nav-guard.test.mjs drives
+  // those lines, including a mutated fail-open copy of them.
+  //
+  // Case 6 is the ONLY navigation in this suite that this helper guards, and it is
+  // guarded because it is genuinely racy (airhorn-1x2d): it leaves the Case 5 page,
+  // which is a booted app document, so a bare `typeof window.__airhorn` wait can be
+  // answered by the document being left (airhorn-ie0b). The other navigations keep
+  // the waits they had, because their outgoing document cannot satisfy that wait:
+  // Case 1 starts from about:blank; Case 5 follows the Case 4 noscript page, where
+  // scripting is disabled and no bundle ran; Case 10 follows the Case 9 page, which
+  // the suite asserts is unbooted (:827-828). Guarding those
+  // three would be a rule the code cannot justify - fewer guards, each with a
+  // reason, is the deliverable.
+  //
+  // What is NOT guarded here, said plainly so this comment cannot be read as
+  // coverage it does not have: Case 7's unstyled navigation still waits bare
+  // (:578-579) - its marker-based fix is a separate delta on fleet/retry-guard
+  // (airhorn-byl0, airhorn-0ghk), and editing those lines here would only make the
+  // two deltas conflict - and Case 8 uses its own `__case8Outgoing` marker (:783)
+  // rather than this helper, because its post-boot signal is `__airhornBooted` and
+  // its marker has to be set after the fetch hold is armed.
+  const navigateFresh = createNavigateFresh({
+    evaluate,
+    send,
+    waitUntil,
+    port,
+    timeoutMs: WAIT_TIMEOUT_MS,
+  });
+  // The same outgoing-document guard for the one navigation the PAGE issues
+  // itself: Case 6's controllerchange reload (airhorn-ajzf).
+  const reloadFresh = createReloadFresh({
+    evaluate,
+    waitUntil,
+    timeoutMs: WAIT_TIMEOUT_MS,
+  });
 
   const shot = async (name) => {
     const res = await send('Page.captureScreenshot', { format: 'png' });
@@ -505,11 +547,23 @@ async function testBootWatchdog() {
 
     // --- Case 6: service worker update over an existing controller -------------
     console.log('--- Case 6: service worker update');
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot before update');
+    await navigateFresh('case 6');
     if ((await evaluate(`!!navigator.serviceWorker.controller`)) !== true) {
       throw new Error('stub SW did not claim the page; the update case needs a controller');
     }
+    // airhorn-ajzf: the page reloads ITSELF on controllerchange (index.html) -
+    // a navigation this suite does not issue, so navigateFresh's pre-navigate
+    // marker cannot cover it, and a bare `typeof window.__airhorn` wait after
+    // the update can be answered by THIS (pre-update) document; the app-status
+    // assertion below would then read the same stale page and the case would go
+    // green without testing the post-update document at all. Option (b) -
+    // documenting the gap and waiting bare - was rejected: the two documents
+    // CAN be told apart, because window properties do not survive a reload, so
+    // an unfalsifiable wait is a choice, not a limitation (option a). Mark this
+    // document NOW, while no reload can be in flight: the reload needs the v2
+    // body published, installed, activated and claiming, so nothing before
+    // `swBody = swV2` can race the marker onto the wrong document.
+    await reloadFresh.markOutgoing('case 6');
     swBody = swV2;
     // Fire and forget: reg.update() is polled below, not awaited here.
     await evaluate(`navigator.serviceWorker.getRegistration().then(reg => reg.update())`);
@@ -528,12 +582,18 @@ async function testBootWatchdog() {
       throw new Error(`successful update announced a failure: ${JSON.stringify(falseFailure)}`);
     }
     await shot('update-notice');
-    // The page updates itself via the existing controllerchange reload; wait
-    // for v2 to be the active controller, then confirm the fresh page boots
-    // and is silent again.
+    // The page updates itself via the existing controllerchange reload. The
+    // wait this replaces read the STALE document twice over: a bare boot wait
+    // is answered by the pre-update page (airhorn-ajzf), and 'controller.state
+    // === "activated"' cannot tell the generations apart either - v1 is already
+    // activated. The marker wait does the distinguishing: it resolves only in a
+    // booted document that never carried the pre-update marker, i.e. the
+    // reloaded page. The controller assertion then runs in THAT document, where
+    // the controller is v2 by construction (v2 had to be activated and
+    // controlling for controllerchange to reload the page at all).
+    await reloadFresh.waitFresh('case 6 post-update');
     await waitUntil(`navigator.serviceWorker.controller
-      && navigator.serviceWorker.controller.state === 'activated'`, WAIT_TIMEOUT_MS, 'v2 to activate');
-    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot after update');
+      && navigator.serviceWorker.controller.state === 'activated'`, WAIT_TIMEOUT_MS, 'v2 controller on the reloaded page');
     if ((await evaluate(`document.getElementById('app-status').textContent`)) !== '') {
       throw new Error('status region not empty on the freshly updated page');
     }
@@ -544,9 +604,22 @@ async function testBootWatchdog() {
     console.log('--- Case 7: stylesheet blocked');
     await send('Network.setBlockedURLs', { urls: ['*styles/*.css', '*assets/*.css'] });
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    await waitUntil('typeof window.__airhorn !== "undefined"', WAIT_TIMEOUT_MS, 'app to boot unstyled');
+    // Mark the outgoing document first (the Case 8 pattern, airhorn-ie0b):
+    // Page.navigate resolves when the browser ACCEPTS the navigation, so a
+    // bare '__airhorn' wait passes INSTANTLY on the previous page (the Case 6
+    // v2 page defines it too), and the unstyled probe below then lands in the
+    // fresh document mid-parse, where .horn does not exist yet - observed as
+    // 'Cannot read properties of null (reading getBoundingClientRect)' on a
+    // 47%-steal run. The marker dies with the old document, so marker absent
+    // + app booted proves the FRESH document both committed and booted (and
+    // __airhorn comes from the deferred bundle, so it proves the parse is
+    // complete - .horn cannot be missing from a booted document).
+    await evaluate(`window.__case7Outgoing = true`);
+    await waitUntil(`!window.__case7Outgoing && typeof window.__airhorn !== 'undefined'`,
+      WAIT_TIMEOUT_MS, 'case 7 navigation to commit a fresh unstyled document');
     const unstyled = await evaluate(`(() => {
       const horn = document.querySelector('.horn');
+      if (!horn) throw new Error('the fresh unstyled document booted without a .horn element');
       const r = horn.getBoundingClientRect();
       const label = document.querySelector('.horn-label');
       const lr = label ? label.getBoundingClientRect() : null;
@@ -635,7 +708,7 @@ async function testBootWatchdog() {
     // retraction beats this wait's first sample is a function of box load -
     // not of the unstyled page working (airhorn-ye54). The wait reads the
     // document-start record of the transition, so no sample can miss it.
-    const hornBox = await evaluate(`(() => {
+    const getHornBox = async () => evaluate(`(() => {
       const horn = document.querySelector('.horn');
       // Unstyled, the page is tall prose and the control can sit below the fold,
       // where a trusted press at its coordinates lands on nothing at all
@@ -658,38 +731,87 @@ async function testBootWatchdog() {
         found: !!horn
       };
     })()`);
-    if (!hornBox.found || !hornBox.overHorn) {
-      throw new Error(`the press point is not over the horn, so the press would prove nothing: ${JSON.stringify(hornBox)}`);
+
+    const hornBox = await getHornBox();
+    // The SAME check guards every re-measured box before a retry below
+    // (airhorn-8wh1): an off-horn press proves nothing, and reporting host
+    // contention for it would misname a coordinate problem as a machine fault.
+    checkPressPoint(hornBox, 'the press point');
+
+    // Make the trusted press retry-aware (airhorn-0ghk) but ONLY for the
+    // machine's failure, never the app's (airhorn-fl70). A timeout whose input
+    // log is still empty means the trusted press was dropped before it reached
+    // the page - host contention, the test machine's fault - and re-dispatching
+    // is honest. A timeout where events DID reach the page but pressed stayed
+    // false is the app failing the exact contract this case proves ("the
+    // unstyled horn still responds"); it fails HERE, on that attempt, the way
+    // the pre-change code failed it - letting it retry would let an app that
+    // ignores a trusted press pass on attempt 3. An unreadable or absent input
+    // log is neither shape and fails fast naming itself (airhorn-l2c3); it
+    // must not retry either, or an app-ignored press becomes invisible again.
+    const steal = hostSteal();
+    const stretchedWait = stretchedBounds({ timeoutMs: WAIT_TIMEOUT_MS, steal }).timeoutMs;
+    const maxAttempts = 3;
+    const attemptTimeout = Math.max(5000, Math.round(stretchedWait / maxAttempts));
+
+    const pressDiagnostics = () => evaluate(`(() => ({
+      input: window.__inputLog || null,
+      pressed: window.__pressedLog || null,
+      activation: navigator.userActivation ? navigator.userActivation.hasBeenActive : null,
+      booted: typeof window.__airhorn,
+      focused: document.hasFocus(),
+      visibility: document.visibilityState
+    }))()`);
+    // Where each attempt actually pressed (validated over the horn BEFORE the
+    // dispatch), carried into the terminal diagnostics so a contention verdict
+    // can say what was under every press point (airhorn-8wh1).
+    const pressPoints = [];
+
+    let pressedSuccess = false;
+    let lastBox = hornBox;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (attempt > 1) {
+        lastBox = await getHornBox();
+        // airhorn-8wh1: the refreshed press point passes the same over-the-horn
+        // check the first one did - a retry landing off the horn would prove
+        // nothing, and reporting host contention for it would misname a
+        // coordinate problem as a machine fault.
+        checkPressPoint(lastBox, `the retried press point (attempt ${attempt}/${maxAttempts})`);
+        // Retire a press that DID land before re-pressing, so the next
+        // transition reads as a press, not a bounce.
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: lastBox.x, y: lastBox.y, button: 'left', buttons: 0, clickCount: 1 }).catch(() => {});
+      }
+      pressPoints.push({ attempt, x: lastBox.x, y: lastBox.y, overHorn: lastBox.overHorn, hit: lastBox.hit });
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: lastBox.x, y: lastBox.y, button: 'left', buttons: 1, clickCount: 1 });
+      try {
+        await waitUntil(`window.__pressedLog.includes('true')`, attemptTimeout,
+          `unstyled horn to respond to trusted press (attempt ${attempt}/${maxAttempts})`);
+        pressedSuccess = true;
+        break;
+      } catch {
+        // The log itself, never a collapsed length (airhorn-l2c3): three
+        // shapes, three owners, and only 'dropped' may retry (airhorn-fl70).
+        const shape = classifyPressTimeout(await readInputLog(evaluate));
+        if (shape === 'unreadable') {
+          throw new Error(`could not read the page's input log after trusted press at ${lastBox.x},${lastBox.y} (attempt ${attempt}/${maxAttempts}), so whether delivery was dropped cannot be judged; press diagnostics ${JSON.stringify(await pressDiagnostics())}`);
+        }
+        if (shape === 'delivered-unpressed') {
+          throw new Error(`unstyled horn failed to respond to trusted press at ${lastBox.x},${lastBox.y} (pointer events delivered but the horn stayed unpressed - the app ignored a trusted press, the product bug this case exists to catch; steal ${steal}); press diagnostics ${JSON.stringify(await pressDiagnostics())}`);
+        }
+        console.log(`  Case 7: attempt ${attempt}/${maxAttempts} timed out: no pointer event reached the page (delivery dropped); retrying press`);
+      }
     }
-    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hornBox.x, y: hornBox.y, button: 'left', buttons: 1, clickCount: 1 });
-    // WAIT_TIMEOUT_MS, not a 3 s window (airhorn-uhdv): the bound is how long we
-    // are willing to wait for the record to show the transition, and on this box
-    // a single CDP round trip measured 13 s at load 10.5 - a 3 s window is two
-    // samples of a loaded renderer, i.e. a machine-state assertion, which is what
-    // airhorn-ye54 already fought here once. Nothing about the unstyled page is
-    // being given more room: the press either reaches the document-start record
-    // or it does not, and a slow box may only take longer to say so.
-    try {
-      await waitUntil(`window.__pressedLog.includes('true')`, WAIT_TIMEOUT_MS, `unstyled horn to respond to a trusted press at ${hornBox.x},${hornBox.y} (viewport ${hornBox.viewport.join('x')}, control top ${hornBox.top})`);
-    } catch (err) {
-      // A miss has to say which of the two things failed: the press never
-      // arriving (input log empty) or the app not recording the transition
-      // (input present, pressed log unchanged). airhorn-uhdv.
-      const diag = await evaluate(`(() => ({
-        input: window.__inputLog || null,
-        pressed: window.__pressedLog || null,
-        activation: navigator.userActivation ? navigator.userActivation.hasBeenActive : null,
-        booted: typeof window.__airhorn,
-        focused: document.hasFocus(),
-        visibility: document.visibilityState
-      }))()`);
-      throw new Error(`${err.message}; press diagnostics ${JSON.stringify(diag)}`);
+
+    if (!pressedSuccess) {
+      throw new Error(`no pointer event reached the page after ${maxAttempts} attempts (every trusted press was dropped before delivery; steal ${steal}); press points ${JSON.stringify(pressPoints)}; press diagnostics ${JSON.stringify(await pressDiagnostics())}`);
     }
-    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hornBox.x, y: hornBox.y, button: 'left', buttons: 0, clickCount: 1 });
+
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: lastBox.x, y: lastBox.y, button: 'left', buttons: 0, clickCount: 1 });
     // The release must retire the hold - the record carries the transition, so
     // this cannot be missed by a slow sample either.
     await waitUntil(`window.__pressedLog.lastIndexOf('false') > window.__pressedLog.lastIndexOf('true')`,
-      WAIT_TIMEOUT_MS, 'release to retire the unstyled hold');
+      stretchedWait, 'release to retire the unstyled hold');
     // airhorn-5yv: the critical fallback hides the installer, but must not
     // lock install away in the very mode it protects - once the prompt is
     // available the button is reachable even unstyled.

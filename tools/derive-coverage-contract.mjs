@@ -3,10 +3,16 @@
  * tools/derive-coverage-contract.mjs — derive .fleet/coverage-contract.json from tools/suite-map.tsv.
  * Single source of truth for file-to-suite mapping (airhorn-y7mx).
  *
+ * It also owns the IMPORT SCAN behind `@importers` map rows (airhorn-ooqm): a shared test helper's
+ * suite set is derived from the tree at run time instead of being hand-listed, so a new importer is
+ * covered with no map edit and a stale list cannot silently under-select.
+ *
  * Usage:
  *   node tools/derive-coverage-contract.mjs             # updates .fleet/coverage-contract.json
  *   node tools/derive-coverage-contract.mjs --check     # verifies .fleet/coverage-contract.json is fresh (exit 0/1)
  *   node tools/derive-coverage-contract.mjs --stdout    # prints generated json to stdout
+ *   node tools/derive-coverage-contract.mjs --importers <module> [--except <file>]...
+ *                                                       # the suites that REFERENCE <module>, one per line
  */
 
 import fs from 'node:fs';
@@ -155,6 +161,50 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
 
     const suiteTokens = parts.slice(1).join(' ').trim().split(/\s+/).filter(Boolean);
 
+    // Directive tokens are not suite paths: `@importers` makes the suite set a RUN-TIME scan of the
+    // tree (airhorn-ooqm), and `except=<file>` names a suite deliberately kept off such a row.
+    const directives = suiteTokens.filter(isDirective);
+    const listedTokens = suiteTokens.filter((t) => !isDirective(t));
+    if (directives.includes('@importers')) {
+      if (pattern.startsWith('~') || pattern.startsWith('!')) {
+        violations.push({
+          type: 'derived_row_kind',
+          token: pattern,
+          pattern,
+          message: `@importers is only valid on a plain row, not on '${pattern[0]}' (${pattern})`,
+        });
+      }
+      if (!fileExists(pattern)) {
+        violations.push({
+          type: 'missing_literal',
+          token: pattern,
+          pattern,
+          message: `@importers row names a module that does not exist on disk: ${pattern}`,
+        });
+      }
+      for (const d of directives.filter((t) => t.startsWith('except='))) {
+        const target = d.slice('except='.length);
+        if (!fileExists(target)) {
+          violations.push({
+            type: 'missing_suite',
+            token: target,
+            pattern,
+            message: `except= names a suite that does not exist on disk: ${target} (referenced by ${pattern})`,
+          });
+        }
+      }
+      // A derived row that scans to NOTHING is a silent hole: the module exists, no suite references
+      // it, so a change to it would select no suite at all. Fail loudly here instead.
+      if (importersOf(pattern, { root, fileExists }).length === 0) {
+        violations.push({
+          type: 'no_importers',
+          token: pattern,
+          pattern,
+          message: `@importers row derives an EMPTY suite set - no suite references ${pattern}`,
+        });
+      }
+    }
+
     // 1 & 2. Pattern side validation
     if (pattern.startsWith('~')) {
       // Pending declaration: allowed to be absent until landed
@@ -204,7 +254,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
     }
 
     // 3 & 4. Suite side validation
-    for (const token of suiteTokens) {
+    for (const token of listedTokens) {
       if (token.includes('*') || token.includes('?') || token.includes('[')) {
         violations.push({
           type: 'glob_suite_token',
@@ -261,6 +311,147 @@ export function isPendingSuite(suite, pendingDeclared, fileExists) {
   return (suite.startsWith('test/') || pendingDeclared.has(suite)) && !fileExists(suite);
 }
 
+// --- `@importers` rows: the suite set is DERIVED from the tree, not hand-listed (airhorn-ooqm) ----
+//
+// Hand-listing a shared helper's importers had already recurred six times (airhorn-5t8, -ckq, -dco,
+// -906, -ooqm): a helper gains a caller, the row keeps its snapshot, and a change every caller depends
+// on is gated by two suites. A row may therefore say `@importers` instead of naming suites, and the
+// set is computed here - at gate run time AND when the contract is derived, from ONE implementation.
+//
+// The scan is import-shape-agnostic on purpose - it does not require one syntactically static import.
+// Every MODULE-RESOLUTION construct counts: `from '...'`, `import '...'`, `import('...')`,
+// `require('...')`, and a COMPUTED reference through path.join/path.resolve/pathToFileURL/new URL/
+// require.resolve (`path.join(import.meta.dirname, 'helper.mjs')`). All of those shapes are already in
+// this tree, and the first attempt at this bead only understood the static one - which is how it missed
+// the computed reference in tests/test-support.test.js and read as a pass.
+//
+// A bare quoted path with no resolution construct around it is NOT a dependency: a suite that merely
+// names the file (a fixture string, a map row, this scanner's own assertions) does not import it, and
+// counting those would make the gate's selection depend on who is talking about the helper. The scan
+// is textual, so a string literal that literally SPELLS a resolution construct still counts - the
+// contrived case, and it errs toward over-selection, which costs time instead of hiding a suite.
+
+const normRel = (p) => p.replace(/\\/g, '/').replace(/^\.\//, '');
+
+/** Tokens of a row's suite column that are DIRECTIVES, not suite paths. */
+const isDirective = (tok) => tok.startsWith('@') || tok.startsWith('except=');
+
+/**
+ * Every file in the tree that could BE a suite: `*.test.{js,mjs,ts}` under tests/ or test/, plus any
+ * file the map already names in a suite column (tests/acceptance.mjs is a suite that matches no
+ * test-file pattern, and is explicit-only by design - airhorn-i8i).
+ */
+export function suiteFiles(tsvText, { root = DEFAULT_ROOT, fileExists: fileExistsOpt } = {}) {
+  const fileExists = fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  const named = new Set();
+  for (const line of tsvText.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const parts = trimmed.split('\t');
+    for (const tok of parts.slice(1).join(' ').trim().split(/\s+/).filter(Boolean)) {
+      if (!isDirective(tok)) named.add(normRel(tok));
+    }
+  }
+  const out = new Set();
+  const walk = (dirRel) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(path.join(root, dirRel), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of entries) {
+      const rel = normRel(path.posix.join(dirRel, ent.name));
+      if (ent.isDirectory()) {
+        walk(rel);
+        continue;
+      }
+      if (!/\.(mjs|js|ts)$/.test(ent.name)) continue;
+      if (/\.test\.(mjs|js|ts)$/.test(ent.name) || (named.has(rel) && fileExists(rel))) out.add(rel);
+    }
+  };
+  walk('tests');
+  walk('test');
+  return [...out].sort();
+}
+
+/**
+ * The suites that reference `modulePath`, in any import shape. `except` names suites that are
+ * deliberately not on the row (the explicit-only acceptance pass).
+ */
+/**
+ * Drops COMMENT text before the scan: prose that happens to spell a resolution construct (`//
+ * (tests/x.test.js: path.join(dir, 'helper.mjs'))`) is not a dependency. Line-based on purpose - a
+ * regex strip of `/* ... *\/` would eat real code the first time a string literal contained `/*`.
+ */
+const codeOnly = (text) => {
+  const out = [];
+  let inBlock = false;
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (inBlock) {
+      if (trimmed.includes('*/')) {
+        inBlock = false;
+        out.push(line.slice(line.indexOf('*/') + 2));
+      }
+      continue;
+    }
+    if (trimmed.startsWith('/*')) {
+      inBlock = !trimmed.includes('*/');
+      continue;
+    }
+    if (trimmed.startsWith('//')) continue;
+    out.push(line);
+  }
+  return out.join('\n');
+};
+
+export function importersOf(modulePath, { root = DEFAULT_ROOT, tsvText, except = [], fileExists } = {}) {
+  const tsv = tsvText ?? fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
+  const target = normRel(modulePath);
+  const base = path.posix.basename(target).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // A module-resolution construct, then - within one statement - a literal that spells the basename.
+  // Each alternative ends at the OPENING quote of the literal, so `[^'"`\n]*<basename>` finishes it.
+  // `import` requires whitespace or `(` after it, so the identifier `importersOf(` is not a match -
+  // the first version of this scanner counted this very test file that way.
+  const Q = "['\"`]";
+  const resolution = [
+    `\\bfrom\\s*${Q}`,                                    // import { x } from './h.mjs', export ... from
+    `\\bimport\\s+${Q}`,                                  // import './h.mjs' (side effect)
+    `\\bimport\\s*\\(\\s*${Q}`,                        // await import('./h.mjs')
+    `\\brequire\\s*\\(\\s*${Q}`,                       // require('./h.mjs')
+    `\\b(?:path\\.join|path\\.resolve|require\\.resolve|createRequire)\\s*\\([^;\\n]{0,160}?${Q}`,
+    `\\bpathToFileURL\\s*\\([^;\\n]{0,160}?${Q}`,
+    `\\bnew URL\\s*\\([^;\\n]{0,160}?${Q}`,
+  ].join('|');
+  const reference = new RegExp(`(?:${resolution})[^'"\`\\n]*${base}`);
+  const skip = new Set([target, ...except.map(normRel)]);
+  const found = [];
+  for (const suite of suiteFiles(tsv, { root, fileExists })) {
+    if (skip.has(suite)) continue;
+    let text;
+    try {
+      text = fs.readFileSync(path.join(root, suite), 'utf8');
+    } catch {
+      continue;
+    }
+    if (reference.test(codeOnly(text))) found.push(suite);
+  }
+  return found.sort();
+}
+
+/**
+ * Expands a row's suite column: `@importers` rows are scanned, plain rows are returned as written.
+ * Returns { derived, except, suites }.
+ */
+export function expandRow(pattern, rest, options = {}) {
+  const tokens = (rest || '').trim().split(/\s+/).filter(Boolean);
+  const derived = tokens.includes('@importers');
+  const except = tokens.filter((t) => t.startsWith('except=')).map((t) => normRel(t.slice('except='.length)));
+  if (!derived) return { derived: false, except, suites: tokens.filter((t) => !isDirective(t)) };
+  return { derived: true, except, suites: importersOf(pattern, { ...options, except }) };
+}
+
 /**
  * Derives the coverage contract object from the TSV content.
  * - Filters out comments (#) and empty lines
@@ -281,7 +472,7 @@ export function deriveCoverageContract(tsvText, { root = DEFAULT_ROOT, existsFn,
     const parts = trimmed.split('\t');
     const pat = parts[0] ? parts[0].trim() : '';
     if (!pat || pat.startsWith('!') || pat.startsWith('~')) continue;
-    const suites = parts.slice(1).join(' ').trim().split(/\s+/).filter(Boolean);
+    const { suites } = expandRow(pat, parts.slice(1).join(' '), { root, fileExists });
     const activeSuites = suites.filter((s) => !isPendingSuite(s, pendingDeclared, fileExists));
     if (activeSuites.length > 0 && activeSuites.every((s) => s === pat)) continue;
     if (activeSuites.length > 0) {
@@ -326,6 +517,23 @@ export function main(args = process.argv.slice(2), { root = DEFAULT_ROOT, exists
   const contractPath = path.join(root, '.fleet', 'coverage-contract.json');
 
   const tsvText = fs.readFileSync(tsvPath, 'utf8');
+
+  // `--importers <module> [--except <file>]...` is the QUERY tools/fast-gate.sh uses to expand an
+  // `@importers` row at run time: the gate asks, this scans. One implementation, so the query and
+  // the contract cannot disagree (airhorn-ooqm).
+  if (args.includes('--importers')) {
+    const i = args.indexOf('--importers');
+    const modulePath = args[i + 1];
+    if (!modulePath) {
+      console.error('--importers needs a module path');
+      return 2;
+    }
+    const except = args.reduce((acc, a, idx) => (a === '--except' && args[idx + 1] ? acc.concat(args[idx + 1]) : acc), []);
+    for (const suite of importersOf(modulePath, { root, tsvText, except, fileExists })) {
+      process.stdout.write(`${suite}\n`);
+    }
+    return 0;
+  }
 
   if (args.includes('--stdout')) {
     const derived = deriveCoverageContract(tsvText, { root, existsFn, fileExists });

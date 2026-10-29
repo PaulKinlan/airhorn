@@ -752,7 +752,6 @@ const RESILIENCE_TOOL = path.join(import.meta.dirname, '..', 'tools', 'resilienc
 
 test('a browser that cannot start fails the resilience audit AND still writes the report (airhorn-w1wh review)', async () => {
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-audit-'));
-  const startedAt = Date.now();
   const run = spawnSync(process.execPath, [RESILIENCE_TOOL], {
     encoding: 'utf8',
     timeout: 180000,
@@ -780,10 +779,19 @@ test('a browser that cannot start fails the resilience audit AND still writes th
       'the first row must carry the launch reason');
     assert.ok(report.scenarios.every((r) => r.error), 'no ERROR row may be silent');
     assert.match(output, /\bhost starved\b/, 'the failure must name the starved host, not just any error');
+    // The refused launch is REMEMBERED, not retried: one attempt, then every later
+    // scenario records "not measured". This is the behaviour the w1wh fix added, and
+    // it is the honest replacement for an elapsed-time check against this spawn's own
+    // 180 s bound - that could not tell a fast refusal from a slow grind through every
+    // scenario, which was the failure its message named (airhorn-auoa). Removing the
+    // launchFailed latch leaves every row saying "cannot launch" and turns this red.
+    const notMeasured = report.scenarios.filter((r) => /not measured/.test(r.error || ''));
+    assert.ok(notMeasured.length > 0,
+      'after the first refused launch every later scenario must say "not measured" rather than relaunch: '
+      + JSON.stringify(report.scenarios.map((r) => r.error)));
   } finally {
     fs.rmSync(out, { recursive: true, force: true });
   }
-  assert.ok(Date.now() - startedAt < 180000, 'the audit must fail at the launch, not run every scenario first');
 });
 
 test('an audit that selected nothing still exits 0, and still writes a report (airhorn-w1wh review)', async () => {
