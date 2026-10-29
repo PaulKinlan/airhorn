@@ -11,6 +11,20 @@
 # coverage opinion about source: it makes a change to the suite run the suite. It is deliberately NOT
 # restated in .fleet/coverage-contract.json — the oracle skips self-rows, so naming one there reads as
 # "the contract places this path, the map does not" and fails tests/gate-smoke.test.js (airhorn-x4l).
+#
+# `@importers` ROWS (airhorn-ooqm). A shared test helper's suite set is not a list to keep by hand: it
+# had drifted six times (5t8, ckq, dco, 906, ooqm) because a helper gains a caller and the row keeps its
+# snapshot, so a change every caller depends on is gated by two suites. A row may therefore say
+# `@importers` instead of naming suites, and the set is DERIVED AT RUN TIME from every file that
+# REFERENCES the module - import-shape-agnostic (static from/import, require(), dynamic import(), a
+# template literal, a computed path.join(dir, 'x.mjs')), because all five shapes are already in this
+# tree. A new importer is therefore covered with no map edit. `except=<file>` keeps a suite off such a
+# row deliberately: tests/acceptance.mjs is the explicit-only whole-product pass (airhorn-i8i), and the
+# tests assert the derived count equals the true reference count (13 for cdp-command-bound.mjs) while
+# the gate selects that set minus the excepted one (12). The scan lives in
+# tools/derive-coverage-contract.mjs (`--importers`), so the gate and .fleet/coverage-contract.json
+# cannot disagree; the contract still has to be re-derived (one command) when the set changes, which
+# `node tools/derive-coverage-contract.mjs --check` and tests/gate-map.test.js fail loudly on.
 src/horn.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/shortcuts.test.mjs
 # THE SPLIT (airhorn-1l04). src/main.js is a composition root now; each concern lives in its own
 # module and carries the suites that would catch a regression IN THAT CONCERN. The rows below are
@@ -211,8 +225,8 @@ tests/acceptance.mjs	tests/acceptance.mjs
 # stand-in process for the shared bound-kill handler (airhorn-4vfn). Mapped specifically so
 # that a change to either module runs its own suite as well as the nine suites that launch
 # through them, and so the suite runs when it is the only thing that changed.
-tests/support/browser.mjs	tests/test-support.test.js
-tests/cdp-command-bound.mjs	tests/test-support.test.js tests/resilience-ui.test.mjs
-tests/support/signal-exit.mjs	tests/test-support.test.js
+tests/support/browser.mjs	@importers except=tests/acceptance.mjs
+tests/cdp-command-bound.mjs	@importers except=tests/acceptance.mjs
+tests/support/signal-exit.mjs	@importers except=tests/acceptance.mjs
 tests/test-support.test.js	tests/test-support.test.js
 tests/support/**	tests/a11y.test.mjs tests/docs-recipe.test.mjs tests/health.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/reflow-zoom.test.mjs tests/resilience-ui.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs tests/tool-bound-kill.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp.test.mjs

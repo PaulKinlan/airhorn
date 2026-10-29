@@ -156,7 +156,10 @@ const buildGateProbe = () => {
     '!*.md',
     '',
   ].join('\n'));
-  for (const args of [['init'], ['config', 'user.email', 'probe@example.invalid'], ['config', 'user.name', 'probe'], ['add', '-A'], ['commit', '-m', 'probe']]) {
+  // `branch -M master`: the gate resolves its default base from origin/master, master, origin/main,
+  // main (fast-gate.sh:132-138), so a probe repo whose init default is anything else would test
+  // NOTHING about base resolution while still exiting 1 - the vacuous pass this replaces.
+  for (const args of [['init'], ['config', 'user.email', 'probe@example.invalid'], ['config', 'user.name', 'probe'], ['add', '-A'], ['commit', '-m', 'probe'], ['branch', '-M', 'master']]) {
     const g = spawnSync('git', ['-C', probe, ...args], { encoding: 'utf8' });
     assert.equal(g.status, 0, `probe git ${args[0]} failed: ${g.stderr}`);
   }
@@ -667,6 +670,144 @@ test('ambient GSM_TOOLS_ROOT redirection is impossible without the minted guard 
     assert.ok(!out.includes('broken.mjs'), `child output must not mention decoy scripts: ${out.slice(0, 300)}`);
   } finally {
     fs.rmSync(tmpDecoy, { recursive: true, force: true });
+  }
+});
+
+test('a NEW importer of a derived helper is selected with no map edit (airhorn-ooqm)', () => {
+  // The bead's first attempt hand-listed the suites and asserted them with a regex: the row was still
+  // a snapshot, so the next importer would have gone uncovered. The row is now `@importers`, and this
+  // is the property that matters end to end: put the helper and an importer in a throwaway repo, name
+  // NEITHER suite on the row, and the gate must still select the importer - then a SECOND importer
+  // added later must be picked up too, with no map edit at all.
+  const { probe, run } = buildGateProbe();
+  try {
+    fs.writeFileSync(path.join(probe, 'tests', 'helper.mjs'), 'export const shared = 1;\n');
+    fs.writeFileSync(path.join(probe, 'tests', 'newimporter.test.js'),
+      "import { shared } from './helper.mjs';\nimport { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('uses the helper', () => { assert.equal(shared, 1); });\n");
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'),
+      '\ntests/helper.mjs\t@importers\ntests/newimporter.test.js\ttests/newimporter.test.js\n');
+
+    const first = run(['--changed', 'tests/helper.mjs', '--list']);
+    assert.equal(first.status, 0, `the derived row must validate and list: ${first.stdout}${first.stderr}`);
+    assert.deepEqual(first.stdout.split('\n').filter(Boolean), ['tests/newimporter.test.js'],
+      `the derived row must select the importer it never names: ${first.stdout}`);
+    // The scan announces itself, and it does so on stderr: --list's stdout is a machine-readable
+    // suite list, so an informational line there would corrupt the query it reports on.
+    assert.match(first.stderr, /fast-gate: derived: tests\/helper\.mjs -> 1 suite\(s\)/,
+      `the derivation must be announced loudly: ${first.stderr}`);
+
+    fs.writeFileSync(path.join(probe, 'tests', 'second.test.mjs'),
+      "const h = await import('./helper.mjs');\nimport { test } from 'node:test';\ntest('second', () => { if (!h.shared) throw new Error('x'); });\n");
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'tests/second.test.mjs\ttests/second.test.mjs\n');
+
+    const second = run(['--changed', 'tests/helper.mjs', '--list']);
+    assert.equal(second.status, 0, second.stderr);
+    assert.deepEqual(second.stdout.split('\n').filter(Boolean),
+      ['tests/newimporter.test.js', 'tests/second.test.mjs'],
+      `a NEW importer must be covered with no map edit: ${second.stdout}`);
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
+test('an ambient FAST_GATE_RUNNER cannot replace the pinned runner (airhorn-v6th)', {
+  // FAST_GATE_RUNNER decides WHAT EXECUTES, and it used to win over tools/gate.conf unconditionally:
+  // a four-line script printing a TAP header greened a RED suite with a normal PASS line and left no
+  // trace in the record, and a leftover '--test-only' in an exported runner still emitted a genuine
+  // TAP summary over a SUBSET of cases - the accident the finding expected to happen in a lane shell.
+  // The runner is now pinned by gate.conf alone: an export that DIFFERS exits 1 before any suite
+  // runs, and an export equal to the pin is a no-op. Both legs run the REAL gate in a throwaway
+  // repo (buildGateProbe copies tools/gate.conf, so the pin under test is the real one).
+  skip: guardActive() ? 'self-invocation guard' : false,
+}, () => {
+  const { probe, run } = buildGateProbe();
+  let runnerDir = '';
+  try {
+    // The same class one knob over: an ambient FAST_GATE_BASE decides what is EXAMINED, and a base at
+    // or after the change selects nothing - the 'no changed files' line, which the fleet contract
+    // certifies as a no-work pass. Refused here for the same reason (--base is the recorded spelling).
+    //
+    // This leg must run BASE RESOLUTION: `--changed` bypasses it entirely (fast-gate.sh:133), so the
+    // earlier version of this probe passed two of its three assertions even while FAST_GATE_BASE was
+    // honoured - only the stderr check bit (review finding). So: a COMMITTED change and no --changed,
+    // with the sensitivity proved first - without the export, the same invocation must really select
+    // the suite, otherwise a refusal proves nothing about what the base would have done.
+    // The change goes on its OWN branch: committing it to master would move the base with it, leaving
+    // "no changed files" for the honest run too, and the sensitivity check below would be vacuous.
+    const branch = spawnSync('git', ['-C', probe, 'checkout', '-b', 'lane'], { encoding: 'utf8' });
+    assert.equal(branch.status, 0, `probe git checkout failed: ${branch.stderr}`);
+    fs.writeFileSync(path.join(probe, 'src', 'a.js'), '// a committed change\n');
+    // Only the source file is committed: the probe directory also holds the forged runner, an
+    // untracked file that `add -A` would put in the delta and the gate would rightly call unmapped.
+    for (const args of [['add', 'src/a.js'], ['commit', '-m', 'a committed change']]) {
+      const g = spawnSync('git', ['-C', probe, ...args], { encoding: 'utf8' });
+      assert.equal(g.status, 0, `probe git ${args[0]} failed: ${g.stderr}`);
+    }
+    const resolved = run([]);
+    assert.equal(resolved.status, 0, `the committed change must be selected by base resolution: ${resolved.stdout}${resolved.stderr}`);
+    assert.ok(resolved.stdout.includes('fast-gate: PASS (1 suite(s), 1 changed file(s))'),
+      `base resolution must see the committed change, or the refusal below proves nothing: ${resolved.stdout}`);
+
+    const ambientBase = run([], { FAST_GATE_BASE: 'HEAD' });
+    assert.equal(ambientBase.status, 1,
+      `an ambient FAST_GATE_BASE must not decide what is examined: ${ambientBase.stdout}${ambientBase.stderr}`);
+    assert.ok(!ambientBase.stdout.includes('fast-gate: no changed files'),
+      `no no-work verdict line may be printed: ${ambientBase.stdout}`);
+    assert.ok(ambientBase.stderr.includes('FAST_GATE_BASE') && ambientBase.stderr.includes('--base'),
+      `the refusal must name the knob and the sanctioned spelling: ${ambientBase.stderr}`);
+
+    // The finding's repro, with its baseline first: a RED suite selected by a source shape.
+    fs.writeFileSync(path.join(probe, 'tests', 'fail.test.js'),
+      "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('one failing case', () => { assert.equal(1, 2); });\n");
+    fs.writeFileSync(path.join(probe, 'src', 'fail-src.js'), '// fail');
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'src/fail-src.js\ttests/fail.test.js\n');
+
+    const redBaseline = run(['--changed', 'src/fail-src.js']);
+    assert.equal(redBaseline.status, 1, `the RED suite must fail the gate unaided: ${redBaseline.stdout}`);
+    assert.ok(redBaseline.stdout.includes('fast-gate: failed: tests/fail.test.js'),
+      `the baseline must name the failing suite: ${redBaseline.stdout}`);
+
+    // The forged runner and its marker live OUTSIDE the probe repo: the gate counts untracked files
+    // as changed, so a script sitting in the tree would be selected by the base-resolution leg below
+    // (and correctly called unmapped) - a fixture artefact, not the behaviour under test.
+    runnerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fakerunner-'));
+    const marker = path.join(runnerDir, 'fakerun.ran');
+    const fakeRunner = path.join(runnerDir, 'fakerun.sh');
+    // The forged runner prints exactly what report_cases() reads as a real pass, so this pin fails if
+    // the gate ever honours the export again (the pre-fix gate greened the RED suite above with a
+    // normal 'fast-gate: PASS' line from this same script). The marker file proves it never ran.
+    fs.writeFileSync(fakeRunner,
+      `#!/usr/bin/env bash\n: > "${marker}"\necho 'TAP version 13'\necho '1..1'\necho 'ok 1 - forged'\necho '# pass 1'\necho '# fail 0'\n`);
+    fs.chmodSync(fakeRunner, 0o755);
+
+    const forged = run(['--changed', 'src/fail-src.js'], { FAST_GATE_RUNNER: fakeRunner });
+    assert.equal(forged.status, 1, `a forged FAST_GATE_RUNNER must not green a RED suite: ${forged.stdout}${forged.stderr}`);
+    assert.ok(!forged.stdout.includes('fast-gate: PASS'), `no PASS line may be printed: ${forged.stdout}`);
+    assert.ok(!forged.stdout.includes('fast-gate: passed:'), `no suite may be reported as passed: ${forged.stdout}`);
+    assert.ok(forged.stderr.includes('FAST_GATE_RUNNER'), `the refusal must name the override: ${forged.stderr}`);
+    assert.ok(forged.stderr.includes(path.join('tools', 'gate.conf')),
+      `the refusal must name the single source: ${forged.stderr}`);
+    assert.ok(!fs.existsSync(marker), 'the forged runner must never have been executed');
+
+    // A REAL runner narrowed to a subset of cases is refused the same way: being genuine is not the
+    // test, agreeing with the pin is.
+    const narrowed = run(['--changed', 'src/fail-src.js'],
+      { FAST_GATE_RUNNER: 'node --test --test-reporter=tap --test-only' });
+    assert.equal(narrowed.status, 1, `a narrowed runner must not be honoured: ${narrowed.stdout}${narrowed.stderr}`);
+    assert.ok(narrowed.stderr.includes('--test-only'), `the refusal must quote the exported value: ${narrowed.stderr}`);
+    assert.ok(!fs.existsSync(marker), 'the narrowed runner must not have executed either');
+
+    // An export that AGREES with the pin changes nothing, so it stays allowed: the real pinned runner
+    // runs the real suite and the pinned verdict line is unchanged.
+    const pinned = /^FAST_GATE_RUNNER=["']?(.*?)["']?$/m
+      .exec(fs.readFileSync(path.join(probe, 'tools', 'gate.conf'), 'utf8'))[1];
+    const agreeing = run(['--changed', 'src/a.js'], { FAST_GATE_RUNNER: pinned });
+    assert.equal(agreeing.status, 0, `an export equal to the pin must be a no-op: ${agreeing.stderr}`);
+    assert.ok(agreeing.stdout.includes('fast-gate: PASS (1 suite(s), 1 changed file(s))'),
+      `the pinned verdict line must be unchanged: ${agreeing.stdout}`);
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+    if (runnerDir) fs.rmSync(runnerDir, { recursive: true, force: true });
   }
 });
 
