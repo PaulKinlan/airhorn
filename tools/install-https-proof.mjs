@@ -40,6 +40,7 @@ import { fileURLToPath } from 'node:url';
 
 import { sweepStaleProfiles } from './lib/reap.mjs';
 import { connectPage, launchChrome } from './lib/chrome.mjs';
+import { missingIconSizes, startUrlInScope } from './lib/pwa-manifest.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 // The bound-kill handler (airhorn-y6mi): this is the one tool of the four that
@@ -300,14 +301,33 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
     const m = await (await fetch(link.href)).json();
     return {
       name: m.name, start_url: m.start_url, scope: m.scope, display: m.display,
-      icons_192_512: (m.icons || []).filter(i => ['192','512'].some(s => String(i.sizes||'').includes(s))).map(i => i.sizes),
+      icons_sizes: (m.icons || []).map(i => i.sizes || null),
+      icons: (m.icons || []).map(i => ({ sizes: i.sizes || null, src: i.src || null })),
     };
   })()`);
-  ev.startUrlInScope = await cdp.evaluate(`(async () => {
-    if (!('serviceWorker' in navigator)) return false;
+  // Raw facts only: the comparison is made in Node by the pure rule, so the page
+  // cannot disagree with the tests. The old comparison asked whether the scope was
+  // the string slash, which is false on every run because a scope is an absolute URL.
+  ev.startUrlFacts = await cdp.evaluate(`(async () => {
+    if (!('serviceWorker' in navigator)) return { unavailable: 'insecure context' };
     const reg = await navigator.serviceWorker.getRegistration();
-    return !!reg && reg.scope === '/';
+    const link = document.querySelector('link[rel="manifest"]');
+    let startUrl = null;
+    if (link) {
+      try { startUrl = (await (await fetch(link.href)).json()).start_url ?? null; } catch (e) { startUrl = null; }
+    }
+    return {
+      scope: reg ? reg.scope : null,
+      startUrl,
+      manifestHref: link ? link.href : null,
+      pageHref: location.href,
+    };
   })()`);
+  ev.startUrlScope = ev.startUrlFacts && !ev.startUrlFacts.unavailable
+    ? startUrlInScope(ev.startUrlFacts)
+    : { inScope: false, reason: 'no service worker in this context, so no scope to be inside' };
+  ev.startUrlInScope = ev.startUrlScope.inScope;
+  ev.missingIconSizes = missingIconSizes({ icons: (ev.manifest && ev.manifest.icons) || [] });
   ev.installPrompt = await cdp.evaluate('window.__install');
   ev.installButton = await cdp.evaluate(`(() => {
     const wrap = document.getElementById('installer');
@@ -405,6 +425,21 @@ async function main() {
       throw new Error('Install button not enabled over HTTPS: ' + JSON.stringify(httpsEv.installButton));
     }
     if (httpEv.installPrompt.fired) throw new Error('the insecure-HTTP contrast fired the prompt - the contrast is invalid');
+    // Collected and then never asserted was the whole defect (airhorn-nxuv.28): a
+    // start_url outside the worker's scope, or a manifest with no 192/512 icon, used
+    // to print PASS.
+    if (httpsEv.manifest && httpsEv.manifest.error) {
+      throw new Error(`the HTTPS manifest could not be read: ${httpsEv.manifest.error}`);
+    }
+    if (!httpsEv.startUrlInScope) {
+      throw new Error('the manifest start_url is not inside the worker scope over HTTPS: ' +
+        (httpsEv.startUrlScope ? httpsEv.startUrlScope.reason : 'not measured'));
+    }
+    if (httpsEv.missingIconSizes.length > 0) {
+      throw new Error('the manifest does not declare the required icon sizes over HTTPS: missing ' +
+        httpsEv.missingIconSizes.join(', ') + ' (declared: ' + JSON.stringify(httpsEv.manifest && httpsEv.manifest.icons_sizes) + ')');
+    }
+    console.log(`  start_url in scope: ${httpsEv.startUrlScope.reason}`);
     console.log('install-https-proof: PASS');
   } finally {
     liveBrowser = null; // the handle's teardown owns it now; a late signal must not repeat it
