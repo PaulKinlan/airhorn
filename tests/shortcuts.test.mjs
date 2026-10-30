@@ -435,19 +435,35 @@ async function checkPromptAndShareable(base) {
     assert(relaunched.hash === '#instant', `a repeat launch moved the URL to ${relaunched.href}`);
     console.log(`  repeat launch blasted again (${queue.source} queue): starts ${beforeLaunch.starts} -> ${relaunched.starts}, peak ${relaunched.peak.toFixed(3)}`);
 
-    // A launch that is not the instant deep link must not sound the horn. Wait
-    // for the repeat blast to finish ringing out first - otherwise the previous
+    // A launch that is not the instant deep link must not sound the horn, and must
+    // not move the URL. Both halves are measured from an explicitly ESTABLISHED
+    // pre-state on a clean route: asserting `hash === '#instant'` here said nothing,
+    // because the previous step left the page on #instant and __fireLaunch never
+    // navigates - so that assertion passed whether the launch preserved the URL or
+    // the launch handler rewrote it to the value it already had (airhorn-g0qr.4).
+    // A clean / route carries no hash, so a hash appearing afterwards can only have
+    // been produced by the launch, and the URL is compared against the one captured
+    // immediately before it.
+    await browser.navigate(`${base}/`, { wait: 700 });
+    const clean = await browser.snapshot();
+    assert(clean.booted, `a plain / navigation did not boot the app (href ${clean.href})`);
+    assert(clean.hash === '', `the clean / route that establishes this pre-state carries hash ${clean.hash} (href ${clean.href})`);
+    // Wait for the repeat blast to finish ringing out - otherwise the previous
     // source's tail is still in the analyser window and "peak stayed low" says
     // nothing about the launch being tested (the gate caught exactly that).
-    await browser.waitFor((s) => s.playing === false, { label: 'the repeat blast to finish', timeout: 8000 });
+    await browser.waitFor((s) => s.playing === false, { label: 'any ringing to finish before the / launch', timeout: 8000 });
+    const beforeOther = await browser.evaluate('location.href');
     await browser.evaluate(`window.__probe.reset(); window.__fireLaunch(${JSON.stringify(base + '/')}); 1`);
     await browser.sleep(700);
     const otherLaunch = await browser.snapshot();
     // Not "exactly 0": the previous blast's ring-out can leave a sliver in the
     // analyser window. Anything below the blast threshold means nothing sounded.
-    assert(otherLaunch.peak < 0.05 && otherLaunch.starts === relaunched.starts,
-      `a launch of / sounded the horn (peak ${otherLaunch.peak.toFixed(6)}, starts ${relaunched.starts} -> ${otherLaunch.starts})`);
-    assert(otherLaunch.hash === '#instant', `a launch of / moved the URL to ${otherLaunch.href}`);
+    assert(otherLaunch.peak < 0.05 && otherLaunch.starts === clean.starts,
+      `a launch of / sounded the horn (peak ${otherLaunch.peak.toFixed(6)}, starts ${clean.starts} -> ${otherLaunch.starts})`);
+    assert(otherLaunch.href === beforeOther,
+      `a launch of / moved the URL ${beforeOther} -> ${otherLaunch.href}`);
+    assert(otherLaunch.hash === '',
+      `a launch of / produced hash ${otherLaunch.hash} on a clean / route (href ${otherLaunch.href})`);
 
     console.log('--- 5. an unknown hash: nothing blasts, the horn still works ---');
     await browser.navigate('about:blank', { wait: 50 });
