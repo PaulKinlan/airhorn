@@ -11,6 +11,7 @@ import {
   formatCoverageContract,
   deriveMapOpinion,
   extractPendingSuites,
+  isPendingSuite,
   validateSuiteMap,
   globToRegex,
   globMatchesAny,
@@ -244,6 +245,47 @@ test('validateSuiteMap flags a bare ~ row (airhorn-nxuv.21)', () => {
 test('validateSuiteMap still accepts a file-backed row and a bare-marker-free map (airhorn-nxuv.21)', () => {
   const violations = validateSuiteMap('src/horn.js\ttests/horn.test.js\n!*.md\n', { root });
   assert.deepEqual(violations, []);
+});
+
+test('a DIRECTORY cannot be declared pending, and does not vanish from the contract (airhorn-nxuv.21 review P1)', () => {
+  // `isPendingSuite` used the FILE-only predicate, so "not a file" read as "not
+  // landed": `~phantom<TAB>tests` happily skipped an existing DIRECTORY and the
+  // derived contract dropped it. A directory has landed as something, and it is not
+  // a suite - validation must say so instead of excusing it.
+  const tsv = '~phantom\ttests\nsrc/horn.js\ttests\n';
+  const violations = validateSuiteMap(tsv, { root });
+  assert.equal(violations.length, 2, `both rows must be flagged, got ${JSON.stringify(violations)}`);
+  for (const violation of violations) {
+    assert.equal(violation.type, 'missing_suite');
+    assert.equal(violation.token, 'tests');
+    assert.ok(violation.message.includes('is a directory, not a file'),
+      `the message must say it is a directory, got: ${violation.message}`);
+  }
+  assert.equal(isPendingSuite('tests', new Set(['tests']), (p) => p !== 'tests', (p) => p === 'tests'), false,
+    'an existing directory is not a pending suite');
+  // ...and derivation must not silently drop it, or the hole would just move.
+  assert.deepEqual(deriveCoverageContract(tsv, { root }), { 'src/horn.js': ['tests'] });
+});
+
+test('a test/-prefixed DIRECTORY token is not pending either (airhorn-nxuv.21 review P1)', () => {
+  // The `test/` spelling is the other half of the pending rule; a directory there
+  // must be reported, not excused. Predicates are injected so the case is provable
+  // without a `test/` directory in the tree.
+  const violations = validateSuiteMap('src/horn.js\ttest/fixture\n', {
+    root,
+    fileExists: (relPath) => relPath === 'src/horn.js',
+    pathExists: (relPath) => relPath === 'src/horn.js' || relPath === 'test/fixture',
+  });
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].type, 'missing_suite');
+  assert.equal(violations[0].token, 'test/fixture');
+});
+
+test('a genuinely absent pending suite is still allowed (airhorn-u42y, airhorn-nxuv.21)', () => {
+  // The fix must not turn the pending rule off: an absent declared suite is fine...
+  assert.deepEqual(validateSuiteMap('~test/phantom.test.mjs\ttest/phantom.test.mjs\n', { root }), []);
+  // ...and so is the `test/` spelling of a suite that has not landed.
+  assert.deepEqual(validateSuiteMap('src/horn.js\ttest/phantom.test.mjs\n', { root }), []);
 });
 
 test('validateSuiteMap returns [] for valid map rows (airhorn-onz0)', () => {

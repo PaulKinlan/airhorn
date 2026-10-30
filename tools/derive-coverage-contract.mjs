@@ -105,6 +105,26 @@ const fileAt = (root) => (relPath) => {
 };
 
 /**
+ * "Is there anything at this path at all" - file, directory or symlink.
+ *
+ * The pending rule needs this and not `fileAt`: a suite is PENDING when it is
+ * declared (or written with the `test/` spelling) and has not landed yet. A path
+ * that exists as a DIRECTORY has landed as something, and it is not a suite, so
+ * treating it as "absent" would let `~phantom<TAB>tests` (or a `test/`-prefixed
+ * directory) skip validation and vanish from the derived contract - the same
+ * silent hole the file-only presence check closed for plain rows
+ * (airhorn-nxuv.21 review, P1).
+ */
+const existsAt = (root) => (relPath) => {
+  try {
+    fs.statSync(path.join(root, relPath));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
  * Why a path is not usable, for the violation message: "does not exist" must never
  * be said about something that is right there as a directory.
  */
@@ -180,8 +200,9 @@ export function globMatchesAny(pattern, { root = DEFAULT_ROOT, existsFn, fileExi
  *
  * Returns Array<{ type: string, token: string, pattern?: string, message: string }>
  */
-export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
+export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt, pathExists: pathExistsOpt } = {}) {
   const fileExists = existsFn || fileExistsOpt || fileAt(root);
+  const pathExists = pathExistsOpt || existsFn || fileExistsOpt || existsAt(root);
   const pendingDeclared = extractPendingSuites(tsvText);
   const violations = [];
 
@@ -311,7 +332,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
         continue;
       }
 
-      if (isPendingSuite(token, pendingDeclared, fileExists)) {
+      if (isPendingSuite(token, pendingDeclared, fileExists, pathExists)) {
         continue;
       }
 
@@ -350,11 +371,16 @@ export function extractPendingSuites(tsvText) {
 }
 
 /**
- * Checks whether a suite is currently pending (declared pending or test/ spelling,
- * and absent from disk).
+ * Checks whether a suite is currently pending: declared as `~...` (or written with
+ * the `test/` spelling) AND not on disk at all.
+ *
+ * `pathExists` is deliberately separate from `fileExists`: a DIRECTORY at the suite
+ * path is not a pending suite, it is a suite path that is not a file, and the
+ * caller must report it as such. It defaults to `fileExists` so the exported
+ * signature keeps working for callers that have only one predicate.
  */
-export function isPendingSuite(suite, pendingDeclared, fileExists) {
-  return (suite.startsWith('test/') || pendingDeclared.has(suite)) && !fileExists(suite);
+export function isPendingSuite(suite, pendingDeclared, fileExists, pathExists = fileExists) {
+  return (suite.startsWith('test/') || pendingDeclared.has(suite)) && !pathExists(suite);
 }
 
 // --- `@importers` rows: the suite set is DERIVED from the tree, not hand-listed (airhorn-ooqm) ----
@@ -507,8 +533,9 @@ export function expandRow(pattern, rest, options = {}) {
  * - Deduplicates suites while preserving order
  * - Accumulates multiple rows for the same pattern additively
  */
-export function deriveCoverageContract(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
+export function deriveCoverageContract(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt, pathExists: pathExistsOpt } = {}) {
   const fileExists = existsFn || fileExistsOpt || fileAt(root);
+  const pathExists = pathExistsOpt || existsFn || fileExistsOpt || existsAt(root);
   const pendingDeclared = extractPendingSuites(tsvText);
 
   const contract = {};
@@ -519,7 +546,7 @@ export function deriveCoverageContract(tsvText, { root = DEFAULT_ROOT, existsFn,
     const pat = parts[0] ? parts[0].trim() : '';
     if (!pat || pat.startsWith('!') || pat.startsWith('~')) continue;
     const { suites } = expandRow(pat, parts.slice(1).join(' '), { root, fileExists });
-    const activeSuites = suites.filter((s) => !isPendingSuite(s, pendingDeclared, fileExists));
+    const activeSuites = suites.filter((s) => !isPendingSuite(s, pendingDeclared, fileExists, pathExists));
     if (activeSuites.length > 0 && activeSuites.every((s) => s === pat)) continue;
     if (activeSuites.length > 0) {
       if (!contract[pat]) {
