@@ -480,15 +480,87 @@ async function reload(cdp, sessionId, timeout = 12000) {
   return ok;
 }
 
-async function waitForSw(cdp, sessionId, attempts = 40) {
+export async function waitForSw(cdp, sessionId, attempts = 40, sleepFn = sleep) {
+  let lastState = null;
+  let evaluateErrors = 0;
   for (let i = 0; i < attempts; i++) {
-    const state = await evaluate(cdp, sessionId, `navigator.serviceWorker.ready
-      .then((reg) => (reg.active ? reg.active.state : null))
-      .catch(() => null)`).catch(() => null);
-    if (state === 'activated') return true;
-    await sleep(150);
+    let res;
+    try {
+      res = await evaluate(cdp, sessionId, `(() => {
+        if (!('serviceWorker' in navigator)) {
+          return { status: 'unsupported', error: 'navigator.serviceWorker is not supported in this browser context' };
+        }
+        return navigator.serviceWorker.getRegistration().then((reg) => {
+          if (!reg) return { status: 'unregistered', detail: 'no service worker registration found' };
+          if (reg.active && reg.active.state === 'activated') {
+            return { status: 'activated' };
+          }
+          const installing = reg.installing ? reg.installing.state : null;
+          const waiting = reg.waiting ? reg.waiting.state : null;
+          const active = reg.active ? reg.active.state : null;
+          if (installing === 'redundant' || waiting === 'redundant' || active === 'redundant') {
+            return {
+              status: 'redundant',
+              error: 'service worker entered redundant state during boot or install',
+            };
+          }
+          return {
+            status: 'pending',
+            detail: \`installing=\${installing} waiting=\${waiting} active=\${active}\`,
+          };
+        }).catch((err) => ({
+          status: 'error',
+          error: \`getRegistration rejected: \${String(err && err.message || err)}\`,
+        }));
+      })()`);
+    } catch (err) {
+      evaluateErrors += 1;
+      lastState = { status: 'evaluate_error', error: `evaluate failed: ${String(err && err.message || err)}` };
+      await sleepFn(150);
+      continue;
+    }
+
+    if (res && res.status === 'activated') {
+      return { active: true, state: 'activated' };
+    }
+    if (res && res.status === 'redundant') {
+      return {
+        active: false,
+        reason: 'no_sw_redundant',
+        detail: res.error || 'service worker boot or install threw and entered redundant state',
+      };
+    }
+    if (res && res.status === 'unsupported') {
+      return {
+        active: false,
+        reason: 'unsupported',
+        detail: res.error,
+      };
+    }
+    lastState = res;
+    await sleepFn(150);
   }
-  return false;
+
+  if (evaluateErrors >= attempts) {
+    return {
+      active: false,
+      reason: 'unreadable_evaluate',
+      detail: lastState?.error || 'CDP evaluate failed on all attempts while probing service worker',
+    };
+  }
+  return {
+    active: false,
+    reason: 'timed_out',
+    detail: `service worker never activated within ${attempts * 150}ms (last state: ${lastState?.status} - ${lastState?.detail || lastState?.error || 'none'})`,
+  };
+}
+
+export function assertSwActive(sw, scenarioName) {
+  if (!sw || !sw.active) {
+    const reason = sw ? sw.reason : 'unknown';
+    const detail = sw ? sw.detail : 'waitForSw returned nullish';
+    throw new Error(`cannot score ${scenarioName} scenario: service worker failed to activate (${reason}): ${detail}`);
+  }
 }
 
 async function readState(cdp, sessionId) {
@@ -669,7 +741,8 @@ async function runAudit() {
       reset();
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
-      const swActive = await waitForSw(cdp, sessionId);
+      const sw = await waitForSw(cdp, sessionId);
+      assertSwActive(sw, 'offline');
       await cdp.send('Network.emulateNetworkConditions', {
         offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0,
       }, sessionId);
@@ -678,7 +751,7 @@ async function runAudit() {
       const horn = await pressHorn(cdp, sessionId);
       const shotFile = await shot(cdp, sessionId, '1-offline');
       return {
-        swActive,
+        swActive: sw.active,
         navigationCompleted: loaded,
         ...summarise(st),
         hornUsable: horn.sounded,
@@ -694,7 +767,8 @@ async function runAudit() {
       reset();
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
-      const swActive = await waitForSw(cdp, sessionId);
+      const sw = await waitForSw(cdp, sessionId);
+      assertSwActive(sw, 'liefi');
 
       // The connection answers, then dies without a response: the classic lie-fi.
       state.lieFi = { match: () => true, delayMs: 9000, mode: 'destroy' };
@@ -734,7 +808,7 @@ async function runAudit() {
       // all (uncachedState null) earns false without a press.
       const hornAfterUncached = uncachedState ? await pressHorn(cdp, sessionId) : null;
       return {
-        swActive,
+        swActive: sw.active,
         cachedNavigation: { completed: cachedLoaded, ms: cachedMs,
           hornPresent: cachedState ? cachedState.horn.present : false },
         uncachedSubresource: subresource,
@@ -755,7 +829,8 @@ async function runAudit() {
       reset();
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
-      const swActive = await waitForSw(cdp, sessionId);
+      const sw = await waitForSw(cdp, sessionId);
+      assertSwActive(sw, 'update');
       const before = await readState(cdp, sessionId);
 
       // Count real document swaps, not markers: a reload replaces the document and
@@ -790,7 +865,7 @@ async function runAudit() {
       const horn = await pressHorn(cdp, sessionId);
       const finalState = await readState(cdp, sessionId);
       return {
-        swActive,
+        swActive: sw.active,
         pressedWhileHeld: pressedState.horn.ariaPressed,
         autoReloaded: reloaded,
         navigationsObserved: navigations,
@@ -811,7 +886,8 @@ async function runAudit() {
       reset();
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
-      const swActive = await waitForSw(cdp, sessionId);
+      const sw = await waitForSw(cdp, sessionId);
+      assertSwActive(sw, 'quota');
 
       // (a) install-time precache is denied: the new worker's addAll rejects.
       state.swShim = `Cache.prototype.addAll = () => Promise.reject(
@@ -840,7 +916,7 @@ async function runAudit() {
       const horn = await pressHorn(cdp, sessionId);
       const shotFile = await shot(cdp, sessionId, '4-quota-offline-after-failed-install');
       return {
-        swActive,
+        swActive: sw.active,
         updateOutcome,
         registration,
         caches: cachesList,
@@ -939,7 +1015,8 @@ async function runAudit() {
       reset();
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
-      const swActive = await waitForSw(cdp, sessionId);
+      const sw = await waitForSw(cdp, sessionId);
+      assertSwActive(sw, 'corrupt');
 
       const cacheInfo = await evaluate(cdp, sessionId, `(async () => {
         const names = await caches.keys();
@@ -1010,7 +1087,7 @@ async function runAudit() {
       const finalShot = await shot(cdp, sessionId, '6-corrupt-after-online-update');
 
       return {
-        swActive,
+        swActive: sw.active,
         cache: cacheInfo,
         assetUrl,
         corruptedAsset: jsCorrupted,
