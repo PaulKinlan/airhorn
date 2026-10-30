@@ -180,7 +180,12 @@ export function globMatchesAny(pattern, { root = DEFAULT_ROOT, existsFn, fileExi
           return true;
         }
       } else {
-        if (regex.test(childRel)) {
+        // A non-directory Dirent is NOT automatically a file: readdirSync does not
+        // follow symlinks, so a symlink to a directory - and any FIFO, socket or
+        // device - arrives here. Ask the same presence predicate the literal rows
+        // are held to (it follows symlinks and requires a regular file), or a
+        // wildcard would be a way around the file check (rev-nxuv4 review, P2).
+        if (regex.test(childRel) && fileExists(childRel)) {
           return true;
         }
       }

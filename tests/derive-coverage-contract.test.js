@@ -362,6 +362,36 @@ test('derive-coverage-contract.mjs --check exits nonzero and names pattern for n
   }
 });
 
+test('a glob does not count a symlink to a directory as a file (rev-nxuv4 review P2)', () => {
+  // readdirSync does not follow symlinks, so `src/alias -> empty-dir` reaches the
+  // glob walk as a non-directory Dirent. The walk called every non-directory a file,
+  // so `src/*` "matched" a symlinked directory and the regular-file predicate that
+  // plain rows are held to was simply bypassed by using a wildcard.
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'contract-check-symlink-'));
+  try {
+    fs.mkdirSync(path.join(tempRoot, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, 'tests'), { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, 'empty-dir'), { recursive: true });
+    fs.writeFileSync(path.join(tempRoot, 'tests', 'ok.test.js'), '// test\n');
+    fs.symlinkSync(path.join(tempRoot, 'empty-dir'), path.join(tempRoot, 'src', 'alias'));
+
+    assert.equal(globMatchesAny('src/*', { root: tempRoot }), false,
+      'a symlink to a directory is not a matched file');
+    const violations = validateSuiteMap('src/*\ttests/ok.test.js\n', { root: tempRoot });
+    assert.equal(violations.length, 1, `expected one violation, got ${JSON.stringify(violations)}`);
+    assert.equal(violations[0].type, 'zero_match_glob');
+
+    // A symlink to a REGULAR file is still a file - symlinked suites are legitimate,
+    // and this is the half that must not break.
+    fs.writeFileSync(path.join(tempRoot, 'tests', 'real.js'), '// x\n');
+    fs.symlinkSync(path.join(tempRoot, 'tests', 'real.js'), path.join(tempRoot, 'src', 'real-link.js'));
+    assert.equal(globMatchesAny('src/*', { root: tempRoot }), true,
+      'a symlink to a regular file still matches');
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test('main([--validate-map], { root }) fails when root lacks mapped directory (airhorn-onz0)', () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'validator-root-'));
   const err = [];
