@@ -119,6 +119,9 @@ tools/lib/**	tests/test-support.test.js
 # only call the second navigation worker-cached when a worker controlled BOTH loads,
 # so a change to the rule is gated on the suite that proves both verdicts.
 tools/lib/repeat-load-verdict.mjs	tests/repeat-load-verdict.test.js
+# The interaction-measurement rule (airhorn-nxuv.14): an INP may only be reported as a
+# value when the control was found and the dispatch was observed.
+tools/lib/interaction-verdict.mjs	tests/interaction-verdict.test.js
 # The two tools whose LAUNCH behaviour has its own regression guard (a refused launch must leave
 # no profile; a browser that cannot start must fail the audit) are driven by test-support, on
 # top of the gate-smoke row every tools/* file already selects (airhorn-w1wh review).

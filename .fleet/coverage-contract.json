@@ -117,6 +117,9 @@
  "tools/lib/repeat-load-verdict.mjs": [
   "tests/repeat-load-verdict.test.js"
  ],
+ "tools/lib/interaction-verdict.mjs": [
+  "tests/interaction-verdict.test.js"
+ ],
  "tools/install-https-proof.mjs": [
   "tests/gate-smoke.test.js",
   "tests/test-support.test.js"

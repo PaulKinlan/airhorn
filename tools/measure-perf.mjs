@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
+import { interactionProblems, interactionVerdict } from './lib/interaction-verdict.mjs';
 import { repeatLoadCaveat, repeatLoadVerdict } from './lib/repeat-load-verdict.mjs';
 
 // The teardown below lives in a try/finally, which a bound-kill (fleet-gate's
@@ -228,8 +229,9 @@ async function main() {
       `,
       returnByValue: true
     });
-    if (boxEval.result.value) {
-      const { x, y } = boxEval.result.value;
+    const hornTarget = boxEval.result.value;
+    if (hornTarget) {
+      const { x, y } = hornTarget;
       await send('Input.dispatchMouseEvent', {
         type: 'mousePressed',
         x,
@@ -272,8 +274,8 @@ async function main() {
     // (airhorn-nxuv.13).
     const swActiveRepeat = await pollForController();
 
-    if (boxEval.result.value) {
-      const { x, y } = boxEval.result.value;
+    if (hornTarget) {
+      const { x, y } = hornTarget;
       await send('Input.dispatchMouseEvent', {
         type: 'mousePressed',
         x,
@@ -335,6 +337,17 @@ async function main() {
       return `${sw} SW / ${disk} Disk / ${net} Net (${resps.length} total)`;
     }
 
+    // The interaction the INP column depends on: a page with no `.horn` used to skip
+    // the dispatch silently and still print "None (0 events ...)" (airhorn-nxuv.14).
+    const interaction = interactionVerdict({
+      targetFound: Boolean(hornTarget),
+      events: (coldMetrics.rawEvents || []).length,
+      inp: computeInp(coldMetrics),
+    });
+    for (const line of interactionProblems(interaction)) {
+      console.log(line);
+    }
+
     console.log('=== Performance Measurement Report ===');
     console.log(`Tooling: Google Chrome Headless (${chromeBin()}) via CDP WebSocket`);
     // The conditions belong IN the report, not only next to it (airhorn-qons):
@@ -365,7 +378,11 @@ async function main() {
         'Request Provenance': summarizeResponses(coldResponses),
         'First Paint (FP)': coldMetrics.fp !== null ? `${Math.round(coldMetrics.fp)} ms` : 'None',
         'LCP': formatLcp(coldMetrics),
-        'INP (p98)': computeInp(coldMetrics),
+        'INP (p98)': interactionVerdict({
+          targetFound: Boolean(hornTarget),
+          events: (coldMetrics.rawEvents || []).length,
+          inp: computeInp(coldMetrics),
+        }).inpLabel,
         'CLS': coldMetrics.cls.toFixed(4)
       },
       [repeatVerdict.label]: {
@@ -373,7 +390,11 @@ async function main() {
         'Request Provenance': summarizeResponses(repeatResponses),
         'First Paint (FP)': repeatMetrics.fp !== null ? `${Math.round(repeatMetrics.fp)} ms` : 'None',
         'LCP': formatLcp(repeatMetrics),
-        'INP (p98)': computeInp(repeatMetrics),
+        'INP (p98)': interactionVerdict({
+          targetFound: Boolean(hornTarget),
+          events: (repeatMetrics.rawEvents || []).length,
+          inp: computeInp(repeatMetrics),
+        }).inpLabel,
         'CLS': repeatMetrics.cls.toFixed(4)
       }
     });
