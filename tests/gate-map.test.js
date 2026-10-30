@@ -567,6 +567,13 @@ test('the render model: shown IS visible text; a skipped node contributes nothin
     // is painted and its text belongs in the walk. Only the hidden element's
     // OWN text is dropped.
     { name: 'a hidden element with a visible descendant', tree: el({ visibility: 'hidden' }, 'hidden own text', [el({}, 'kept child text')]), text: 'kept child text' },
+    // `visibility: collapse` on anything that is not a table row/column is
+    // `hidden`; treating it as visible let a region whose only text sat in a
+    // collapsed element report shown:true with text nobody can see
+    // (airhorn-nxuv.27). Its descendants are still walked, exactly like the
+    // hidden case above: a visibility:visible child IS painted.
+    { name: 'a visibility:collapse element', tree: el({ visibility: 'collapse' }, 'collapsed own text', [el({}, 'kept child text')]), text: 'kept child text' },
+    { name: 'a region whose only text is inside a visibility:collapse element', tree: el({}, '', [el({ visibility: 'collapse' }, 'collapsed only text')]), text: '' },
     { name: 'a region inside a display:none ancestor', tree: el({ boxChain: false }, 'hidden ancestor status'), text: '' },
     { name: 'a visibility:visible region inside a visibility:hidden ancestor', tree: el({}, 'visible override region'), text: 'visible override region' },
     { name: 'an opacity:0 region', tree: el({ boxChain: false, opacity: 0 }, 'echo opacity zero'), text: '' },
@@ -583,6 +590,23 @@ test('the render model: shown IS visible text; a skipped node contributes nothin
     assert.equal(model.isShown(c.tree, adapt), text !== '',
       `${c.name}: shown must BE "has visible text" - a second visibility path is the bug`);
   }
+});
+
+test('visibility:collapse is NOT painted own text (airhorn-nxuv.27)', () => {
+  // `visibility: collapse` is `hidden` for every element that is not a table
+  // row/column. The gate only special-cased 'hidden', so a collapsed element's own
+  // text went into the walk and a region whose only text sat in one reported
+  // shown:true - a verdict about text nobody can see.
+  const model = makeRenderModel();
+  const oldVerdict = (facts) => (facts.visibility === 'hidden' ? 'own' : 'text');
+  assert.equal(oldVerdict({ visibility: 'collapse' }), 'text',
+    'the old read treated a collapsed element as painted - this is the hole');
+
+  const facts = { type: 'element', boxChain: true, visibility: 'collapse', opacity: 1, contentVisibility: 'visible' };
+  assert.equal(model.gate(facts), 'own',
+    'a collapsed element must keep its box (descend) but drop its OWN text');
+  assert.equal(model.gate({ ...facts, visibility: 'hidden' }), 'own', 'hidden and collapse decide alike');
+  assert.equal(model.gate({ ...facts, visibility: 'visible' }), 'text', 'a visible element is unchanged');
 });
 
 // The instrument the audit actually runs - READ_STATE, the page code - driven

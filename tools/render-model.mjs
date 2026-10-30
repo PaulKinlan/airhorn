@@ -60,7 +60,14 @@ export function makeRenderModel() {
     // opacity allow it - a display:contents region had no verdict at all, so
     // its own text read shown:true from visibility:hidden and opacity:0
     // (airhorn-s52). Descend either way: children may override visibility.
-    if (facts.visibility === 'hidden') return 'own';
+    //
+    // `visibility: collapse` is `hidden` for everything outside CSS tables (inside
+    // one it collapses the row/column instead); either way this element's own text
+    // is not painted and its descendants may still override with
+    // visibility:visible. It used to fall through to 'text', so a region whose only
+    // text sat in a collapsed element reported shown:true with text nobody can see
+    // (airhorn-nxuv.27).
+    if (facts.visibility === 'hidden' || facts.visibility === 'collapse') return 'own';
     if (!(facts.opacity > 0.05)) return 'own';
     return 'text';
   };
