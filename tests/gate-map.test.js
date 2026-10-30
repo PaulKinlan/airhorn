@@ -235,10 +235,44 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
   // assertion cannot silently diverge into a suite that checks nothing real.
   const page = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
   const suite = fs.readFileSync(path.join(root, 'tests', 'resilience-ui.test.mjs'), 'utf8');
-  for (const copy of ['The app could not update', 'previous version']) {
+  const copies = ['The app could not update', 'previous version'];
+  // `includes` on the RAW file text cannot tell an assertion from a comment: a
+  // commented-out assertion, or even a comment quoting the copy, satisfied it. So
+  // comments go first (the tree already ships esbuild), and then the COMPARISON
+  // has to be there - the copy sitting in the loop's list literal was enough
+  // before, which is why deleting the assertion left this green (airhorn-g0qr.1).
+  const stripComments = (source) => esbuild.transformSync(source, { loader: 'js', minifyWhitespace: true }).code;
+  const coverageProblems = (source, wanted) => {
+    const code = stripComments(source);
+    const problems = [];
+    for (const copy of wanted) {
+      if (!code.includes(copy)) problems.push(`"${copy}" is not in the suite's code (a comment does not count)`);
+    }
+    // The copies must be iterated, and each one compared against the live text in
+    // a guard (a negation or an assert) - not just listed.
+    const loops = [...code.matchAll(/for\(const ([A-Za-z_$][\w$]*)\s*of\[([^\]]*)\]/g)]
+      .filter(([, , list]) => wanted.every((copy) => list.includes(copy)));
+    if (loops.length === 0) problems.push('the copies are not iterated from one list literal (for (const copy of [...]))');
+    const guarded = loops.some(([, name]) => new RegExp(
+      `(?:if\\(!|assert\\.[a-zA-Z]+\\([^)]*)[A-Za-z_$][\\w$.]*\\.includes\\(${name}\\)`).test(code));
+    if (!guarded) problems.push('the live text is never compared against the copies in a guard (if (!text.includes(copy)) / assert ... includes(copy))');
+    return problems;
+  };
+
+  assert.deepEqual(coverageProblems(suite, copies), [],
+    'resilience-ui must assert the page\'s lost-upgrade copy in code');
+  for (const copy of copies) {
     assert.ok(page.includes(copy), `index.html must author the lost-upgrade copy "${copy}"`);
-    assert.ok(suite.includes(copy), `resilience-ui must assert the page's lost-upgrade copy "${copy}"`);
   }
+  // Able to fail, permanently and in one run: the same predicate must reject the
+  // two mutations the old check could not see. Commented out and deleted both
+  // leave the copy in the loop's list, so only the comparison check can catch them.
+  const liveCondition = 'if (!lost.text.includes(copy))';
+  assert.ok(suite.includes(liveCondition), 'the mutation fixtures assume the shipped guard shape');
+  assert.notDeepEqual(coverageProblems(suite.replace(liveCondition, 'if (/* !lost.text.includes(copy) */ true)'), copies), [],
+    'a COMMENTED-OUT comparison must be rejected');
+  assert.notDeepEqual(coverageProblems(suite.replace(liveCondition, 'if (true)'), copies), [],
+    'a DELETED comparison must be rejected');
   // The worker's own failure story is still the failover suite's job, and the
   // suite still has a row owner (the worker). No page module carries worker code
   // since the split (airhorn-1l04): the registration handler is inline in
