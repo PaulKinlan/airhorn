@@ -52,7 +52,9 @@
  * Budgets (of one core, measured on this VM's headless Chrome):
  *   A pristine idle   < 0.5%      nothing runs
  *   B after a blast   < 1.0%      a running-but-silent AudioContext is tolerated
- *   D hidden          < 0.5%      and no audio may keep playing
+ *   D hidden          < 0.5%      no audio may keep playing, and the stop is measured IN THE PAGE
+ *                                 against HIDDEN_STOP_BOUND_MS (2s); a stop not observed by
+ *                                 HIDDEN_STOP_DEADLINE_MS (15s) is UNMEASURED and fails.
  */
 
 import http from 'node:http';
@@ -77,6 +79,21 @@ const mimeTypes = {
 };
 
 const BUDGET = { pristineIdle: 0.5, afterBlastIdle: 1.0, hidden: 0.5 };
+
+// Verdict D's stated bound ("a looping horn stops within 2s"). It is COMPARED now, not just printed in
+// the label: until airhorn-nxuv.2b the pass path never looked at the measured number, so a 5091ms stop
+// passed. The bound itself is unchanged - the mechanism was what was wrong (see the in-page
+// measurement below).
+const HIDDEN_STOP_BOUND_MS = 2000;
+// A stop not observed by this deadline is UNMEASURED - its own failing outcome, never a pass. The
+// deadline is deliberately wider than the bound, so a slow stop is *measured* and fails the bound
+// rather than being reported as "no measurement".
+const HIDDEN_STOP_DEADLINE_MS = 15000;
+// The in-page loop asks for a 25ms cadence and gets whatever the host allows (156-385ms/sample on this
+// 66-82%-steal VM). That cadence is the resolution of the measurement, so the bound needs ~5 samples
+// inside it (2s / 5 = 400ms) before a number close to the bound can be judged. A coarser page than
+// that, with a measurement near the bound, is reported UNRESOLVED - never a pass (airhorn-nxuv.2b).
+const HIDDEN_STOP_MAX_SAMPLE_MS = 400;
 
 // Scheduling instrumentation, installed before any page script runs: the app's
 // own timers and frames are what is being counted, so this must be in place for
@@ -413,17 +430,53 @@ async function main() {
     // rings out rather than cutting dead (by design), so wait for silence and
     // report how long it took: "playing" read 500ms after the hide is a race, not
     // a defect.
-    const hideStartedAt = Date.now();
+    // Measured IN THE PAGE, in one round trip (airhorn-nxuv.2b). The old loop polled over CDP once per
+    // sample, so each sample cost a round trip - 150ms+ on a loaded host - and the number it produced was
+    // mostly the poll's own overhead: it reported 5091ms for a horn that had already stopped, which the
+    // verdict then ignored anyway because it never compared it to the bound. In-page timing with
+    // performance.now() measures the app, so the stated 2s bound is answerable.
     let stopLatencyMs = null;
+    let stopWallMs = null;
+    let stopSamples = 0;
     if (playback.met) {
-      for (let i = 0; i < 40; i++) {
-        const state = await evaluate('window.__airhorn.isPlaying()');
-        if (state === false) { stopLatencyMs = Date.now() - hideStartedAt; break; }
-        await sleep(50);
-      }
+      const measured = await evaluate(`(async () => {
+        const ctx = window.__airhornContext || null;
+        const started = performance.now();
+        const startedAudio = ctx ? ctx.currentTime : null;
+        let samples = 0;
+        while (performance.now() - started < ${HIDDEN_STOP_DEADLINE_MS}) {
+          samples += 1;
+          if (window.__airhorn.isPlaying() === false) {
+            return {
+              stoppedMs: performance.now() - started,
+              audioMs: ctx && startedAudio !== null ? (ctx.currentTime - startedAudio) * 1000 : null,
+              samples,
+            };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        return { stoppedMs: null, audioMs: null, samples };
+      })()`);
+      stopWallMs = measured.stoppedMs === null ? null : Math.round(measured.stoppedMs);
+      // PRIMARY number: the AUDIO clock. A sample source that stops at 0.9s of audio time stopped at
+      // 0.9s even if the main thread was 8s late in dispatching onended, so the audio domain is what the
+      // 2s bound is about; the wall number is kept beside it to show the host's lag rather than hiding it.
+      stopLatencyMs = measured.audioMs === null
+        ? stopWallMs
+        : Math.round(measured.audioMs);
+      stopSamples = measured.samples;
     }
+    // The page's own cadence, in wall time: how often it actually got to run. (Dividing the audio-clock
+    // latency by the sample count would hide a starved page behind a short audio number.)
+    const stopMeanSampleMs = stopWallMs !== null && stopSamples > 0
+      ? Number((stopWallMs / stopSamples).toFixed(1))
+      : null;
     // Never 0 for an unplayed horn: with the precondition unmet this stays null, and verdict D refuses.
     report.hiddenStopLatencyMs = stopLatencyMs;
+    report.hiddenStopWallMs = stopWallMs;
+    report.hiddenStopBoundMs = HIDDEN_STOP_BOUND_MS;
+    report.hiddenStopSamples = stopSamples;
+    report.hiddenStopMeanSampleMs = stopMeanSampleMs;
     const afterHide = await evaluate(`({
       playing: window.__airhorn.isPlaying(),
       pressed: document.querySelector('.horn').getAttribute('aria-pressed'),
@@ -510,15 +563,33 @@ async function main() {
         // third state (PASS / FAIL / REFUSED), and a refusal never reaches `pass: true`.
         refused: !playback.met,
         precondition: playback,
+        // Precondition met but no stop observed by the deadline: not a pass and not a refusal - a
+        // measurement that did not happen, reported as its own failing outcome.
+        unmeasured: playback.met === true && report.hiddenStopLatencyMs === null,
+        // Measured, but by a page whose own timers ran slower than this bound is worth AND close enough to
+        // the bound that the granularity matters: the number is about the host, so it is not evidence
+        // either way. Reported, never passed. A number more than twice the bound is decisive anyway - a
+        // coarse sample can overstate the latency, never understate it - so that is a plain failure.
+        unresolved: playback.met === true && report.hiddenStopLatencyMs !== null
+          && report.hiddenStopLatencyMs <= 2 * HIDDEN_STOP_BOUND_MS
+          && (stopMeanSampleMs === null || stopMeanSampleMs > HIDDEN_STOP_MAX_SAMPLE_MS),
         pass: playback.met === true
           && report.hiddenStopLatencyMs !== null
+          && report.hiddenStopLatencyMs <= HIDDEN_STOP_BOUND_MS
+          && stopMeanSampleMs !== null && stopMeanSampleMs <= HIDDEN_STOP_MAX_SAMPLE_MS
           && report.hidden.afterHide.pressed === 'false'
           && byName('D').mainThreadCpuPct < BUDGET.hidden,
         measured: (playback.met
           ? `playing before the hide=${playback.playing} pressed=${playback.pressed}`
           : `PRECONDITION UNMET - the horn was not playing before the hide (playing=${playback.playing} `
             + `pressed=${playback.pressed}), so there is no stop latency to measure`) + ', ' +
-          `stopped after ${report.hiddenStopLatencyMs === null ? 'NEVER (>2s)' : report.hiddenStopLatencyMs + 'ms'}, ` +
+          `stopped after ${report.hiddenStopLatencyMs === null
+            ? `NEVER within ${HIDDEN_STOP_DEADLINE_MS}ms (unmeasured, bound ${HIDDEN_STOP_BOUND_MS}ms)`
+            : `${report.hiddenStopLatencyMs}ms on the audio clock (bound ${HIDDEN_STOP_BOUND_MS}ms; `
+              + `${report.hiddenStopWallMs}ms wall, ${stopSamples} in-page sample(s) = ${stopMeanSampleMs}ms wall/sample`
+              + `${stopMeanSampleMs > HIDDEN_STOP_MAX_SAMPLE_MS
+                ? ' - the host cannot resolve this bound: the page\'s own timers ran slower than the number means'
+                : ''})`}, ` +
           `pressed=${report.hidden.afterHide.pressed}, ctx=${report.hidden.afterHide.contextState}, ` +
           `${byName('D').mainThreadCpuPct}% main thread`,
       },
@@ -545,7 +616,11 @@ async function main() {
       if (report.errors.length) console.log(`page errors: ${JSON.stringify(report.errors)}`);
       console.log('');
       for (const verdict of verdicts) {
-        const label = verdict.refused ? 'REFUSED' : verdict.pass ? 'PASS' : 'FAIL';
+        const label = verdict.refused ? 'REFUSED'
+          : verdict.pass ? 'PASS'
+            : verdict.unmeasured ? 'FAIL (unmeasured)'
+              : verdict.unresolved ? 'FAIL (host cannot resolve the bound)'
+                : 'FAIL';
         console.log(`${label}  ${verdict.what} — ${verdict.measured}`);
       }
     }
