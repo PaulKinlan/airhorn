@@ -114,6 +114,9 @@
  "tools/lib/**": [
   "tests/test-support.test.js"
  ],
+ "tools/lib/node-release-check.mjs": [
+  "tests/node-release-check.test.js"
+ ],
  "tools/install-https-proof.mjs": [
   "tests/gate-smoke.test.js",
   "tests/test-support.test.js"

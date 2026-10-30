@@ -9,8 +9,13 @@
  * after ten minutes — so this drives one browser through a realistic long
  * session and measures what the page *holds*, not what it printed.
  *
- * One session, four phases, all against a served `dist/`:
+ * One session, five phases, all against a served `dist/`:
  *
+ *   A0. fallback — cycles with the sample's decode blocked, so the app takes its
+ *                 synthesised-fallback path: three OscillatorNodes per blast, and
+ *                 those are measured too, not just the sample's buffer sources.
+ *                 The real decoder goes back in the same document afterwards and
+ *                 one more cycle proves the sample path came back.
  *   A. cycles   — 240 start/stop cycles mixed the way people and agents really
  *                 drive it: WebMCP play/stop (the bulk), pointer press-and-hold
  *                 with the sample ringing out, keyboard Space, and `/#instant`.
@@ -27,7 +32,11 @@
  *                     the number is *retained* bytes rather than garbage;
  *   - live audio      counts of AudioBufferSourceNode / OscillatorNode instances
  *                     still reachable in the heap (Runtime.queryObjects), cross-
- *                     checked against start/ended events counted in the page;
+ *                     checked against start/ended events counted in the page. The
+ *                     cross-check is load-bearing, so it has to be honest in both
+ *                     directions: a document that CREATED nodes of a kind and whose
+ *                     heap count could not then be taken FAILS - an unmeasured
+ *                     count is not "zero live nodes" (airhorn-nxuv.4);
  *   - audio contexts  the app must own exactly one AudioContext for the life of
  *                     the document, not one per blast;
  *   - listeners/DOM   Memory.getDOMCounters — live nodes, documents and JS event
@@ -62,6 +71,7 @@ import { fileURLToPath } from 'node:url';
 import { quiescenceProbe, waitForQuiescence } from '../tests/support/quiescence.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
+import { checkNodeRelease } from './lib/node-release-check.mjs';
 
 // A bound-kill (fleet-gate's SIGTERM, a job-tree reaper, Ctrl-C) never runs the
 // try/finally below, so a mid-run kill left the chrome tree and its /tmp profile
@@ -79,6 +89,23 @@ installSignalExit(() => {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
 const distDir = path.join(root, 'dist');
+
+/*
+ * How many oscillators one synthesised blast starts - Horn#playSynth builds one
+ * per entry in SYNTH_FREQUENCIES (src/horn.js). Read it from the source instead of
+ * restating the number here, so the "the fallback path really ran" lower bound and
+ * the one-blast tolerance in the node check cannot drift away from the app.
+ */
+const SYNTH_VOICES = (() => {
+  try {
+    const source = fs.readFileSync(path.join(root, 'src', 'horn.js'), 'utf-8');
+    const match = source.match(/const SYNTH_FREQUENCIES\s*=\s*\[([^\]]*)\]/);
+    const voices = match ? match[1].split(',').filter((entry) => entry.trim() !== '').length : 0;
+    return voices > 0 ? voices : 3;
+  } catch {
+    return 3;
+  }
+})();
 
 const mimeTypes = {
   '.html': 'text/html',
@@ -106,7 +133,17 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *                  heap cross-check sees it);
  *   listener-leak  one document listener added per blast; the renderer's
  *                  listener count has to climb;
- *   heap-leak      1 MB retained per blast; the retained heap has to climb.
+ *   heap-leak      1 MB retained per blast; the retained heap has to climb;
+ *   oscillator-leak  every OscillatorNode created is retained - exactly what a
+ *                  `window.__leakedOscs.push(osc)` inside Horn's fallback synth
+ *                  does. The app still stops and disconnects it, so the ended
+ *                  counters stay clean and only the heap cross-check can see it,
+ *                  which is why the oscillator assertion cannot live on the live
+ *                  counters alone (airhorn-nxuv.4);
+ *   heap-count-blind  the node prototypes are captured but never readable, so
+ *                  Runtime.queryObjects has nothing to count. Before airhorn-nxuv.4
+ *                  `?? 0` read that as "0 live nodes" and the check stayed green;
+ *                  it is a missing measurement, not a clean one.
  */
 const MUTANTS = {
   none: '',
@@ -150,6 +187,29 @@ const MUTANTS = {
       };
     })();
   `,
+  'oscillator-leak': `
+    (() => {
+      window.__mutantOscs = [];
+      const proto = AudioContext.prototype;
+      const create = proto.createOscillator;
+      proto.createOscillator = function (...args) {
+        const node = create.apply(this, args);
+        window.__mutantOscs.push(node);
+        return node;
+      };
+    })();
+  `,
+  'heap-count-blind': `
+    (() => {
+      for (const key of ['source', 'oscillator']) {
+        Object.defineProperty(window.__soak.protos, key, {
+          configurable: true,
+          get: () => null,
+          set: () => {},
+        });
+      }
+    })();
+  `,
 };
 
 /* ------------------------------- options ---------------------------------- */
@@ -158,12 +218,15 @@ const HELP = `
 Usage: node tools/soak.mjs [options]     (run "npm run build" first)
 
   --cycles <n>        horn start/stop cycles (default 240)
+  --synth <n>         cycles with the sample's decode blocked, so the synthesised
+                      fallback runs and its oscillators are measured (default 12, 0 disables)
   --updates <n>       service-worker versions published over the controller (default 3)
   --offline <n>       offline/online toggles (default 4)
   --out <dir>         evidence directory (default /tmp/airhorn-soak/<sha>-<stamp>)
   --heap-budget <mb>  retained-heap growth allowed across the cycles (default 8)
   --mutant <name>     inject a known leak to prove the checks can fail:
-                      none | source-leak | listener-leak | heap-leak
+                      none | source-leak | listener-leak | heap-leak |
+                      oscillator-leak | heap-count-blind
   --help              this text
 
 Exits 0 only when every check passes; report.json + a screenshot are the evidence.
@@ -172,6 +235,7 @@ Exits 0 only when every check passes; report.json + a screenshot are the evidenc
 function parseArgs(argv) {
   const options = {
     cycles: 240,
+    synth: 12,
     updates: 3,
     offline: 4,
     out: null,
@@ -188,6 +252,7 @@ function parseArgs(argv) {
     };
     switch (arg) {
       case '--cycles': options.cycles = Number(value()); break;
+      case '--synth': options.synth = Number(value()); break;
       case '--updates': options.updates = Number(value()); break;
       case '--offline': options.offline = Number(value()); break;
       case '--out': options.out = value(); break;
@@ -202,6 +267,7 @@ function parseArgs(argv) {
     }
   }
   if (!Number.isFinite(options.cycles) || options.cycles < 1) throw new Error('--cycles must be positive');
+  if (!Number.isFinite(options.synth) || options.synth < 0) throw new Error('--synth must be >= 0');
   if (!Number.isFinite(options.updates) || options.updates < 0) throw new Error('--updates must be >= 0');
   if (!Number.isFinite(options.offline) || options.offline < 0) throw new Error('--offline must be >= 0');
   if (!(options.mutant in MUTANTS)) {
@@ -767,9 +833,122 @@ async function main() {
       return { sounded: true, stopped: true };
     }
 
+    /* ------------------ samples, and A0. the fallback path ------------------ */
+    const samples = [];
+
+    /*
+     * The app plays the mp3 unless the sample will not decode, in which case it
+     * synthesises the horn from three OscillatorNodes (Horn#playSynth). A soak
+     * that only ever plays the sample cannot say anything about those nodes, so
+     * "audio nodes are released after every cycle" would be a check over an empty
+     * set - green for a leak the fallback path had all along (airhorn-nxuv.4).
+     * Block the decode for a few cycles and measure it.
+     *
+     * The blocker has to be a new-document script, so this costs one reload. The
+     * real decoder goes back in the SAME document afterwards: a failed decode
+     * clears the app's cached buffer promise, so the next start fetches and
+     * decodes again, and one cycle proves the sample path came back. Everything
+     * after this - the baseline included - therefore measures a document on the
+     * sample path, and the fallback's (zero) DOM churn is behind the baseline
+     * rather than looking like churn from the cycle phase.
+     */
+    let synthCheck = null;
+    let synthResults = null;
+    if (options.synth > 0) {
+      console.log('\n--- A0. synthesised fallback ---');
+      const blocker = await send('Page.addScriptToEvaluateOnNewDocument', {
+        source: `(() => {
+          const AC = window.AudioContext || window.webkitAudioContext;
+          if (!AC || !AC.prototype || typeof AC.prototype.decodeAudioData !== 'function') return;
+          window.__soakRealDecode = AC.prototype.decodeAudioData;
+          AC.prototype.decodeAudioData = () => Promise.reject(
+            new Error('soak: sample decode blocked for the fallback phase'));
+        })();`,
+      });
+      await send('Page.reload');
+      await waitFor(`document.readyState === 'complete' && !!window.__airhorn && !!window.__soak`,
+        20000, 'the app to boot with the sample decode blocked');
+      await waitFor(`document.modelContext.getTools().then((tools) => tools.length >= 3)`,
+        10000, 'the WebMCP tools to register after the fallback reload');
+
+      const synthBefore = await evaluate('window.__soak.oscillatorsCreated');
+      const synthPlayed = { ok: 0, failed: [] };
+      for (let i = 0; i < options.synth; i += 1) {
+        const started = await evaluate(`window.__call('play_horn', { loop: true })`);
+        await waitPlaying(`fallback cycle ${i}`);
+        await sleep(70);
+        const stopped = await evaluate(`window.__call('stop_horn', {})`);
+        await waitSilent(`fallback cycle ${i}`);
+        if (started && started.playing === true && stopped && stopped.playing === false) synthPlayed.ok += 1;
+        else synthPlayed.failed.push(i);
+      }
+      const inFallback = await evaluate(`({
+        fallback: window.__airhorn.usingFallback,
+        oscillators: window.__soak.oscillatorsCreated,
+        oscillatorsEnded: window.__soak.oscillatorsEnded,
+        sources: window.__soak.sourcesCreated,
+      })`);
+
+      // Same document, real decoder back: the app's buffer promise was cleared by
+      // the failed decodes, so the next start loads and decodes the sample.
+      const decoderRestored = await evaluate(`(() => {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC || !AC.prototype || !window.__soakRealDecode) return false;
+        AC.prototype.decodeAudioData = window.__soakRealDecode;
+        return true;
+      })()`);
+      const backToSample = await evaluate(`window.__call('play_horn', { loop: true })`);
+      await waitPlaying('the sample path after the fallback cycles');
+      await sleep(70);
+      await evaluate(`window.__call('stop_horn', {})`);
+      await waitSilent('the sample path after the fallback cycles');
+      const afterFallback = await evaluate(`({
+        fallback: window.__airhorn.usingFallback,
+        sources: window.__soak.sourcesCreated,
+      })`);
+      // Later reloads (updates, offline toggles) must be on the sample path again.
+      if (blocker && blocker.identifier) {
+        await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: blocker.identifier });
+      }
+
+      synthCheck = check(
+        `${options.synth} fallback-synth cycles sounded and stopped, and the sample path came back`,
+        synthPlayed.ok === options.synth &&
+          inFallback.fallback === true &&
+          inFallback.oscillators - synthBefore >= options.synth * SYNTH_VOICES &&
+          decoderRestored === true &&
+          backToSample && backToSample.playing === true &&
+          afterFallback.fallback === false &&
+          afterFallback.sources > inFallback.sources,
+        `played ${synthPlayed.ok}/${options.synth}` +
+          (synthPlayed.failed.length ? ` (stuck at ${synthPlayed.failed.slice(0, 8).join(', ')})` : '') +
+          `, usingFallback=${inFallback.fallback}, oscillators ${synthBefore}->${inFallback.oscillators} ` +
+          `(${inFallback.oscillatorsEnded} ended), decoder restored=${decoderRestored}, ` +
+          `usingFallback after=${afterFallback.fallback}, ` +
+          `buffer sources ${inFallback.sources}->${afterFallback.sources}`,
+      );
+      const synthSample = await sample('synth-fallback');
+      samples.push(synthSample);
+      synthResults = {
+        cycles: options.synth,
+        played: synthPlayed.ok,
+        stuck: synthPlayed.failed,
+        usingFallback: inFallback.fallback,
+        oscillatorsCreated: inFallback.oscillators - synthBefore,
+        oscillatorsEnded: inFallback.oscillatorsEnded,
+        decoderRestored,
+        samplePathBack: afterFallback.fallback === false,
+        sourcesAfter: afterFallback.sources,
+        sample: synthSample,
+      };
+      console.log(`  fallback: ${synthPlayed.ok}/${options.synth} blasts, ` +
+        `${inFallback.oscillators - synthBefore} oscillators, sample path back=` +
+        `${afterFallback.fallback === false}, heap ${mb(synthSample.heapUsed)} MB, ` +
+        `oscillators reachable ${synthSample.heapOscillators ?? 'unmeasurable'}`);
+    }
+
     /* ------------------------------ A. cycles ------------------------------ */
     console.log('\n--- A. horn cycles ---');
-    const samples = [];
 
     // Warm up before the baseline: the first blast pays for the sample decode,
     // the AudioContext unlock and the WebMCP registration, and none of that is
@@ -800,7 +979,8 @@ async function main() {
         const point = await sample(`cycle-${i + 1}`);
         samples.push(point);
         console.log(`  after ${i + 1} cycles: heap ${mb(point.heapUsed)} MB, ` +
-          `live sources ${point.liveSources}/${point.heapBufferSources}, ` +
+          `live sources ${point.liveSources}/${point.heapBufferSources ?? 'unmeasurable'}, ` +
+          `live oscillators ${point.liveOscillators}/${point.heapOscillators ?? 'unmeasurable'}, ` +
           `${point.listeners} listeners, ${point.nodes} nodes`);
       }
     }
@@ -830,23 +1010,42 @@ async function main() {
       `(budget ${options.heapBudgetMb} MB, monotonic=${heapMonotonic})`,
     );
 
-    const liveSourcesMax = Math.max(...samples.map((point) => point.liveSources));
-    const heapSourcesMax = Math.max(...samples.map((point) => point.heapBufferSources ?? 0));
+    /*
+     * The rule lives in tools/lib/node-release-check.mjs so it can be proven
+     * without a browser: this box cannot always launch one (60-96% steal), and an
+     * assertion about assertions must not depend on that. Per document, a session
+     * that CREATED nodes of a kind must be able to count them in the heap
+     * afterwards or the check fails - the old `?? 0` used to answer "0 live
+     * nodes" for a measurement nobody took (airhorn-nxuv.4) - and both kinds'
+     * live-at-once and still-reachable maxima are asserted, not just printed.
+     */
+    const nodeRelease = checkNodeRelease({ samples, totals: afterCycles, synthVoices: SYNTH_VOICES });
+    const [sourceKind, oscillatorKind] = nodeRelease.kinds;
+    const liveSourcesMax = sourceKind.liveMax;
+    const heapSourcesMax = sourceKind.heapMax;
+    const liveOscillatorsMax = oscillatorKind.liveMax;
+    const heapOscillatorsMax = oscillatorKind.heapMax;
+
     const liveCheck = check(
       'audio nodes are released after every cycle',
-      liveSourcesMax <= 2 && heapSourcesMax <= 2 && afterCycles.liveSources === 0,
-      `live sources max ${liveSourcesMax} (heap ${heapSourcesMax}), oscillators max ` +
-      `${Math.max(...samples.map((point) => point.liveOscillators))}, ` +
-      `sources created ${afterCycles.sourcesCreated} / ended ${afterCycles.sourcesEnded}`,
+      nodeRelease.pass,
+      nodeRelease.detail,
     );
 
-    const contextMax = Math.max(...samples.map((point) => point.heapAudioContexts ?? 0));
-    const contextMin = Math.min(...samples.map((point) => point.heapAudioContexts ?? 0));
+    // Same honesty for the context count: an unmeasured heap AudioContext count is
+    // not "one context", and `?? 0` here only happened to fail because 0 !== 1.
+    const contextSeries = samples.map((point) => point.heapAudioContexts);
+    const contextMeasurable = contextSeries.every((value) => Number.isFinite(value));
+    const contextMax = contextMeasurable ? Math.max(...contextSeries) : null;
+    const contextMin = contextMeasurable ? Math.min(...contextSeries) : null;
     const contextCheck = check(
       'the app keeps one AudioContext, not one per blast',
-      contextMax === 1 && contextMin === 1,
-      `heap AudioContexts ${contextMin}..${contextMax}, constructed ${afterCycles.contexts} across the session ` +
-      '(the page reloads once per update/offline toggle later, so one per document is expected)',
+      contextMeasurable && contextMax === 1 && contextMin === 1,
+      contextMeasurable
+        ? `heap AudioContexts ${contextMin}..${contextMax}, constructed ${afterCycles.contexts} across the session ` +
+          '(the page reloads once per update/offline toggle later, so one per document is expected)'
+        : `heap AudioContexts unmeasurable in ${contextSeries.filter((value) => !Number.isFinite(value)).length}` +
+          `/${contextSeries.length} samples — an unmeasured count is not one context`,
     );
 
     const listenerSeries = samples.map((point) => point.listeners).filter((value) => value !== null);
@@ -1044,15 +1243,21 @@ async function main() {
         heapBudgetMb: options.heapBudgetMb,
         mutant: options.mutant,
       },
-      plan: { cycles: options.cycles, updates: options.updates, offlineToggles: options.offline },
+      plan: {
+        cycles: options.cycles, synthCycles: options.synth,
+        updates: options.updates, offlineToggles: options.offline, synthVoices: SYNTH_VOICES,
+      },
       phases: {
         cycles: { kinds: cycleKinds, played: played.ok, stuck: played.failed },
+        synth: options.synth === 0 ? null : synthResults,
         updates: updateResults,
         offline: offlineResults,
       },
       series: {
         heapUsedMb: samples.map((point) => ({ label: point.label, mb: Number(mb(point.heapUsed)) })),
         liveSources: samples.map((point) => ({ label: point.label, live: point.liveSources, heap: point.heapBufferSources })),
+        liveOscillators: samples.map((point) =>
+          ({ label: point.label, live: point.liveOscillators, heap: point.heapOscillators })),
         listeners: listenerSeries,
         nodes: nodeSeries,
       },
@@ -1063,11 +1268,16 @@ async function main() {
     fs.writeFileSync(path.join(evidenceDir, 'report.json'), JSON.stringify(report, null, 2) + '\n');
 
     console.log(`\nsoak: ${summary.pass ? 'PASS' : 'FAIL'} — ` +
-      `${options.cycles} cycles, ${options.updates} worker updates, ${options.offline} offline toggles`);
+      `${options.cycles} cycles, ${options.synth} fallback cycles, ${options.updates} worker updates, ` +
+      `${options.offline} offline toggles`);
     console.log(`  heap (after GC): ${heapSeries.map((bytes) => mb(bytes)).join(' -> ')} MB ` +
       `(growth ${mb(heapGrowth)} MB, budget ${options.heapBudgetMb} MB)`);
-    console.log(`  audio: contexts ${contextMin}..${contextMax}, live sources max ${liveSourcesMax}, ` +
-      `created ${afterCycles.sourcesCreated}, ended ${afterCycles.sourcesEnded}`);
+    console.log(`  audio: contexts ${contextMeasurable ? `${contextMin}..${contextMax}` : 'unmeasurable'}, ` +
+      `live sources max ${liveSourcesMax ?? 'not measurable'} (heap ${heapSourcesMax ?? 'not measurable'}), ` +
+      `live oscillators max ${liveOscillatorsMax ?? 'not measurable'} ` +
+      `(heap ${heapOscillatorsMax ?? 'not measurable'}); ` +
+      `sources ${afterCycles.sourcesCreated} created / ${afterCycles.sourcesEnded} ended, ` +
+      `oscillators ${afterCycles.oscillatorsCreated} created / ${afterCycles.oscillatorsEnded} ended`);
     console.log(`  renderer: listeners delta ${listenerDelta}, nodes delta ${nodeDelta}, ` +
       `documents ${finalSample.documents}`);
     console.log(`  evidence: ${evidenceDir}`);
@@ -1078,7 +1288,7 @@ async function main() {
 
     // Keep the tree honest: a busy check that the caller forgot to assert on
     // would be dead weight, so every check above is at least referenced here.
-    void [cycleCheck, heapCheck, liveCheck, contextCheck, listenerCheck, domCheck, drainCheck,
+    void [synthCheck, cycleCheck, heapCheck, liveCheck, contextCheck, listenerCheck, domCheck, drainCheck,
       updateCheck, offlineCheck, offlineHeapCheck, errorCheck, finalDrainCheck];
 
     return summary.pass ? 0 : 1;

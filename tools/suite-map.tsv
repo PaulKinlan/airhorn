@@ -115,6 +115,14 @@ tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
 # a change to it used to select zero suites - a shared helper with no owner.
 # tests/test-support.test.js drives it directly (marker hit and marker miss).
 tools/lib/**	tests/test-support.test.js
+# The soak's audio-node release rule is pure logic over a session's samples, and
+# the two holes it had (an unmeasured heap count read as 0 live nodes; oscillator
+# counters computed but never asserted) are provable without a browser
+# (airhorn-nxuv.4). Mapped so a change to the rule runs its own suite on top of the
+# tools/lib/** row above, and so that suite runs when it is the only thing changed.
+# Cost: ~0.1s of assertions and no browser - a starved host cannot launch Chrome,
+# and an assertion about assertions must not depend on that.
+tools/lib/node-release-check.mjs	tests/node-release-check.test.js
 # The two tools whose LAUNCH behaviour has its own regression guard (a refused launch must leave
 # no profile; a browser that cannot start must fail the audit) are driven by test-support, on
 # top of the gate-smoke row every tools/* file already selects (airhorn-w1wh review).
@@ -162,6 +170,7 @@ tests/resilience-ui.test.mjs	tests/resilience-ui.test.mjs
 # pays it (paid deliberately: the guard's fail-open case is unreachable from a
 # browser, so nothing else can gate it).
 tests/nav-guard.test.mjs	tests/nav-guard.test.mjs
+tests/node-release-check.test.js	tests/node-release-check.test.js
 tests/visual-overrides.test.mjs	tests/visual-overrides.test.mjs
 tests/reflow-zoom.test.mjs	tests/reflow-zoom.test.mjs
 tests/shortcuts.test.mjs	tests/shortcuts.test.mjs
