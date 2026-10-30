@@ -55,6 +55,34 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+// A screenshot's `sizes` is a single "WxH" (a LIST belongs to icons). Returns null for anything else,
+// so a malformed size is a failure rather than a silently unmatched string (airhorn-g0qr.3).
+function parseScreenshotSizes(value) {
+  if (typeof value !== 'string') return null;
+  const m = value.trim().match(/^(\d+)x(\d+)$/);
+  if (!m) return null;
+  return { w: Number(m[1]), h: Number(m[2]) };
+}
+
+// The pixel dimensions the FILE is, read from the PNG IHDR chunk (fixed offset), or null when the file
+// is not a PNG this can read. Declared `sizes` is a claim; this is the evidence (airhorn-g0qr.3).
+function pngPixelSize(file) {
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(24);
+      if (fs.readSync(fd, buf, 0, 24, 0) < 24) return null;
+      if (buf.readUInt32BE(0) !== 0x89504e47 || buf.readUInt32BE(4) !== 0x0d0a1a0a) return null;
+      if (buf.toString('ascii', 12, 16) !== 'IHDR') return null;
+      return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
 async function testSwAndManifest() {
   const distDir = path.join(__dirname, '../dist');
   if (!fs.existsSync(distDir)) {
@@ -78,13 +106,56 @@ async function testSwAndManifest() {
   if (!Array.isArray(manifest.shortcuts) || manifest.shortcuts.length === 0) {
     throw new Error('Expected manifest.shortcuts to contain entries');
   }
+  // WIDE AND NARROW ARE TWO FORM FACTORS, NOT TWO FILES (airhorn-g0qr.3). This used to be
+  // `screenshots.length >= 2`, whose message claims "wide and narrow": the SAME screenshot twice
+  // satisfied it, so a manifest that had lost its responsive pair, or duplicated one entry, passed
+  // the assertion meant to catch exactly that. Assert the SHAPES instead: one landscape wide and one
+  // portrait narrow, distinct pixel dimensions, and each file actually being the dimensions it
+  // declares - so "two screenshots of the same shape", a duplicated entry, a dropped narrow entry and
+  // a `sizes` string that lies are all RED.
   if (!Array.isArray(manifest.screenshots) || manifest.screenshots.length < 2) {
-    throw new Error(`Expected manifest.screenshots to contain wide and narrow screenshots`);
+    throw new Error('Expected manifest.screenshots to declare a wide and a narrow form factor, got '
+      + `${JSON.stringify(manifest.screenshots)}`);
   }
+  const byFormFactor = new Map();
+  for (const s of manifest.screenshots) {
+    const dims = parseScreenshotSizes(s.sizes);
+    if (!dims) {
+      throw new Error(`Screenshot ${JSON.stringify(s.src)} has no single WxH size (got ${JSON.stringify(s.sizes)})`);
+    }
+    if (s.form_factor !== 'wide' && s.form_factor !== 'narrow') {
+      throw new Error(`Screenshot ${JSON.stringify(s.src)} declares form_factor ${JSON.stringify(s.form_factor)}; `
+        + 'a responsive manifest needs one \'wide\' and one \'narrow\'');
+    }
+    if (byFormFactor.has(s.form_factor)) {
+      throw new Error(`manifest.screenshots declares '${s.form_factor}' twice - two entries for one form `
+        + 'factor is the duplicate this check exists to catch');
+    }
+    byFormFactor.set(s.form_factor, { ...s, dims });
+  }
+  const wide = byFormFactor.get('wide');
+  const narrow = byFormFactor.get('narrow');
+  if (!wide || !narrow) {
+    throw new Error(`manifest.screenshots must declare one 'wide' and one 'narrow', got ${JSON.stringify([...byFormFactor.keys()])}`);
+  }
+  if (!(wide.dims.w > wide.dims.h)) {
+    throw new Error(`the 'wide' screenshot is not landscape: it declares ${wide.sizes}`);
+  }
+  if (!(narrow.dims.h > narrow.dims.w)) {
+    throw new Error(`the 'narrow' screenshot is not portrait: it declares ${narrow.sizes}`);
+  }
+  // No separate "are the two shapes different" check: landscape-plus-portrait already implies it, and
+  // two entries of ONE shape fail on the orientation above (both would have to be landscape, or both
+  // portrait). An assert that cannot be reached is the defect this sweep removes, not a belt to wear.
   for (const s of manifest.screenshots) {
     const sPath = path.join(distDir, s.src.replace(/^\//, ''));
     if (!fs.existsSync(sPath)) {
       throw new Error(`Screenshot file referenced in manifest does not exist: ${sPath}`);
+    }
+    const dims = parseScreenshotSizes(s.sizes);
+    const actual = pngPixelSize(sPath);
+    if (actual && (actual.w !== dims.w || actual.h !== dims.h)) {
+      throw new Error(`screenshot ${s.src} declares ${s.sizes} but the file is ${actual.w}x${actual.h}`);
     }
   }
   console.log('manifest.json verified successfully!');
