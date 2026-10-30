@@ -279,10 +279,21 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
     // Negation, an indexOf sentinel, or an assert - never a bare positive `if (`,
     // which would accept the inverted guard `if (text.includes(copy)) throw ...`
     // as evidence that the copy is asserted.
-    const guarded = loops.some((name) => [
-      `(?:if\\(\\s*!|assert\\.[a-zA-Z]+\\(\\s*[^)]*)${receiver}\\.(?:includes|indexOf)\\(\\s*${escape(name)}\\s*\\)`,
-      `if\\(\\s*${receiver}\\.indexOf\\(\\s*${escape(name)}\\s*\\)\\s*(?:===\\s*-1|!==\\s*-1|<\\s*0|>=\\s*0)`,
-    ].some((pattern) => new RegExp(pattern).test(code)));
+    // A condition is not an assertion: `if (!text.includes(copy)) { }` compares the
+    // copy and does nothing with the answer, so the guard has to be followed by an
+    // action - a throw, or an assert call (which throws by itself).
+    const action = '(?:\\{[^}]*(?:\\bthrow\\b|\\bassert\\b)|\\bthrow\\b)';
+    const guarded = loops.some((name) => {
+      const target = `${receiver}\\.(?:includes|indexOf)\\(\\s*${escape(name)}\\s*\\)`;
+      return [
+        // if (!text.includes(copy)) { throw ... }   /   if (!text.includes(copy)) throw ...
+        `if\\(\\s*!${target}\\s*\\)\\s*${action}`,
+        // if (text.indexOf(copy) === -1) { throw ... }
+        `if\\(\\s*${receiver}\\.indexOf\\(\\s*${escape(name)}\\s*\\)\\s*(?:===\\s*-1|!==\\s*-1|<\\s*0|>=\\s*0)\\s*\\)\\s*${action}`,
+        // assert.ok(text.includes(copy)) - the call itself fails the test
+        `assert\\.[a-zA-Z]+\\(\\s*[^)]*${target}`,
+      ].some((pattern) => new RegExp(pattern).test(code));
+    });
     if (!guarded) {
       problems.push('the live text is never compared against the copies in a guard (if (!text.includes(copy)) / assert ... includes(copy) / indexOf(copy))');
     }
@@ -310,6 +321,10 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
     'an INVERTED comparison must be rejected');
   assert.notDeepEqual(coverageProblems(suite.replace(liveCondition, 'if (!dead.includes(copy))'), copies), [],
     'a comparison against a non-text receiver must be rejected');
+  // The condition without the consequence: this is the shape the pure comparison
+  // check could not see, and it fails nothing at runtime (airhorn-g0qr.1 review).
+  assert.notDeepEqual(coverageProblems(suite.replace(liveCondition, 'if (!lost.text.includes(copy)) { }'), copies), [],
+    'a guard that compares and does NOTHING must be rejected');
   // The worker's own failure story is still the failover suite's job, and the
   // suite still has a row owner (the worker). No page module carries worker code
   // since the split (airhorn-1l04): the registration handler is inline in
