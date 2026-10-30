@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
+import { repeatLoadCaveat, repeatLoadVerdict } from './lib/repeat-load-verdict.mjs';
 
 // The teardown below lives in a try/finally, which a bound-kill (fleet-gate's
 // SIGTERM, a job-tree reaper, Ctrl-C) never reaches - so the chrome tree and its
@@ -197,19 +198,23 @@ async function main() {
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
     await new Promise(r => setTimeout(r, 1000));
 
-    // Wait for service worker to activate
-    let swActive = false;
-    for (let i = 0; i < 40; i++) {
-      const evalRes = await send('Runtime.evaluate', {
-        expression: 'navigator.serviceWorker.controller ? true : false',
-        returnByValue: true
-      });
-      if (evalRes.result.value) {
-        swActive = true;
-        break;
+    // Wait for service worker to activate. `swActive` stays false when the worker
+    // never takes control, and that false is MEASURED - the report has to carry it
+    // rather than label the repeat load cached anyway (airhorn-nxuv.13).
+    const pollForController = async () => {
+      for (let i = 0; i < 40; i++) {
+        const evalRes = await send('Runtime.evaluate', {
+          expression: 'navigator.serviceWorker.controller ? true : false',
+          returnByValue: true
+        });
+        if (evalRes.result.value) {
+          return true;
+        }
+        await new Promise(r => setTimeout(r, 100));
       }
-      await new Promise(r => setTimeout(r, 100));
-    }
+      return false;
+    };
+    const swActive = await pollForController();
 
     // Trigger user input interaction via CDP Input domain for trusted INP
     const boxEval = await send('Runtime.evaluate', {
@@ -261,6 +266,11 @@ async function main() {
 
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
     await new Promise(r => setTimeout(r, 1000));
+    // The repeat load has its own controller state: a worker can control the first
+    // load and lose the second (or never have activated at all), and the label below
+    // is only allowed to say "SW-cached" when BOTH loads were controlled
+    // (airhorn-nxuv.13).
+    const swActiveRepeat = await pollForController();
 
     if (boxEval.result.value) {
       const { x, y } = boxEval.result.value;
@@ -341,7 +351,14 @@ async function main() {
       : 'unknown';
     console.log(`Conditions: NO CPU throttling, NO network throttling, default viewport ${viewport}, ` +
       'server on loopback - a desktop-class measurement, NOT a phone on a mobile network');
-    console.log(`SW Controller Present: ${swActive}`);
+    const repeatVerdict = repeatLoadVerdict({
+      coldControlled: swActive,
+      repeatControlled: swActiveRepeat,
+    });
+    console.log(`SW Controller Present: cold=${swActive} repeat=${swActiveRepeat}`);
+    for (const line of repeatLoadCaveat(repeatVerdict)) {
+      console.log(line);
+    }
     console.table({
       'Cold Load': {
         'Transferred Bytes': `${coldTransferred} B`,
@@ -351,7 +368,7 @@ async function main() {
         'INP (p98)': computeInp(coldMetrics),
         'CLS': coldMetrics.cls.toFixed(4)
       },
-      'Repeat (SW-cached) Load': {
+      [repeatVerdict.label]: {
         'Transferred Bytes': `${repeatTransferred} B`,
         'Request Provenance': summarizeResponses(repeatResponses),
         'First Paint (FP)': repeatMetrics.fp !== null ? `${Math.round(repeatMetrics.fp)} ms` : 'None',
