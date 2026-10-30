@@ -453,6 +453,17 @@ async function main() {
   const missing = required.filter(f => !fs.existsSync(path.join(outDir, f)));
   if (missing.length) throw new Error('missing captures: ' + missing.join(', '));
   if (!evidence.checks.offlineRenders) throw new Error('offline reload did not render the horn');
+  // airhorn-nxuv.12: the boot-failure banner reading is COLLECTED above (:337),
+  // so it must be ASSERTED here - gathered proof of a failed offline boot cannot
+  // be ignored by the verdict. Strict three-way: true means the crash banner was
+  // shown (the app failed), false means measured-and-clean, and anything else
+  // (undefined/null) means UNMEASURED, which fails as itself rather than
+  // defaulting into either measured world.
+  if (evidence.checks.offlineBootFailureShown !== false) {
+    throw new Error(evidence.checks.offlineBootFailureShown === true
+      ? 'offline reload showed the boot-failure banner: the app did not boot offline'
+      : `offline boot-failure state was not measured (offlineBootFailureShown=${JSON.stringify(evidence.checks.offlineBootFailureShown)}) - an unmeasured check cannot pass`);
+  }
   if (!evidence.checks.darkApplied) throw new Error('dark scheme did not change the page (detector says not applied)');
   if (!evidence.checks.darkDetectorCanFail) throw new Error('dark detector negative control failed: forced-light was read as applied');
   if (!evidence.checks.offlinePlay || evidence.checks.offlinePlay.pressedWhileHeld !== 'true') {
