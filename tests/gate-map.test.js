@@ -241,21 +241,44 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
   // comments go first (the tree already ships esbuild), and then the COMPARISON
   // has to be there - the copy sitting in the loop's list literal was enough
   // before, which is why deleting the assertion left this green (airhorn-g0qr.1).
-  const stripComments = (source) => esbuild.transformSync(source, { loader: 'js', minifyWhitespace: true }).code;
+  // `legalComments: 'none'` is not decoration: minifyWhitespace alone keeps `/*!`,
+  // `//!` and `@license`/`@preserve` comments inline, so a `/*! ... */` comment
+  // quoting the copy would still satisfy a "the copy is in the code" check.
+  const stripComments = (source) => esbuild.transformSync(source, {
+    loader: 'js', minifyWhitespace: true, legalComments: 'none',
+  }).code;
   const coverageProblems = (source, wanted) => {
     const code = stripComments(source);
     const problems = [];
     for (const copy of wanted) {
       if (!code.includes(copy)) problems.push(`"${copy}" is not in the suite's code (a comment does not count)`);
     }
-    // The copies must be iterated, and each one compared against the live text in
-    // a guard (a negation or an assert) - not just listed.
-    const loops = [...code.matchAll(/for\(const ([A-Za-z_$][\w$]*)\s*of\[([^\]]*)\]/g)]
-      .filter(([, , list]) => wanted.every((copy) => list.includes(copy)));
-    if (loops.length === 0) problems.push('the copies are not iterated from one list literal (for (const copy of [...]))');
-    const guarded = loops.some(([, name]) => new RegExp(
-      `(?:if\\(!|assert\\.[a-zA-Z]+\\([^)]*)[A-Za-z_$][\\w$.]*\\.includes\\(${name}\\)`).test(code));
-    if (!guarded) problems.push('the live text is never compared against the copies in a guard (if (!text.includes(copy)) / assert ... includes(copy))');
+    // The copies must be iterated - from an inline list literal, or from a named
+    // const array holding both - and each one compared against the live text in a
+    // guard (a negation, an assert, includes() or indexOf()). Listing alone is not
+    // asserting, which is what made the old substring check pass on a deletion.
+    const holdsBoth = (list) => wanted.every((copy) => list.includes(copy));
+    const namedLists = [...code.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\[([^\]]*)\]/g)]
+      .filter(([, , list]) => holdsBoth(list))
+      .map(([, name]) => name);
+    const loops = [
+      ...[...code.matchAll(/for\(const\s+([A-Za-z_$][\w$]*)\s+of\s*\[([^\]]*)\]/g)]
+        .filter(([, , list]) => holdsBoth(list))
+        .map(([, name]) => name),
+      ...(namedLists.length === 0 ? [] : [...code.matchAll(/for\(const\s+([A-Za-z_$][\w$]*)\s+of\s+([A-Za-z_$][\w$]*)\)/g)]
+        .filter(([, , listName]) => namedLists.includes(listName))
+        .map(([, name]) => name)),
+    ];
+    if (loops.length === 0) {
+      problems.push('the copies are not iterated from a list holding both (for (const copy of [...]) or of a const array)');
+    }
+    const escape = (name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const guarded = loops.some((name) => new RegExp(
+      `(?:if\\(\\s*!|if\\(\\s*|assert\\.[a-zA-Z]+\\(\\s*[^)]*)[A-Za-z_$][\\w$.]*\\.(?:includes|indexOf)\\(\\s*${escape(name)}\\s*\\)`,
+    ).test(code));
+    if (!guarded) {
+      problems.push('the live text is never compared against the copies in a guard (if (!text.includes(copy)) / assert ... includes(copy) / indexOf(copy))');
+    }
     return problems;
   };
 
