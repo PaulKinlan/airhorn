@@ -262,10 +262,10 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
       .filter(([, , list]) => holdsBoth(list))
       .map(([, name]) => name);
     const loops = [
-      ...[...code.matchAll(/for\(const\s+([A-Za-z_$][\w$]*)\s+of\s*\[([^\]]*)\]/g)]
+      ...[...code.matchAll(/for\((?:const|let)\s+([A-Za-z_$][\w$]*)\s+of\s*\[([^\]]*)\]/g)]
         .filter(([, , list]) => holdsBoth(list))
         .map(([, name]) => name),
-      ...(namedLists.length === 0 ? [] : [...code.matchAll(/for\(const\s+([A-Za-z_$][\w$]*)\s+of\s+([A-Za-z_$][\w$]*)\)/g)]
+      ...(namedLists.length === 0 ? [] : [...code.matchAll(/for\((?:const|let)\s+([A-Za-z_$][\w$]*)\s+of\s+([A-Za-z_$][\w$]*)\)/g)]
         .filter(([, , listName]) => namedLists.includes(listName))
         .map(([, name]) => name)),
     ];
@@ -273,9 +273,16 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
       problems.push('the copies are not iterated from a list holding both (for (const copy of [...]) or of a const array)');
     }
     const escape = (name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const guarded = loops.some((name) => new RegExp(
-      `(?:if\\(\\s*!|if\\(\\s*|assert\\.[a-zA-Z]+\\(\\s*[^)]*)[A-Za-z_$][\\w$.]*\\.(?:includes|indexOf)\\(\\s*${escape(name)}\\s*\\)`,
-    ).test(code));
+    // The receiver has to be a TEXT value, or the check would accept a comparison
+    // against anything (`dead.includes(copy)`) as proof about the live page.
+    const receiver = '[A-Za-z_$][\\w$.]*[Tt]ext[\\w$.]*';
+    // Negation, an indexOf sentinel, or an assert - never a bare positive `if (`,
+    // which would accept the inverted guard `if (text.includes(copy)) throw ...`
+    // as evidence that the copy is asserted.
+    const guarded = loops.some((name) => [
+      `(?:if\\(\\s*!|assert\\.[a-zA-Z]+\\(\\s*[^)]*)${receiver}\\.(?:includes|indexOf)\\(\\s*${escape(name)}\\s*\\)`,
+      `if\\(\\s*${receiver}\\.indexOf\\(\\s*${escape(name)}\\s*\\)\\s*(?:===\\s*-1|!==\\s*-1|<\\s*0|>=\\s*0)`,
+    ].some((pattern) => new RegExp(pattern).test(code)));
     if (!guarded) {
       problems.push('the live text is never compared against the copies in a guard (if (!text.includes(copy)) / assert ... includes(copy) / indexOf(copy))');
     }
@@ -296,6 +303,13 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
     'a COMMENTED-OUT comparison must be rejected');
   assert.notDeepEqual(coverageProblems(suite.replace(liveCondition, 'if (true)'), copies), [],
     'a DELETED comparison must be rejected');
+  // Inverted and mis-targeted guards are the same disease one step further along:
+  // `if (text.includes(copy)) throw` asserts the OPPOSITE, and a comparison against
+  // anything that is not text says nothing about the page.
+  assert.notDeepEqual(coverageProblems(suite.replace(liveCondition, 'if (lost.text.includes(copy)) { throw new Error("x"); }'), copies), [],
+    'an INVERTED comparison must be rejected');
+  assert.notDeepEqual(coverageProblems(suite.replace(liveCondition, 'if (!dead.includes(copy))'), copies), [],
+    'a comparison against a non-text receiver must be rejected');
   // The worker's own failure story is still the failover suite's job, and the
   // suite still has a row owner (the worker). No page module carries worker code
   // since the split (airhorn-1l04): the registration handler is inline in
