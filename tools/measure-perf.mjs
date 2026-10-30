@@ -131,6 +131,66 @@ async function main() {
     await send('Runtime.enable');
     await send('Network.enable');
 
+    // MEASUREMENT INTEGRITY (airhorn-nxuv.13, -nxuv.14, -nxuv.30). Every item pushed here means the
+    // printed report is NOT a measurement of the app under its service worker, and the run exits
+    // non-zero at the end of this block. It matters because this tool's stdout is checked in as
+    // preview/CWV-report.txt and quoted as the perf evidence of record (docs/runbooks/DEPLOY.md:293):
+    // a number the tool did not measure must not leave the tool looking clean.
+    const integrity = [];
+
+    // One reader for "is a service worker controlling THIS document", shared by both loads. The cold
+    // load polled it and the repeat load never did, so the repeat row printed 'Repeat (SW-cached) Load'
+    // whether or not any worker existed - a workerless repeat load was reported as the cached path the
+    // row claims to measure (airhorn-nxuv.13).
+    async function swControllerActive() {
+      for (let i = 0; i < 40; i++) {
+        const evalRes = await send('Runtime.evaluate', {
+          expression: 'navigator.serviceWorker && navigator.serviceWorker.controller ? true : false',
+          returnByValue: true
+        });
+        if (evalRes.result.value) return true;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return false;
+    }
+
+    // Dispatch one trusted click on the horn, RE-QUERYING the element every time, and report whether the
+    // interaction actually happened. The repeat load reused the cold page's coordinates and skipped the
+    // click silently when .horn was absent, so a page with no horn produced an INP line of 'None' that
+    // read like a measured zero (airhorn-nxuv.14).
+    async function clickHorn() {
+      const boxEval = await send('Runtime.evaluate', {
+        expression: `
+          (() => {
+            const btn = document.querySelector('.horn');
+            if (!btn) return null;
+            const rect = btn.getBoundingClientRect();
+            if (rect.width === 0 && rect.height === 0) return null;
+            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+          })()
+        `,
+        returnByValue: true
+      });
+      const box = boxEval.result.value;
+      if (!box) return { dispatched: false, reason: 'the document has no visible .horn element' };
+      await send('Input.dispatchMouseEvent', {
+        type: 'mousePressed',
+        x: box.x,
+        y: box.y,
+        button: 'left',
+        clickCount: 1
+      });
+      await new Promise(r => setTimeout(r, 100));
+      await send('Input.dispatchMouseEvent', {
+        type: 'mouseReleased',
+        x: box.x,
+        y: box.y,
+        button: 'left',
+        clickCount: 1
+      });
+      return { dispatched: true, reason: '' };
+    }
+
     const observerScript = `
       window.__perfMetrics = {
         fp: null,
@@ -138,7 +198,8 @@ async function main() {
         lcp: null,
         lcpEntriesCount: 0,
         cls: 0,
-        rawEvents: []
+        rawEvents: [],
+        observerErrors: []
       };
 
       try {
@@ -151,7 +212,9 @@ async function main() {
             }
           }
         }).observe({ type: 'paint', buffered: true });
-      } catch (e) {}
+      } catch (e) {
+        window.__perfMetrics.observerErrors.push({ type: 'paint', message: String((e && e.message) || e) });
+      }
 
       try {
         new PerformanceObserver((entryList) => {
@@ -161,7 +224,9 @@ async function main() {
             window.__perfMetrics.lcp = entries[entries.length - 1].startTime;
           }
         }).observe({ type: 'largest-contentful-paint', buffered: true });
-      } catch (e) {}
+      } catch (e) {
+        window.__perfMetrics.observerErrors.push({ type: 'largest-contentful-paint', message: String((e && e.message) || e) });
+      }
 
       try {
         new PerformanceObserver((entryList) => {
@@ -171,7 +236,9 @@ async function main() {
             }
           }
         }).observe({ type: 'layout-shift', buffered: true });
-      } catch (e) {}
+      } catch (e) {
+        window.__perfMetrics.observerErrors.push({ type: 'layout-shift', message: String((e && e.message) || e) });
+      }
 
       try {
         new PerformanceObserver((entryList) => {
@@ -184,7 +251,9 @@ async function main() {
             });
           }
         }).observe({ type: 'event', durationThreshold: 0, buffered: true });
-      } catch (e) {}
+      } catch (e) {
+        window.__perfMetrics.observerErrors.push({ type: 'event', message: String((e && e.message) || e) });
+      }
     `;
 
     await send('Page.addScriptToEvaluateOnNewDocument', { source: observerScript });
@@ -198,48 +267,13 @@ async function main() {
     await new Promise(r => setTimeout(r, 1000));
 
     // Wait for service worker to activate
-    let swActive = false;
-    for (let i = 0; i < 40; i++) {
-      const evalRes = await send('Runtime.evaluate', {
-        expression: 'navigator.serviceWorker.controller ? true : false',
-        returnByValue: true
-      });
-      if (evalRes.result.value) {
-        swActive = true;
-        break;
-      }
-      await new Promise(r => setTimeout(r, 100));
-    }
+    const swActive = await swControllerActive();
+    if (!swActive) integrity.push('no service worker controlled the COLD load');
 
     // Trigger user input interaction via CDP Input domain for trusted INP
-    const boxEval = await send('Runtime.evaluate', {
-      expression: `
-        (() => {
-          const btn = document.querySelector('.horn');
-          if (!btn) return null;
-          const rect = btn.getBoundingClientRect();
-          return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-        })()
-      `,
-      returnByValue: true
-    });
-    if (boxEval.result.value) {
-      const { x, y } = boxEval.result.value;
-      await send('Input.dispatchMouseEvent', {
-        type: 'mousePressed',
-        x,
-        y,
-        button: 'left',
-        clickCount: 1
-      });
-      await new Promise(r => setTimeout(r, 100));
-      await send('Input.dispatchMouseEvent', {
-        type: 'mouseReleased',
-        x,
-        y,
-        button: 'left',
-        clickCount: 1
-      });
+    const coldInteraction = await clickHorn();
+    if (!coldInteraction.dispatched) {
+      integrity.push(`cold load: ${coldInteraction.reason}, so no trusted interaction was measured`);
     }
     await new Promise(r => setTimeout(r, 500));
 
@@ -262,23 +296,15 @@ async function main() {
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
     await new Promise(r => setTimeout(r, 1000));
 
-    if (boxEval.result.value) {
-      const { x, y } = boxEval.result.value;
-      await send('Input.dispatchMouseEvent', {
-        type: 'mousePressed',
-        x,
-        y,
-        button: 'left',
-        clickCount: 1
-      });
-      await new Promise(r => setTimeout(r, 100));
-      await send('Input.dispatchMouseEvent', {
-        type: 'mouseReleased',
-        x,
-        y,
-        button: 'left',
-        clickCount: 1
-      });
+    // The repeat load gets its OWN controller check and its own element query: it is a different
+    // document, so neither the cold load's controller state nor its click coordinates describe it
+    // (airhorn-nxuv.13, -nxuv.14).
+    const repeatSwActive = await swControllerActive();
+    if (!repeatSwActive) integrity.push('no service worker controlled the REPEAT load');
+
+    const repeatInteraction = await clickHorn();
+    if (!repeatInteraction.dispatched) {
+      integrity.push(`repeat load: ${repeatInteraction.reason}, so no trusted interaction was measured`);
     }
     await new Promise(r => setTimeout(r, 500));
 
@@ -300,10 +326,16 @@ async function main() {
       return `None (${m.lcpEntriesCount} entries recorded)`;
     }
 
-    function computeInp(m) {
+    function computeInp(m, interaction) {
       const events = m.rawEvents || [];
       if (events.length === 0) {
-        return 'None (0 events >=16ms)';
+        // A bare 'None' is indistinguishable from a measured zero, and the checked-in report shipped
+        // exactly that on a row whose click was dispatched (airhorn-nxuv.14). Name which of the two
+        // happened: Chrome emits no event-timing entry below its 16ms granularity, so a dispatched
+        // click with no entries is 'not measurable', while no click at all is 'never measured'.
+        return interaction && interaction.dispatched
+          ? 'None (0 event-timing entries >=16ms after a dispatched click: not a measured zero)'
+          : 'UNMEASURED (no interaction was dispatched) - this row is not an INP result';
       }
       const interactions = new Map();
       for (const ev of events) {
@@ -341,25 +373,55 @@ async function main() {
       : 'unknown';
     console.log(`Conditions: NO CPU throttling, NO network throttling, default viewport ${viewport}, ` +
       'server on loopback - a desktop-class measurement, NOT a phone on a mobile network');
-    console.log(`SW Controller Present: ${swActive}`);
+    // Observer failures (airhorn-nxuv.30): the four PerformanceObserver registrations used to sit in
+    // empty catch blocks, so a browser that refused one left the matching column at its default (LCP
+    // null, CLS 0.0000) and the report still read as a full set of measurements.
+    const observerErrors = [
+      ...(coldMetrics.observerErrors || []),
+      ...(repeatMetrics.observerErrors || []),
+    ];
+    for (const e of observerErrors) {
+      integrity.push(`PerformanceObserver for '${e.type}' failed: ${e.message}`);
+    }
+
+    console.log(`SW Controller Present: cold=${swActive} repeat=${repeatSwActive}`);
+    if (observerErrors.length > 0) {
+      console.log(`Observer Registration Failures: ${observerErrors.length}`);
+      for (const e of observerErrors) console.log(`  - '${e.type}': ${e.message}`);
+    }
+    // The row title carries what was actually observed: a repeat load with no controlling worker is
+    // not the 'SW-cached' row this report has always claimed to print (airhorn-nxuv.13).
+    const repeatRowLabel = repeatSwActive
+      ? 'Repeat (SW-cached) Load'
+      : 'Repeat Load (NO service worker) - not a cached-path measurement';
     console.table({
       'Cold Load': {
         'Transferred Bytes': `${coldTransferred} B`,
         'Request Provenance': summarizeResponses(coldResponses),
         'First Paint (FP)': coldMetrics.fp !== null ? `${Math.round(coldMetrics.fp)} ms` : 'None',
         'LCP': formatLcp(coldMetrics),
-        'INP (p98)': computeInp(coldMetrics),
+        'INP (p98)': computeInp(coldMetrics, coldInteraction),
         'CLS': coldMetrics.cls.toFixed(4)
       },
-      'Repeat (SW-cached) Load': {
+      [repeatRowLabel]: {
         'Transferred Bytes': `${repeatTransferred} B`,
         'Request Provenance': summarizeResponses(repeatResponses),
         'First Paint (FP)': repeatMetrics.fp !== null ? `${Math.round(repeatMetrics.fp)} ms` : 'None',
         'LCP': formatLcp(repeatMetrics),
-        'INP (p98)': computeInp(repeatMetrics),
+        'INP (p98)': computeInp(repeatMetrics, repeatInteraction),
         'CLS': repeatMetrics.cls.toFixed(4)
       }
     });
+
+    if (integrity.length > 0) {
+      console.log('');
+      console.log('!!! MEASUREMENT INVALID - do NOT quote this report as performance evidence:');
+      for (const f of integrity) console.log(`  - ${f}`);
+      // Thrown after the report so the numbers that WERE collected are still printed, the finally
+      // below still reaps chrome and its profile, and the caller sees a non-zero exit instead of a
+      // clean-looking report of numbers this run did not measure.
+      throw new Error(`measure-perf: measurement invalid (${integrity.length} integrity failure(s)); see the report above`);
+    }
 
   } finally {
     try { ws.close(); } catch { /* already closed */ }
