@@ -784,9 +784,30 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       }, 5000);
       assert(held, 'the test could not hold the origin badge lock - sequence I cannot force the interleaving');
       await A2.evaluate(`window.__airhorn.start()`);
-      await sleep(300);
-      // The red assert: while the TEST owns the origin lock, a blast's
-      // read-modify-write must not have written. Unfixed code bumps
+      // Settle on a TERMINAL CONDITION, not on a clock (airhorn-g0qr.8): wait
+      // until the blast's increment is QUEUED on the origin lock, which
+      // navigator.locks.query() reports as a pending request behind the
+      // test's holder. A fixed sleep sampled one instant and made two worlds
+      // indistinguishable: an unlocked write that lands after the sample
+      // (the 1500ms mutation below) and no write at all both left the count at
+      // `before`, so both passed. The wait below is only a bound on reaching
+      // the condition - it is never the window the assertion is taken over.
+      let lastLockQuery = null;
+      const queued = await waitUntil(async () => {
+        const q = await A2.evaluate(`navigator.locks.query().then(({ held, pending }) => ({
+          held: held.map((l) => l.name),
+          pending: pending.map((l) => l.name),
+        }))`);
+        lastLockQuery = q;
+        return q.pending.includes('airhorn:blast-count') ? q : null;
+      }, 5000);
+      assert(queued,
+        `a blast never queued its increment on the origin badge lock within 5s ` +
+        `(last: ${JSON.stringify(lastLockQuery)}) - ` +
+        `a bump that writes without the lock can be interleaved with another tab's and lost, and one that never queues ` +
+        `cannot be shown to be ordered at all (airhorn-rqz1)`);
+      // The red assert, taken at that terminal condition: the instant the
+      // increment is queued it must not have been written. Unfixed code bumps
       // immediately (count already before+1 under the hold); the fixed app
       // queues its bump behind the lock. CDP dispatches the two tabs'
       // evaluations sequentially, so an interleaving cannot be forced from
