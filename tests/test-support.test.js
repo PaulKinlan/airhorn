@@ -1038,6 +1038,51 @@ test('a profile left by a SIGKILLed run is swept, a live or brand-new one is not
   }
 });
 
+test('owner markers: a live-owned dir is kept, a dead owner is reaped, an unreadable marker reads live (airhorn-nxuv.31)', async () => {
+  // The cert/server temp dir is never named on any command line, so the
+  // cmdline premise cannot protect it; the owner marker is the only liveness
+  // evidence. A stand-in that is ALIVE but names nothing is exactly the
+  // running-server case the sweep used to delete.
+  const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), `reapowner-${process.pid}-`));
+  const liveOwned = path.join(tmpdir, 'chrome-https-proof-tmp-live01');
+  const deadOwned = path.join(tmpdir, 'chrome-https-proof-tmp-dead99');
+  const mangled = path.join(tmpdir, 'chrome-https-proof-tmp-mangle');
+  const legacy = path.join(tmpdir, 'chrome-https-proof-tmp-legac1');
+  for (const dir of [liveOwned, deadOwned, mangled, legacy]) fs.mkdirSync(dir);
+  const { sweepStaleProfiles, processStartTime } = await import(REAP);
+  const standIn = spawnStandIn([]); // alive, names NOTHING - the cert-dir case
+  try {
+    await new Promise((r) => setTimeout(r, 300)); // let the stand-in exec
+    // Live owner: marker names the stand-in's pid WITH its real start time
+    // (the pid-reuse key).
+    fs.writeFileSync(path.join(liveOwned, '.airhorn-owner'),
+      JSON.stringify({ pid: standIn.pid, started: processStartTime(standIn.pid) }));
+    // Dead owner: a process that has already exited.
+    const dead = spawnSync(process.execPath, ['-e', '']);
+    fs.writeFileSync(path.join(deadOwned, '.airhorn-owner'),
+      JSON.stringify({ pid: dead.pid, started: null }));
+    // Unreadable marker: present but not parseable - must read as LIVE.
+    fs.writeFileSync(path.join(mangled, '.airhorn-owner'), 'not json{');
+    // Age the dirs AFTER the marker writes: creating the marker file bumps
+    // the dir's mtime, which would otherwise read as inside the launch window.
+    const old = new Date(Date.now() - 10 * 60 * 1000);
+    for (const dir of [liveOwned, deadOwned, mangled, legacy]) fs.utimesSync(dir, old, old);
+    const result = sweepStaleProfiles('chrome-https-proof-', { tmpdir });
+    assert.deepEqual([...result.swept].sort(), ['chrome-https-proof-tmp-dead99', 'chrome-https-proof-tmp-legac1'],
+      `only the dead-owned and legacy dirs may be swept: ${JSON.stringify(result)}`);
+    assert.ok(fs.existsSync(liveOwned), 'a dir owned by a live pid must be left alone');
+    assert.ok(fs.existsSync(mangled), 'an unreadable marker must read as live, never as stale');
+    assert.ok(!fs.existsSync(deadOwned), 'a dir whose owner pid is gone must be reaped');
+    assert.ok(!fs.existsSync(legacy), 'a markerless legacy dir must still be reaped');
+    const why = Object.fromEntries(result.kept.map((k) => [k.dir, k.why]));
+    assert.match(why['chrome-https-proof-tmp-live01'] ?? '', /owned by live pid/);
+    assert.match(why['chrome-https-proof-tmp-mangle'] ?? '', /treated as live/);
+  } finally {
+    try { standIn.kill('SIGKILL'); } catch { /* already gone */ }
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+  }
+});
+
 test('a caller-owned --out dir under the sweep prefix is never swept (airhorn-13xr)', async () => {
   // A prefix is a name a caller can choose too: `--out /tmp/chrome-https-proof-
   // evidence` matched the sweep and lost its content. Only the exact mkdtemp

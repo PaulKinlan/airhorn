@@ -38,7 +38,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-import { sweepStaleProfiles } from './lib/reap.mjs';
+import { sweepStaleProfiles, writeOwnerMarker } from './lib/reap.mjs';
 import { connectPage, launchChrome } from './lib/chrome.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
@@ -351,6 +351,11 @@ async function main() {
   // The cert/server temp dir shares the profile's owned prefix (chrome-https-
   // proof-*) so one stale sweep covers both, under the same mkdtemp shape.
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-https-proof-tmp-'));
+  // airhorn-nxuv.31: no process ever NAMES this dir on its command line, so
+  // the sweep's cmdline guard could never see it as live - a concurrent run
+  // deleted a running server's TLS dir after the grace window. The owner
+  // marker is the liveness evidence; write it before the dir holds anything.
+  writeOwnerMarker(tmp);
   let serverHttp = null;
   let serverHttps = null;
   let cdp = null;

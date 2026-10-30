@@ -33,6 +33,77 @@ import os from 'node:os';
 import path from 'node:path';
 
 /*
+ * Owner markers (airhorn-nxuv.31): the liveness premise below - "a process
+ * that names a dir owns it" - cannot see a dir no process ever NAMES on its
+ * command line. install-https-proof's cert/server temp dir
+ * (chrome-https-proof-tmp-*) is exactly that: the sweep's cmdline guard could
+ * never match it, so after the grace window a concurrent run deleted the TLS
+ * directory of a RUNNING server. The creator now writes
+ * `<dir>/.airhorn-owner` ({pid, started}) the moment the dir exists, and the
+ * sweep treats a dir as live when its marker names a live pid with a matching
+ * start time (the pid-reuse key). The guard fails both ways honestly: an
+ * unreadable or malformed marker, or a live pid whose state cannot be read,
+ * is treated as LIVE (deleting on uncertainty is the dangerous default); a
+ * dead or pid-reused marker is stale; a dir with no marker at all is legacy
+ * and falls through to the age rule, so genuinely dead dirs are still reaped.
+ */
+const OWNER_MARKER = '.airhorn-owner';
+
+// Field 22 of /proc/<pid>/stat is the start time in clock ticks since boot -
+// the value that distinguishes a live pid from a REUSED one. The parse keys
+// off the last ')' because the comm field can itself contain spaces and
+// parens. Returns null when the pid cannot be read (dead, or a /proc-less
+// host); what uncertainty means is the caller's decision.
+export function processStartTime(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const close = stat.lastIndexOf(')');
+    if (close === -1) return null;
+    const fields = stat.slice(close + 1).trim().split(' ');
+    // fields[0] is state (field 3), so start time (field 22) is index 19.
+    const started = Number(fields[19]);
+    return Number.isFinite(started) ? started : null;
+  } catch { return null; }
+}
+
+// Write the owner marker for a dir this process just created. Throws on
+// failure: an unmarked live dir is exactly the defect the marker closes, and
+// the creator must know it is running unprotected rather than find out when a
+// sweep deletes its dir.
+export function writeOwnerMarker(dir) {
+  fs.writeFileSync(path.join(dir, OWNER_MARKER),
+    JSON.stringify({ pid: process.pid, started: processStartTime(process.pid) }));
+}
+
+// What a dir's owner marker says: 'live' (owned by a live pid whose start
+// time matches), 'stale' (the pid is gone or was REUSED by an unrelated
+// process), 'absent' (no marker - a legacy dir, judged by the age rule), or
+// 'unreadable' (present but not parseable, or the pid exists but its state
+// cannot be read) - which the sweep treats as live.
+function ownerMarkerVerdict(dir) {
+  let raw;
+  try { raw = fs.readFileSync(path.join(dir, OWNER_MARKER), 'utf8'); } catch (err) {
+    return { kind: err?.code === 'ENOENT' ? 'absent' : 'unreadable', why: err?.code ?? String(err) };
+  }
+  let marker;
+  try { marker = JSON.parse(raw); } catch { return { kind: 'unreadable', why: 'malformed JSON' }; }
+  const pid = marker?.pid;
+  if (!Number.isInteger(pid) || pid <= 0) return { kind: 'unreadable', why: 'no valid pid' };
+  // The caller just scanned /proc, so a missing /proc/<pid> here means the
+  // owner is simply gone. A pid that EXISTS but cannot be read is ambiguous
+  // and reads live.
+  if (!fs.existsSync(`/proc/${pid}`)) return { kind: 'stale', pid };
+  const started = processStartTime(pid);
+  if (started === null) {
+    return { kind: 'unreadable', why: `pid ${pid} exists but its start time is unreadable` };
+  }
+  if (marker.started !== null && marker.started !== undefined && marker.started !== started) {
+    return { kind: 'stale', pid }; // the pid was REUSED by an unrelated process
+  }
+  return { kind: 'live', pid };
+}
+
+/*
  * SIGKILL every process whose command line carries this launch's unique
  * --user-data-dir: the browser itself and every child it forked all carry it,
  * so one /proc read finds the whole tree and one pass kills it. The browser
@@ -153,6 +224,21 @@ export function sweepStaleProfiles(prefix, {
     if (!stat.isDirectory()) continue;
     if (cmdlines.some((line) => line.includes(dir))) {
       kept.push({ dir: name, why: 'a live process names it' });
+      continue;
+    }
+    // airhorn-nxuv.31: the cmdline premise cannot see a dir no live process
+    // NAMES (the cert/server temp dir), so the owner marker is the liveness
+    // evidence there. An unreadable or ambiguous marker reads live - deleting
+    // on uncertainty is the dangerous default. 'absent' (a legacy dir) and
+    // 'stale' (a dead or reused pid) fall through to the age rule, so
+    // genuinely dead dirs are still reaped.
+    const owner = ownerMarkerVerdict(dir);
+    if (owner.kind === 'live') {
+      kept.push({ dir: name, why: `owned by live pid ${owner.pid}` });
+      continue;
+    }
+    if (owner.kind === 'unreadable') {
+      kept.push({ dir: name, why: `owner marker ${owner.why} - treated as live` });
       continue;
     }
     if (now - stat.mtimeMs <= graceMs) {
