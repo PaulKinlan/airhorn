@@ -189,6 +189,63 @@ test('validateSuiteMap returns missing_suite when suite does not exist (airhorn-
   assert.ok(violations[0].message.includes('tests/missing.test.js'));
 });
 
+test('validateSuiteMap flags a mapped pattern that is a DIRECTORY, not a file (airhorn-nxuv.21)', () => {
+  // `fs.existsSync` answered true for a directory, so a row naming `src` validated
+  // as "exists on disk" while selecting nothing - a silent hole in the map, which is
+  // the one thing this validator exists to catch.
+  assert.equal(fs.existsSync(path.join(root, 'src')), true, 'the fixture must be a real directory');
+  assert.equal(fs.statSync(path.join(root, 'src')).isFile(), false);
+
+  const violations = validateSuiteMap('src\ttests/horn.test.js\n', { root });
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].type, 'missing_literal');
+  assert.ok(violations[0].message.includes('is a directory, not a file'),
+    `the message must say it is a directory, got: ${violations[0].message}`);
+});
+
+test('validateSuiteMap flags a suite token that is a DIRECTORY (airhorn-nxuv.21)', () => {
+  assert.equal(fs.statSync(path.join(root, 'preview')).isFile(), false);
+
+  const violations = validateSuiteMap('src/horn.js\tpreview\n', { root });
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].type, 'missing_suite');
+  assert.equal(violations[0].token, 'preview');
+  assert.ok(violations[0].message.includes('is a directory, not a file'),
+    `the message must say it is a directory, got: ${violations[0].message}`);
+});
+
+test('validateSuiteMap flags an except= target that is a DIRECTORY (airhorn-nxuv.21)', () => {
+  const violations = validateSuiteMap('tests/support/browser.mjs\t@importers except=preview\n', { root });
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].type, 'missing_suite');
+  assert.ok(violations[0].message.includes('is a directory, not a file'),
+    `the message must say it is a directory, got: ${violations[0].message}`);
+});
+
+test('validateSuiteMap flags a bare ! row, which exempted nothing and said nothing (airhorn-nxuv.21)', () => {
+  // The empty path resolved to the repo root, and `fs.existsSync(root)` is true, so
+  // the row validated as fine while covering nothing at all.
+  assert.equal(fs.existsSync(path.join(root, '')), true, 'the old read of the bare row');
+
+  const violations = validateSuiteMap('!\n', { root });
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].type, 'empty_pattern');
+  assert.ok(violations[0].message.includes("only the '!' marker"),
+    `the message must name the bare marker, got: ${violations[0].message}`);
+});
+
+test('validateSuiteMap flags a bare ~ row (airhorn-nxuv.21)', () => {
+  const violations = validateSuiteMap('~\t\n', { root });
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].type, 'empty_pattern');
+  assert.ok(violations[0].message.includes("only the '~' marker"));
+});
+
+test('validateSuiteMap still accepts a file-backed row and a bare-marker-free map (airhorn-nxuv.21)', () => {
+  const violations = validateSuiteMap('src/horn.js\ttests/horn.test.js\n!*.md\n', { root });
+  assert.deepEqual(violations, []);
+});
+
 test('validateSuiteMap returns [] for valid map rows (airhorn-onz0)', () => {
   const tsv = `
 src/horn.js\ttests/horn.test.js

@@ -86,10 +86,43 @@ export function globToRegex(glob) {
 }
 
 /**
+ * The default presence predicate: a root-relative path is present only if it is a
+ * REGULAR FILE (a symlink to one counts, `statSync` follows it).
+ *
+ * `fs.existsSync` also answers true for a directory, and that was a hole in the
+ * validator itself: a row naming `src/lib`, or a suite column naming a directory,
+ * validated as "exists on disk" while selecting nothing - a silent hole in the map,
+ * which is the one thing this tool exists to catch. An empty path resolves to the
+ * root directory and passed for the same reason, so a bare `!` or `~` row exempted
+ * or deferred nothing and said nothing (airhorn-nxuv.21).
+ */
+const fileAt = (root) => (relPath) => {
+  try {
+    return fs.statSync(path.join(root, relPath)).isFile();
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Why a path is not usable, for the violation message: "does not exist" must never
+ * be said about something that is right there as a directory.
+ */
+function presenceProblem(root, relPath) {
+  try {
+    return fs.statSync(path.join(root, relPath)).isDirectory()
+      ? 'is a directory, not a file'
+      : 'is not a regular file';
+  } catch {
+    return 'does not exist on disk';
+  }
+}
+
+/**
  * Checks whether a glob pattern matches at least one file on disk.
  */
 export function globMatchesAny(pattern, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
-  const fileExists = existsFn || fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  const fileExists = existsFn || fileExistsOpt || fileAt(root);
 
   if (!pattern.includes('*') && !pattern.includes('?') && !pattern.includes('[')) {
     return fileExists(pattern);
@@ -148,7 +181,7 @@ export function globMatchesAny(pattern, { root = DEFAULT_ROOT, existsFn, fileExi
  * Returns Array<{ type: string, token: string, pattern?: string, message: string }>
  */
 export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
-  const fileExists = existsFn || fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  const fileExists = existsFn || fileExistsOpt || fileAt(root);
   const pendingDeclared = extractPendingSuites(tsvText);
   const violations = [];
 
@@ -158,6 +191,19 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
     const parts = trimmed.split('\t');
     const pattern = parts[0] ? parts[0].trim() : '';
     if (!pattern) continue;
+
+    // A bare marker is not a row. '!' or '~' with no path after it exempts or defers
+    // nothing, and it used to validate as fine because the empty path resolved to the
+    // root DIRECTORY and `fs.existsSync(root)` is true (airhorn-nxuv.21).
+    if (pattern === '!' || pattern === '~') {
+      violations.push({
+        type: 'empty_pattern',
+        token: pattern,
+        pattern,
+        message: `Row is only the '${pattern}' marker, with no path after it: it exempts/defers nothing`,
+      });
+      continue;
+    }
 
     const suiteTokens = parts.slice(1).join(' ').trim().split(/\s+/).filter(Boolean);
 
@@ -179,7 +225,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
           type: 'missing_literal',
           token: pattern,
           pattern,
-          message: `@importers row names a module that does not exist on disk: ${pattern}`,
+          message: `@importers row names a module that ${presenceProblem(root, pattern)}: ${pattern}`,
         });
       }
       for (const d of directives.filter((t) => t.startsWith('except='))) {
@@ -189,7 +235,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
             type: 'missing_suite',
             token: target,
             pattern,
-            message: `except= names a suite that does not exist on disk: ${target} (referenced by ${pattern})`,
+            message: `except= names a suite that ${presenceProblem(root, target)}: ${target} (referenced by ${pattern})`,
           });
         }
       }
@@ -226,7 +272,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
             type: 'missing_literal',
             token: pattern,
             pattern,
-            message: `Exemption path does not exist on disk: ${pattern}`,
+            message: `Exemption path ${presenceProblem(root, cleanPat)}: ${pattern}`,
           });
         }
       }
@@ -247,7 +293,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
             type: 'missing_literal',
             token: pattern,
             pattern,
-            message: `Mapped path does not exist on disk: ${pattern}`,
+            message: `Mapped path ${presenceProblem(root, pattern)}: ${pattern}`,
           });
         }
       }
@@ -274,7 +320,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
           type: 'missing_suite',
           token,
           pattern,
-          message: `Suite does not exist on disk: ${token} (referenced by ${pattern})`,
+          message: `Suite ${presenceProblem(root, token)}: ${token} (referenced by ${pattern})`,
         });
       }
     }
@@ -342,7 +388,7 @@ const isDirective = (tok) => tok.startsWith('@') || tok.startsWith('except=');
  * test-file pattern, and is explicit-only by design - airhorn-i8i).
  */
 export function suiteFiles(tsvText, { root = DEFAULT_ROOT, fileExists: fileExistsOpt } = {}) {
-  const fileExists = fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  const fileExists = fileExistsOpt || fileAt(root);
   const named = new Set();
   for (const line of tsvText.split('\n')) {
     const trimmed = line.trim();
@@ -462,7 +508,7 @@ export function expandRow(pattern, rest, options = {}) {
  * - Accumulates multiple rows for the same pattern additively
  */
 export function deriveCoverageContract(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
-  const fileExists = existsFn || fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  const fileExists = existsFn || fileExistsOpt || fileAt(root);
   const pendingDeclared = extractPendingSuites(tsvText);
 
   const contract = {};
