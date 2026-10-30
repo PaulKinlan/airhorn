@@ -66,10 +66,10 @@ CONF="$HERE/gate.conf"
 
 [ -f "$MAP" ] || { echo "fast-gate: no $MAP — the map IS the gate; refusing to guess" >&2; exit 1; }
 # The runner comes from gate.conf ONLY (airhorn-v6th). This knob decides WHAT EXECUTES, so an
-# ambient export used to weaken every verdict the fleet takes from this repo (airhorn-bt55 closed
-# the same class for FAST_GATE_SKIP_BUILD; GSM_TOOLS_ROOT followed the same rule - honoured only
-# under the minted test guard). Here the rule is stricter and cheaper, because nothing in the tree
-# exports it (git grep: only tools/fast-gate.sh and tools/gate.conf) and a probe that needs a
+# ambient export used to weaken every verdict the fleet takes from this repo (the build-skip knob
+# airhorn-bt55 removed was the same class of hole; GSM_TOOLS_ROOT followed the same rule - honoured
+# only under the minted test guard). Here the rule is stricter and cheaper, because nothing in the
+# tree exports it (git grep: only tools/fast-gate.sh and tools/gate.conf) and a probe that needs a
 # different runner copies tools/ and writes its own gate.conf (tests/gate-smoke.test.js does).
 # An export equal to the pin is a no-op; one that differs FAILS, here, before any suite runs, so a
 # forged runner cannot green a RED suite and a narrowed one cannot silently skip cases.
