@@ -732,8 +732,14 @@ function distance(sample, render) {
   const safeLog2 = (value) => (value > 0 ? Math.log2(value) : null);
   const durationRatio = sample.durationS > 0 ? render.durationS / sample.durationS : 1;
   const centroidRatio = sample.centroidHz > 0 && render.centroidHz > 0 ? render.centroidHz / sample.centroidHz : 1;
+  // airhorn-nxuv.3: an UNMEASURABLE pitch must not read as a perfect match.
+  // A render whose fundamental cannot be measured while the sample's can (a
+  // noise render, a broken oscillator) is ranked as a 2x pitch error - the
+  // worst plausible candidate - never as identical. If the SAMPLE's pitch is
+  // unmeasurable the metric cannot judge this pair, and 0 is honest there.
   const fundamentalRatio =
-    sample.fundamentalHz && render.fundamentalHz ? render.fundamentalHz / sample.fundamentalHz : 1;
+    sample.fundamentalHz && render.fundamentalHz ? render.fundamentalHz / sample.fundamentalHz
+      : sample.fundamentalHz ? 0.5 : 1;
   const terms = [
     Math.abs(render.peakDbfs - sample.peakDbfs) / TOLERANCE.peakDb,
     Math.abs(render.rmsDbfs - sample.rmsDbfs) / TOLERANCE.rmsDb,
@@ -802,8 +808,14 @@ function verdict(results) {
   const synth = results.paths.synthBlast;
   const durationRatio = sample.durationS > 0 ? synth.durationS / sample.durationS : 0;
   const centroidRatio = sample.centroidHz > 0 ? synth.centroidHz / sample.centroidHz : 0;
-  const fundamentalRatio =
-    sample.fundamentalHz && synth.fundamentalHz ? synth.fundamentalHz / sample.fundamentalHz : 1;
+  // airhorn-nxuv.3: pitch is only a verdict when BOTH sides were measured. An
+  // unmeasurable synth fundamental (noise render, broken oscillator) used to
+  // default the ratio to 1 - dead centre of the 0.85-1.18 band - so an
+  // unpitched fallback passed as a perfect match. Unmeasurable is its own
+  // FAILING outcome: the ratio stays null, the row says so, and the band is
+  // neither narrowed nor widened to make the distinction.
+  const pitchMeasured = sample.fundamentalHz > 0 && synth.fundamentalHz > 0;
+  const fundamentalRatio = pitchMeasured ? synth.fundamentalHz / sample.fundamentalHz : null;
   const rows = [
     {
       metric: 'peak level',
@@ -830,9 +842,10 @@ function verdict(results) {
       metric: 'pitch (fundamental)',
       sample: `${sample.fundamentalHz} Hz`,
       synth: `${synth.fundamentalHz} Hz`,
-      gap: `${((fundamentalRatio - 1) * 100).toFixed(0)}%`,
+      gap: pitchMeasured ? `${((fundamentalRatio - 1) * 100).toFixed(0)}%` : 'unmeasurable',
       pass:
-        fundamentalRatio >= TOLERANCE.fundamentalRatio[0] && fundamentalRatio <= TOLERANCE.fundamentalRatio[1],
+        pitchMeasured
+          && fundamentalRatio >= TOLERANCE.fundamentalRatio[0] && fundamentalRatio <= TOLERANCE.fundamentalRatio[1],
     },
     {
       metric: 'brightness (centroid)',
