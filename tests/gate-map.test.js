@@ -77,6 +77,49 @@ const listFor = (changed) =>
   execFileSync('bash', [gate, '--changed', changed, '--list'], { cwd: root, encoding: 'utf8' })
     .split('\n').map((s) => s.trim()).filter(Boolean);
 
+// Quote-aware `//` and `/* */` removal (airhorn-g0qr.1). A pin whose claim is
+// "this file ASSERTS that copy" cannot be satisfied by text that never runs, so
+// every source substring check below reads live code, not comments.
+const stripComments = (source) => {
+  let out = '';
+  let quote = null;
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (quote) {
+      out += ch;
+      if (ch === '\\') {
+        out += next ?? '';
+        i += 1;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      while (i < source.length && source[i] !== '\n') i += 1;
+      out += '\n';
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      i += 2;
+      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) i += 1;
+      i += 1;
+      out += ' ';
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+};
+
+const liveSource = (rel) => stripComments(fs.readFileSync(path.join(root, rel), 'utf8'));
+
 // --- the fleet coverage contract vs the map (airhorn-ona) --------------------
 // tools/suite-map.tsv is THE map the gate runs; .fleet/coverage-contract.json
 // restates it for ~/fleet/remote/check-coverage.py, the independent oracle that
@@ -233,12 +276,26 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
   // announcement is authored in index.html, and the suite that runs on this row
   // has to assert that copy. Read both files: the page's copy and the suite's
   // assertion cannot silently diverge into a suite that checks nothing real.
-  const page = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
-  const suite = fs.readFileSync(path.join(root, 'tests', 'resilience-ui.test.mjs'), 'utf8');
-  for (const copy of ['The app could not update', 'previous version']) {
-    assert.ok(page.includes(copy), `index.html must author the lost-upgrade copy "${copy}"`);
-    assert.ok(suite.includes(copy), `resilience-ui must assert the page's lost-upgrade copy "${copy}"`);
+  //
+  // Comments are stripped first, and naming the copy is not enough (airhorn-
+  // g0qr.1): `suite.includes(copy)` was satisfied by a commented-out assertion
+  // or by any survivor of the assertion's deletion, so deleting the runtime
+  // check from resilience-ui kept this pin green. What is pinned now is live
+  // code that (i) names each copy, (ii) checks it against the rendered notice,
+  // and (iii) REFUSES when it is missing - this suite throws rather than
+  // importing assert, so the refusal is a `throw` in the guard's body.
+  const copies = ['The app could not update', 'previous version'];
+  const page = liveSource('index.html');
+  const suite = liveSource('tests/resilience-ui.test.mjs');
+  for (const copy of copies) {
+    assert.ok(page.includes(copy), `index.html must author the lost-upgrade copy "${copy}" in live code`);
+    assert.ok(suite.includes(copy), `resilience-ui must name the lost-upgrade copy "${copy}" in live code`);
   }
+  assert.match(suite,
+    new RegExp(`for\\s*\\(\\s*const\\s+copy\\s+of\\s*\\[\\s*${copies.map((c) => `'${c}'`).join('\\s*,\\s*')}\\s*\\]\\s*\\)`),
+    'resilience-ui must loop over the lost-upgrade copy strings and assert each of them');
+  assert.match(suite, /!\s*[A-Za-z_$][\w$.]*\.includes\(\s*copy\s*\)[\s\S]{0,240}?(?:\bthrow\b|\bassert\b)/,
+    'the copy loop must refuse when the rendered notice is missing a copy string - naming the copy without a live guard is the defect this pin exists for');
   // The worker's own failure story is still the failover suite's job, and the
   // suite still has a row owner (the worker). No page module carries worker code
   // since the split (airhorn-1l04): the registration handler is inline in
