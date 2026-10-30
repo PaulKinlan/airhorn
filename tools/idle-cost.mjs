@@ -44,6 +44,11 @@
  *   node tools/idle-cost.mjs --check                # exit 1 if a budget is missed
  *   node tools/idle-cost.mjs --json                 # machine-readable report
  *
+ * Exit codes: 0 = every verdict passed (or no --check and nothing refused); 1 = --check and a budget
+ * was missed; 2 = REFUSED - a verdict's precondition was unmet, so its measurement never happened
+ * (today: D needs the horn to be playing before the page is hidden). A refusal is never printed as
+ * PASS and never reports a 0 ms latency.
+ *
  * Budgets (of one core, measured on this VM's headless Chrome):
  *   A pristine idle   < 0.5%      nothing runs
  *   B after a blast   < 1.0%      a running-but-silent AudioContext is tolerated
@@ -377,6 +382,19 @@ async function main() {
     await evaluate(`window.__airhorn.start({ loop: true })`);
     await sleep(400);
     const beforeHide = await evaluate(`({ playing: window.__airhorn.isPlaying(), pressed: document.querySelector('.horn').getAttribute('aria-pressed') })`);
+    // PRECONDITION (airhorn-nxuv.2): the stop latency below only means something if the horn was
+    // AUDIBLY PLAYING when the page was hidden. With a broken start({ loop: true }) isPlaying() is
+    // false here, the poll loop below sees its first sample already false, records ~0 ms, and verdict
+    // D passed GREEN for a horn that never sounded - a measurement of nothing, reported as a budget met.
+    // So playback is a precondition of the measurement, not an assumption: when it is unmet no latency
+    // is recorded at all (null, never 0) and the verdict REFUSES instead of passing.
+    const playback = {
+      required: 'the horn is audibly playing when the page is hidden',
+      playing: beforeHide.playing,
+      pressed: beforeHide.pressed,
+    };
+    playback.met = playback.playing === true && playback.pressed === 'true';
+    report.hiddenPlaybackPrecondition = playback;
     const hidden = await evaluate(`(() => {
       // Stand-in for the platform hiding the tab: the app's listeners read
       // document.hidden/visibilityState, and headless cannot background itself.
@@ -397,11 +415,14 @@ async function main() {
     // a defect.
     const hideStartedAt = Date.now();
     let stopLatencyMs = null;
-    for (let i = 0; i < 40; i++) {
-      const state = await evaluate('window.__airhorn.isPlaying()');
-      if (state === false) { stopLatencyMs = Date.now() - hideStartedAt; break; }
-      await sleep(50);
+    if (playback.met) {
+      for (let i = 0; i < 40; i++) {
+        const state = await evaluate('window.__airhorn.isPlaying()');
+        if (state === false) { stopLatencyMs = Date.now() - hideStartedAt; break; }
+        await sleep(50);
+      }
     }
+    // Never 0 for an unplayed horn: with the precondition unmet this stays null, and verdict D refuses.
     report.hiddenStopLatencyMs = stopLatencyMs;
     const afterHide = await evaluate(`({
       playing: window.__airhorn.isPlaying(),
@@ -485,10 +506,19 @@ async function main() {
       },
       {
         what: 'D hidden: a looping horn stops (within 2s), and the hidden page is quiet',
-        pass: report.hiddenStopLatencyMs !== null
+        // A verdict whose measurement never happened is not a pass: `refused` is the machine-readable
+        // third state (PASS / FAIL / REFUSED), and a refusal never reaches `pass: true`.
+        refused: !playback.met,
+        precondition: playback,
+        pass: playback.met === true
+          && report.hiddenStopLatencyMs !== null
           && report.hidden.afterHide.pressed === 'false'
           && byName('D').mainThreadCpuPct < BUDGET.hidden,
-        measured: `stopped after ${report.hiddenStopLatencyMs === null ? 'NEVER (>2s)' : report.hiddenStopLatencyMs + 'ms'}, ` +
+        measured: (playback.met
+          ? `playing before the hide=${playback.playing} pressed=${playback.pressed}`
+          : `PRECONDITION UNMET - the horn was not playing before the hide (playing=${playback.playing} `
+            + `pressed=${playback.pressed}), so there is no stop latency to measure`) + ', ' +
+          `stopped after ${report.hiddenStopLatencyMs === null ? 'NEVER (>2s)' : report.hiddenStopLatencyMs + 'ms'}, ` +
           `pressed=${report.hidden.afterHide.pressed}, ctx=${report.hidden.afterHide.contextState}, ` +
           `${byName('D').mainThreadCpuPct}% main thread`,
       },
@@ -515,12 +545,23 @@ async function main() {
       if (report.errors.length) console.log(`page errors: ${JSON.stringify(report.errors)}`);
       console.log('');
       for (const verdict of verdicts) {
-        console.log(`${verdict.pass ? 'PASS' : 'FAIL'}  ${verdict.what} — ${verdict.measured}`);
+        const label = verdict.refused ? 'REFUSED' : verdict.pass ? 'PASS' : 'FAIL';
+        console.log(`${label}  ${verdict.what} — ${verdict.measured}`);
       }
     }
 
+    const refused = verdicts.filter((v) => v.refused);
+    if (refused.length) {
+      // Not a budget miss and not a pass: the audit could not measure what the verdict claims, so it
+      // says so with its own exit code (2) whether or not --check was asked for. A consumer that only
+      // looks at the exit code must not see green for a horn that never played.
+      for (const v of refused) {
+        console.error(`idle-cost: REFUSED - ${v.what}: precondition unmet (${v.precondition.required})`);
+      }
+      process.exitCode = 2;
+    }
     if (check) {
-      const failed = verdicts.filter((v) => !v.pass);
+      const failed = verdicts.filter((v) => !v.pass && !v.refused);
       if (failed.length) {
         console.error(`idle-cost: ${failed.length} budget(s) missed`);
         process.exitCode = 1;
