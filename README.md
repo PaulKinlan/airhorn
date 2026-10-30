@@ -175,7 +175,9 @@ Both commands launch the browser found via `CHROME_BIN`, falling back to
 
 Every suite above proves a moment; `tools/soak.mjs` proves a session. It drives the
 built app through 240 start/stop cycles (WebMCP tools, pointer press-and-hold with the
-sample ringing out, keyboard `Space`, and `/#instant`), publishes three
+sample ringing out, keyboard `Space`, and `/#instant`), a dozen more with the sample's
+decode blocked so the app's synthesised fallback plays (three `OscillatorNode`s a
+blast, and the sample path has to come back afterwards), publishes three
 service-worker versions over the live controller, and toggles offline/online four
 times — then measures what the page is *holding* rather than what it printed:
 
@@ -186,20 +188,25 @@ npm run build && node tools/soak.mjs        # 240 cycles, ~2.5 min
 After a forced GC at every sample it reads the retained heap (V8 heap **plus**
 typed-array backing stores, which is where a leaked `AudioBuffer` lives), counts live
 `AudioBufferSourceNode`/`OscillatorNode` instances and `AudioContext`s still reachable
-in the heap, and takes the renderer's live node, document and JS-event-listener
-counts. It also asserts the page drains to zero timers/intervals/fetches between
-cycles, that each worker update replaces its caches and reloads the page once, and
-that an offline reload still renders and still plays. `report.json` and a screenshot
-land in `/tmp/airhorn-soak/<git-sha>-<timestamp>/` (override with `--out` or
-`SOAK_OUT`); it exits non-zero when any check fails.
+in the heap — and fails the run if the page started nodes of a kind the heap count
+cannot then count, because an unmeasured count is not zero live nodes. It also takes
+the renderer's live node, document and JS-event-listener counts, asserts the page
+drains to zero timers/intervals/fetches between cycles, that each worker update
+replaces its caches and reloads the page once, and that an offline reload still renders
+and still plays. `report.json` and a screenshot land in
+`/tmp/airhorn-soak/<git-sha>-<timestamp>/` (override with `--out` or `SOAK_OUT`); it
+exits non-zero when any check fails.
 
 Like the acceptance pass it is explicit-only — a soak is minutes long and has no
 business in the fast gate.
 
 None of that is worth anything if it cannot fail, so the harness ships with injectable
-leaks it is expected to catch (`--mutant source-leak|listener-leak|heap-leak`): the
+leaks it is expected to catch (`--mutant source-leak|listener-leak|heap-leak|oscillator-leak|heap-count-blind`): the
 page retains every buffer source it starts, or adds a document listener per blast, or
-keeps 1 MB per blast. Run one and the matching check goes red:
+keeps 1 MB per blast, or keeps every oscillator the fallback synth starts (which only
+the heap cross-check can see — the `ended` counters stay clean), or never lets the
+sample and oscillator prototypes be counted at all. Run one and the matching check
+goes red:
 
 ```bash
 node tools/soak.mjs --cycles 24 --updates 0 --offline 0 --mutant source-leak
