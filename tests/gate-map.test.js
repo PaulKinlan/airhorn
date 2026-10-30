@@ -291,11 +291,18 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
     assert.ok(page.includes(copy), `index.html must author the lost-upgrade copy "${copy}" in live code`);
     assert.ok(suite.includes(copy), `resilience-ui must name the lost-upgrade copy "${copy}" in live code`);
   }
+  // One regex, because the pieces are only a claim together: the loop over these
+  // exact copy strings, then a guard on the loop variable that refuses INSIDE its
+  // own block. A `throw` merely NEARBY is not a guard - the first mutation run of
+  // this pin proved that: with the guard's throw commented out, the throw under the
+  // NEXT `if` satisfied a "throw within N chars" match and the pin stayed green
+  // (the same false-green class, one level up). Hence `[^{}]*?` for the guard
+  // body: the refusal has to be in that block, not after it.
+  const copiesAlt = copies.map((c) => `'${c}'`).join('\\s*,\\s*');
   assert.match(suite,
-    new RegExp(`for\\s*\\(\\s*const\\s+copy\\s+of\\s*\\[\\s*${copies.map((c) => `'${c}'`).join('\\s*,\\s*')}\\s*\\]\\s*\\)`),
-    'resilience-ui must loop over the lost-upgrade copy strings and assert each of them');
-  assert.match(suite, /!\s*[A-Za-z_$][\w$.]*\.includes\(\s*copy\s*\)[\s\S]{0,240}?(?:\bthrow\b|\bassert\b)/,
-    'the copy loop must refuse when the rendered notice is missing a copy string - naming the copy without a live guard is the defect this pin exists for');
+    new RegExp('for\\s*\\(\\s*const\\s+copy\\s+of\\s*\\[\\s*' + copiesAlt + '\\s*\\]\\s*\\)\\s*\\{[\\s\\S]{0,400}?'
+      + 'if\\s*\\(\\s*!\\s*[A-Za-z_$][\\w$.]*\\.includes\\(\\s*copy\\s*\\)\\s*\\)\\s*\\{[^{}]*?\\b(?:throw|assert)\\b'),
+    'resilience-ui must loop over the lost-upgrade copy strings and REFUSE inside the guard when the rendered notice is missing one - naming the copy, or throwing nearby, is the defect this pin exists for');
   // The worker's own failure story is still the failover suite's job, and the
   // suite still has a row owner (the worker). No page module carries worker code
   // since the split (airhorn-1l04): the registration handler is inline in
