@@ -272,6 +272,13 @@ async function closeBrowser(browser) {
 // not intent. Honoured only with RESILIENCE_TEST_MODE=1, like the stub seam.
 const START_THROWS_SEAM = process.env.RESILIENCE_TEST_MODE === '1'
   && process.env.RESILIENCE_START_THROWS === '1';
+// A seam env var without the test mode must SAY it was dropped
+// (airhorn-t00l): a silent ignore produces a GREEN, honest-looking audit
+// that can be misrecorded as RED evidence. The stub seam already warns this
+// way; the load-time seam warns here, the scenario-time ones in runAudit.
+if (process.env.RESILIENCE_START_THROWS && process.env.RESILIENCE_TEST_MODE !== '1') {
+  console.warn('RESILIENCE_START_THROWS is honoured only with RESILIENCE_TEST_MODE=1 - ignoring it and running the real audit.');
+}
 
 const PROBE = `
 (() => {
@@ -773,6 +780,11 @@ async function runAudit() {
     console.warn('RESILIENCE_STUB_SCENARIO is honoured only with RESILIENCE_TEST_MODE=1 - ignoring it and running the real scenarios.');
   }
   const useStub = Boolean(stub) && testMode;
+  for (const seamVar of ['RESILIENCE_UPDATE_REJECT', 'RESILIENCE_CACHE_MISS']) {
+    if (process.env[seamVar] && !testMode) {
+      console.warn(`${seamVar} is honoured only with RESILIENCE_TEST_MODE=1 - ignoring it and running the real scenarios.`);
+    }
+  }
 
   try {
     if (useStub) {
