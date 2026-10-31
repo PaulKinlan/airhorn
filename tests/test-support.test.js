@@ -1245,3 +1245,28 @@ test('waitForQuiescence attributes its timeout to the real cause, never to work 
     },
   );
 });
+
+test('the steal probe window still spans real time without SharedArrayBuffer (airhorn-nxuv.36)', async () => {
+  // sleepSync's catch used to just RETURN, so on a runtime without SAB the
+  // probe's two /proc/stat readings came back-to-back: too few ticks, and the
+  // only verdict the probe could ever produce was 'unknown'. Drive the REAL
+  // default sleep through createStealProbe (whose sleep is injectable - so
+  // deliberately NOT injected here), the real /proc/stat reader, and one
+  // 120ms window: at 100Hz that is ~12 ticks per CPU, over MIN_STEAL_TICKS
+  // even on a loaded host.
+  const { createStealProbe } = await import('../tools/lib/chrome.mjs');
+  const saved = Object.getOwnPropertyDescriptor(globalThis, 'SharedArrayBuffer');
+  Object.defineProperty(globalThis, 'SharedArrayBuffer', { value: undefined, configurable: true, writable: true });
+  try {
+    const started = Date.now();
+    const probe = createStealProbe({ windowMs: 120, windows: 1, maxAttempts: 1 });
+    const rate = probe.rate();
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 110,
+      `the no-SAB window must span REAL time - a no-op sleep finishes instantly, got ${elapsed}ms`);
+    assert.notEqual(rate, null,
+      `a real 120ms window advances enough ticks for a verdict; got unknown: ${probe.reason()}`);
+  } finally {
+    if (saved) Object.defineProperty(globalThis, 'SharedArrayBuffer', saved);
+  }
+});
