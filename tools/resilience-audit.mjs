@@ -1278,7 +1278,22 @@ async function runAudit() {
       const afterUpdate = await readState(cdp, sessionId).catch((err) => ({ unreadable: String((err && err.message) || err) }));
       const finalShot = await shot(cdp, sessionId, '6-corrupt-after-online-update');
 
+      // The recovery update is part of the claim, so when it cannot run the
+      // ROW FAILS, not just a field nobody reads (airhorn-qp8k): v7ba
+      // recorded the outcome but left status OK and the audit green. The
+      // measurements already taken are kept on the row - the failure is
+      // carried by status/error, the evidence by the fields.
+      const recoveryUnmeasurable = recoveryUpdate.outcome !== 'updated'
+        ? `reg.update() ${recoveryUpdate.outcome} - ${recoveryUpdate.detail}`
+        : afterUpdate.unreadable
+          ? `state unreadable after the update (${afterUpdate.unreadable})`
+          : null;
+
       return {
+        ...(recoveryUnmeasurable ? {
+          status: 'ERROR',
+          error: `corrupt-cache recovery unmeasurable: ${recoveryUnmeasurable}`,
+        } : {}),
         swActive: sw.active,
         cache: cacheInfo,
         assetUrl,
@@ -1304,13 +1319,12 @@ async function runAudit() {
         recoveredAfterSecondLoad: !!onlineSecond && onlineSecond.horn.present,
         swUpdate: recoveryUpdate,
         // Claimed only when an update RAN and the page was READABLE
-        // (airhorn-v7ba): anything else is a named 'unmeasurable', never
-        // folded into false next to a real not-recovered.
-        recoveredAfterSwUpdate: recoveryUpdate.outcome !== 'updated'
-          ? `unmeasurable: reg.update() ${recoveryUpdate.outcome} - ${recoveryUpdate.detail}`
-          : afterUpdate.unreadable
-            ? `unmeasurable: state unreadable after the update (${afterUpdate.unreadable})`
-            : !!afterUpdate.horn.present,
+        // (airhorn-v7ba); anything else also FAILS the row above
+        // (airhorn-qp8k) - the string here is the record, the status is the
+        // consequence.
+        recoveredAfterSwUpdate: recoveryUnmeasurable
+          ? `unmeasurable: ${recoveryUnmeasurable}`
+          : !!afterUpdate.horn.present,
         screenshots: [jsShot, shellShot, finalShot],
         console: collectors(sessionId).console,
         pageErrors: [...afterJsCorruption.errors, ...afterShellCorruption.errors],
