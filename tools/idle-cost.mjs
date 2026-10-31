@@ -71,7 +71,22 @@ const mimeTypes = {
   '.ico': 'image/x-icon',
 };
 
-const BUDGET = { pristineIdle: 0.5, afterBlastIdle: 1.0, hidden: 0.5 };
+// afterBlastRenderer gates the RENDERER process in the same silent state
+// (airhorn-nxuv.15): the audio thread is where a Web Audio graph spins, and a
+// silent page should not burn a core there either. Same scale as
+// afterBlastIdle - the state under test is the same, only the thread differs.
+const BUDGET = { pristineIdle: 0.5, afterBlastIdle: 1.0, afterBlastRenderer: 1.0, hidden: 0.5 };
+
+// Mutation seam (airhorn-nxuv.15): under test mode, a busy Web Worker spins
+// through the whole B window - renderer-process CPU, off the main thread, no
+// intervals - so verdict B must FAIL on rendererCpuPct instead of passing
+// green. Honoured only with IDLE_COST_TEST_MODE=1, the same guard family as
+// the resilience-audit stub seam (airhorn-w1wh).
+const TEST_MODE = process.env.IDLE_COST_TEST_MODE === '1';
+const SPIN_RENDERER_SEAM = TEST_MODE && process.env.IDLE_COST_SPIN_RENDERER === '1';
+if (process.env.IDLE_COST_SPIN_RENDERER && !TEST_MODE) {
+  console.warn('IDLE_COST_SPIN_RENDERER is honoured only with IDLE_COST_TEST_MODE=1 - ignoring it and running the real measurement.');
+}
 
 // Scheduling instrumentation, installed before any page script runs: the app's
 // own timers and frames are what is being counted, so this must be in place for
@@ -353,6 +368,15 @@ async function main() {
       contextState: window.__airhornContext ? window.__airhornContext.state : null,
       samplerate: window.__airhornContext ? window.__airhornContext.sampleRate : null,
     })`);
+    if (SPIN_RENDERER_SEAM) {
+      await evaluate(`(() => {
+        const w = new Worker(URL.createObjectURL(new Blob([
+          'const until = Date.now() + ${Math.round(seconds * 1000) + 500}; while (Date.now() < until) {}'
+        ], { type: 'application/javascript' })));
+        window.__spinWorker = w;
+        return true;
+      })()`);
+    }
     report.phases.push(await windowOf('B idle after a blast (context left running)', seconds * 1000));
 
     // ------------------------------------------------------------------ C
@@ -472,7 +496,13 @@ async function main() {
       },
       {
         what: 'B after a blast: silent page still under budget',
-        pass: byName('B').mainThreadCpuPct < BUDGET.afterBlastIdle && byName('B').intervalTicks === 0,
+        // The audio thread is where a Web Audio graph spins, so the main
+        // thread alone cannot prove 'silent page under budget': a 100%-CPU
+        // audio graph passed it (airhorn-nxuv.15). The renderer side is gated
+        // too - and an UNMEASURED renderer (no comparable process across the
+        // window) fails as itself, it is not a pass.
+        pass: byName('B').mainThreadCpuPct < BUDGET.afterBlastIdle && byName('B').intervalTicks === 0
+          && byName('B').rendererCpuPct !== null && byName('B').rendererCpuPct < BUDGET.afterBlastRenderer,
         measured: `${byName('B').mainThreadCpuPct}% main thread, renderer ${describeRenderer(byName('B'))}`,
       },
       {
