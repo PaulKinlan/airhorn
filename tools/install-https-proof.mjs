@@ -315,16 +315,95 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
     if (!wrap) return null;
     const b = wrap.querySelector('button');
     const cs = getComputedStyle(wrap);
+    // The button's OWN computed style and box, collected next to the wrap's
+    // (airhorn-nxuv.11): visibility and pointer-events inherit, so a rule
+    // pinning the button itself is invisible at the wrap - and it is the
+    // button a user taps. The rect catches what no style property can: a
+    // zero-size or off-screen button still computes 'visible'.
+    const csBtn = b ? getComputedStyle(b) : null;
+    const rect = b ? b.getBoundingClientRect() : null;
     return {
       disabled: b ? b.disabled : null,
       hasAvailableClass: wrap.classList.contains('available'),
       visibility: cs.visibility,
       pointerEvents: cs.pointerEvents,
+      button: csBtn ? {
+        display: csBtn.display,
+        visibility: csBtn.visibility,
+        opacity: csBtn.opacity,
+        pointerEvents: csBtn.pointerEvents,
+        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        viewport: { width: innerWidth, height: innerHeight },
+      } : null,
       text: b ? b.textContent.trim() : null,
     };
   })()`);
   ev.screenshot = await cdp.screenshot(`install-${label}.png`);
   return ev;
+}
+
+// Whether the collected installButton state describes a button a user can
+// actually perceive and tap (airhorn-nxuv.11). Three independent ways a
+// present-in-DOM button is NOT tappable, each named separately so a failure
+// says which one fired:
+//   - not perceivable: display:none, visibility != 'visible', opacity 0
+//     (button or wrap - airhorn-5n3u measured a wrap-level read passing an
+//     invisible button), a zero-size box, or a box entirely outside the
+//     viewport;
+//   - not operable: pointer-events:none on the button or the wrap;
+//   - unreadable: any expected field missing or of the wrong type. This
+//     fails AS unreadable - it never defaults to 'visible'/'auto', because
+//     a style the tool cannot read is a state it knows nothing about.
+function buttonPerceptibility(btn) {
+  const unreadable = [];
+  const str = (name, v) => {
+    if (typeof v !== 'string' || v === '') unreadable.push(`${name} unreadable: ${JSON.stringify(v)}`);
+    return v;
+  };
+  const num = (name, v) => {
+    if (typeof v !== 'number' || !Number.isFinite(v)) unreadable.push(`${name} unreadable: ${JSON.stringify(v)}`);
+    return v;
+  };
+  if (!btn || typeof btn !== 'object') {
+    return { unreadable: ['installButton unreadable: ' + JSON.stringify(btn)], notPerceivable: [], notOperable: [] };
+  }
+  const wrapVisibility = str('wrap.visibility', btn.visibility);
+  const wrapPointerEvents = str('wrap.pointerEvents', btn.pointerEvents);
+  const b = btn.button;
+  if (!b || typeof b !== 'object') {
+    unreadable.push('button computed style unreadable: ' + JSON.stringify(btn));
+    return { unreadable, notPerceivable: [], notOperable: [] };
+  }
+  const display = str('button.display', b.display);
+  const visibility = str('button.visibility', b.visibility);
+  const pointerEvents = str('button.pointerEvents', b.pointerEvents);
+  const opacity = str('button.opacity', b.opacity);
+  if (typeof opacity === 'string' && opacity !== '' && !Number.isFinite(Number(opacity))) {
+    unreadable.push(`button.opacity is not a number: ${JSON.stringify(opacity)}`);
+  }
+  const r = b.rect || {};
+  const vp = b.viewport || {};
+  const x = num('button.rect.x', r.x);
+  const y = num('button.rect.y', r.y);
+  const width = num('button.rect.width', r.width);
+  const height = num('button.rect.height', r.height);
+  const vw = num('button.viewport.width', vp.width);
+  const vh = num('button.viewport.height', vp.height);
+  if (unreadable.length) return { unreadable, notPerceivable: [], notOperable: [] };
+
+  const notPerceivable = [];
+  if (display === 'none') notPerceivable.push('button.display is none');
+  if (visibility !== 'visible') notPerceivable.push(`button.visibility is ${visibility}`);
+  if (Number(opacity) <= 0) notPerceivable.push(`button.opacity is ${opacity}`);
+  if (wrapVisibility !== 'visible') notPerceivable.push(`wrap.visibility is ${wrapVisibility}`);
+  if (width <= 0 || height <= 0) notPerceivable.push(`button is zero-size (${width}x${height})`);
+  if (x >= vw || y >= vh || x + width <= 0 || y + height <= 0) {
+    notPerceivable.push(`button box (${x},${y} ${width}x${height}) is outside the viewport (${vw}x${vh})`);
+  }
+  const notOperable = [];
+  if (pointerEvents === 'none') notOperable.push('button.pointerEvents is none');
+  if (wrapPointerEvents === 'none') notOperable.push('wrap.pointerEvents is none');
+  return { unreadable, notPerceivable, notOperable };
 }
 
 async function main() {
@@ -408,12 +487,37 @@ async function main() {
     if (httpsEv.installButton.disabled !== false || !httpsEv.installButton.hasAvailableClass) {
       throw new Error('Install button not enabled over HTTPS: ' + JSON.stringify(httpsEv.installButton));
     }
+    // Enabled in the DOM is not tappable on the glass (airhorn-nxuv.11): an
+    // 'available' installer that is display:none, visibility:hidden,
+    // opacity:0, zero-size, off-screen or pointer-events:none passes every
+    // check above while a user could never tap it. The HTTPS stage claims an
+    // OPERABLE button, so assert perceivable AND operable, by property name.
+    const httpsPerc = buttonPerceptibility(httpsEv.installButton);
+    if (httpsPerc.unreadable.length) {
+      throw new Error('Install button computed state unreadable over HTTPS: ' + httpsPerc.unreadable.join('; '));
+    }
+    if (httpsPerc.notPerceivable.length || httpsPerc.notOperable.length) {
+      throw new Error('Install button enabled but not tappable over HTTPS - ' +
+        httpsPerc.notPerceivable.map(f => `not perceivable: ${f}`)
+          .concat(httpsPerc.notOperable.map(f => `not operable: ${f}`)).join('; ') +
+        ' :: ' + JSON.stringify(httpsEv.installButton));
+    }
     if (httpEv.installPrompt.fired) throw new Error('the insecure-HTTP contrast fired the prompt - the contrast is invalid');
     if (!httpEv.installButton || typeof httpEv.installButton.disabled !== 'boolean') {
       throw new Error('Install button state unreadable over HTTP: ' + JSON.stringify(httpEv.installButton));
     }
     if (httpEv.installButton.disabled !== true || httpEv.installButton.hasAvailableClass) {
       throw new Error('Install button not disabled over HTTP: ' + JSON.stringify(httpEv.installButton));
+    }
+    // The contrast's other half: over HTTP the not-installable stage must
+    // also RENDER as such - a disabled button still shown as perceivable and
+    // operable would present an install affordance the platform just refused.
+    const httpPerc = buttonPerceptibility(httpEv.installButton);
+    if (httpPerc.unreadable.length) {
+      throw new Error('Install button computed state unreadable over HTTP: ' + httpPerc.unreadable.join('; '));
+    }
+    if (!httpPerc.notPerceivable.length && !httpPerc.notOperable.length) {
+      throw new Error('Install button disabled but still perceivable and operable over HTTP: ' + JSON.stringify(httpEv.installButton));
     }
     console.log('install-https-proof: PASS');
   } finally {
