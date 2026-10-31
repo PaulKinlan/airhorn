@@ -809,32 +809,49 @@ async function runAudit() {
 
       // (c) a navigation the precache does not cover: it must be served by the network,
       //     which hangs and then fails
+      // Which document is on screen BEFORE the attempt: the marker is what tells
+      // "the deep-link attempt produced its own document (page or error page)"
+      // apart from "the previous cached page is still there" (airhorn-nxuv.8).
+      const preDeepLink = await readState(cdp, sessionId);
       const uncachedStart = Date.now();
       const uncachedLoaded = await navigate(cdp, sessionId, `${origin}/deep-link`, 12000);
       const uncachedMs = Date.now() - uncachedStart;
-      const uncachedState = await readState(cdp, sessionId).catch(() => null);
+      // An unreadable state is UNMEASURABLE, not a synthesised 'no document'
+      // row with status OK (airhorn-nxuv.8): it fails as itself.
+      const uncachedState = await readState(cdp, sessionId).catch((err) => {
+        throw new Error(`lie-fi measured nothing: the state after the uncached navigation is unreadable (${String((err && err.message) || err)})`);
+      });
+      const onDeepLink = uncachedLoaded
+        && uncachedState.marker !== preDeepLink.marker
+        && /\/deep-link/.test(uncachedState.url || '');
       const shotFile = await shot(cdp, sessionId, '2-liefi-uncached-nav');
-      // Headline usability is MEASURED on the post-navigation state (airhorn-dse,
-      // the airhorn-0aq instrument): the literal `false` here called the horn
-      // unusable while the same row's measured state showed it rendered and
-      // visible - a failed navigation leaves the previous (cached, working)
-      // document on screen, and that is the truth to report. No document at
-      // all (uncachedState null) earns false without a press.
-      const hornAfterUncached = uncachedState ? await pressHorn(cdp, sessionId) : null;
+      const hornAfterUncached = await pressHorn(cdp, sessionId);
       return {
         swActive: sw.active,
         cachedNavigation: { completed: cachedLoaded, ms: cachedMs,
           hornPresent: cachedState ? cachedState.horn.present : false },
         uncachedSubresource: subresource,
-        uncachedNavigation: { completed: uncachedLoaded, ms: uncachedMs },
-        ...(uncachedState ? summarise(uncachedState) : { renders: false, hornVisible: false,
-          explainsItself: false, explanationEvidence: 'no document at all' }),
-        hornUsable: hornAfterUncached ? hornAfterUncached.sounded : false,
-        hornCheck: hornAfterUncached || { sounded: false, reason: 'no document after the uncached navigation' },
+        uncachedNavigation: { completed: uncachedLoaded, ms: uncachedMs, reachedDeepLink: onDeepLink },
+        // The headline describes the DEEP-LINK outcome. When the attempt never
+        // replaced the document, the previous cached page is still on screen;
+        // measuring it and reporting it as the lie-fi result was the mask
+        // (airhorn-nxuv.8). The previous page IS still measured - nested and
+        // labelled, so a leftover working page and a working deep link are no
+        // longer indistinguishable in the row.
+        ...(onDeepLink
+          ? { measuredDocument: 'deep-link', ...summarise(uncachedState),
+              hornUsable: hornAfterUncached.sounded, hornCheck: hornAfterUncached }
+          : { measuredDocument: 'previous-cached-document',
+              renders: false, hornVisible: false, explainsItself: false,
+              explanationEvidence: 'the deep-link navigation never replaced the document; nothing about /deep-link was measured',
+              hornUsable: false,
+              hornCheck: { sounded: false, reason: 'the press measured the previous cached page, not /deep-link (see previousDocument)' },
+              previousDocument: { ...summarise(uncachedState),
+                hornUsable: hornAfterUncached.sounded, hornCheck: hornAfterUncached } }),
         cachedShellWasAvailable: cachedLoaded,
         screenshot: shotFile,
         console: collectors(sessionId).console,
-        pageErrors: uncachedState ? uncachedState.errors : [],
+        pageErrors: uncachedState.errors,
       };
     });
 
