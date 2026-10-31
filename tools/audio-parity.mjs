@@ -85,6 +85,18 @@ const mimeTypes = {
   '.svg': 'image/svg+xml',
 };
 
+// Mutation seam (airhorn-nxuv.3): under test mode, the synth render's
+// samples are replaced with white noise, which has no pitch - the
+// autocorrelation returns null and the pitch verdict must FAIL as
+// 'unmeasurable', never pass on a defaulted ratio. Honoured only with
+// PARITY_TEST_MODE=1: this is a production entry point, and a stray
+// PARITY_SYNTH_NOISE in the environment must never fabricate a result.
+const PARITY_TEST_MODE = process.env.PARITY_TEST_MODE === '1';
+const SYNTH_NOISE_SEAM = PARITY_TEST_MODE && process.env.PARITY_SYNTH_NOISE === '1';
+if (process.env.PARITY_SYNTH_NOISE && !PARITY_TEST_MODE) {
+  console.warn('PARITY_SYNTH_NOISE is honoured only with PARITY_TEST_MODE=1 - ignoring it and running the real measurement.');
+}
+
 // The page-side measurement. Everything numeric happens here, next to the
 // Float32 sample data, so only numbers cross the CDP boundary.
 const page = `<!doctype html>
@@ -426,13 +438,19 @@ const page = `<!doctype html>
     });
   }
 
-  async function renderHorn({ audioSrc, loop, seconds }) {
+  async function renderHorn({ audioSrc, loop, seconds, forceNoise = false }) {
     const { Horn } = await import('/src/horn.js');
     const ctx = new OfflineAudioContext(1, Math.round(SR * seconds), SR);
     const horn = new Horn({ audioContext: runningPort(ctx), ...(audioSrc ? { audioSrc } : {}) });
     const started = await horn.start({ loop });
     const rendered = await ctx.startRendering();
     const data = rendered.getChannelData(0);
+    if (forceNoise) {
+      // Mutation seam (airhorn-nxuv.3): white noise is unpitched, so the
+      // autocorrelation returns null and the pitch verdict must fail as
+      // 'unmeasurable' - the proof the check can fail that way.
+      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+    }
     let checksum = 0;
     for (let i = 0; i < data.length; i += 97) checksum = (checksum * 31 + Math.round(data[i] * 1e6)) % 1e12;
     return { started, data, usingFallback: horn.usingFallback === true, checksum };
@@ -535,7 +553,7 @@ const page = `<!doctype html>
       ...summarise(sampleBlast.data, { loop: false }),
     };
 
-    const synthBlast = mustStart('synth blast', await renderHorn({ audioSrc: missingSrc, loop: false, seconds }));
+    const synthBlast = mustStart('synth blast', await renderHorn({ audioSrc: missingSrc, loop: false, seconds, forceNoise: ${SYNTH_NOISE_SEAM} }));
     if (synthBlast.usingFallback !== true) {
       throw new Error('the synth render did not use the fallback: the 404 sentinel was served');
     }
@@ -802,8 +820,12 @@ function verdict(results) {
   const synth = results.paths.synthBlast;
   const durationRatio = sample.durationS > 0 ? synth.durationS / sample.durationS : 0;
   const centroidRatio = sample.centroidHz > 0 ? synth.centroidHz / sample.centroidHz : 0;
-  const fundamentalRatio =
-    sample.fundamentalHz && synth.fundamentalHz ? synth.fundamentalHz / sample.fundamentalHz : 1;
+  // Pitch is measured only when BOTH sides have a fundamental. The old
+  // default was 1 - dead centre of the tolerance band - so an unpitched or
+  // unmeasurable synth passed green (airhorn-nxuv.3). Unmeasurable is its
+  // own FAILING outcome, named; it is never a pass.
+  const pitchMeasured = Boolean(sample.fundamentalHz && synth.fundamentalHz);
+  const fundamentalRatio = pitchMeasured ? synth.fundamentalHz / sample.fundamentalHz : null;
   const rows = [
     {
       metric: 'peak level',
@@ -830,8 +852,8 @@ function verdict(results) {
       metric: 'pitch (fundamental)',
       sample: `${sample.fundamentalHz} Hz`,
       synth: `${synth.fundamentalHz} Hz`,
-      gap: `${((fundamentalRatio - 1) * 100).toFixed(0)}%`,
-      pass:
+      gap: pitchMeasured ? `${((fundamentalRatio - 1) * 100).toFixed(0)}%` : 'unmeasurable (no fundamental on one or both sides)',
+      pass: pitchMeasured &&
         fundamentalRatio >= TOLERANCE.fundamentalRatio[0] && fundamentalRatio <= TOLERANCE.fundamentalRatio[1],
     },
     {
