@@ -249,6 +249,18 @@ export async function openBrowser(extraFlags) {
 // Runs one origin end to end and returns its evidence object. On the HTTP
 // contrast leg the service worker CANNOT register - that is the point of the
 // contrast - so the controller wait only applies to the secure origin.
+// Mutation seam (airhorn-nxuv.11): under test mode, hide the installer wrap
+// before the button evidence is read on the secure leg, so the HTTPS
+// assertion must FAIL naming visibility - the proof the check can fail.
+// Honoured only with INSTALL_PROOF_TEST_MODE=1: this is a production proof
+// entry point, and a stray INSTALL_PROOF_HIDE_BUTTON must never fabricate a
+// failure (same guard family as the resilience-audit stub seam, airhorn-w1wh).
+const TEST_MODE = process.env.INSTALL_PROOF_TEST_MODE === '1';
+const HIDE_BUTTON_SEAM = TEST_MODE && process.env.INSTALL_PROOF_HIDE_BUTTON === '1';
+if (process.env.INSTALL_PROOF_HIDE_BUTTON && !TEST_MODE) {
+  console.warn('INSTALL_PROOF_HIDE_BUTTON is honoured only with INSTALL_PROOF_TEST_MODE=1 - ignoring it and running the real proof.');
+}
+
 async function probeOrigin(cdp, originUrl, label, expectSecure) {
   // Collect the install prompt from the first parse instant, and remember
   // exactly what the event offered. requestPrompt() needs a user gesture in
@@ -310,6 +322,13 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
     return !!reg && reg.scope === '/';
   })()`);
   ev.installPrompt = await cdp.evaluate('window.__install');
+  if (HIDE_BUTTON_SEAM && expectSecure) {
+    await cdp.evaluate(`(() => {
+      const w = document.getElementById('installer');
+      if (w) w.style.visibility = 'hidden';
+      return true;
+    })()`);
+  }
   ev.installButton = await cdp.evaluate(`(() => {
     const wrap = document.getElementById('installer');
     if (!wrap) return null;
@@ -407,6 +426,16 @@ async function main() {
     }
     if (httpsEv.installButton.disabled !== false || !httpsEv.installButton.hasAvailableClass) {
       throw new Error('Install button not enabled over HTTPS: ' + JSON.stringify(httpsEv.installButton));
+    }
+    // 'Available' is not 'clickable' (airhorn-nxuv.11): disabled/class say the
+    // button is offered, but a visibility:hidden or pointer-events:none button
+    // cannot be pressed. The collector already reads both; assert them, and
+    // treat an unreadable shape as unreadable, not as a pass.
+    if (typeof httpsEv.installButton.visibility !== 'string' || typeof httpsEv.installButton.pointerEvents !== 'string') {
+      throw new Error('Install button visibility/pointer-events unreadable over HTTPS: ' + JSON.stringify(httpsEv.installButton));
+    }
+    if (httpsEv.installButton.visibility !== 'visible' || httpsEv.installButton.pointerEvents === 'none') {
+      throw new Error('Install button enabled but not visible/clickable over HTTPS: ' + JSON.stringify(httpsEv.installButton));
     }
     if (httpEv.installPrompt.fired) throw new Error('the insecure-HTTP contrast fired the prompt - the contrast is invalid');
     if (!httpEv.installButton || typeof httpEv.installButton.disabled !== 'boolean') {
