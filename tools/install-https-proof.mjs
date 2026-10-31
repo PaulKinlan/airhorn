@@ -322,6 +322,17 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
     // zero-size or off-screen button still computes 'visible'.
     const csBtn = b ? getComputedStyle(b) : null;
     const rect = b ? b.getBoundingClientRect() : null;
+    // Two ENGINE answers, not more properties (airhorn-iqrz): a fixed
+    // property allow-list cannot see ancestor opacity (opacity does not
+    // inherit - the app's own hidden state sets it on the wrap) nor
+    // clip/overflow/occlusion (the rect still reports the unclipped box).
+    // checkVisibility walks the ancestor chain for display/visibility/
+    // opacity; elementFromPoint at the box's centre is a real hit-test - a
+    // clipped-away or covered button does not receive the hit.
+    const engineVisible = b && b.checkVisibility
+      ? b.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : null;
+    const hit = b && rect
+      ? document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) : null;
     return {
       disabled: b ? b.disabled : null,
       hasAvailableClass: wrap.classList.contains('available'),
@@ -332,6 +343,8 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
         visibility: csBtn.visibility,
         opacity: csBtn.opacity,
         pointerEvents: csBtn.pointerEvents,
+        engineVisible,
+        hitTarget: b ? (hit === b || b.contains(hit)) : null,
         rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
         viewport: { width: innerWidth, height: innerHeight },
       } : null,
@@ -343,17 +356,22 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
 }
 
 // Whether the collected installButton state describes a button a user can
-// actually perceive and tap (airhorn-nxuv.11). Three independent ways a
-// present-in-DOM button is NOT tappable, each named separately so a failure
-// says which one fired:
-//   - not perceivable: display:none, visibility != 'visible', opacity 0
-//     (button or wrap - airhorn-5n3u measured a wrap-level read passing an
-//     invisible button), a zero-size box, or a box entirely outside the
-//     viewport;
-//   - not operable: pointer-events:none on the button or the wrap;
-//   - unreadable: any expected field missing or of the wrong type. This
-//     fails AS unreadable - it never defaults to 'visible'/'auto', because
-//     a style the tool cannot read is a state it knows nothing about.
+// actually perceive and tap (airhorn-nxuv.11, airhorn-iqrz). Two engine
+// answers carry the load, because a fixed property allow-list cannot:
+//   - engineVisible (checkVisibility with checkOpacity +
+//     checkVisibilityCSS): false when the button OR ANY ANCESTOR hides it
+//     via display, visibility or opacity - ancestor opacity does not
+//     inherit, so a per-element read can never see it;
+//   - hitTarget (elementFromPoint at the box's centre): false when the
+//     centre point is clipped away, off-screen or covered by another
+//     element - the rect alone still reports the unclipped box.
+// The per-property reads (display/visibility/opacity/pointer-events, wrap
+// and button) and the rect/viewport stay, so a failure still names the
+// mechanism, and zero-size is caught even where the engine would say
+// 'visible'.
+// Any unreadable field fails AS unreadable - it never defaults to
+// 'visible'/'auto', because a style the tool cannot read is a state it
+// knows nothing about.
 function buttonPerceptibility(btn) {
   const unreadable = [];
   const str = (name, v) => {
@@ -377,6 +395,12 @@ function buttonPerceptibility(btn) {
   const display = str('button.display', b.display);
   const visibility = str('button.visibility', b.visibility);
   const pointerEvents = str('button.pointerEvents', b.pointerEvents);
+  const bool = (name, v) => {
+    if (typeof v !== 'boolean') unreadable.push(`${name} unreadable: ${JSON.stringify(v)}`);
+    return v;
+  };
+  const engineVisible = bool('button.engineVisible', b.engineVisible);
+  const hitTarget = bool('button.hitTarget', b.hitTarget);
   const opacity = str('button.opacity', b.opacity);
   if (typeof opacity === 'string' && opacity !== '' && !Number.isFinite(Number(opacity))) {
     unreadable.push(`button.opacity is not a number: ${JSON.stringify(opacity)}`);
@@ -392,6 +416,7 @@ function buttonPerceptibility(btn) {
   if (unreadable.length) return { unreadable, notPerceivable: [], notOperable: [] };
 
   const notPerceivable = [];
+  if (engineVisible === false) notPerceivable.push('engine reports the button not visible (display/visibility/opacity chain, ancestors included)');
   if (display === 'none') notPerceivable.push('button.display is none');
   if (visibility !== 'visible') notPerceivable.push(`button.visibility is ${visibility}`);
   if (Number(opacity) <= 0) notPerceivable.push(`button.opacity is ${opacity}`);
@@ -401,6 +426,7 @@ function buttonPerceptibility(btn) {
     notPerceivable.push(`button box (${x},${y} ${width}x${height}) is outside the viewport (${vw}x${vh})`);
   }
   const notOperable = [];
+  if (hitTarget === false) notOperable.push('elementFromPoint at the button centre does not reach the button (clipped away, off-screen or covered)');
   if (pointerEvents === 'none') notOperable.push('button.pointerEvents is none');
   if (wrapPointerEvents === 'none') notOperable.push('wrap.pointerEvents is none');
   return { unreadable, notPerceivable, notOperable };
