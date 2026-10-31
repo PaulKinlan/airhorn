@@ -613,23 +613,37 @@ async function shot(cdp, sessionId, name) {
 
 const EXPLAINS_RE = /offline|no connection|can.?t (?:reach|load|connect)|failed to load|unable to|retry|reconnect|try again|update available|new version|something went wrong|error/i;
 
-function summarise(state) {
+export function summarise(state) {
   // Evidence is what the page actually says somewhere rendered (airhorn-01e):
   // a region with no text, or a hidden one, explains nothing.
   const liveEvidence = (state.live || []).filter((l) => l.shown && l.text);
   const liveText = liveEvidence.map((l) => l.text).join(' | ');
-  const mentions = state.bodyText.match(EXPLAINS_RE);
+  // airhorn-nxuv.5: an explanation is credited only from an EXPLANATORY
+  // ELEMENT (a status/alert/aria-live region - collectRegions collects exactly
+  // those) whose own text says something explanatory. Crash prose elsewhere in
+  // the body ('something went wrong' in a paragraph) is not an explanation,
+  // and a live region saying something unrelated ('Ready') is not one either -
+  // both used to count. An unreadable evidence shape (no live-region array, no
+  // body text) is UNMEASURABLE - its own failing outcome, not a pass on
+  // whatever text happened to be around.
+  const measured = Array.isArray(state.live) && typeof state.bodyText === 'string';
+  const explanatory = measured ? liveEvidence.filter((l) => EXPLAINS_RE.test(l.text)) : [];
   return {
     renders: state.horn.present,
     hornVisible: state.horn.visible,
     hornSize: state.horn.present ? `${state.horn.width}x${state.horn.height}` : null,
     title: state.title,
     navType: state.navType ?? null,
-    liveRegions: state.live.length,
+    liveRegions: Array.isArray(state.live) ? state.live.length : 0,
     shownLiveRegions: liveEvidence.length,
     liveText,
-    explainsItself: liveEvidence.length > 0 || !!mentions,
-    explanationEvidence: liveText || (mentions ? `body text mentions "${mentions[0]}"` : 'none'),
+    explainsItself: measured && explanatory.length > 0,
+    explanationMeasured: measured,
+    explanationEvidence: !measured
+      ? 'unmeasurable: the live-region evidence was not collected'
+      : explanatory.length
+        ? explanatory.map((l) => `${l.role || l.live}: "${l.text}"`).join(' | ')
+        : 'none',
     controller: state.controller,
     controllerChanges: state.controllerChanges,
     online: state.online,
