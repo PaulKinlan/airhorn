@@ -27,7 +27,8 @@
  * --host-resolver-rules for the local hostname. Nothing else.
  *
  * Exit code 0 only if the HTTPS origin fires beforeinstallprompt and enables
- * the Install button AND the HTTP contrast does not fire it.
+ * the Install button AND the HTTP contrast does not fire it and leaves the
+ * Install button disabled.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -396,15 +397,24 @@ async function main() {
 
     console.log('=== Install over HTTPS proof ===');
     console.log(`  chrome: ${browserVersion}`);
-    console.log(`  HTTP  ${httpEv.origin}: secureContext=${httpEv.secureContext} sw=${httpEv.serviceWorker && !httpEv.serviceWorker.unavailable && !!httpEv.serviceWorker.scriptURL} prompt=${JSON.stringify(httpEv.installPrompt)}`);
+    console.log(`  HTTP  ${httpEv.origin}: secureContext=${httpEv.secureContext} sw=${httpEv.serviceWorker && !httpEv.serviceWorker.unavailable && !!httpEv.serviceWorker.scriptURL} prompt=${JSON.stringify(httpEv.installPrompt)} button=${JSON.stringify(httpEv.installButton)}`);
     console.log(`  HTTPS ${httpsEv.origin}: secureContext=${httpsEv.secureContext} sw=${!!httpsEv.serviceWorker} prompt=${JSON.stringify(httpsEv.installPrompt)} button=${JSON.stringify(httpsEv.installButton)}`);
     console.log(`  screenshots: ${httpEv.screenshot}, ${httpsEv.screenshot}`);
 
     if (!httpsEv.installPrompt.fired) throw new Error('beforeinstallprompt did NOT fire over HTTPS');
+    if (!httpsEv.installButton || typeof httpsEv.installButton.disabled !== 'boolean') {
+      throw new Error('Install button state unreadable over HTTPS: ' + JSON.stringify(httpsEv.installButton));
+    }
     if (httpsEv.installButton.disabled !== false || !httpsEv.installButton.hasAvailableClass) {
       throw new Error('Install button not enabled over HTTPS: ' + JSON.stringify(httpsEv.installButton));
     }
     if (httpEv.installPrompt.fired) throw new Error('the insecure-HTTP contrast fired the prompt - the contrast is invalid');
+    if (!httpEv.installButton || typeof httpEv.installButton.disabled !== 'boolean') {
+      throw new Error('Install button state unreadable over HTTP: ' + JSON.stringify(httpEv.installButton));
+    }
+    if (httpEv.installButton.disabled !== true || httpEv.installButton.hasAvailableClass) {
+      throw new Error('Install button not disabled over HTTP: ' + JSON.stringify(httpEv.installButton));
+    }
     console.log('install-https-proof: PASS');
   } finally {
     liveBrowser = null; // the handle's teardown owns it now; a late signal must not repeat it
