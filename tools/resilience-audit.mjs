@@ -265,23 +265,53 @@ async function closeBrowser(browser) {
 
 /* ----------------------------------------------------- page instrumentation */
 
+// Mutation seam (airhorn-nxuv.9): under test mode, the real start() is
+// replaced by one that throws, so the probe must leave its counters
+// UNCHANGED and record the throw - the proof the counter tracks playback,
+// not intent. Honoured only with RESILIENCE_TEST_MODE=1, like the stub seam.
+const START_THROWS_SEAM = process.env.RESILIENCE_TEST_MODE === '1'
+  && process.env.RESILIENCE_START_THROWS === '1';
+
 const PROBE = `
 (() => {
-  window.__probe = { bufferStarts: 0, oscStarts: 0 };
+  window.__probe = { bufferStarts: 0, oscStarts: 0, startThrows: 0, lastStartError: null };
   window.__errors = [];
   window.__marker = Math.random().toString(36).slice(2) + Date.now();
   window.addEventListener('error', (e) => window.__errors.push('error: ' + (e.message || String(e))));
   window.addEventListener('unhandledrejection', (e) => {
     window.__errors.push('unhandledrejection: ' + String((e.reason && e.reason.message) || e.reason));
   });
+  // A start() counts only when playback actually STARTED: run it FIRST and
+  // increment after it returns (airhorn-nxuv.9). The old order (++ before
+  // start) recorded intent, so a start() that threw still read as a buffer
+  // started - absence looked like success. A throw is counted as a THROW,
+  // with the message kept, so a failed start is an explicit outcome in the
+  // record, not a zero that looks healthy. (The app swallows start() throws
+  // - airhorn.js .catch(() => false) and horn.js try/catch around osc.start -
+  // so without this the failure would be invisible everywhere.)
+  const wrapStart = (node, field) => {
+    const start = ${START_THROWS_SEAM
+      ? '() => { throw new Error("start() forced to throw (mutation seam airhorn-nxuv.9)"); }'
+      : 'node.start.bind(node)'};
+    node.start = (...x) => {
+      try {
+        const r = start(...x);
+        window.__probe[field]++;
+        return r;
+      } catch (e) {
+        window.__probe.startThrows++;
+        window.__probe.lastStartError = String((e && e.message) || e);
+        throw e;
+      }
+    };
+  };
   const AC = window.AudioContext || window.webkitAudioContext;
   if (AC) {
     if (AC.prototype.createBufferSource) {
       const orig = AC.prototype.createBufferSource;
       AC.prototype.createBufferSource = function (...a) {
         const node = orig.apply(this, a);
-        const start = node.start.bind(node);
-        node.start = (...x) => { window.__probe.bufferStarts++; return start(...x); };
+        wrapStart(node, 'bufferStarts');
         return node;
       };
     }
@@ -289,8 +319,7 @@ const PROBE = `
       const orig = AC.prototype.createOscillator;
       AC.prototype.createOscillator = function (...a) {
         const node = orig.apply(this, a);
-        const start = node.start.bind(node);
-        node.start = (...x) => { window.__probe.oscStarts++; return start(...x); };
+        wrapStart(node, 'oscStarts');
         return node;
       };
     }
@@ -579,7 +608,14 @@ async function pressHorn(cdp, sessionId) {
   if (!box || box.w < 2 || box.h < 2) {
     return { dispatched: false, responded: false, sounded: false, reason: 'horn has no hit area' };
   }
-  const before = await evaluate(cdp, sessionId, 'window.__probe ? (window.__probe.bufferStarts + window.__probe.oscStarts) : -1');
+  const probeShot = 'window.__probe ? { starts: window.__probe.bufferStarts + window.__probe.oscStarts, throws: window.__probe.startThrows || 0, lastError: window.__probe.lastStartError || null } : null';
+  const before = await evaluate(cdp, sessionId, probeShot);
+  // A page WITH a hit area but no probe means the instrumentation never
+  // injected: hornUsable is UNMEASURABLE, and unmeasurable fails as itself
+  // (airhorn-nxuv.9) rather than reading as a horn that made no sound.
+  if (!before) {
+    throw new Error('horn press unmeasurable: the audio probe (__probe) was not injected into a document that has a horn');
+  }
   await cdp.send('Input.dispatchMouseEvent', {
     type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1,
   }, sessionId);
@@ -589,14 +625,22 @@ async function pressHorn(cdp, sessionId) {
     type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1,
   }, sessionId);
   await sleep(150);
-  const after = await evaluate(cdp, sessionId, 'window.__probe ? (window.__probe.bufferStarts + window.__probe.oscStarts) : -1');
-  const started = before >= 0 && after > before;
+  const after = await evaluate(cdp, sessionId, probeShot);
+  if (!after) {
+    throw new Error('horn press unmeasurable: the audio probe (__probe) vanished across the press');
+  }
+  const started = after.starts > before.starts;
+  const startThrows = after.throws - before.throws;
   return {
     dispatched: true,
     ariaPressedWhileHeld: mid.horn.ariaPressed,
     responded: mid.horn.ariaPressed === 'true',
     sounded: started,
-    audioStarts: { before, after },
+    audioStarts: { before: before.starts, after: after.starts },
+    // A start() that threw is an explicit failing outcome with the error in
+    // the record - never a zero that looks healthy (airhorn-nxuv.9).
+    startThrows,
+    ...(startThrows > 0 ? { startError: after.lastError } : {}),
   };
 }
 
