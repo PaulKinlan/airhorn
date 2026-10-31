@@ -767,6 +767,20 @@ async function runAudit() {
   // RESILIENCE_ONLY=liefi,update re-runs just those scenarios (they all share one server).
   const only = (process.env.RESILIENCE_ONLY || '').split(',').map((s) => s.trim()).filter(Boolean);
   const want = (id) => only.length === 0 || only.includes(id);
+  // A selection naming no known scenario measured nothing BY MISTAKE
+  // (airhorn-nxuv.23): a typo used to run zero scenarios and exit 0. 'none'
+  // is the documented intentional empty selection; anything else unknown is
+  // an ERROR row, so the audit fails and names the typo.
+  const KNOWN_SCENARIOS = ['offline', 'liefi', 'update', 'quota', 'blocked', 'corrupt'];
+  const unknownSelection = only.filter((s) => s !== 'none' && !KNOWN_SCENARIOS.includes(s));
+  if (unknownSelection.length) {
+    results.push({
+      id: 'selection',
+      name: 'scenario selection',
+      status: 'ERROR',
+      error: `RESILIENCE_ONLY names unknown scenario(s): ${unknownSelection.join(', ')} - known: ${KNOWN_SCENARIOS.join(', ')} (use 'none' for an intentional empty selection)`,
+    });
+  }
 
   // Test seam (airhorn-w1wh review, rounds 3 and 4): a scenario error is otherwise
   // unreachable without a working browser, so a spawned run can stage exactly one
