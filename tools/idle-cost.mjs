@@ -382,12 +382,15 @@ async function main() {
         const ctx = new AudioContext();
         const sr = ctx.sampleRate;
         const noise = ctx.createBuffer(1, sr, sr);
-        const impulse = ctx.createBuffer(1, sr >> 1, sr);
+        const impulse = ctx.createBuffer(1, sr >> 2, sr);
         const nc = noise.getChannelData(0);
         const ic = impulse.getChannelData(0);
         for (let i = 0; i < nc.length; i++) nc[i] = Math.random() * 2 - 1;
         for (let i = 0; i < ic.length; i++) ic[i] = Math.random() * 2 - 1;
-        for (let i = 0; i < 8; i++) {
+        // 4 light convolvers, not 8 heavy ones: the first version (8 x 0.5s
+        // impulses) made the busiest-renderer identity flip mid-window and B
+        // failed on 'unmeasured' instead of on a MEASURED high CPU.
+        for (let i = 0; i < 4; i++) {
           const src = ctx.createBufferSource();
           src.buffer = noise; src.loop = true;
           const conv = ctx.createConvolver();
