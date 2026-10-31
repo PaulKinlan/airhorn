@@ -742,7 +742,7 @@ async function withBrowser(id, name, fn) {
   results.push(result);
   const verdict = result.error
     ? `ERROR ${result.error}`
-    : `renders=${result.renders} hornVisible=${result.hornVisible} hornUsable=${result.hornUsable} explains=${result.explainsItself}`;
+    : `renders=${result.renders} hornVisible=${result.hornVisible} hornUsable=${result.hornUsable} explains=${result.explainsItself}${result.measuredDocument ? ` doc=${result.measuredDocument}` : ''}`;
   console.log(`[${id}] ${name}\n  ${verdict}`);
 }
 
@@ -1303,14 +1303,24 @@ export function writeReport(scenarios, outDir = OUT) {
   };
   fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify(report, null, 2));
 
+  // The named reason must reach the operator even when it explains a NO
+  // (airhorn-mslu): 'NO (the deep-link navigation never replaced the
+  // document...)' is a different row from 'NO', and measuredDocument is what
+  // tells a leftover cached page apart from the page under test.
   const row = (r) => [
     r.id,
     r.name,
     (r.status === 'ERROR' || r.error) ? 'ERROR' : (r.renders ? 'yes' : 'NO'),
     r.error ? '-' : (r.hornVisible ? 'yes' : 'NO'),
     r.error ? '-' : (r.hornUsable ? 'yes' : 'NO'),
-    r.error ? '-' : (r.explainsItself ? `yes (${r.explanationEvidence})` : 'NO'),
-    r.error || '',
+    r.error
+      ? '-'
+      : r.explainsItself
+        ? `yes (${r.explanationEvidence})`
+        : r.explanationEvidence && r.explanationEvidence !== 'none'
+          ? `NO (${r.explanationEvidence})`
+          : 'NO',
+    [r.measuredDocument ? `doc: ${r.measuredDocument}` : '', r.error || ''].filter(Boolean).join('; '),
   ];
   const lines = [
     '# Air Horner resilience audit',
