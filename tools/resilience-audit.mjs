@@ -1108,9 +1108,15 @@ async function runAudit() {
         `getComputedStyle(document.querySelector('.horn')).fontFamily`);
       const fontShot = await shot(cdp, sessionId, '5-fonts');
 
+      // The headline row is the WORST subcase, NAMED (airhorn-nxuv.22):
+      // spreading ...css let a JS-blocked failure (hornUsable false) pass
+      // under the CSS subcase's green in the summary table. 'Worst' = the
+      // first subcase that fails to render, show or sound; the CSS case
+      // stays the default when everything is green (it is the layout one).
+      const worst = [js, css].find((s) => !s.renders || !s.hornVisible || !s.hornUsable) || css;
       return {
-        // top-level row describes the worst blocked-asset case, the CSS one
-        ...css,
+        ...worst,
+        headlineCase: worst.label,
         subCases: { js, css },
         baselineHornSize: baseline.horn.present ? `${baseline.horn.width}x${baseline.horn.height}` : null,
         fonts: {
