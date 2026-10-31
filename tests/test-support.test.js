@@ -1047,8 +1047,9 @@ test('owner markers: a live-owned dir is kept, a dead owner is reaped, an unread
   const liveOwned = path.join(tmpdir, 'chrome-https-proof-tmp-live01');
   const deadOwned = path.join(tmpdir, 'chrome-https-proof-tmp-dead99');
   const mangled = path.join(tmpdir, 'chrome-https-proof-tmp-mangle');
+  const wrongType = path.join(tmpdir, 'chrome-https-proof-tmp-wrongt');
   const legacy = path.join(tmpdir, 'chrome-https-proof-tmp-legac1');
-  for (const dir of [liveOwned, deadOwned, mangled, legacy]) fs.mkdirSync(dir);
+  for (const dir of [liveOwned, deadOwned, mangled, wrongType, legacy]) fs.mkdirSync(dir);
   const { sweepStaleProfiles, processStartTime } = await import(REAP);
   const standIn = spawnStandIn([]); // alive, names NOTHING - the cert-dir case
   try {
@@ -1063,20 +1064,27 @@ test('owner markers: a live-owned dir is kept, a dead owner is reaped, an unread
       JSON.stringify({ pid: dead.pid, started: null }));
     // Unreadable marker: present but not parseable - must read as LIVE.
     fs.writeFileSync(path.join(mangled, '.airhorn-owner'), 'not json{');
+    // Parseable but wrong-typed (airhorn-3lx5): a STRING started field cannot
+    // be compared, so it must read live like any untrustworthy marker -
+    // a strict string-vs-number compare used to read it as STALE (reapable).
+    fs.writeFileSync(path.join(wrongType, '.airhorn-owner'),
+      JSON.stringify({ pid: standIn.pid, started: String(processStartTime(standIn.pid)) }));
     // Age the dirs AFTER the marker writes: creating the marker file bumps
     // the dir's mtime, which would otherwise read as inside the launch window.
     const old = new Date(Date.now() - 10 * 60 * 1000);
-    for (const dir of [liveOwned, deadOwned, mangled, legacy]) fs.utimesSync(dir, old, old);
+    for (const dir of [liveOwned, deadOwned, mangled, wrongType, legacy]) fs.utimesSync(dir, old, old);
     const result = sweepStaleProfiles('chrome-https-proof-', { tmpdir });
     assert.deepEqual([...result.swept].sort(), ['chrome-https-proof-tmp-dead99', 'chrome-https-proof-tmp-legac1'],
       `only the dead-owned and legacy dirs may be swept: ${JSON.stringify(result)}`);
     assert.ok(fs.existsSync(liveOwned), 'a dir owned by a live pid must be left alone');
     assert.ok(fs.existsSync(mangled), 'an unreadable marker must read as live, never as stale');
+    assert.ok(fs.existsSync(wrongType), 'a wrong-typed started field must read as live, never as stale (airhorn-3lx5)');
     assert.ok(!fs.existsSync(deadOwned), 'a dir whose owner pid is gone must be reaped');
     assert.ok(!fs.existsSync(legacy), 'a markerless legacy dir must still be reaped');
     const why = Object.fromEntries(result.kept.map((k) => [k.dir, k.why]));
     assert.match(why['chrome-https-proof-tmp-live01'] ?? '', /owned by live pid/);
     assert.match(why['chrome-https-proof-tmp-mangle'] ?? '', /treated as live/);
+    assert.match(why['chrome-https-proof-tmp-wrongt'] ?? '', /started is not a number - treated as live/);
   } finally {
     try { standIn.kill('SIGKILL'); } catch { /* already gone */ }
     fs.rmSync(tmpdir, { recursive: true, force: true });

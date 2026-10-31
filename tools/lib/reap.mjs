@@ -97,6 +97,14 @@ function ownerMarkerVerdict(dir) {
   if (started === null) {
     return { kind: 'unreadable', why: `pid ${pid} exists but its start time is unreadable` };
   }
+  // airhorn-3lx5: a parseable marker whose started is not a NUMBER (e.g. a
+  // hand-written string) cannot be compared - parseable-but-wrong-typed is
+  // still untrustworthy, so it reads live like every other unreadable marker.
+  // (null/undefined stay on the live path below: a /proc-less writer records
+  // no start time.)
+  if (marker.started !== null && marker.started !== undefined && typeof marker.started !== 'number') {
+    return { kind: 'unreadable', why: 'started is not a number' };
+  }
   if (marker.started !== null && marker.started !== undefined && marker.started !== started) {
     return { kind: 'stale', pid }; // the pid was REUSED by an unrelated process
   }
