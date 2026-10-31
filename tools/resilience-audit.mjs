@@ -8,7 +8,8 @@
  *
  * Scenarios (airhorn-ylx):
  *   1. offline after first load      - SW installed, then a real offline reload
- *   2. lie-fi                        - latency+drip emulation: cached nav vs uncached nav
+ *   2. lie-fi                        - app-shell navigation + bounded subresource
+ *                                      vs a connection that hangs then dies
  *   3. SW update while a page is open- new build deployed mid-press
  *   4. storage-quota denial          - QuotaExceededError at install-time precache
  *                                      and at a runtime cache write
@@ -821,7 +822,7 @@ async function runAudit() {
     });
 
     /* ---- 2. lie-fi: cached navigation vs a navigation the precache does not cover ---- */
-    if (want('liefi')) await withBrowser('liefi', 'lie-fi (nav hangs then fails)', async ({ cdp }, collectors) => {
+    if (want('liefi')) await withBrowser('liefi', 'lie-fi (app-shell nav vs uncached subresource)', async ({ cdp }, collectors) => {
       reset();
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
@@ -837,9 +838,10 @@ async function runAudit() {
       const cachedMs = Date.now() - cachedStart;
       const cachedState = cachedLoaded ? await readState(cdp, sessionId) : null;
 
-      // (b) an in-page request the precache does not cover: the SW falls through to
-      //     fetch() with no timeout and no catch, so it hangs for as long as the
-      //     connection does
+      // (b) an in-page request the precache does not cover: the SW bounds the
+      //     fall-through fetch at FETCH_TIMEOUT_MS (5000) and answers 503 on
+      //     failure (public/sw.js) - so under lie-fi this settles ~5s with a
+      //     visible failure, it does not hang for the connection's 9s.
       const subresource = await evaluate(cdp, sessionId, `(async () => {
         const started = Date.now();
         const raced = await Promise.race([
@@ -851,11 +853,16 @@ async function runAudit() {
         return { ...raced, waitedMs: Date.now() - started };
       })()`);
 
-      // (c) a navigation the precache does not cover: it must be served by the network,
-      //     which hangs and then fails
-      // Which document is on screen BEFORE the attempt: the marker is what tells
-      // "the deep-link attempt produced its own document (page or error page)"
-      // apart from "the previous cached page is still there" (airhorn-nxuv.8).
+      // (c) a deep-link navigation under lie-fi. The premise is the CURRENT
+      //     worker (airhorn-p344): public/sw.js answers EVERY navigation from
+      //     the verified precache shell without touching the network, and
+      //     with no shell its fetch is bounded at NAVIGATION_TIMEOUT_MS
+      //     (4000) and falls back to offlineDocument (status 200) - so the
+      //     deep link must COMMIT a new document, quickly, lie-fi or not.
+      //     measuredDocument tells that apart from the one remaining
+      //     leftover shape: a navigation that never commits within the
+      //     12000ms navigate bound (only possible if the worker is gone AND
+      //     the network hangs forever - not this 9s-destroy shape).
       const preDeepLink = await readState(cdp, sessionId);
       const uncachedStart = Date.now();
       const uncachedLoaded = await navigate(cdp, sessionId, `${origin}/deep-link`, 12000);
