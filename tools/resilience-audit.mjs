@@ -115,8 +115,18 @@ function startServer() {
     }
     let body = fs.readFileSync(file);
     if (rel === '/sw.js') {
-      const text = body.toString()
+      const original = body.toString();
+      const text = original
         .replace(/const version = "[^"]*";/, `const version = "${state.version}";`);
+      // A stamp that did not land (quote style or shape drifted) means every
+      // 'new build' the audit deploys is the SAME build - the update scenario
+      // measures nothing and reads green (airhorn-nxuv.24). Fail the serve,
+      // loudly, so the scenario errors instead.
+      if (text === original) {
+        res.writeHead(500, { 'content-type': 'text/plain' }).end(
+          'resilience-audit: could not stamp the sw.js version - the source no longer matches const version = "...";');
+        return;
+      }
       body = Buffer.from(state.swShim ? state.swShim + '\n' + text : text);
     }
     res.writeHead(200, {
