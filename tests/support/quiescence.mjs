@@ -241,6 +241,37 @@ export async function waitForQuiescence(send, {
     await sleep(pollMs);
   }
 
+  // Name the REAL cause (airhorn-kqz1): the loop can exit with the LAST
+  // sample quiet - nothing pending, the quiet condition true - because the
+  // STABILITY window never completed inside the bound: the page flapped in
+  // and out of quiet, or a starved host made each CDP round trip slow
+  // enough that stableSamples consecutive quiet samples never fit (measured
+  // on a 60-97% steal host: 3 samples in 20s). The payload then contradicts
+  // a 'work is still pending' message, and the operator hunts for app work
+  // that does not exist. Attribute by the last sample, not by habit.
+  if (last && last.probe === 'present') {
+    const drained = last.pendingTimers === 0 &&
+      last.pendingIntervals === 0 &&
+      last.pendingFetches === 0;
+    if (drained && last.quietCondition) {
+      throw new Error(
+        `Page was quiet at the final sample but never stayed quiet for ${stableSamples} consecutive samples within ${timeoutMs}ms ` +
+        `(${JSON.stringify(last)}; ${samples} samples taken, ${stable} consecutive quiet at the end). ` +
+        `Nothing is pending and the quiet condition holds - it is the STABILITY window, not the page, that did not fit the bound: ` +
+        `the page flapped in and out of quiet, or the host is too starved to poll fast enough (each sample is a CDP round trip). ` +
+        `On a loaded host, retry when it is calmer or widen timeoutMs/stableSamples deliberately; "no errors yet" cannot be asserted either way.`,
+      );
+    }
+    if (drained && !last.quietCondition) {
+      // Reachable only with stateTimeoutMs = 0 (the in-loop early throw is
+      // disabled): nothing is pending but the app state never arrived.
+      throw new Error(
+        `Page work drained within ${timeoutMs}ms, but the state this wait depends on never became true ` +
+        `(condition \`${quietExpression}\`, ${JSON.stringify(last)}). ` +
+        `Nothing is pending, so this is app state that never reached its end condition, not a page still working.`,
+      );
+    }
+  }
   throw new Error(
     `Page never went quiet within ${timeoutMs}ms ` +
     `(${JSON.stringify(last)}): work is still pending, so "no errors yet" cannot be asserted.`,

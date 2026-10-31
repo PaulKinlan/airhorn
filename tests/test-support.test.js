@@ -1197,3 +1197,51 @@ test('opening the page socket is bounded and rejects on error or close (airhorn-
   const already = await outcome(awaitSocketOpen({ readyState: 1 }));
   assert.equal(already.state, 'resolved', `an already-open socket must resolve, not settle as ${already.state}`);
 });
+
+test('waitForQuiescence attributes its timeout to the real cause, never to work that is not pending (airhorn-kqz1)', async () => {
+  // Measured on a 60-97% steal host: the loop sampled 3 times in 20s, the
+  // last sample was quiet by the function's own definition, and the timeout
+  // throw still said 'work is still pending' - sending the operator hunting
+  // for app work that did not exist. A stub `send` drives the loop with no
+  // browser: each case below is the LAST-sample shape at deadline.
+  const { waitForQuiescence } = await import('./support/quiescence.mjs');
+  const sample = (over = {}) => ({
+    probe: 'present', pendingTimers: 0, pendingIntervals: 0, pendingFetches: 0,
+    scheduled: 3, completed: 3, quietCondition: true, ...over,
+  });
+  const sendOf = (s) => async () => ({ result: { value: { ...s } } });
+
+  // 1. Quiet at the deadline, stability window never completed: the message
+  //    must name the STABILITY window (flap or a starved host), and must NOT
+  //    blame pending work. stableSamples is set unreachable on purpose.
+  await assert.rejects(
+    waitForQuiescence(sendOf(sample()), { timeoutMs: 200, pollMs: 40, stableSamples: 1000, stateTimeoutMs: 0 }),
+    (err) => {
+      assert.match(err.message, /never stayed quiet for 1000 consecutive samples/,
+        `a quiet last sample must blame the stability window: ${err.message}`);
+      assert.match(err.message, /STABILITY window, not the page/);
+      assert.doesNotMatch(err.message, /work is still pending/,
+        `nothing was pending - the message must not invent pending work: ${err.message}`);
+      return true;
+    },
+  );
+
+  // 2. Work genuinely pending at the deadline: the pending-work message is
+  //    the honest one and must survive.
+  await assert.rejects(
+    waitForQuiescence(sendOf(sample({ pendingTimers: 1, quietCondition: false })), { timeoutMs: 200, pollMs: 40, stateTimeoutMs: 0 }),
+    /work is still pending/,
+  );
+
+  // 3. Drained but the quiet condition false, with the in-loop early throw
+  //    disabled (stateTimeoutMs: 0): the deadline message must blame the app
+  //    STATE, not pending work.
+  await assert.rejects(
+    waitForQuiescence(sendOf(sample({ quietCondition: false })), { timeoutMs: 200, pollMs: 40, stateTimeoutMs: 0, quietExpression: 'false' }),
+    (err) => {
+      assert.match(err.message, /app state that never reached its end condition/, err.message);
+      assert.doesNotMatch(err.message, /work is still pending/, err.message);
+      return true;
+    },
+  );
+});
