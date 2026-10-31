@@ -378,6 +378,7 @@ async function main() {
       // non-'renderer' process that SystemInfo.getProcessInfo never reports
       // to this metric. Measured, not guessed.)
       await evaluate(`(async () => {
+        const prev = window.__airhornContext; // the constructor hook would rebind it
         const ctx = new AudioContext();
         const sr = ctx.sampleRate;
         const noise = ctx.createBuffer(1, sr, sr);
@@ -394,6 +395,7 @@ async function main() {
           src.connect(conv); conv.connect(ctx.destination); src.start();
         }
         window.__spinCtx = ctx;
+        window.__airhornContext = prev; // restore: phase C suspends the APP's context
         return true;
       })()`);
     }
