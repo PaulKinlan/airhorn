@@ -72,16 +72,19 @@ const mimeTypes = {
 };
 
 // afterBlastRenderer gates the RENDERER process in the same silent state
-// (airhorn-nxuv.15): the audio thread is where a Web Audio graph spins, and a
-// silent page should not burn a core there either. Same scale as
-// afterBlastIdle - the state under test is the same, only the thread differs.
-const BUDGET = { pristineIdle: 0.5, afterBlastIdle: 1.0, afterBlastRenderer: 1.0, hidden: 0.5 };
+// (airhorn-nxuv.15): the audio thread is where a Web Audio graph spins. The
+// value is EMPIRICAL, not mirrored: a healthy running-but-silent AudioContext
+// measured 7.3% renderer CPU on this fleet's starved VM (2026-10-31,
+// proof-sweep2 idle-green; 1.0% - the first value here - fails the healthy
+// app). 20% sits far above that noise and far below a runaway graph's ~100%.
+const BUDGET = { pristineIdle: 0.5, afterBlastIdle: 1.0, afterBlastRenderer: 20, hidden: 0.5 };
 
-// Mutation seam (airhorn-nxuv.15): under test mode, a busy Web Worker spins
-// through the whole B window - renderer-process CPU, off the main thread, no
-// intervals - so verdict B must FAIL on rendererCpuPct instead of passing
-// green. Honoured only with IDLE_COST_TEST_MODE=1, the same guard family as
-// the resilience-audit stub seam (airhorn-w1wh).
+// Mutation seam (airhorn-nxuv.15): under test mode, a Web Audio convolver
+// bank spins the audio thread through the whole B window - renderer-process
+// CPU, off the main thread, no intervals - so verdict B must FAIL on
+// rendererCpuPct instead of passing green. Honoured only with
+// IDLE_COST_TEST_MODE=1, the same guard family as the resilience-audit stub
+// seam (airhorn-w1wh).
 const TEST_MODE = process.env.IDLE_COST_TEST_MODE === '1';
 const SPIN_RENDERER_SEAM = TEST_MODE && process.env.IDLE_COST_SPIN_RENDERER === '1';
 if (process.env.IDLE_COST_SPIN_RENDERER && !TEST_MODE) {
@@ -369,15 +372,37 @@ async function main() {
       samplerate: window.__airhornContext ? window.__airhornContext.sampleRate : null,
     })`);
     if (SPIN_RENDERER_SEAM) {
-      await evaluate(`(() => {
-        const w = new Worker(URL.createObjectURL(new Blob([
-          'const until = Date.now() + ${Math.round(seconds * 1000) + 500}; while (Date.now() < until) {}'
-        ], { type: 'application/javascript' })));
-        window.__spinWorker = w;
+      // A Web Audio convolver bank: real audio-thread load in the page's OWN
+      // renderer process. (The first version of this seam spun a Worker and
+      // verdict B stayed green - Chrome runs dedicated workers in a
+      // non-'renderer' process that SystemInfo.getProcessInfo never reports
+      // to this metric. Measured, not guessed.)
+      await evaluate(`(async () => {
+        const ctx = new AudioContext();
+        const sr = ctx.sampleRate;
+        const noise = ctx.createBuffer(1, sr, sr);
+        const impulse = ctx.createBuffer(1, sr >> 1, sr);
+        const nc = noise.getChannelData(0);
+        const ic = impulse.getChannelData(0);
+        for (let i = 0; i < nc.length; i++) nc[i] = Math.random() * 2 - 1;
+        for (let i = 0; i < ic.length; i++) ic[i] = Math.random() * 2 - 1;
+        for (let i = 0; i < 8; i++) {
+          const src = ctx.createBufferSource();
+          src.buffer = noise; src.loop = true;
+          const conv = ctx.createConvolver();
+          conv.buffer = impulse;
+          src.connect(conv); conv.connect(ctx.destination); src.start();
+        }
+        window.__spinCtx = ctx;
         return true;
       })()`);
     }
     report.phases.push(await windowOf('B idle after a blast (context left running)', seconds * 1000));
+    if (SPIN_RENDERER_SEAM) {
+      // The load belongs to window B only: left running it would pollute the
+      // C/D/E windows' renderer figures.
+      await evaluate(`window.__spinCtx ? window.__spinCtx.close().then(() => true) : true`);
+    }
 
     // ------------------------------------------------------------------ C
     const suspended = await evaluate(`(async () => {
