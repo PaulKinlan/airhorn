@@ -249,9 +249,10 @@ export async function openBrowser(extraFlags) {
 // Runs one origin end to end and returns its evidence object. On the HTTP
 // contrast leg the service worker CANNOT register - that is the point of the
 // contrast - so the controller wait only applies to the secure origin.
-// Mutation seam (airhorn-nxuv.11): under test mode, hide the installer wrap
-// before the button evidence is read on the secure leg, so the HTTPS
-// assertion must FAIL naming visibility - the proof the check can fail.
+// Mutation seam (airhorn-nxuv.11, sharpened by airhorn-5n3u): under test
+// mode, hide the install BUTTON (display:none, wrapper untouched) before the
+// button evidence is read on the secure leg, so the HTTPS assertion must FAIL
+// naming the button-level check - the proof the check can fail.
 // Honoured only with INSTALL_PROOF_TEST_MODE=1: this is a production proof
 // entry point, and a stray INSTALL_PROOF_HIDE_BUTTON must never fabricate a
 // failure (same guard family as the resilience-audit stub seam, airhorn-w1wh).
@@ -323,9 +324,12 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
   })()`);
   ev.installPrompt = await cdp.evaluate('window.__install');
   if (HIDE_BUTTON_SEAM && expectSecure) {
+    // Button-level, on purpose (airhorn-5n3u): the wrapper stays
+    // visible/auto, so this RED is only caught by a check that reads the
+    // BUTTON - the wrapper read passes it.
     await cdp.evaluate(`(() => {
-      const w = document.getElementById('installer');
-      if (w) w.style.visibility = 'hidden';
+      const b = document.querySelector('#installer button');
+      if (b) b.style.display = 'none';
       return true;
     })()`);
   }
@@ -334,11 +338,20 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
     if (!wrap) return null;
     const b = wrap.querySelector('button');
     const cs = getComputedStyle(wrap);
+    const bcs = b ? getComputedStyle(b) : null;
     return {
       disabled: b ? b.disabled : null,
       hasAvailableClass: wrap.classList.contains('available'),
       visibility: cs.visibility,
       pointerEvents: cs.pointerEvents,
+      // The BUTTON, not just the wrapper (airhorn-5n3u): display:none,
+      // opacity:0 and button-level visibility/pointer-events all passed the
+      // wrapper read. checkVisibility covers display/visibility/opacity up
+      // the ancestor chain; pointer-events is read computed (it inherits).
+      buttonVisible: b && typeof b.checkVisibility === 'function'
+        ? b.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+        : null,
+      buttonPointerEvents: bcs ? bcs.pointerEvents : null,
       text: b ? b.textContent.trim() : null,
     };
   })()`);
@@ -436,6 +449,15 @@ async function main() {
     }
     if (httpsEv.installButton.visibility !== 'visible' || httpsEv.installButton.pointerEvents === 'none') {
       throw new Error('Install button enabled but not visible/clickable over HTTPS: ' + JSON.stringify(httpsEv.installButton));
+    }
+    // ... and at the BUTTON itself (airhorn-5n3u): the wrapper can be
+    // visible/auto while the button is display:none, opacity:0 or hidden -
+    // all of which passed the wrapper read.
+    if (typeof httpsEv.installButton.buttonVisible !== 'boolean' || typeof httpsEv.installButton.buttonPointerEvents !== 'string') {
+      throw new Error('Install button-level visibility unreadable over HTTPS: ' + JSON.stringify(httpsEv.installButton));
+    }
+    if (httpsEv.installButton.buttonVisible !== true || httpsEv.installButton.buttonPointerEvents === 'none') {
+      throw new Error('Install button enabled but not visible/clickable at the button over HTTPS: ' + JSON.stringify(httpsEv.installButton));
     }
     if (httpEv.installPrompt.fired) throw new Error('the insecure-HTTP contrast fired the prompt - the contrast is invalid');
     if (!httpEv.installButton || typeof httpEv.installButton.disabled !== 'boolean') {
