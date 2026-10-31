@@ -61,6 +61,18 @@ export function makeRenderModel() {
     // its own text read shown:true from visibility:hidden and opacity:0
     // (airhorn-s52). Descend either way: children may override visibility.
     if (facts.visibility === 'hidden') return 'own';
+    // visibility:collapse (airhorn-nxuv.27): for a NON-table element it
+    // computes and paints exactly like hidden, so only its own text is
+    // dropped. For a table-internal box (row, row group, column, column
+    // group) collapse REMOVES the box: nothing in the subtree is painted
+    // and, unlike visibility:hidden, a descendant's visibility:visible
+    // cannot override it (CSS 2.1 11.1 'dynamic effects') - so the subtree
+    // is pruned whole. Used to fall through to 'text': a collapsed row's
+    // caption counted as visible text.
+    if (facts.visibility === 'collapse') {
+      return /^(table-row|table-row-group|table-header-group|table-footer-group|table-column|table-column-group)$/
+        .test(facts.display || '') ? 'none' : 'own';
+    }
     if (!(facts.opacity > 0.05)) return 'own';
     return 'text';
   };

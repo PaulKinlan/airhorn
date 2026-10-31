@@ -569,6 +569,14 @@ test('the render model: shown IS visible text; a skipped node contributes nothin
     { name: 'a hidden element with a visible descendant', tree: el({ visibility: 'hidden' }, 'hidden own text', [el({}, 'kept child text')]), text: 'kept child text' },
     { name: 'a region inside a display:none ancestor', tree: el({ boxChain: false }, 'hidden ancestor status'), text: '' },
     { name: 'a visibility:visible region inside a visibility:hidden ancestor', tree: el({}, 'visible override region'), text: 'visible override region' },
+    // visibility:collapse (airhorn-nxuv.27): on a non-table element it is
+    // hidden - own text dropped, a visible descendant survives. On a
+    // table-internal box it REMOVES the box and no descendant can override
+    // (CSS 2.1 11.1), so the whole subtree is pruned. It used to fall
+    // through to 'text' in both shapes.
+    { name: 'a visibility:collapse block with a visible descendant', tree: el({ visibility: 'collapse' }, 'collapsed own text', [el({}, 'kept child text')]), text: 'kept child text' },
+    { name: 'a visibility:collapse table row removes the whole row', tree: el({ display: 'table-row', visibility: 'collapse' }, 'collapsed row text', [el({}, 'collapsed cell text')]), text: '' },
+    { name: 'a visibility:collapse table-column group removes its columns', tree: el({ display: 'table-column-group', visibility: 'collapse' }, '', [el({ display: 'table-column' }, 'collapsed column text')]), text: '' },
     { name: 'an opacity:0 region', tree: el({ boxChain: false, opacity: 0 }, 'echo opacity zero'), text: '' },
     { name: 'a region in closed <details>', tree: el({ boxChain: false }, 'closed details alert'), text: '' },
     { name: 'a message only in an open shadow root', tree: el({}, '', [], shadowRoot(el({}, 'shadow alert text'))), text: 'shadow alert text' },
