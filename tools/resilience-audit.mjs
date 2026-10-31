@@ -866,8 +866,30 @@ async function runAudit() {
       const pressedState = await readState(cdp, sessionId);
 
       state.version = '2.0.0-audit-next';
-      await evaluate(cdp, sessionId, `navigator.serviceWorker.getRegistration()
-        .then((reg) => reg && reg.update()).then(() => true).catch(() => false)`);
+      // Mutation seam (airhorn-nxuv.6): under test mode, make the update fetch
+      // fail so reg.update() really rejects - the proof that this scenario CAN
+      // fail. Honoured only with RESILIENCE_TEST_MODE=1, like the stub seam.
+      if (testMode && process.env.RESILIENCE_UPDATE_REJECT === '1') {
+        state.overrides.set('/sw.js', { status: 500, body: 'update forced to fail (mutation seam)' });
+      }
+      // The update call is the thing under test, so its outcome is RECORDED,
+      // never swallowed (airhorn-nxuv.6): the old `.catch(() => false)` turned
+      // a rejected reg.update() into a discarded `false` and the row reported
+      // pressInterrupted:false with status OK - a failed update read as a pass.
+      // Now a rejection is its own explicit FAILING outcome with the rejection
+      // message in the record, and a missing registration is UNMEASURABLE -
+      // both fail the scenario instead of fitting current behaviour.
+      const update = await evaluate(cdp, sessionId, `navigator.serviceWorker.getRegistration()
+        .then((reg) => {
+          if (!reg) return { outcome: 'unmeasurable', detail: 'no service worker registration to update' };
+          return reg.update().then(
+            () => ({ outcome: 'updated' }),
+            (err) => ({ outcome: 'rejected', detail: String((err && err.message) || err) }),
+          );
+        })`);
+      if (update.outcome !== 'updated') {
+        throw new Error(`update-during-press measured nothing: reg.update() ${update.outcome} - ${update.detail}`);
+      }
       await sleep(3000);
 
       const afterState = await readState(cdp, sessionId).catch(() => null);
@@ -880,6 +902,7 @@ async function runAudit() {
       const finalState = await readState(cdp, sessionId);
       return {
         swActive: sw.active,
+        update,
         pressedWhileHeld: pressedState.horn.ariaPressed,
         autoReloaded: reloaded,
         navigationsObserved: navigations,
