@@ -387,10 +387,11 @@ async function main() {
         const ic = impulse.getChannelData(0);
         for (let i = 0; i < nc.length; i++) nc[i] = Math.random() * 2 - 1;
         for (let i = 0; i < ic.length; i++) ic[i] = Math.random() * 2 - 1;
-        // 4 light convolvers, not 8 heavy ones: the first version (8 x 0.5s
-        // impulses) made the busiest-renderer identity flip mid-window and B
-        // failed on 'unmeasured' instead of on a MEASURED high CPU.
-        for (let i = 0; i < 4; i++) {
+        // 8 convolvers on 0.25s impulses: 4 measured only 12.28% (under the
+        // 20% bound - healthy noise already reaches 7.3%); 8 x 0.5s flipped
+        // the busiest-renderer identity mid-window ('unmeasured'). This is
+        // the measured middle.
+        for (let i = 0; i < 8; i++) {
           const src = ctx.createBufferSource();
           src.buffer = noise; src.loop = true;
           const conv = ctx.createConvolver();
