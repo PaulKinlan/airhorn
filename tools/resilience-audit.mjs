@@ -1208,10 +1208,25 @@ async function runAudit() {
       const onlineAgain = await readState(cdp, sessionId);
       await reload(cdp, sessionId);
       const onlineSecond = await readState(cdp, sessionId);
-      await evaluate(cdp, sessionId, `navigator.serviceWorker.getRegistration()
-        .then((reg) => reg && reg.update()).then(() => true).catch(() => false)`);
+      // The recovery update is the mechanism under test, so its outcome is
+      // RECORDED, never swallowed (airhorn-v7ba, the same fix as nxuv.6's
+      // update scenario): a rejected reg.update() or a null registration used
+      // to fold into recoveredAfterSwUpdate:false, indistinguishable from
+      // 'the update ran and the app did not recover'. The same mutation seam
+      // as scenario 3 forces the rejection under test mode.
+      if (testMode && process.env.RESILIENCE_UPDATE_REJECT === '1') {
+        state.overrides.set('/sw.js', { status: 500, body: 'update forced to fail (mutation seam)' });
+      }
+      const recoveryUpdate = await evaluate(cdp, sessionId, `navigator.serviceWorker.getRegistration()
+        .then((reg) => {
+          if (!reg) return { outcome: 'unmeasurable', detail: 'no service worker registration to update' };
+          return reg.update().then(
+            () => ({ outcome: 'updated' }),
+            (err) => ({ outcome: 'rejected', detail: String((err && err.message) || err) }),
+          );
+        })`);
       await sleep(1500);
-      const afterUpdate = await readState(cdp, sessionId).catch(() => null);
+      const afterUpdate = await readState(cdp, sessionId).catch((err) => ({ unreadable: String((err && err.message) || err) }));
       const finalShot = await shot(cdp, sessionId, '6-corrupt-after-online-update');
 
       return {
@@ -1238,7 +1253,15 @@ async function runAudit() {
         hornUsable: hornAfterShell.sounded,
         recoveredOnline: !!onlineAgain && onlineAgain.horn.present,
         recoveredAfterSecondLoad: !!onlineSecond && onlineSecond.horn.present,
-        recoveredAfterSwUpdate: !!(afterUpdate && afterUpdate.horn.present),
+        swUpdate: recoveryUpdate,
+        // Claimed only when an update RAN and the page was READABLE
+        // (airhorn-v7ba): anything else is a named 'unmeasurable', never
+        // folded into false next to a real not-recovered.
+        recoveredAfterSwUpdate: recoveryUpdate.outcome !== 'updated'
+          ? `unmeasurable: reg.update() ${recoveryUpdate.outcome} - ${recoveryUpdate.detail}`
+          : afterUpdate.unreadable
+            ? `unmeasurable: state unreadable after the update (${afterUpdate.unreadable})`
+            : !!afterUpdate.horn.present,
         screenshots: [jsShot, shellShot, finalShot],
         console: collectors(sessionId).console,
         pageErrors: [...afterJsCorruption.errors, ...afterShellCorruption.errors],
