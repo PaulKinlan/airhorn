@@ -1055,6 +1055,16 @@ async function runAudit() {
       const sw = await waitForSw(cdp, sessionId);
       assertSwActive(sw, 'corrupt');
 
+      // Mutation seam (airhorn-nxuv.7): under test mode, delete every cache so
+      // the scenario must FAIL naming the missing cache - the proof that this
+      // check can fail. Honoured only with RESILIENCE_TEST_MODE=1, like the
+      // stub seam.
+      if (testMode && process.env.RESILIENCE_CACHE_MISS === '1') {
+        await evaluate(cdp, sessionId, `(async () => {
+          for (const n of await caches.keys()) await caches.delete(n);
+          return true;
+        })()`);
+      }
       const cacheInfo = await evaluate(cdp, sessionId, `(async () => {
         const names = await caches.keys();
         const name = names.find((n) => n.startsWith('airhorner-'));
@@ -1063,7 +1073,21 @@ async function runAudit() {
         const keys = await cache.keys();
         return { name, urls: keys.map((r) => new URL(r.url).pathname) };
       })()`);
+      // The corruption is the thing under test, so what it corrupts must EXIST
+      // and the corruption must LAND - a missing cache, a cache with no asset,
+      // or a corruption that touched nothing used to read exactly like a
+      // healthy run (airhorn-nxuv.7): the row passed without the corruption
+      // ever being exercised. Each is an explicit failing outcome naming what
+      // was missing, not a false green. (Same false-green family as nxuv.21:
+      // an empty container is not the thing - a cache with zero entries is not
+      // a corrupted cache.)
+      if (!cacheInfo || !cacheInfo.name) {
+        throw new Error('corrupt-cache measured nothing: no airhorner-* cache exists to corrupt (precache missing or unreadable after an activated SW)');
+      }
       const assetUrl = (cacheInfo.urls || []).find((u) => u.startsWith('/assets/'));
+      if (!assetUrl) {
+        throw new Error(`corrupt-cache measured nothing: cache "${cacheInfo.name}" has no /assets/ entry to corrupt (entries: ${(cacheInfo.urls || []).length})`);
+      }
 
       // Corrupt the cached JS bundle: valid response, broken body.
       const jsCorrupted = await evaluate(cdp, sessionId, `(async () => {
@@ -1077,6 +1101,9 @@ async function runAudit() {
           { headers: { 'content-type': 'application/javascript' } }));
         return target;
       })()`);
+      if (typeof jsCorrupted !== 'string' || !jsCorrupted.startsWith('http')) {
+        throw new Error(`corrupt-cache measured nothing: the asset corruption was not exercised (${jsCorrupted})`);
+      }
 
       await cdp.send('Network.emulateNetworkConditions', {
         offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0,
@@ -1104,6 +1131,9 @@ async function runAudit() {
         }
         return touched;
       })()`);
+      if (!(shellCorrupted > 0)) {
+        throw new Error(`corrupt-cache measured nothing: the shell corruption touched ${shellCorrupted} entries (no / or /index.html in cache "${cacheInfo.name}")`);
+      }
       const shellLoaded = await reload(cdp, sessionId);
       const afterShellCorruption = await readState(cdp, sessionId);
       const shellShot = await shot(cdp, sessionId, '6-corrupt-shell-offline');
