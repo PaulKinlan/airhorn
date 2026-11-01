@@ -167,27 +167,49 @@ export const defaultFileIsRegular = (root, relPath) => {
   }
 };
 
-export const describeNonFile = (root, relPath) => {
-  if (!relPath) return 'an empty path (path.join(root, \'\') resolves to the root itself)';
+/*
+ * What a path on disk IS, as a value logic can branch on. 'pending' means
+ * "not created yet"; a path that EXISTS but is not a regular file is a
+ * different world - it must surface as a violation, never read as pending
+ * (the tools/ sweep residual: with an isFile-style existence check a
+ * directory at a test/-spelled suite path read 'not a file' -> 'pending' and
+ * validated clean).
+ */
+export const pathKind = (root, relPath) => {
+  if (!relPath) return 'empty'; // path.join(root, '') resolves to the root itself
   const full = path.join(root, relPath);
   let lst;
   try {
     lst = fs.lstatSync(full);
   } catch {
-    return 'missing from disk';
+    return 'missing';
   }
   if (lst.isSymbolicLink()) {
+    let target;
     try {
-      return fs.statSync(full).isDirectory()
-        ? 'a symlink to a directory, not a file'
-        : 'a symlink to a non-file';
+      target = fs.statSync(full);
     } catch {
-      return 'a symlink whose target does not resolve';
+      return 'symlink-broken';
     }
+    if (target.isFile()) return 'file';
+    return target.isDirectory() ? 'symlink-to-directory' : 'symlink-to-nonfile';
   }
-  if (lst.isDirectory()) return 'a directory, not a file';
-  if (!lst.isFile()) return 'a non-regular file (socket/fifo/device)';
-  return 'present';
+  if (lst.isFile()) return 'file';
+  if (lst.isDirectory()) return 'directory';
+  return 'other-nonfile';
+};
+
+export const describeNonFile = (root, relPath) => {
+  switch (pathKind(root, relPath)) {
+    case 'empty': return 'an empty path (path.join(root, \'\') resolves to the root itself)';
+    case 'missing': return 'missing from disk';
+    case 'symlink-to-directory': return 'a symlink to a directory, not a file';
+    case 'symlink-to-nonfile': return 'a symlink to a non-file';
+    case 'symlink-broken': return 'a symlink whose target does not resolve';
+    case 'directory': return 'a directory, not a file';
+    case 'other-nonfile': return 'a non-regular file (socket/fifo/device)';
+    default: return 'present';
+  }
 };
 
 export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
@@ -196,6 +218,11 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
   // What the thing on disk IS, when the real-disk checker is the one that ran
   // (an injected predicate has no disk to describe).
   const what = (relPath) => (usingDefault ? ` (${describeNonFile(root, relPath)})` : '');
+  // The pending carve-out distinguishes 'not created yet' from 'exists but is
+  // not a file' only when the real-disk checker can say which (the sweep
+  // residual: a directory at a test/-spelled suite path must be a violation,
+  // not a silent pending).
+  const pathKindOf = usingDefault ? (relPath) => pathKind(root, relPath) : undefined;
   const pendingDeclared = extractPendingSuites(tsvText);
   const violations = [];
 
@@ -312,7 +339,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
         continue;
       }
 
-      if (isPendingSuite(token, pendingDeclared, fileExists)) {
+      if (isPendingSuite(token, pendingDeclared, fileExists, pathKindOf)) {
         continue;
       }
 
@@ -352,10 +379,18 @@ export function extractPendingSuites(tsvText) {
 
 /**
  * Checks whether a suite is currently pending (declared pending or test/ spelling,
- * and absent from disk).
+ * and absent from disk). The carve-out covers "not created yet", NEVER "exists
+ * but is not a file": when the caller can supply pathKindOf (the real-disk
+ * checker can), a path present as a directory / symlink-to-directory is NOT
+ * pending - it falls through to the existence violation, named for what it is.
+ * Without a pathKindOf (an injected boolean predicate carries no type
+ * information) the honest fallback is the old boolean-only rule.
  */
-export function isPendingSuite(suite, pendingDeclared, fileExists) {
-  return (suite.startsWith('test/') || pendingDeclared.has(suite)) && !fileExists(suite);
+export function isPendingSuite(suite, pendingDeclared, fileExists, pathKindOf) {
+  if (fileExists(suite)) return false; // a regular file: active, not pending
+  if (!(suite.startsWith('test/') || pendingDeclared.has(suite))) return false;
+  if (pathKindOf && pathKindOf(suite) !== 'missing') return false; // present but wrong-typed
+  return true;
 }
 
 // --- `@importers` rows: the suite set is DERIVED from the tree, not hand-listed (airhorn-ooqm) ----
