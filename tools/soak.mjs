@@ -380,6 +380,58 @@ const instrumentation = (mutantScript) => `
 
 /* --------------------------------- report --------------------------------- */
 
+/*
+ * The audio-node release decision, pure and exported so the mutation harness
+ * replays recorded and synthetic samples through the REAL check rather than a
+ * copy (the tools/ assertion-honesty sweep, finding #5). samples = every point
+ * taken; afterCycles = the quiesced sample. Returns { pass, detail }.
+ *
+ * Bounds: live sources <= 2 (one playing plus a tail); live oscillators <= 3
+ * (one full fallback blast is SYNTH_FREQUENCIES.length = 3, src/horn.js:39);
+ * heap counts are taken after a forced GC, so retained-but-collectible nodes
+ * are gone and anything counted is genuinely retained. Healthy recorded run:
+ * live sources max 0 (heap 0), oscillators max 0, sources 245 created / 245
+ * ended. A leak climbs past either bound within a few cycles.
+ *
+ * UNMEASURED is its own failure, never a zero: a null heap sample means the
+ * prototype was never captured or the CDP count query failed, and the old
+ * '?? 0' read that as a healthy 0 (finding #5a). The one vacuous exception is
+ * structural: the instrumentation captures a node's prototype on FIRST
+ * creation, so heapOscillators === null while oscillatorsCreated === 0 can only
+ * mean no oscillator has ever existed (the common healthy case - the fallback
+ * synth never engages when decoding works). null WITH creations on the counter
+ * is a broken measurement and fails as such.
+ */
+export const audioNodesReleased = (samples, afterCycles) => {
+  const liveSourcesMax = Math.max(...samples.map((point) => point.liveSources));
+  const liveOscillatorsMax = Math.max(...samples.map((point) => point.liveOscillators));
+  const heapMax = (key, created) => {
+    if (created === 0) return { max: 0, vacuous: true };
+    const values = samples.map((point) => point[key]);
+    if (values.some((value) => value === null || value === undefined)) return { max: null, vacuous: false };
+    return { max: Math.max(...values), vacuous: false };
+  };
+  const heapSources = heapMax('heapBufferSources', afterCycles.sourcesCreated);
+  const heapOscillators = heapMax('heapOscillators', afterCycles.oscillatorsCreated);
+
+  const pass = liveSourcesMax <= 2 && liveOscillatorsMax <= 3
+    && heapSources.max !== null && heapSources.max <= 2
+    && heapOscillators.max !== null && heapOscillators.max <= 3
+    && afterCycles.liveSources === 0 && afterCycles.liveOscillators === 0;
+
+  const heapText = (heap, noun) => (heap.vacuous
+    ? `no ${noun} ever created`
+    : heap.max === null
+      ? `${noun} heap count UNMEASURED (the prototype was never captured or the count query failed - unknown, not 0)`
+      : `${noun} heap max ${heap.max}`);
+  const detail =
+    `live sources max ${liveSourcesMax} (${heapText(heapSources, 'sources')}), ` +
+    `live oscillators max ${liveOscillatorsMax} (${heapText(heapOscillators, 'oscillators')}), ` +
+    `sources created ${afterCycles.sourcesCreated} / ended ${afterCycles.sourcesEnded}, ` +
+    `oscillators created ${afterCycles.oscillatorsCreated} / ended ${afterCycles.oscillatorsEnded}`;
+  return { pass, detail };
+};
+
 const checks = [];
 function check(name, pass, detail) {
   checks.push({ name, pass: Boolean(pass), detail });
@@ -830,14 +882,11 @@ async function main() {
       `(budget ${options.heapBudgetMb} MB, monotonic=${heapMonotonic})`,
     );
 
-    const liveSourcesMax = Math.max(...samples.map((point) => point.liveSources));
-    const heapSourcesMax = Math.max(...samples.map((point) => point.heapBufferSources ?? 0));
+    const audioNodes = audioNodesReleased(samples, afterCycles);
     const liveCheck = check(
       'audio nodes are released after every cycle',
-      liveSourcesMax <= 2 && heapSourcesMax <= 2 && afterCycles.liveSources === 0,
-      `live sources max ${liveSourcesMax} (heap ${heapSourcesMax}), oscillators max ` +
-      `${Math.max(...samples.map((point) => point.liveOscillators))}, ` +
-      `sources created ${afterCycles.sourcesCreated} / ended ${afterCycles.sourcesEnded}`,
+      audioNodes.pass,
+      audioNodes.detail,
     );
 
     const contextMax = Math.max(...samples.map((point) => point.heapAudioContexts ?? 0));
@@ -1093,7 +1142,12 @@ async function main() {
   }
 }
 
-main().then((code) => {
+// Only a direct `node tools/soak.mjs` runs the soak: importing the module (the
+// mutation harness replays samples through audioNodesReleased) must not launch
+// a browser.
+const invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedAsScript) {
+  main().then((code) => {
   // Same drain the catch has: even a PASSING soak against a peer that
   // swallows the ws close-frame holds the event loop on the half-open socket
   // after every check has passed (airhorn-uenq). The summary and report are
@@ -1106,4 +1160,5 @@ main().then((code) => {
   // holds the event loop past the finally (airhorn-kduy; cache-growth's
   // catch does the same).
   process.exit(1);
-});
+  });
+}
