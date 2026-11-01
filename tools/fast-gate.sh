@@ -165,10 +165,58 @@ runner_for() {
   esac
 }
 
-LIST=0; BUILD_PLAN=0; STAMP_DIST=0; BASE=''; EXPLICIT=()
+# Declaration vs content, in exactly one direction each way, and it cannot be fooled silently
+# (airhorn-z4cn step 2): a suite DECLARED node-test must import node:test runner symbols; a
+# suite DECLARED script must NOT (that inverse shape is the one that ran 6 real node:test
+# suites under the script tier with no TAP counts). Declaration is authority; content is the
+# audit. A disagreement fails with both facts named. Verified over EVERY declared suite at
+# every gate start - 24 greps, milliseconds - so a wrong declaration cannot ride along.
+NODE_TEST_IMPORT_RE="from 'node:test'|from \"node:test\"|require\\('node:test'\\)"
+verify_suite_tiers() { # no args: every declared suite; returns non-zero on any disagreement
+  local bad=0 s d line
+  [ -n "${SUITE_TIERS:-}" ] || return 0  # probes declare nothing (legacy extension mapping)
+  while IFS= read -r line; do
+    s=$(printf '%s' "${line%%=*}" | tr -d '[:space:]')
+    [ -n "$s" ] || continue
+    d=$(printf '%s' "${line#*=}" | tr -d '[:space:]')
+    case $d in
+      node-test)
+        if ! grep -qE "$NODE_TEST_IMPORT_RE" "$ROOT/$s" 2>/dev/null; then
+          echo "fast-gate: tier FAIL: $s is DECLARED node-test in gate.conf but imports no node:test symbols - declaration and content disagree" >&2
+          bad=1
+        fi ;;
+      script)
+        if grep -qE "$NODE_TEST_IMPORT_RE" "$ROOT/$s" 2>/dev/null; then
+          echo "fast-gate: tier FAIL: $s is DECLARED script in gate.conf but imports node:test - declaration and content disagree (a node:test suite under the script tier reports no TAP counts)" >&2
+          bad=1
+        fi ;;
+      *)
+        echo "fast-gate: tier FAIL: $s is declared '$d' in gate.conf - this gate has no such tier" >&2
+        bad=1 ;;
+    esac
+  done <<TIEREOF
+$SUITE_TIERS
+TIEREOF
+  # The other half of the audit: a suite FILE with no declaration must fail here, not be
+  # discovered (or silently guessed) at selection time. Content-as-audit in the safe
+  # direction: enumeration finds the files, the declaration is still the authority.
+  local f rel
+  for f in "$ROOT"/tests/*.test.*; do
+    [ -f "$f" ] || continue
+    rel=${f#$ROOT/}
+    if ! declared_tier "$rel" >/dev/null; then
+      echo "fast-gate: tier FAIL: $rel exists but declares no tier in gate.conf SUITE_TIERS - declare it (a guessed tier is how the .mjs split happened)" >&2
+      bad=1
+    fi
+  done
+  return $bad
+}
+
+LIST=0; BUILD_PLAN=0; STAMP_DIST=0; BASE=''; EXPLICIT=(); CHECK_TIERS=0
 while [ $# -gt 0 ]; do
   case $1 in
     --list)    LIST=1; shift ;;
+    --check-tiers) CHECK_TIERS=1; shift ;;
     --build-plan) BUILD_PLAN=1; shift ;;
     --stamp-dist) STAMP_DIST=1; shift ;;
     --changed) EXPLICIT+=("${2:?--changed needs a path}"); shift 2 ;;
@@ -176,6 +224,16 @@ while [ $# -gt 0 ]; do
     *)         echo "fast-gate: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
+
+# The declarations are audited before anything runs (airhorn-z4cn): every declared suite's
+# tier is checked against its content on EVERY invocation - 24 greps, milliseconds - so a
+# declaration that disagrees with its file fails here, naming both facts, and cannot ride
+# along inside an unrelated change. --check-tiers runs only this audit (read-only).
+if ! verify_suite_tiers; then
+  echo "fast-gate: FAIL - tier declaration(s) disagree with suite content (above); fix gate.conf or the suite" >&2
+  exit 1
+fi
+if [ "$CHECK_TIERS" -eq 1 ]; then echo "fast-gate: tier declarations agree with suite content"; exit 0; fi
 
 # --- the base: origin/master (this repo's default), then main variants, then HEAD~1. Never "everything".
 if [ "${#EXPLICIT[@]}" -eq 0 ]; then
