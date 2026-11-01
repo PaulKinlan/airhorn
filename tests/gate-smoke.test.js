@@ -165,7 +165,10 @@ const buildGateProbe = () => {
         'tests/second.test.mjs=node-test',
         'tests/dist-suite.test.js=node-test',
         'tests/plain-suite.test.js=node-test',
-        'tests/joined-suite.test.js=node-test',
+        // nh8y's build-plan fixture holds no node:test import and is never executed -
+        // script is its honest declaration (a file with no node:test symbols is not a
+        // node-test suite), and loop A's content audit agrees.
+        'tests/joined-suite.test.js=script',
       ].join('\n') + '\n"\n'));
   fs.copyFileSync(path.join(root, 'tools', 'derive-coverage-contract.mjs'), path.join(toolsDir, 'derive-coverage-contract.mjs'));
   fs.writeFileSync(path.join(probe, 'package.json'),
