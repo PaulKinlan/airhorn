@@ -424,7 +424,9 @@ const isDirective = (tok) => tok.startsWith('@') || tok.startsWith('except=');
  * test-file pattern, and is explicit-only by design - airhorn-i8i).
  */
 export function suiteFiles(tsvText, { root = DEFAULT_ROOT, fileExists: fileExistsOpt } = {}) {
-  const fileExists = fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  // Same existence notion as validation (cc-derive): a regular FILE, so a map row
+  // naming a directory (or symlink-to-one) is never collected as a suite file.
+  const fileExists = fileExistsOpt || ((relPath) => defaultFileIsRegular(root, relPath));
   const named = new Set();
   for (const line of tsvText.split('\n')) {
     const trimmed = line.trim();
@@ -544,7 +546,16 @@ export function expandRow(pattern, rest, options = {}) {
  * - Accumulates multiple rows for the same pattern additively
  */
 export function deriveCoverageContract(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
-  const fileExists = existsFn || fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  // Same existence notion as validation (cc-derive): a regular FILE. With the old
+  // existsSync default a directory read as 'present', so a directory row was
+  // DERIVED into a clean-looking contract while --validate-map rejected the same
+  // row - and with a bare isFile swap a test/-spelled directory would instead
+  // read as 'pending' and be silently dropped, so pathKindOf rides along exactly
+  // as in validateSuiteMap: wrong-typed-but-present is NOT pending, it stays in
+  // the derived contract as written, for validation to name.
+  const usingDefault = !existsFn && !fileExistsOpt;
+  const fileExists = existsFn || fileExistsOpt || ((relPath) => defaultFileIsRegular(root, relPath));
+  const pathKindOf = usingDefault ? (relPath) => pathKind(root, relPath) : undefined;
   const pendingDeclared = extractPendingSuites(tsvText);
 
   const contract = {};
@@ -555,7 +566,7 @@ export function deriveCoverageContract(tsvText, { root = DEFAULT_ROOT, existsFn,
     const pat = parts[0] ? parts[0].trim() : '';
     if (!pat || pat.startsWith('!') || pat.startsWith('~')) continue;
     const { suites } = expandRow(pat, parts.slice(1).join(' '), { root, fileExists });
-    const activeSuites = suites.filter((s) => !isPendingSuite(s, pendingDeclared, fileExists));
+    const activeSuites = suites.filter((s) => !isPendingSuite(s, pendingDeclared, fileExists, pathKindOf));
     if (activeSuites.length > 0 && activeSuites.every((s) => s === pat)) continue;
     if (activeSuites.length > 0) {
       if (!contract[pat]) {
@@ -617,7 +628,20 @@ export function main(args = process.argv.slice(2), { root = DEFAULT_ROOT, exists
     return 0;
   }
 
+  // One report, three gates: --stdout, the default write, and --check all refuse
+  // an invalid map identically. (--stdout used to skip validation entirely, so a
+  // map --validate-map rejects still produced a clean-looking contract - the
+  // cc-derive asymmetry.)
+  const reportMapViolations = () => {
+    const violations = validateSuiteMap(tsvText, { root, existsFn, fileExists });
+    for (const v of violations) {
+      console.error(`FAIL: suite-map: [${v.type}] ${v.message}`);
+    }
+    return violations;
+  };
+
   if (args.includes('--stdout')) {
+    if (reportMapViolations().length > 0) return 1;
     const derived = deriveCoverageContract(tsvText, { root, existsFn, fileExists });
     const formatted = formatCoverageContract(derived);
     process.stdout.write(formatted);
@@ -625,23 +649,10 @@ export function main(args = process.argv.slice(2), { root = DEFAULT_ROOT, exists
   }
 
   if (args.includes('--validate-map')) {
-    const violations = validateSuiteMap(tsvText, { root, existsFn, fileExists });
-    if (violations.length > 0) {
-      for (const v of violations) {
-        console.error(`FAIL: suite-map: [${v.type}] ${v.message}`);
-      }
-      return 1;
-    }
-    return 0;
+    return reportMapViolations().length > 0 ? 1 : 0;
   }
 
-  const violations = validateSuiteMap(tsvText, { root, existsFn, fileExists });
-  if (violations.length > 0) {
-    for (const v of violations) {
-      console.error(`FAIL: suite-map: [${v.type}] ${v.message}`);
-    }
-    return 1;
-  }
+  if (reportMapViolations().length > 0) return 1;
 
   const derived = deriveCoverageContract(tsvText, { root, existsFn, fileExists });
   const formatted = formatCoverageContract(derived);
