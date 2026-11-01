@@ -688,35 +688,93 @@ wait "${SUITE_PIDS[@]}"
 # TAP summary, for script-tier suites the hook's own line (which names the step a
 # failure was attributed to). "no result" is reported as such - a suite that dies
 # before reporting must never read as a pass.
-# Returns non-zero when the suite produced no valid result, so the caller can fail
-# the gate. A missing result is a reporting regression, not a pass (airhorn-yy1): a
-# suite that exits 0 without saying what it ran proves nothing.
+# The OUTCOME is decided by the fail count and status the report carries, never by the
+# presence of a pass count (airhorn-nxuv.16): a summary that names passing cases while
+# failures exist is a failing outcome that names the count, and a fail count or status
+# that cannot be parsed is its own failing outcome - unknown is not zero.
+# Return codes (every non-zero one fails the gate at the caller):
+#   0 the suite reported, and every case it counted passed
+#   1 the suite produced no USABLE report - no summary at all, or a fail count/status
+#     that does not parse. A reporting regression, not a pass (airhorn-yy1): a suite
+#     that exits 0 without proving what it ran proves nothing.
+#   2 the suite reported failures: a non-zero fail count, its own status=fail, or named
+#     failing cases.
 report_cases() { # $1 = suite, $2 = log
-  case $(tier_of "$1") in
+  local tier pass fail line status names count
+  tier=$(tier_of "$1")
+  case $tier in
     node-test)
       pass=$(sed -nE 's/^# pass ([0-9]+).*/\1/p' "$2" | tail -1)
       fail=$(sed -nE 's/^# fail ([0-9]+).*/\1/p' "$2" | tail -1)
-      if [ -n "$pass" ]; then
-        echo "fast-gate: cases: $1 :: node:test pass=${pass} fail=${fail:-0}"
-        if [ "${fail:-0}" != 0 ]; then
-          sed -nE 's/^not ok [0-9]+ - (.*)$/fast-gate:   failing: \1/p' "$2" | head -5
-        fi
-        return 0
+      if [ -z "$pass" ]; then
+        echo "fast-gate: cases: $1 :: no TAP summary (suite exited without reporting)"
+        return 1
       fi
-      echo "fast-gate: cases: $1 :: no TAP summary (suite exited without reporting)"
-      return 1
+      # node --test --test-reporter=tap (the runner tools/gate.conf pins) always prints
+      # '# fail <n>', including '# fail 0'. A summary without a parseable fail count is
+      # therefore not a node:test summary this gate can certify - and ${fail:-0} used to
+      # read it as zero failures, i.e. as a pass.
+      if [ -z "$fail" ]; then
+        echo "fast-gate: cases: $1 :: node:test pass=${pass} fail=UNKNOWN (no parseable '# fail <n>' summary line)"
+        echo "fast-gate:   failing: the fail count is UNKNOWN, which is not 0 - the pass count alone certifies nothing"
+        return 1
+      fi
+      if [ "$fail" != 0 ]; then
+        echo "fast-gate: cases: $1 :: node:test pass=${pass} fail=${fail} FAILED (fail count ${fail})"
+        sed -nE 's/^not ok [0-9]+ - (.*)$/fast-gate:   failing: \1/p' "$2" | head -5
+        return 2
+      fi
+      echo "fast-gate: cases: $1 :: node:test pass=${pass} fail=${fail}"
+      return 0
       ;;
     script)
       line=$(grep -m1 '^##CASES## ' "$2" 2>/dev/null | sed 's/^##CASES## //')
-      if [ -n "$line" ]; then
-        echo "fast-gate: cases: $1 :: $line"
-        return 0
+      if [ -z "$line" ]; then
+        echo "fast-gate: cases: $1 :: no result (suite exited without reporting)"
+        return 1
       fi
-      echo "fast-gate: cases: $1 :: no result (suite exited without reporting)"
+      # The hook's own verdict field. It precedes every quoted narration in the line
+      # (tests/support/report-hook.mjs writes suite= tier= status= events= ...), so the
+      # first ' status=' token is the field, not something a suite printed.
+      case $line in
+        *' status='*) status=${line#* status=}; status=${status%% *} ;;
+        *)            status='' ;;
+      esac
+      case $status in
+        fail)
+          echo "fast-gate: cases: $1 :: $line FAILED (the report's own status field is fail)"
+          return 2
+          ;;
+        pass) ;;
+        *)
+          echo "fast-gate: cases: $1 :: $line UNKNOWN status '${status:-<missing>}'"
+          echo "fast-gate:   failing: the report's status field is neither pass nor fail, which is not a pass"
+          return 1
+          ;;
+      esac
+      # status=pass is still not a pass on its own: the hook also NAMES the cases it saw
+      # fail (a 'not ok - <name>' line, airhorn-n00), and a suite can print those and then
+      # exit 0 - the shape tests/webmcp.test.mjs has, one forgotten process.exit(1) away
+      # from reporting failures the exit code would never show.
+      case $line in
+        *' failed-cases='*)
+          names=${line#* failed-cases=\"}; names=${names%%\"*}
+          count=$(printf '%s' "$names" | awk -F', ' 'NF { print NF }')
+          echo "fast-gate: cases: $1 :: $line FAILED (${count:-0} named case(s) failed while status said pass: ${names:-<unparseable>})"
+          return 2
+          ;;
+      esac
+      echo "fast-gate: cases: $1 :: $line"
+      return 0
+      ;;
+    *)
+      # Was 'return 0' after the case: a tier with no reporter here printed NOTHING and
+      # still certified, so the caller read a suite nobody examined as a pass.
+      echo "fast-gate: cases: $1 :: UNKNOWN tier '${tier}' (this gate has no case reporter for it)"
+      echo "fast-gate:   failing: an unreported suite is not a pass"
       return 1
       ;;
   esac
-  return 0
 }
 
 # Report failure diagnostics and preserve the suite log for post-mortem analysis (airhorn-rumq).
@@ -825,9 +883,16 @@ for s in "${RUN[@]}"; do
   printf '%s\n' "$cases_out" | tee -a "$RESULTS_DIR/summary.txt"
   if [ "$suite_rc" = 0 ] && [ "$cases_rc" = 0 ]; then
     echo "fast-gate: passed: $s"
+  elif [ "$suite_rc" = 0 ] && [ "$cases_rc" = 2 ]; then
+    # exit 0 but the suite's OWN report counts failures: the report decides, not the exit
+    # code (airhorn-nxuv.16). The fail count is named on the 'cases:' line above.
+    echo "fast-gate: failed: $s (exit 0 but its case report counts failures)"
+    echo "fast-gate: a non-zero fail count is a failing outcome; exit 0 does not outvote the report" >&2
+    report_suite_failure "$s" "$key" "$TMP/$key.log"
+    rc=1
   elif [ "$suite_rc" = 0 ]; then
-    # exit 0 but nothing reported: the suite cannot prove what it ran.
-    echo "fast-gate: failed: $s (exit 0 but no result; reporting is broken)"
+    # exit 0 but nothing usable reported: the suite cannot prove what it ran.
+    echo "fast-gate: failed: $s (exit 0 but no usable result; reporting is broken)"
     echo "fast-gate: a selected suite must report its cases; silence is not a pass" >&2
     report_suite_failure "$s" "$key" "$TMP/$key.log"
     rc=1
