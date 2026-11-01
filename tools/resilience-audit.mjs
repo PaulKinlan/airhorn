@@ -758,6 +758,21 @@ async function runAudit() {
 
   // RESILIENCE_ONLY=liefi,update re-runs just those scenarios (they all share one server).
   const only = (process.env.RESILIENCE_ONLY || '').split(',').map((s) => s.trim()).filter(Boolean);
+  // The selector is VALIDATED, not just applied (airhorn-7sfn): a typo'd name used to match
+  // no scenario, run zero of them, and exit 0 - a green audit that measured nothing. An
+  // explicit selection naming an unknown scenario is an ERROR naming it. The ONE deliberate
+  // empty selection keeps exit 0: 'none' is the documented way to ask for nothing (the
+  // auditExitCode contract, 'nothing wanted'). One entry per want('<id>') call below: a
+  // scenario added without an entry here is unreachable by name (its selector errors loudly),
+  // which is the failure direction this fix exists to produce.
+  const KNOWN_SCENARIOS = ['blocked', 'corrupt', 'liefi', 'offline', 'quota', 'update'];
+  const unknownSelectors = only.filter((s) => s !== 'none' && !KNOWN_SCENARIOS.includes(s));
+  if (unknownSelectors.length) {
+    console.error(`resilience-audit: RESILIENCE_ONLY names unknown scenario(s): ${unknownSelectors.join(', ')} - ` +
+      `known scenarios: ${KNOWN_SCENARIOS.join(', ')} (or 'none' for a deliberately empty run). ` +
+      'Refusing to report a green audit that measured nothing.');
+    process.exit(1);
+  }
   const want = (id) => only.length === 0 || only.includes(id);
 
   // Test seam (airhorn-w1wh review, rounds 3 and 4): a scenario error is otherwise
