@@ -28,6 +28,7 @@
 // and the shared module's three passes include the fork-race pass this copy
 // had lost.
 import { launchChrome } from './lib/chrome.mjs';
+import { assertUpdateMeasured, classifyUpdateOutcome } from './lib/update-outcome.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -873,23 +874,25 @@ async function runAudit() {
         state.overrides.set('/sw.js', { status: 500, body: 'update forced to fail (mutation seam)' });
       }
       // The update call is the thing under test, so its outcome is RECORDED,
-      // never swallowed (airhorn-nxuv.6): the old `.catch(() => false)` turned
-      // a rejected reg.update() into a discarded `false` and the row reported
-      // pressInterrupted:false with status OK - a failed update read as a pass.
-      // Now a rejection is its own explicit FAILING outcome with the rejection
-      // message in the record, and a missing registration is UNMEASURABLE -
-      // both fail the scenario instead of fitting current behaviour.
-      const update = await evaluate(cdp, sessionId, `navigator.serviceWorker.getRegistration()
+      // never swallowed (airhorn-nxuv.6): the old code caught the rejection and
+      // threw the `false` away, so a rejected update reported pressInterrupted:false
+      // with status OK - a failed update read as a pass.
+      //
+      // The PAGE reports raw facts only (was there a registration, did the promise
+      // settle, what did it reject with) and the decision is made in Node by the
+      // pure rule in tools/lib/update-outcome.mjs. That keeps the thing under test
+      // identical to the thing the unit suite proves, on a host that cannot launch
+      // Chrome: the classification is not a string buried in an evaluate().
+      const updateFacts = await evaluate(cdp, sessionId, `navigator.serviceWorker.getRegistration()
         .then((reg) => {
-          if (!reg) return { outcome: 'unmeasurable', detail: 'no service worker registration to update' };
+          if (!reg) return { registrationPresent: false };
           return reg.update().then(
-            () => ({ outcome: 'updated' }),
-            (err) => ({ outcome: 'rejected', detail: String((err && err.message) || err) }),
+            () => ({ registrationPresent: true, settled: true }),
+            (err) => ({ registrationPresent: true, settled: false, errorMessage: String((err && err.message) || err) }),
           );
         })`);
-      if (update.outcome !== 'updated') {
-        throw new Error(`update-during-press measured nothing: reg.update() ${update.outcome} - ${update.detail}`);
-      }
+      const update = classifyUpdateOutcome(updateFacts);
+      assertUpdateMeasured(update);
       await sleep(3000);
 
       const afterState = await readState(cdp, sessionId).catch(() => null);
