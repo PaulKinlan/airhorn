@@ -541,6 +541,16 @@ test('fuzzing the real Horn leaks no AudioContext, buffer sources or oscillators
     return { ok: true, arrayBuffer: async () => new ArrayBuffer(8) };
   };
   CountingAudioContext.created = 0;
+  // The counter sees only CountingAudioContext constructions, and Horn creates a
+  // context ITSELF through window.AudioContext when none is injected - and window
+  // is undefined in this harness, so an internal construction was INVISIBLE: a
+  // Horn that news up an extra context still read created===1 (the tests/ sweep,
+  // webmcp-fuzz:565). Install the counting class as the global constructor for
+  // the run, so every creation path counts; the injected context is still the
+  // one this Horn uses.
+  const hadWindow = Object.prototype.hasOwnProperty.call(globalThis, 'window');
+  const originalWindow = globalThis.window;
+  globalThis.window = { AudioContext: CountingAudioContext };
 
   try {
     const context = new CountingAudioContext();
@@ -573,6 +583,8 @@ test('fuzzing the real Horn leaks no AudioContext, buffer sources or oscillators
     );
   } finally {
     globalThis.fetch = originalFetch;
+    if (hadWindow) globalThis.window = originalWindow;
+    else delete globalThis.window;
   }
 });
 
