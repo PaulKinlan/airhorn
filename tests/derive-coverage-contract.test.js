@@ -153,10 +153,13 @@ test('CLI --stdout outputs formatted JSON to stdout', () => {
   // suite (the tests/ sweep, g0qr #14). .fleet/coverage-contract.json is the reviewed
   // artifact --check holds the derivation to; --stdout must print it byte for byte.
   // P3a (from g0qr.11 review): a bare assert.equal on two ~200-line strings dumps a
-  // Node string diff on failure. Name the drift and its remedy instead.
+  // Node string diff on failure. Name the first differing line and the remedy instead.
   const committed = fs.readFileSync(path.join(root, '.fleet', 'coverage-contract.json'), 'utf8');
   if (res.stdout !== committed) {
-    assert.fail('--stdout drifted from .fleet/coverage-contract.json - regenerate it with `node tools/derive-coverage-contract.mjs` (or fix tools/suite-map.tsv if the drift is unintended)');
+    const got = res.stdout.split('\n');
+    const want = committed.split('\n');
+    const firstDiff = got.findIndex((line, i) => line !== want[i]);
+    assert.fail(`--stdout drifted from .fleet/coverage-contract.json, first differing line ${firstDiff + 1}: derived ${JSON.stringify(got[firstDiff])} vs committed ${JSON.stringify(want[firstDiff])} - regenerate with \`node tools/derive-coverage-contract.mjs\` (or fix tools/suite-map.tsv if the drift is unintended)`);
   }
   // And the keys the old assertion named must be there with real rows, so a regression
   // in WHICH sources are covered is named, not hidden in a diff dump.
@@ -185,8 +188,8 @@ test('validateSuiteMap returns missing_literal for nonexistent literal path (air
   assert.equal(violations[0].type, 'missing_literal');
   assert.equal(violations[0].token, 'src/does-not-exist.js');
   assert.ok(violations[0].message.includes('src/does-not-exist.js'), 'the message names the offending token');
-  assert.match(violations[0].message, /does not exist on disk/,
-    'the message names the failure MODE: a message that merely restates the token must not pass (g0qr map #24)');
+  assert.match(violations[0].message, /(does not exist|is not a regular file) on disk/,
+    'the message names the failure MODE: a message that merely restates the token must not pass (g0qr.21). Either wording: master says "does not exist", the cc chain says "is not a regular file ... (missing from disk)" - both name the mode');
 });
 
 test('validateSuiteMap returns glob_suite_token when suite token has wildcards (airhorn-onz0)', () => {
@@ -208,8 +211,8 @@ test('validateSuiteMap returns missing_suite when suite does not exist (airhorn-
   assert.equal(violations[0].type, 'missing_suite');
   assert.equal(violations[0].token, 'tests/missing.test.js');
   assert.ok(violations[0].message.includes('tests/missing.test.js'), 'the message names the offending token');
-  assert.match(violations[0].message, /does not exist on disk/,
-    'the message names the failure MODE: a message that merely restates the token must not pass (g0qr map #24)');
+  assert.match(violations[0].message, /(does not exist|is not a regular file) on disk/,
+    'the message names the failure MODE: a message that merely restates the token must not pass (g0qr.21). Either wording: master says "does not exist", the cc chain says "is not a regular file ... (missing from disk)" - both name the mode');
   assert.match(violations[0].message, /referenced by src\/horn\.js/, 'the message names the referencing source row');
 });
 
