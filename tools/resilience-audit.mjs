@@ -73,6 +73,29 @@ fs.mkdirSync(OUT, { recursive: true });
 function startServer() {
   const state = { version: '2.0.0-audit-base', overrides: new Map(), lieFi: null };
 
+  // The SW version shim's contract, validated BEFORE the first request (airhorn-7sfn's
+  // sibling in the sweep): the /sw.js handler bumps the cache version by replacing exactly
+  // one 'const version = "...";' line. If public/sw.js ever changes shape (a quote style, a
+  // renamed const), String.replace becomes a SILENT no-op - the SW keeps the old version and
+  // the update scenario 'updates' nothing while reporting OK. So the pattern is matched
+  // against the real dist/sw.js here: exactly one match or the audit refuses to start,
+  // naming the pattern and the line the file actually carries. The regex is deliberately NOT
+  // broadened to any version-like string: a silent WRONG update is worse than a loud no-op.
+  const swSource = (() => {
+    try { return fs.readFileSync(path.join(distDir, 'sw.js'), 'utf8'); } catch (err) {
+      throw new Error(`resilience-audit: cannot shim the SW cache version: dist/sw.js is unreadable (${String((err && err.message) || err)}) - the update scenario would measure nothing`);
+    }
+  })();
+  const versionMatches = swSource.match(/const version = "[^"]*";/g) || [];
+  if (versionMatches.length !== 1) {
+    const hint = (swSource.match(/[^\n]*\bconst\b[^\n]*\bversion\b[^\n]*/i)
+      || swSource.match(/[^\n]*\bversion\b[^\n]*=[^\n]*/i)
+      || ['(no line mentions "version" at all)'])[0].trim();
+    throw new Error('resilience-audit: cannot shim the SW cache version: expected exactly one \'const version = "...";\' '
+      + `line in dist/sw.js, found ${versionMatches.length}. The file's version-looking line is: ${hint}. `
+      + 'Fix the pattern or the file - a silent no-op would let the update scenario update nothing and report OK.');
+  }
+
   const server = http.createServer((req, res) => {
     let pathname;
     try {
