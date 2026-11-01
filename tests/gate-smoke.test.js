@@ -146,6 +146,13 @@ const buildGateProbe = () => {
   // The runner config is part of the gate: without its pinned TAP reporter the probe's
   // node --test would emit the spec summary and the gate would read the suite as silent.
   fs.copyFileSync(path.join(root, 'tools', 'gate.conf'), path.join(toolsDir, 'gate.conf'));
+  // ...but SUITE_TIERS declares the REAL repo's suites, and the probe holds none of them:
+  // a probe suite absent from the block reads 'undeclared' at SELECTION and gets no
+  // runner (the audit stands down for absent declarations; selection does not guess).
+  // The block's own contract says probes declare nothing and get the legacy extension
+  // mapping, so the probe copy strips the block.
+  fs.writeFileSync(path.join(toolsDir, 'gate.conf'),
+    fs.readFileSync(path.join(toolsDir, 'gate.conf'), 'utf8').replace(/SUITE_TIERS="[^"]*"\n?/, ''));
   fs.copyFileSync(path.join(root, 'tools', 'derive-coverage-contract.mjs'), path.join(toolsDir, 'derive-coverage-contract.mjs'));
   fs.writeFileSync(path.join(probe, 'package.json'),
     JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'true' } }));
@@ -580,7 +587,13 @@ test('a suite whose own report counts failures is FAILED, not passed (airhorn-nx
     // runs under the REAL pinned runner and the real report hook, so nothing is stubbed:
     // the suite prints 'not ok - <name>' and exits 0 (tests/webmcp.test.mjs is one
     // forgotten process.exit(1) away from exactly this).
+    // The real conf's SUITE_TIERS declares real-repo suites a probe does not have:
+    // absent declarations are not disagreements (the audit stands down), but a probe
+    // suite reads 'undeclared' at SELECTION and gets no runner. The block's own
+    // contract says probes declare nothing, so the copy strips it.
     fs.copyFileSync(path.join(root, 'tools', 'gate.conf'), path.join(probe, 'tools', 'gate.conf'));
+    fs.writeFileSync(path.join(probe, 'tools', 'gate.conf'),
+      fs.readFileSync(path.join(probe, 'tools', 'gate.conf'), 'utf8').replace(/SUITE_TIERS="[^"]*"\n?/, ''));
     fs.mkdirSync(path.join(probe, 'tests', 'support'), { recursive: true });
     fs.copyFileSync(path.join(root, 'tests', 'support', 'report-hook.mjs'),
       path.join(probe, 'tests', 'support', 'report-hook.mjs'));
