@@ -1089,9 +1089,12 @@ async function runAudit() {
         `getComputedStyle(document.querySelector('.horn')).fontFamily`);
       const fontShot = await shot(cdp, sessionId, '5-fonts');
 
+      const headline = blockedAssetHeadline(js, css);
       return {
-        // top-level row describes the worst blocked-asset case, the CSS one
-        ...css,
+        // The top-level row is the worst blocked-asset subcase, NAMED - see
+        // blockedAssetHeadline. Spreading one fixed subcase let its passing
+        // values mask the other subcase's failure in the summary table.
+        ...headline,
         subCases: { js, css },
         baselineHornSize: baseline.horn.present ? `${baseline.horn.width}x${baseline.horn.height}` : null,
         fonts: {
@@ -1269,6 +1272,35 @@ export function auditExitCode(scenarios) {
 
 // Extracted from runAudit so a browser-free test can hand it a stubbed failing
 // scenario and check the row really lands in the file, not just in memory.
+
+/*
+ * The blocked-asset scenario's headline row: the WORST subcase, NAMED. The row
+ * used to spread the CSS subcase unconditionally, so a JS-blocked failure
+ * (hornUsable false) was masked by the CSS subcase's true in the summary
+ * table - a recorded report read hornUsable 'yes' while its own
+ * subCases.js.hornUsable was false (the tools/ assertion-honesty sweep).
+ * 'Worst' = a subcase that measured a failure: the horn unusable, the render
+ * degraded, or the navigation incomplete. JS is listed first, so a run where
+ * both failed names the more basic asset. When neither measured a failure the
+ * CSS row stays the representative, exactly as before. Pure and exported so
+ * the replay harness drives the real row construction.
+ */
+export const blockedAssetHeadline = (js, css) => {
+  const measuredFailure = (s) => !s.hornUsable || s.degraded || !s.navigationCompleted;
+  const failed = [js, css].filter(measuredFailure);
+  const headline = failed.length ? failed[0] : css;
+  return {
+    ...headline,
+    name: failed.length ? `blocked JS / CSS / font (headline: ${headline.label})` : 'blocked JS / CSS / font',
+    headlineSubcase: headline.label,
+    headlineNote: failed.length === 0
+      ? 'no subcase measured a failure; the CSS subcase is shown'
+      : failed.length === 1
+        ? `${headline.label} measured the worst outcome and is shown as the headline`
+        : `both subcases measured failures (${failed.map((s) => s.label).join(', ')}); ${headline.label} is shown as the headline`,
+  };
+};
+
 export function writeReport(scenarios, outDir = OUT) {
   const results = scenarios;
   const OUT = outDir;
