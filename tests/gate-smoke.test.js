@@ -619,6 +619,43 @@ test('a suite whose own report counts failures is FAILED, not passed (airhorn-nx
   }
 });
 
+test('a nested suite (tests/sub/*.test.js) is visible to the reverse check (map P2)', () => {
+  // The reverse check's tree enumeration was DEPTH-1 (tests/*.test.*), so a suite one
+  // directory deeper never reached the unmapped-suite check: the layer that exists to
+  // catch coverage blind spots had one. The probe writes its own minimal gate.conf
+  // WITHOUT SUITE_TIERS (the legacy extension mapping then applies) - copying the real
+  // conf declares real-repo suites a probe does not have, and the tier audit fails the
+  // probe before the reverse check runs (a pre-existing gate-tiermjs probe gap).
+  const { probe, run } = buildGateProbe();
+  try {
+    fs.writeFileSync(path.join(probe, 'tools', 'gate.conf'),
+      'FAST_GATE_RUNNER="node --test --test-reporter=tap"\nFAST_GATE_JOBS=1\n');
+
+    // GREEN: no nested suite at all - the broadened glob adds no false positive.
+    const plain = run(['--changed', 'src/a.js']);
+    assert.equal(plain.status, 0, `a plain depth-1 tree must stay green: ${plain.stdout}${plain.stderr}`);
+
+    // RED: present, unmapped - the reverse check must name it.
+    fs.mkdirSync(path.join(probe, 'tests', 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(probe, 'tests', 'sub', 'deep.test.js'),
+      "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('a nested suite', () => { assert.ok(true); });\n");
+    const unmapped = run(['--changed', 'src/a.js']);
+    assert.equal(unmapped.status, 1, `an unmapped nested suite must fail the gate: ${unmapped.stdout}`);
+    assert.ok(unmapped.stdout.includes('fast-gate: unmapped-suite: tests/sub/deep.test.js'),
+      `the nested suite must be NAMED as unmapped: ${unmapped.stdout}`);
+
+    // GREEN: mapped by its own row, the nested suite is reachable and nothing is flagged.
+    fs.writeFileSync(path.join(probe, 'src', 'deep.js'), '// deep\n');
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'src/deep.js\ttests/sub/deep.test.js\n');
+    const mapped = run(['--changed', 'src/a.js']);
+    assert.equal(mapped.status, 0, `a mapped nested suite must pass: ${mapped.stdout}${mapped.stderr}`);
+    assert.ok(!mapped.stdout.includes('unmapped-suite'),
+      `no unmapped-suite line may appear: ${mapped.stdout}`);
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
 test('every tools script parses - recognised extensions at any depth (airhorn-7lm, airhorn-7z5, airhorn-h19)', () => {
   // Glob, not names (airhorn-v1n), and every RECOGNISED script extension,
   // not just .mjs (airhorn-h19: .cjs and .ts were unparseable, extensionless

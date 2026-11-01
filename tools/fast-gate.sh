@@ -55,6 +55,11 @@
 # unmapped, a non-empty change selected ZERO suites without the acknowledgement, or every selected
 # suite is '~'-pending (nothing executed) without the acknowledgement.
 set -uo pipefail
+# globstar: `tests/**/*.test.js` reaches suites nested at ANY depth (zero or more
+# directories), so a suite one directory deeper is visible to the reverse check
+# below instead of sitting unmapped forever (map P2). Plain `*` globs are
+# unaffected; `**` appears only where any-depth is intended.
+shopt -s globstar
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
@@ -627,7 +632,15 @@ fi
 # Without this, a second suite covering src/main.js that forgot its map row silently never runs for
 # the code it covers, while the gate still prints a positive suite count.
 TREE_SUITE_NOT_REACHABLE=()
-for s in tests/*.test.js tests/*.test.mjs tests/*.test.ts test/*.test.js test/*.test.mjs test/*.test.ts; do
+# Any depth, not just depth 1: tests/sub/deep.test.js was INVISIBLE to the old
+# depth-1 globs, so a nested suite was never reverse-checked and could sit
+# unmapped forever - a blind spot in the layer that exists to catch coverage
+# blind spots (map P2). The *.test.* extension keeps tests/support helpers out;
+# the tests//test/ roots keep node_modules and dist out. A genuine FIXTURE
+# named *.test.* under those roots will be flagged here: that is the honest
+# reading of a file spelled like a suite - exempt it with a `!` row if it is
+# not one.
+for s in tests/**/*.test.js tests/**/*.test.mjs tests/**/*.test.ts test/**/*.test.js test/**/*.test.mjs test/**/*.test.ts; do
   [ -f "$ROOT/$s" ] || continue          # unmatched globs stay literal; skip them
   if is_exempt "$s" || map_reaches "$s"; then continue; fi
   TREE_SUITE_NOT_REACHABLE+=("$s")
