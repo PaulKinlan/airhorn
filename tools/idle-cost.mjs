@@ -46,7 +46,11 @@
  *
  * Budgets (of one core, measured on this VM's headless Chrome):
  *   A pristine idle   < 0.5%      nothing runs
- *   B after a blast   < 1.0%      a running-but-silent AudioContext is tolerated
+ *   B after a blast   < 1.0% main + renderer < 20% + running-context cost (B - C
+ *                       renderer differential) < 10%: the differential is what
+ *                       separates a moderate audio graph (+12.28% recorded) from
+ *                       healthy noise (+7.302/0/-6.983 recorded) - no absolute
+ *                       bound below 20% can (airhorn-nxuv.15 P2b)
  *   D hidden          < 0.5%      and no audio may keep playing
  */
 
@@ -77,7 +81,32 @@ const mimeTypes = {
 // measured 7.3% renderer CPU on this fleet's starved VM (2026-10-31,
 // proof-sweep2 idle-green; 1.0% - the first value here - fails the healthy
 // app). 20% sits far above that noise and far below a runaway graph's ~100%.
-const BUDGET = { pristineIdle: 0.5, afterBlastIdle: 1.0, afterBlastRenderer: 20, hidden: 0.5 };
+//
+// afterBlastContextCost gates the RUNNING-CONTEXT cost itself: B minus C
+// renderer CPU, the noise-cancelling differential costOfRunningContext already
+// prints. Why a differential and not a tighter absolute bound (airhorn-nxuv.15
+// P2b): the healthy ABSOLUTE swung 0.332%..7.302% run to run on this VM, so any
+// absolute bound below 20% fails honest runs, while a moderate audio graph at
+// 12.28% passed 20% green. Recorded healthy differentials (3s calibration
+// windows): +7.302, 0, -6.983 - the +-7 is a one-off burst landing in a random
+// short window (it dilutes ~10x in the shipped 30s windows, and the exact 0 in
+// a second green run shows the sustained silent-graph cost is ~0). Recorded
+// audio-busy differentials: +12.28 (4x0.25s convolvers), +38.858 (8x0.25s).
+// 10 sits above every recorded healthy differential and below the lightest
+// recorded audio-busy one; every report prints the differential, so drift
+// toward the bound is visible in the green output, not silent.
+export const BUDGET = { pristineIdle: 0.5, afterBlastIdle: 1.0, afterBlastRenderer: 20, afterBlastContextCost: 10, hidden: 0.5 };
+
+// Verdict B's pass decision, pure and exported so the mutation harness replays
+// the recorded runs through the REAL gate rather than a copy (airhorn-nxuv.15
+// P2b). b is the B phase sample; contextRendererCost is
+// costOfRunningContext.rendererPct. An UNMEASURED input (null renderer on B, or
+// a null differential because a renderer was not comparable across B and C)
+// fails as itself - unknown is not a pass.
+export const afterBlastSilentPass = (b, contextRendererCost) =>
+  b.mainThreadCpuPct < BUDGET.afterBlastIdle && b.intervalTicks === 0
+  && b.rendererCpuPct !== null && b.rendererCpuPct < BUDGET.afterBlastRenderer
+  && contextRendererCost !== null && contextRendererCost < BUDGET.afterBlastContextCost;
 
 // Mutation seam (airhorn-nxuv.15): under test mode, a Web Audio convolver
 // bank spins the audio thread through the whole B window - renderer-process
@@ -505,6 +534,9 @@ async function main() {
     const describeRenderer = (phase) => (phase.rendererCpuPct === null
       ? `unmeasured (only ${phase.rendererProcesses} renderer process comparable across the window)`
       : `${phase.rendererCpuPct}% over ${phase.rendererProcesses} process(es)`);
+    const describeContextCost = (cost) => (cost.rendererPct === null
+      ? 'unmeasured (a renderer process was not comparable across the B and C windows) - UNKNOWN is not a pass'
+      : `${cost.rendererPct}% of one core (B - C, budget <${BUDGET.afterBlastContextCost}%)`);
     const b = byNameForCost('B');
     const c = byNameForCost('C');
     const rendererSound = b.rendererCpuPct !== null && c.rendererCpuPct !== null;
@@ -532,9 +564,17 @@ async function main() {
         // audio graph passed it (airhorn-nxuv.15). The renderer side is gated
         // too - and an UNMEASURED renderer (no comparable process across the
         // window) fails as itself, it is not a pass.
-        pass: byName('B').mainThreadCpuPct < BUDGET.afterBlastIdle && byName('B').intervalTicks === 0
-          && byName('B').rendererCpuPct !== null && byName('B').rendererCpuPct < BUDGET.afterBlastRenderer,
-        measured: `${byName('B').mainThreadCpuPct}% main thread, renderer ${describeRenderer(byName('B'))}`,
+        // The ABSOLUTE renderer bound (20%) is only the runaway backstop: a
+        // moderate audio graph at 12.28% passed it green, and the healthy
+        // absolute swings 0.3%..7.3% run to run, so no absolute bound below
+        // 20% can separate them. The gate that separates them is the
+        // RUNNING-CONTEXT cost (B - C, ambient cancels): healthy recorded
+        // +7.302/0/-6.983 in 3s calibration windows, the lightest recorded
+        // audio-busy cost +12.28; the budget sits between (airhorn-nxuv.15
+        // P2b). An UNMEASURED differential fails as itself, named in the text.
+        pass: afterBlastSilentPass(byName('B'), report.costOfRunningContext.rendererPct),
+        measured: `${byName('B').mainThreadCpuPct}% main thread, renderer ${describeRenderer(byName('B'))}, ` +
+          `running-context cost ${describeContextCost(report.costOfRunningContext)}`,
       },
       {
         what: 'E foregrounded: the return path is quiet and the horn still works',
@@ -594,7 +634,13 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('idle-cost failed:', err.message);
-  process.exit(1);
-});
+// Only a direct `node tools/idle-cost.mjs` runs the measurement: importing the
+// module (the mutation harness replays recorded runs through afterBlastSilentPass)
+// must not launch a browser.
+const invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedAsScript) {
+  main().catch((err) => {
+    console.error('idle-cost failed:', err.message);
+    process.exit(1);
+  });
+}
