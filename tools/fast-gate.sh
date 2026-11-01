@@ -178,11 +178,18 @@ runner_for() {
 # every gate start - 24 greps, milliseconds - so a wrong declaration cannot ride along.
 NODE_TEST_IMPORT_RE="from 'node:test'|from \"node:test\"|require\\('node:test'\\)"
 verify_suite_tiers() { # no args: every declared suite; returns non-zero on any disagreement
-  local bad=0 s d line
+  local bad=0 s d line declared_present=0
   [ -n "${SUITE_TIERS:-}" ] || return 0  # probes declare nothing (legacy extension mapping)
   while IFS= read -r line; do
     s=$(printf '%s' "${line%%=*}" | tr -d '[:space:]')
     [ -n "$s" ] || continue
+    # Absent is NOT a disagreement: a probe (or partial checkout) holds a SUBSET
+    # of the declared suites, and grepping ENOENT read as 'imports no node:test
+    # symbols' - one bogus content disagreement per absent declaration (13 in a
+    # probe). Content is audited only where the file exists; a declaration whose
+    # file was DELETED from the real tree is the map-honesty layer's concern.
+    [ -f "$ROOT/$s" ] || continue
+    declared_present=$((declared_present + 1))
     d=$(printf '%s' "${line#*=}" | tr -d '[:space:]')
     case $d in
       node-test)
@@ -205,6 +212,13 @@ TIEREOF
   # The other half of the audit: a suite FILE with no declaration must fail here, not be
   # discovered (or silently guessed) at selection time. Content-as-audit in the safe
   # direction: enumeration finds the files, the declaration is still the authority.
+  # This half only has meaning where declarations DO - a probe tree that contains none
+  # of the declared suites would fail every file it holds for declarations it never
+  # made, so with zero declared suites present the audit says so and stands down.
+  if [ "$declared_present" -eq 0 ]; then
+    echo "fast-gate: tier audit: no declared suites present under $ROOT - declaration-vs-content audit skipped"
+    return 0
+  fi
   local f rel
   for f in "$ROOT"/tests/*.test.*; do
     [ -f "$f" ] || continue
@@ -636,10 +650,12 @@ TREE_SUITE_NOT_REACHABLE=()
 # depth-1 globs, so a nested suite was never reverse-checked and could sit
 # unmapped forever - a blind spot in the layer that exists to catch coverage
 # blind spots (map P2). The *.test.* extension keeps tests/support helpers out;
-# the tests//test/ roots keep node_modules and dist out. A genuine FIXTURE
-# named *.test.* under those roots will be flagged here: that is the honest
-# reading of a file spelled like a suite - exempt it with a `!` row if it is
-# not one.
+# the tests//test/ roots exclude the repo's OWN node_modules and dist - but
+# globstar DOES descend symlinked directories (verified), so a symlink inside
+# tests/ pointing outside would expose the target's *.test.* files. And note:
+# ANY *.test.* file at any depth - helper or fixture included - now fails here
+# unless it is mapped or exempted with '!': the honest reading of a file
+# spelled like a suite.
 for s in tests/**/*.test.js tests/**/*.test.mjs tests/**/*.test.ts test/**/*.test.js test/**/*.test.mjs test/**/*.test.ts; do
   [ -f "$ROOT/$s" ] || continue          # unmatched globs stay literal; skip them
   if is_exempt "$s" || map_reaches "$s"; then continue; fi
