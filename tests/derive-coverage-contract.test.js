@@ -152,8 +152,12 @@ test('CLI --stdout outputs formatted JSON to stdout', () => {
   // check passes when src/horn.js maps to [] (empty arrays are truthy) or to a broken
   // suite (the tests/ sweep, g0qr #14). .fleet/coverage-contract.json is the reviewed
   // artifact --check holds the derivation to; --stdout must print it byte for byte.
+  // P3a (from g0qr.11 review): a bare assert.equal on two ~200-line strings dumps a
+  // Node string diff on failure. Name the drift and its remedy instead.
   const committed = fs.readFileSync(path.join(root, '.fleet', 'coverage-contract.json'), 'utf8');
-  assert.equal(res.stdout, committed, '--stdout must print exactly the committed contract');
+  if (res.stdout !== committed) {
+    assert.fail('--stdout drifted from .fleet/coverage-contract.json - regenerate it with `node tools/derive-coverage-contract.mjs` (or fix tools/suite-map.tsv if the drift is unintended)');
+  }
   // And the keys the old assertion named must be there with real rows, so a regression
   // in WHICH sources are covered is named, not hidden in a diff dump.
   const parsed = JSON.parse(res.stdout);
@@ -169,7 +173,9 @@ test('validateSuiteMap returns zero_match_glob for glob matching zero files (air
   assert.equal(violations.length, 1);
   assert.equal(violations[0].type, 'zero_match_glob');
   assert.equal(violations[0].token, 'src/*.nonexistent-review.js');
-  assert.ok(violations[0].message.includes('src/*.nonexistent-review.js'));
+  assert.ok(violations[0].message.includes('src/*.nonexistent-review.js'), 'the message names the offending token');
+  assert.match(violations[0].message, /matches zero files on disk/,
+    'the message names the failure MODE: a message that merely restates the token must not pass (g0qr map #24)');
 });
 
 test('validateSuiteMap returns missing_literal for nonexistent literal path (airhorn-onz0)', () => {
@@ -178,7 +184,9 @@ test('validateSuiteMap returns missing_literal for nonexistent literal path (air
   assert.equal(violations.length, 1);
   assert.equal(violations[0].type, 'missing_literal');
   assert.equal(violations[0].token, 'src/does-not-exist.js');
-  assert.ok(violations[0].message.includes('src/does-not-exist.js'));
+  assert.ok(violations[0].message.includes('src/does-not-exist.js'), 'the message names the offending token');
+  assert.match(violations[0].message, /does not exist on disk/,
+    'the message names the failure MODE: a message that merely restates the token must not pass (g0qr map #24)');
 });
 
 test('validateSuiteMap returns glob_suite_token when suite token has wildcards (airhorn-onz0)', () => {
@@ -187,7 +195,10 @@ test('validateSuiteMap returns glob_suite_token when suite token has wildcards (
   assert.equal(violations.length, 1);
   assert.equal(violations[0].type, 'glob_suite_token');
   assert.equal(violations[0].token, 'src/*.bad.js');
-  assert.ok(violations[0].message.includes('src/*.bad.js'));
+  assert.ok(violations[0].message.includes('src/*.bad.js'), 'the message names the offending token');
+  assert.match(violations[0].message, /wildcard metacharacters/,
+    'the message names the failure MODE: a message that merely restates the token must not pass (g0qr map #24)');
+  assert.match(violations[0].message, /referenced by src\/horn\.js/, 'the message names the referencing source row');
 });
 
 test('validateSuiteMap returns missing_suite when suite does not exist (airhorn-onz0)', () => {
@@ -196,7 +207,10 @@ test('validateSuiteMap returns missing_suite when suite does not exist (airhorn-
   assert.equal(violations.length, 1);
   assert.equal(violations[0].type, 'missing_suite');
   assert.equal(violations[0].token, 'tests/missing.test.js');
-  assert.ok(violations[0].message.includes('tests/missing.test.js'));
+  assert.ok(violations[0].message.includes('tests/missing.test.js'), 'the message names the offending token');
+  assert.match(violations[0].message, /does not exist on disk/,
+    'the message names the failure MODE: a message that merely restates the token must not pass (g0qr map #24)');
+  assert.match(violations[0].message, /referenced by src\/horn\.js/, 'the message names the referencing source row');
 });
 
 test('validateSuiteMap returns [] for valid map rows (airhorn-onz0)', () => {
@@ -320,5 +334,7 @@ test('validateSuiteMap supports bracket/character-class globs (airhorn-onz0)', (
   assert.equal(failViolations.length, 1);
   assert.equal(failViolations[0].type, 'zero_match_glob');
   assert.equal(failViolations[0].token, 'src/[xy]orn.js');
-  assert.ok(failViolations[0].message.includes('src/[xy]orn.js'));
+  assert.ok(failViolations[0].message.includes('src/[xy]orn.js'), 'the message names the offending token');
+  assert.match(failViolations[0].message, /matches zero files on disk/,
+    'the message names the failure MODE: a message that merely restates the token must not pass (same genre as g0qr map #24)');
 });
