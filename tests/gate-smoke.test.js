@@ -146,13 +146,27 @@ const buildGateProbe = () => {
   // The runner config is part of the gate: without its pinned TAP reporter the probe's
   // node --test would emit the spec summary and the gate would read the suite as silent.
   fs.copyFileSync(path.join(root, 'tools', 'gate.conf'), path.join(toolsDir, 'gate.conf'));
-  // ...but SUITE_TIERS declares the REAL repo's suites, and the probe holds none of them:
-  // a probe suite absent from the block reads 'undeclared' at SELECTION and gets no
-  // runner (the audit stands down for absent declarations; selection does not guess).
-  // The block's own contract says probes declare nothing and get the legacy extension
-  // mapping, so the probe copy strips the block.
+  // The copied SUITE_TIERS block declares the REAL repo's suites, and the probe holds none
+  // of them, so the probe's own suites would read tier 'undeclared' at selection and get
+  // no runner. Stripping the block is the wrong fix: it makes every probe run the legacy
+  // extension-mapping fallback the real repo no longer uses - green bought by shrinking
+  // what is tested. The block is REPLACED with declarations for the suites probes create,
+  // keeping probes on the real strict-declaration path (and loop B audits any undeclared
+  // *.test.* file the probe holds once declarations exist, so every suite a probe adds
+  // must be declared here - that is the strict contract working as designed, and it keeps
+  // a live probe-level test of the declaration machinery itself).
   fs.writeFileSync(path.join(toolsDir, 'gate.conf'),
-    fs.readFileSync(path.join(toolsDir, 'gate.conf'), 'utf8').replace(/SUITE_TIERS="[^"]*"\n?/, ''));
+    fs.readFileSync(path.join(toolsDir, 'gate.conf'), 'utf8').replace(
+      /SUITE_TIERS="[^"]*"\n?/,
+      'SUITE_TIERS="\n' + [
+        'tests/pass.test.js=node-test',
+        'tests/fail.test.js=node-test',
+        'tests/newimporter.test.js=node-test',
+        'tests/second.test.mjs=node-test',
+        'tests/dist-suite.test.js=node-test',
+        'tests/plain-suite.test.js=node-test',
+        'tests/joined-suite.test.js=node-test',
+      ].join('\n') + '\n"\n'));
   fs.copyFileSync(path.join(root, 'tools', 'derive-coverage-contract.mjs'), path.join(toolsDir, 'derive-coverage-contract.mjs'));
   fs.writeFileSync(path.join(probe, 'package.json'),
     JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'true' } }));
@@ -587,13 +601,19 @@ test('a suite whose own report counts failures is FAILED, not passed (airhorn-nx
     // runs under the REAL pinned runner and the real report hook, so nothing is stubbed:
     // the suite prints 'not ok - <name>' and exits 0 (tests/webmcp.test.mjs is one
     // forgotten process.exit(1) away from exactly this).
-    // The real conf's SUITE_TIERS declares real-repo suites a probe does not have:
-    // absent declarations are not disagreements (the audit stands down), but a probe
-    // suite reads 'undeclared' at SELECTION and gets no runner. The block's own
-    // contract says probes declare nothing, so the copy strips it.
+    // The real conf's SUITE_TIERS declares real-repo suites this probe does not have, and
+    // this probe's own suites would read 'undeclared' at selection. Like buildGateProbe,
+    // the block is REPLACED (not stripped - the probe must run the strict-declaration
+    // path) with declarations for every suite file the probe holds: scriptsuite is the
+    // script tier this leg exercises; pass.test.js came from buildGateProbe; the stub
+    // legs' failcount/unparseable suites are still on disk, carry no node:test import,
+    // and are never run in this leg - script is their honest declaration (a file with no
+    // node:test symbols is not a node-test suite).
     fs.copyFileSync(path.join(root, 'tools', 'gate.conf'), path.join(probe, 'tools', 'gate.conf'));
     fs.writeFileSync(path.join(probe, 'tools', 'gate.conf'),
-      fs.readFileSync(path.join(probe, 'tools', 'gate.conf'), 'utf8').replace(/SUITE_TIERS="[^"]*"\n?/, ''));
+      fs.readFileSync(path.join(probe, 'tools', 'gate.conf'), 'utf8').replace(
+        /SUITE_TIERS="[^"]*"\n?/,
+        'SUITE_TIERS="\ntests/pass.test.js=node-test\ntests/failcount.test.js=script\ntests/unparseable.test.js=script\ntests/scriptsuite.mjs=script\n"\n'));
     fs.mkdirSync(path.join(probe, 'tests', 'support'), { recursive: true });
     fs.copyFileSync(path.join(root, 'tests', 'support', 'report-hook.mjs'),
       path.join(probe, 'tests', 'support', 'report-hook.mjs'));
