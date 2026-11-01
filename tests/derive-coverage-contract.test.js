@@ -148,9 +148,19 @@ test('formatCoverageContract formats with 1-space indentation and trailing newli
 test('CLI --stdout outputs formatted JSON to stdout', () => {
   const res = spawnSync(process.execPath, [tool, '--stdout'], { encoding: 'utf8' });
   assert.equal(res.status, 0);
+  // The output must BE the committed contract, not merely contain a key: a truthiness
+  // check passes when src/horn.js maps to [] (empty arrays are truthy) or to a broken
+  // suite (the tests/ sweep, g0qr #14). .fleet/coverage-contract.json is the reviewed
+  // artifact --check holds the derivation to; --stdout must print it byte for byte.
+  const committed = fs.readFileSync(path.join(root, '.fleet', 'coverage-contract.json'), 'utf8');
+  assert.equal(res.stdout, committed, '--stdout must print exactly the committed contract');
+  // And the keys the old assertion named must be there with real rows, so a regression
+  // in WHICH sources are covered is named, not hidden in a diff dump.
   const parsed = JSON.parse(res.stdout);
-  assert.ok(parsed['src/horn.js']);
-  assert.ok(parsed['src/main.js']);
+  assert.ok(Array.isArray(parsed['src/horn.js']) && parsed['src/horn.js'].length > 0,
+    'src/horn.js must map to a non-empty suite list');
+  assert.ok(Array.isArray(parsed['src/main.js']) && parsed['src/main.js'].length > 0,
+    'src/main.js must map to a non-empty suite list');
 });
 
 test('validateSuiteMap returns zero_match_glob for glob matching zero files (airhorn-onz0)', () => {
