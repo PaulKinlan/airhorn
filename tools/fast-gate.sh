@@ -124,7 +124,34 @@ case $JOBS in ''|*[!0-9]*|0) JOBS=$CORES ;; esac
 # what the suite already prints, and `##case## <name>` is an optional convention.
 HOOK="$HERE/../tests/support/report-hook.mjs"
 RESULTS_DIR=${AIRHORN_RESULTS_DIR:-/tmp/airhorn-test-results}
+# The tier a suite runs under is DECLARED in gate.conf (SUITE_TIERS, airhorn-z4cn), never
+# inferred. With the block present, an undeclared suite is 'undeclared' and the gate fails it
+# rather than guessing. With the block ABSENT (the gate-smoke probes' own confs), the legacy
+# extension mapping applies - probes declare nothing and keep working.
+declared_tier() { # $1 = suite path; prints the declared tier; rc 1 when absent/undeclared
+  [ -n "${SUITE_TIERS:-}" ] || return 1
+  local line s t
+  while IFS= read -r line; do
+    s=$(printf '%s' "${line%%=*}" | tr -d '[:space:]')
+    [ -n "$s" ] || continue
+    [ "$s" = "$1" ] || continue
+    t=$(printf '%s' "${line#*=}" | tr -d '[:space:]')
+    printf '%s' "$t"
+    return 0
+  done <<TIEREOF
+$SUITE_TIERS
+TIEREOF
+  return 1
+}
 tier_of() {
+  local d
+  if d=$(declared_tier "$1"); then
+    case $d in
+      node-test|script) echo "$d"; return ;;
+      *)                echo "bad-tier:$d"; return ;;  # a declared tier this gate has no runner for
+    esac
+  fi
+  if [ -n "${SUITE_TIERS:-}" ]; then echo 'undeclared'; return; fi
   case $1 in
     *.test.js|*.test.ts) echo node-test ;;
     *)                   echo script ;;
@@ -134,6 +161,7 @@ runner_for() {
   case $(tier_of "$1") in
     node-test) echo "$FAST_GATE_RUNNER" ;;
     script)    echo "node --import $HOOK" ;;
+    *)         echo "fast-gate: ERROR: no runner for tier '$(tier_of "$1")' of $1 (declare it in gate.conf SUITE_TIERS)" >&2; return 2 ;;
   esac
 }
 
