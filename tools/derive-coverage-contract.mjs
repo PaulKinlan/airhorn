@@ -141,14 +141,61 @@ export function globMatchesAny(pattern, { root = DEFAULT_ROOT, existsFn, fileExi
 /**
  * Validates suite-map integrity across all 4 violation classes:
  * 1. zero_match_glob: Pattern contains wildcards but matches 0 files under root.
- * 2. missing_literal: Plain pattern path does not exist on disk (! and ~ rows skipped).
+ * 2. missing_literal: Plain pattern path is not a regular file on disk (! and ~ rows skipped).
  * 3. glob_suite_token: Suite token contains wildcard metacharacters (*, ?, [).
  * 4. missing_suite: Suite file is missing from disk and not declared pending.
  *
  * Returns Array<{ type: string, token: string, pattern?: string, message: string }>
  */
+
+/*
+ * The default existence check must mean "a regular FILE is there", not
+ * "something is there": existsSync passes for directories, and path.join(root, '')
+ * resolves to root itself, so a row naming a directory - or a bare '!' row whose
+ * literal is empty - validated clean while watching nothing (the tools/
+ * assertion-honesty sweep). statSync().isFile() also fails a symlink TO A
+ * DIRECTORY (the target is not a file), while a symlink to a real file still
+ * passes. describeNonFile says WHAT is there instead, for the violation message;
+ * both are exported so the fixture harness drives the real predicates.
+ */
+export const defaultFileIsRegular = (root, relPath) => {
+  if (!relPath) return false;
+  try {
+    return fs.statSync(path.join(root, relPath)).isFile();
+  } catch {
+    return false;
+  }
+};
+
+export const describeNonFile = (root, relPath) => {
+  if (!relPath) return 'an empty path (path.join(root, \'\') resolves to the root itself)';
+  const full = path.join(root, relPath);
+  let lst;
+  try {
+    lst = fs.lstatSync(full);
+  } catch {
+    return 'missing from disk';
+  }
+  if (lst.isSymbolicLink()) {
+    try {
+      return fs.statSync(full).isDirectory()
+        ? 'a symlink to a directory, not a file'
+        : 'a symlink to a non-file';
+    } catch {
+      return 'a symlink whose target does not resolve';
+    }
+  }
+  if (lst.isDirectory()) return 'a directory, not a file';
+  if (!lst.isFile()) return 'a non-regular file (socket/fifo/device)';
+  return 'present';
+};
+
 export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
-  const fileExists = existsFn || fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  const usingDefault = !existsFn && !fileExistsOpt;
+  const fileExists = existsFn || fileExistsOpt || ((relPath) => defaultFileIsRegular(root, relPath));
+  // What the thing on disk IS, when the real-disk checker is the one that ran
+  // (an injected predicate has no disk to describe).
+  const what = (relPath) => (usingDefault ? ` (${describeNonFile(root, relPath)})` : '');
   const pendingDeclared = extractPendingSuites(tsvText);
   const violations = [];
 
@@ -179,7 +226,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
           type: 'missing_literal',
           token: pattern,
           pattern,
-          message: `@importers row names a module that does not exist on disk: ${pattern}`,
+          message: `@importers row names a module that is not a regular file on disk: ${pattern}${what(pattern)}`,
         });
       }
       for (const d of directives.filter((t) => t.startsWith('except='))) {
@@ -189,7 +236,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
             type: 'missing_suite',
             token: target,
             pattern,
-            message: `except= names a suite that does not exist on disk: ${target} (referenced by ${pattern})`,
+            message: `except= names a suite that is not a regular file on disk: ${target} (referenced by ${pattern})${what(target)}`,
           });
         }
       }
@@ -226,7 +273,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
             type: 'missing_literal',
             token: pattern,
             pattern,
-            message: `Exemption path does not exist on disk: ${pattern}`,
+            message: `Exemption path is not a regular file on disk: ${pattern}${what(cleanPat)}`,
           });
         }
       }
@@ -247,7 +294,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
             type: 'missing_literal',
             token: pattern,
             pattern,
-            message: `Mapped path does not exist on disk: ${pattern}`,
+            message: `Mapped path is not a regular file on disk: ${pattern}${what(pattern)}`,
           });
         }
       }
@@ -274,7 +321,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
           type: 'missing_suite',
           token,
           pattern,
-          message: `Suite does not exist on disk: ${token} (referenced by ${pattern})`,
+          message: `Suite is not a regular file on disk: ${token} (referenced by ${pattern})${what(token)}`,
         });
       }
     }
