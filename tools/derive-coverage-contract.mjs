@@ -89,7 +89,13 @@ export function globToRegex(glob) {
  * Checks whether a glob pattern matches at least one file on disk.
  */
 export function globMatchesAny(pattern, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
-  const fileExists = existsFn || fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  // The default is the SAME predicate the validator uses, not fs.existsSync (airhorn-xs2m,
+  // P2 from the review of this branch): the function's own contract is "matches at least
+  // one FILE on disk", and existsSync answers true for a DIRECTORY - so a direct caller of
+  // this exported helper still counted a symlink to a directory, exactly the false green
+  // the walk fix below closed for the validator. existsSync now appears nowhere on this
+  // path: a caller that wants different semantics passes its own predicate.
+  const fileExists = existsFn || fileExistsOpt || ((relPath) => defaultFileIsRegular(root, relPath));
 
   if (!pattern.includes('*') && !pattern.includes('?') && !pattern.includes('[')) {
     return fileExists(pattern);

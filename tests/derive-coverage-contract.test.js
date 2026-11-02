@@ -240,6 +240,38 @@ test('a glob counts a FILE, never a symlink to a directory or a symlink loop (ai
   }
 });
 
+test('the EXPORTED globMatchesAny default is the regular-file predicate too (airhorn-xs2m)', (t) => {
+  // The walk fix above ran inside the validator, which injects defaultFileIsRegular. The
+  // exported helper's OWN default was still fs.existsSync, so a direct caller of
+  // globMatchesAny() - the documented "does this glob match a file" checker - still said
+  // true for a symlink to a directory. That is the same false green, one caller further
+  // out, and the review of this branch filed it as a P2 with a live probe.
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'airhorn-glob-default-'));
+  try {
+    try {
+      fs.mkdirSync(path.join(fixture, 'empty'));
+      fs.mkdirSync(path.join(fixture, 'aliases'));
+      fs.symlinkSync('../empty', path.join(fixture, 'aliases/faux.js'));
+      fs.writeFileSync(path.join(fixture, 'aliases/real.js'), 'x\n');
+    } catch (err) {
+      t.skip(`this filesystem cannot create the symlink this case needs: ${err.message}`);
+      return;
+    }
+    // No predicate supplied: the default must already be file-only.
+    assert.equal(globMatchesAny('aliases/*.js', { root: fixture }), true,
+      'a directory containing a real file must match');
+    assert.equal(globMatchesAny('aliases/nope.js', { root: fixture }), false,
+      'a literal that does not exist must not match');
+    fs.rmSync(path.join(fixture, 'aliases/real.js'));
+    assert.equal(globMatchesAny('aliases/*.js', { root: fixture }), false,
+      'with only a symlink to an empty directory left, the default must report no match');
+    assert.equal(globMatchesAny('empty', { root: fixture }), false,
+      'a literal directory is not a file either');
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test('validateSuiteMap returns missing_literal for nonexistent literal path (airhorn-onz0)', () => {
   const tsv = 'src/does-not-exist.js\ttests/horn.test.js\n';
   const violations = validateSuiteMap(tsv, { root });
