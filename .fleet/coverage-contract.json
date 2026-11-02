@@ -117,6 +117,9 @@
  "tools/lib/**": [
   "tests/test-support.test.js"
  ],
+ "tools/lib/update-outcome.mjs": [
+  "tests/update-outcome.test.js"
+ ],
  "tools/install-https-proof.mjs": [
   "tests/gate-smoke.test.js",
   "tests/test-support.test.js"

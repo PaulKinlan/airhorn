@@ -28,6 +28,7 @@
 // and the shared module's three passes include the fork-race pass this copy
 // had lost.
 import { launchChrome } from './lib/chrome.mjs';
+import { assertUpdateMeasured, classifyUpdateOutcome } from './lib/update-outcome.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -613,23 +614,37 @@ async function shot(cdp, sessionId, name) {
 
 const EXPLAINS_RE = /offline|no connection|can.?t (?:reach|load|connect)|failed to load|unable to|retry|reconnect|try again|update available|new version|something went wrong|error/i;
 
-function summarise(state) {
+export function summarise(state) {
   // Evidence is what the page actually says somewhere rendered (airhorn-01e):
   // a region with no text, or a hidden one, explains nothing.
   const liveEvidence = (state.live || []).filter((l) => l.shown && l.text);
   const liveText = liveEvidence.map((l) => l.text).join(' | ');
-  const mentions = state.bodyText.match(EXPLAINS_RE);
+  // airhorn-nxuv.5: an explanation is credited only from an EXPLANATORY
+  // ELEMENT (a status/alert/aria-live region - collectRegions collects exactly
+  // those) whose own text says something explanatory. Crash prose elsewhere in
+  // the body ('something went wrong' in a paragraph) is not an explanation,
+  // and a live region saying something unrelated ('Ready') is not one either -
+  // both used to count. An unreadable evidence shape (no live-region array, no
+  // body text) is UNMEASURABLE - its own failing outcome, not a pass on
+  // whatever text happened to be around.
+  const measured = Array.isArray(state.live) && typeof state.bodyText === 'string';
+  const explanatory = measured ? liveEvidence.filter((l) => EXPLAINS_RE.test(l.text)) : [];
   return {
     renders: state.horn.present,
     hornVisible: state.horn.visible,
     hornSize: state.horn.present ? `${state.horn.width}x${state.horn.height}` : null,
     title: state.title,
     navType: state.navType ?? null,
-    liveRegions: state.live.length,
+    liveRegions: Array.isArray(state.live) ? state.live.length : 0,
     shownLiveRegions: liveEvidence.length,
     liveText,
-    explainsItself: liveEvidence.length > 0 || !!mentions,
-    explanationEvidence: liveText || (mentions ? `body text mentions "${mentions[0]}"` : 'none'),
+    explainsItself: measured && explanatory.length > 0,
+    explanationMeasured: measured,
+    explanationEvidence: !measured
+      ? 'unmeasurable: the live-region evidence was not collected'
+      : explanatory.length
+        ? explanatory.map((l) => `${l.role || l.live}: "${l.text}"`).join(' | ')
+        : 'none',
     controller: state.controller,
     controllerChanges: state.controllerChanges,
     online: state.online,
@@ -795,32 +810,49 @@ async function runAudit() {
 
       // (c) a navigation the precache does not cover: it must be served by the network,
       //     which hangs and then fails
+      // Which document is on screen BEFORE the attempt: the marker is what tells
+      // "the deep-link attempt produced its own document (page or error page)"
+      // apart from "the previous cached page is still there" (airhorn-nxuv.8).
+      const preDeepLink = await readState(cdp, sessionId);
       const uncachedStart = Date.now();
       const uncachedLoaded = await navigate(cdp, sessionId, `${origin}/deep-link`, 12000);
       const uncachedMs = Date.now() - uncachedStart;
-      const uncachedState = await readState(cdp, sessionId).catch(() => null);
+      // An unreadable state is UNMEASURABLE, not a synthesised 'no document'
+      // row with status OK (airhorn-nxuv.8): it fails as itself.
+      const uncachedState = await readState(cdp, sessionId).catch((err) => {
+        throw new Error(`lie-fi measured nothing: the state after the uncached navigation is unreadable (${String((err && err.message) || err)})`);
+      });
+      const onDeepLink = uncachedLoaded
+        && uncachedState.marker !== preDeepLink.marker
+        && /\/deep-link/.test(uncachedState.url || '');
       const shotFile = await shot(cdp, sessionId, '2-liefi-uncached-nav');
-      // Headline usability is MEASURED on the post-navigation state (airhorn-dse,
-      // the airhorn-0aq instrument): the literal `false` here called the horn
-      // unusable while the same row's measured state showed it rendered and
-      // visible - a failed navigation leaves the previous (cached, working)
-      // document on screen, and that is the truth to report. No document at
-      // all (uncachedState null) earns false without a press.
-      const hornAfterUncached = uncachedState ? await pressHorn(cdp, sessionId) : null;
+      const hornAfterUncached = await pressHorn(cdp, sessionId);
       return {
         swActive: sw.active,
         cachedNavigation: { completed: cachedLoaded, ms: cachedMs,
           hornPresent: cachedState ? cachedState.horn.present : false },
         uncachedSubresource: subresource,
-        uncachedNavigation: { completed: uncachedLoaded, ms: uncachedMs },
-        ...(uncachedState ? summarise(uncachedState) : { renders: false, hornVisible: false,
-          explainsItself: false, explanationEvidence: 'no document at all' }),
-        hornUsable: hornAfterUncached ? hornAfterUncached.sounded : false,
-        hornCheck: hornAfterUncached || { sounded: false, reason: 'no document after the uncached navigation' },
+        uncachedNavigation: { completed: uncachedLoaded, ms: uncachedMs, reachedDeepLink: onDeepLink },
+        // The headline describes the DEEP-LINK outcome. When the attempt never
+        // replaced the document, the previous cached page is still on screen;
+        // measuring it and reporting it as the lie-fi result was the mask
+        // (airhorn-nxuv.8). The previous page IS still measured - nested and
+        // labelled, so a leftover working page and a working deep link are no
+        // longer indistinguishable in the row.
+        ...(onDeepLink
+          ? { measuredDocument: 'deep-link', ...summarise(uncachedState),
+              hornUsable: hornAfterUncached.sounded, hornCheck: hornAfterUncached }
+          : { measuredDocument: 'previous-cached-document',
+              renders: false, hornVisible: false, explainsItself: false,
+              explanationEvidence: 'the deep-link navigation never replaced the document; nothing about /deep-link was measured',
+              hornUsable: false,
+              hornCheck: { sounded: false, reason: 'the press measured the previous cached page, not /deep-link (see previousDocument)' },
+              previousDocument: { ...summarise(uncachedState),
+                hornUsable: hornAfterUncached.sounded, hornCheck: hornAfterUncached } }),
         cachedShellWasAvailable: cachedLoaded,
         screenshot: shotFile,
         console: collectors(sessionId).console,
-        pageErrors: uncachedState ? uncachedState.errors : [],
+        pageErrors: uncachedState.errors,
       };
     });
 
@@ -852,8 +884,32 @@ async function runAudit() {
       const pressedState = await readState(cdp, sessionId);
 
       state.version = '2.0.0-audit-next';
-      await evaluate(cdp, sessionId, `navigator.serviceWorker.getRegistration()
-        .then((reg) => reg && reg.update()).then(() => true).catch(() => false)`);
+      // Mutation seam (airhorn-nxuv.6): under test mode, make the update fetch
+      // fail so reg.update() really rejects - the proof that this scenario CAN
+      // fail. Honoured only with RESILIENCE_TEST_MODE=1, like the stub seam.
+      if (testMode && process.env.RESILIENCE_UPDATE_REJECT === '1') {
+        state.overrides.set('/sw.js', { status: 500, body: 'update forced to fail (mutation seam)' });
+      }
+      // The update call is the thing under test, so its outcome is RECORDED,
+      // never swallowed (airhorn-nxuv.6): the old code caught the rejection and
+      // threw the `false` away, so a rejected update reported pressInterrupted:false
+      // with status OK - a failed update read as a pass.
+      //
+      // The PAGE reports raw facts only (was there a registration, did the promise
+      // settle, what did it reject with) and the decision is made in Node by the
+      // pure rule in tools/lib/update-outcome.mjs. That keeps the thing under test
+      // identical to the thing the unit suite proves, on a host that cannot launch
+      // Chrome: the classification is not a string buried in an evaluate().
+      const updateFacts = await evaluate(cdp, sessionId, `navigator.serviceWorker.getRegistration()
+        .then((reg) => {
+          if (!reg) return { registrationPresent: false };
+          return reg.update().then(
+            () => ({ registrationPresent: true, settled: true }),
+            (err) => ({ registrationPresent: true, settled: false, errorMessage: String((err && err.message) || err) }),
+          );
+        })`);
+      const update = classifyUpdateOutcome(updateFacts);
+      assertUpdateMeasured(update);
       await sleep(3000);
 
       const afterState = await readState(cdp, sessionId).catch(() => null);
@@ -866,6 +922,7 @@ async function runAudit() {
       const finalState = await readState(cdp, sessionId);
       return {
         swActive: sw.active,
+        update,
         pressedWhileHeld: pressedState.horn.ariaPressed,
         autoReloaded: reloaded,
         navigationsObserved: navigations,
@@ -1018,6 +1075,16 @@ async function runAudit() {
       const sw = await waitForSw(cdp, sessionId);
       assertSwActive(sw, 'corrupt');
 
+      // Mutation seam (airhorn-nxuv.7): under test mode, delete every cache so
+      // the scenario must FAIL naming the missing cache - the proof that this
+      // check can fail. Honoured only with RESILIENCE_TEST_MODE=1, like the
+      // stub seam.
+      if (testMode && process.env.RESILIENCE_CACHE_MISS === '1') {
+        await evaluate(cdp, sessionId, `(async () => {
+          for (const n of await caches.keys()) await caches.delete(n);
+          return true;
+        })()`);
+      }
       const cacheInfo = await evaluate(cdp, sessionId, `(async () => {
         const names = await caches.keys();
         const name = names.find((n) => n.startsWith('airhorner-'));
@@ -1026,7 +1093,21 @@ async function runAudit() {
         const keys = await cache.keys();
         return { name, urls: keys.map((r) => new URL(r.url).pathname) };
       })()`);
+      // The corruption is the thing under test, so what it corrupts must EXIST
+      // and the corruption must LAND - a missing cache, a cache with no asset,
+      // or a corruption that touched nothing used to read exactly like a
+      // healthy run (airhorn-nxuv.7): the row passed without the corruption
+      // ever being exercised. Each is an explicit failing outcome naming what
+      // was missing, not a false green. (Same false-green family as nxuv.21:
+      // an empty container is not the thing - a cache with zero entries is not
+      // a corrupted cache.)
+      if (!cacheInfo || !cacheInfo.name) {
+        throw new Error('corrupt-cache measured nothing: no airhorner-* cache exists to corrupt (precache missing or unreadable after an activated SW)');
+      }
       const assetUrl = (cacheInfo.urls || []).find((u) => u.startsWith('/assets/'));
+      if (!assetUrl) {
+        throw new Error(`corrupt-cache measured nothing: cache "${cacheInfo.name}" has no /assets/ entry to corrupt (entries: ${(cacheInfo.urls || []).length})`);
+      }
 
       // Corrupt the cached JS bundle: valid response, broken body.
       const jsCorrupted = await evaluate(cdp, sessionId, `(async () => {
@@ -1040,6 +1121,9 @@ async function runAudit() {
           { headers: { 'content-type': 'application/javascript' } }));
         return target;
       })()`);
+      if (typeof jsCorrupted !== 'string' || !jsCorrupted.startsWith('http')) {
+        throw new Error(`corrupt-cache measured nothing: the asset corruption was not exercised (${jsCorrupted})`);
+      }
 
       await cdp.send('Network.emulateNetworkConditions', {
         offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0,
@@ -1067,6 +1151,9 @@ async function runAudit() {
         }
         return touched;
       })()`);
+      if (!(shellCorrupted > 0)) {
+        throw new Error(`corrupt-cache measured nothing: the shell corruption touched ${shellCorrupted} entries (no / or /index.html in cache "${cacheInfo.name}")`);
+      }
       const shellLoaded = await reload(cdp, sessionId);
       const afterShellCorruption = await readState(cdp, sessionId);
       const shellShot = await shot(cdp, sessionId, '6-corrupt-shell-offline');
