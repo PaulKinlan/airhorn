@@ -127,7 +127,15 @@ export function globMatchesAny(pattern, { root = DEFAULT_ROOT, existsFn, fileExi
           return true;
         }
       } else {
-        if (regex.test(childRel)) {
+        // A dirent that is not a directory is not evidence of a FILE: withFileTypes
+        // reports a symlink as a symlink, so a symlink -> EMPTY DIRECTORY and a symlink
+        // LOOP both matched the pattern by name alone and the glob validated clean while
+        // selecting nothing (airhorn-nxuv.21). The name match has to be confirmed by the
+        // same presence predicate a literal path uses - master's defaultFileIsRegular when
+        // it is the default (isFile, so a symlink to a real file still passes, a symlink to
+        // a directory does not, and a loop throws -> false), or the caller's injected
+        // predicate when the caller supplied one.
+        if (regex.test(childRel) && fileExists(childRel)) {
           return true;
         }
       }

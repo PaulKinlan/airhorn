@@ -186,6 +186,60 @@ test('validateSuiteMap returns zero_match_glob for glob matching zero files (air
     'the message names the failure MODE: a message that merely restates the token must not pass (g0qr map #24)');
 });
 
+test('a glob counts a FILE, never a symlink to a directory or a symlink loop (airhorn-nxuv.21)', (t) => {
+  // The glob walk matched by NAME alone for any dirent that was not a directory, and
+  // withFileTypes reports a symlink as a symlink - so `onlyalias/*.js` matched a symlink
+  // pointing at an empty directory, and a symlink LOOP matched itself. Both validated
+  // clean while selecting nothing. The name match now has to be confirmed by the same
+  // presence predicate a literal path uses (defaultFileIsRegular: isFile, follows
+  // symlinks). The four worlds are pinned so the fix cannot be swapped for a blanket
+  // "refuse symlinks", which would fail an honest layout that links to a real file.
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'airhorn-glob-'));
+  try {
+    try {
+      fs.mkdirSync(path.join(fixture, 'src'), { recursive: true });
+      fs.writeFileSync(path.join(fixture, 'src/index.js'), 'x\n');
+      fs.mkdirSync(path.join(fixture, 'tests'), { recursive: true });
+      fs.writeFileSync(path.join(fixture, 'tests/ok.test.js'), 'x\n');
+      fs.mkdirSync(path.join(fixture, 'empty'));
+      fs.mkdirSync(path.join(fixture, 'onlyalias'));
+      fs.symlinkSync('../empty', path.join(fixture, 'onlyalias/alias.js'));
+      fs.mkdirSync(path.join(fixture, 'loopdir'));
+      fs.symlinkSync('self.js', path.join(fixture, 'loopdir/self.js'));
+      fs.mkdirSync(path.join(fixture, 'linkdir'));
+      fs.symlinkSync('../src/index.js', path.join(fixture, 'linkdir/real-link.js'));
+      fs.mkdirSync(path.join(fixture, 'dirs/sub.js'), { recursive: true });
+      fs.writeFileSync(path.join(fixture, 'dirs/other.txt'), 'x\n');
+    } catch (err) {
+      t.skip(`this filesystem cannot create the symlinks this case needs: ${err.message}`);
+      return;
+    }
+    // Present on disk, but NOT a file: the glob must report zero matches.
+    const violationsFor = (pattern) => validateSuiteMap(`${pattern}\ttests/ok.test.js\n`, { root: fixture });
+    for (const [pattern, why] of [
+      ['onlyalias/*.js', 'a symlink to an empty directory'],
+      ['loopdir/*.js', 'a symlink loop'],
+      ['dirs/*.js', 'a directory whose name matches the glob'],
+    ]) {
+      const violations = violationsFor(pattern);
+      assert.equal(violations.length, 1,
+        `${pattern} (${why}) must be a violation, got ${JSON.stringify(violations)}`);
+      assert.equal(violations[0].type, 'zero_match_glob',
+        `${pattern} (${why}) must read as zero_match_glob, got ${violations[0].type}`);
+    }
+    // Present AND a file: a real file and a symlink to a real file both match.
+    for (const [pattern, why] of [
+      ['src/*.js', 'a real file'],
+      ['linkdir/*.js', 'a symlink to a real file'],
+    ]) {
+      assert.deepEqual(violationsFor(pattern), [],
+        `${pattern} (${why}) must select something, got ${JSON.stringify(violationsFor(pattern))}`);
+    }
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test('validateSuiteMap returns missing_literal for nonexistent literal path (airhorn-onz0)', () => {
   const tsv = 'src/does-not-exist.js\ttests/horn.test.js\n';
   const violations = validateSuiteMap(tsv, { root });
