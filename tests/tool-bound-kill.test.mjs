@@ -97,6 +97,28 @@ const procPgrp = (pid) => {
   }
 };
 
+// Read the claimant set TWICE with a beat between, until it is stable
+// (the fork-exec ghost, airhorn's tool-bound-kill gate flake): dash does NOT
+// exec-optimise `sh -c 'sleep 20' ...` - it forks - and between fork() and
+// execve() the child's /proc/<pid>/cmdline still shows the PARENT's argv while
+// the marker env is inherited, so a single scan inside that window claims the
+// pre-exec child too. The ghost is gone one beat later (its cmdline becomes
+// 'sleep 20' and loses the token); a REAL second claimant - a stranger with
+// the marker AND the token - survives every scan and still fails the caller's
+// assertion. Settling never excuses a survivor; it only waits out a window
+// that is milliseconds wide (stretched under gate load, which is how the
+// merger's gate saw two claimants for one dir).
+async function settledClaimants(marker, runDir) {
+  let last = oursProcesses(marker, runDir);
+  for (let i = 0; i < 5; i++) {
+    await sleep(200);
+    const next = oursProcesses(marker, runDir);
+    if (JSON.stringify(next) === JSON.stringify(last)) return next;
+    last = next;
+  }
+  return last;
+}
+
 // A process belongs to this run only if the marker AND the exact user-data-dir
 // token both hold. Neither is a substring search over the whole command line.
 function oursProcesses(marker, runDir) {
@@ -288,9 +310,10 @@ test('identity is the run marker plus the exact user-data-dir token, never a pre
         try {
           await waitFor(() => oursProcesses(marker, runDir).length > 0,
             { timeoutMs: 5000, label: 'the positive-control process to appear in /proc' });
-          assert.deepEqual(oursProcesses(marker, runDir),
+          const claimants = await settledClaimants(marker, runDir);
+          assert.deepEqual(claimants,
             [{ pid: ours.pid, dir: profileDir }],
-            'this run\'s marker plus the exact --user-data-dir token must be claimed');
+            'this run\'s marker plus the exact --user-data-dir token must be claimed - by the run\'s own process and no survivor of the settle window');
         } finally {
           if (procPgrp(ours.pid) === ours.pid) {
             try { process.kill(-ours.pid, 'SIGKILL'); } catch {}
