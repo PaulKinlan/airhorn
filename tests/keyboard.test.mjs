@@ -184,7 +184,23 @@ function assertFocusRing(stop, label) {
  *                      a11y suite; the offer this suite walks is explicit.
  */
 const instrumentation = `
-  window.__kb = { sources: 0, oscillators: 0, realOffers: 0, prompts: 0, stub: true, stops: [], errors: [] };
+  window.__kb = { sources: 0, oscillators: 0, realOffers: 0, prompts: 0, stub: true, stops: [], focusCalls: [], errors: [] };
+  // A no-op focus() is invisible from outside (airhorn-g0qr.16): on a cold load
+  // document.activeElement is ALREADY <body>, so an init that calls
+  // document.body.focus() fires no focus event and adds no focus stop, and the stop
+  // count below cannot see it. The call itself is the observable, so it is recorded
+  // before the browser decides whether anything changed.
+  if (window.HTMLElement && typeof HTMLElement.prototype.focus === 'function') {
+    const originalFocus = HTMLElement.prototype.focus;
+    HTMLElement.prototype.focus = function (...args) {
+      window.__kb.focusCalls.push({
+        tag: this.tagName,
+        id: this.id || null,
+        cls: typeof this.className === 'string' ? this.className : '',
+      });
+      return originalFocus.apply(this, args);
+    };
+  }
   const countStarts = (proto, key) => {
     if (!proto) return;
     const original = proto.start;
@@ -336,6 +352,7 @@ async function launch({ label = 'keyboard' } = {}) {
       realOffers: window.__kb.realOffers,
       prompts: window.__kb.prompts,
       stops: window.__kb.stops.length,
+      focusCalls: window.__kb.focusCalls.map((c) => c.tag + (c.id ? '#' + c.id : '') + (c.cls ? '.' + c.cls.trim().split(/\\s+/)[0] : '')),
       errors: window.__kb.errors.slice(),
     };
   })()`);
@@ -480,6 +497,13 @@ async function run() {
       stopped.stops === 0,
       `Tab → horn (cold load): the page focused something before the first Tab (${stopped.stops} focus stop(s)) - a keyboard user starts with no idea where they are`
     );
+    // The stop count only sees focus that MOVED. A cold load already has <body>
+    // active, so `document.body.focus()` during init is a no-op that raises no
+    // focusin - the exact mutation this case has to catch (airhorn-g0qr.16). The
+    // claim is therefore checked at the call site: no focus() at all before the
+    // first Tab.
+    assert(stopped.focusCalls.length === 0,
+      `cold load: the page called focus() before the first Tab (${stopped.focusCalls.join(', ')}) - focusing the default <body> moves nothing, so this is invisible to the focus-stop count and has to be caught at the call`);
     const first = await tab();
     assert(stopped.active && stopped.active.tag === 'BODY', `cold load: expected focus to start on <body>, got ${describeStop(stopped.active)}`);
     assert(hasClass(first, 'horn'), `Tab → horn (cold load): first Tab stop is ${describeStop(first)}, not the horn`);
