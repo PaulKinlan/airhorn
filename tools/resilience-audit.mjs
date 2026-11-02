@@ -362,7 +362,20 @@ export const READ_STATE = `(() => {
   const cs = horn ? getComputedStyle(horn) : null;
   const visible = !!(
     horn && rect && rect.width > 4 && rect.height > 4 &&
-    cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0.05
+    cs.display !== 'none' && !['hidden', 'collapse'].includes(cs.visibility) && Number(cs.opacity) > 0.05 &&
+    // ...and the ANCESTOR chain, not just the element's own style (the sweep:
+    // hornVisible ignored ancestor state - a parent with opacity:0 paints the
+    // horn INVISIBLE while its own computed style passes, and the audit
+    // recorded it visible). checkVisibility with the render model's box-chain
+    // option set (opacityProperty + contentVisibilityAuto, deliberately NO
+    // visibilityProperty) answers for the element AND its ancestors -
+    // display:none, an opacity:0 group, a c-v skip - while the computed-style
+    // visibility check above keeps the od1 override semantics (visibility
+    // inherits, so a hidden ancestor already reads in cs.visibility, and a
+    // visibility:visible override under one IS genuinely painted). Chrome 155
+    // always has checkVisibility; if it were absent the TypeError would fail
+    // the scenario as itself rather than silently skip the ancestor half.
+    horn.checkVisibility({ opacityProperty: true, contentVisibilityAuto: true })
   );
   // The decision itself is NOT here (airhorn-0w9, -cpi, -9py): it lives in
   // tools/render-model.mjs and is injected BY SOURCE, so the instrument
