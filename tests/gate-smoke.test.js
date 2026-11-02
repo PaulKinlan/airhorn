@@ -146,6 +146,30 @@ const buildGateProbe = () => {
   // The runner config is part of the gate: without its pinned TAP reporter the probe's
   // node --test would emit the spec summary and the gate would read the suite as silent.
   fs.copyFileSync(path.join(root, 'tools', 'gate.conf'), path.join(toolsDir, 'gate.conf'));
+  // The copied SUITE_TIERS block declares the REAL repo's suites, and the probe holds none
+  // of them, so the probe's own suites would read tier 'undeclared' at selection and get
+  // no runner. Stripping the block is the wrong fix: it makes every probe run the legacy
+  // extension-mapping fallback the real repo no longer uses - green bought by shrinking
+  // what is tested. The block is REPLACED with declarations for the suites probes create,
+  // keeping probes on the real strict-declaration path (and loop B audits any undeclared
+  // *.test.* file the probe holds once declarations exist, so every suite a probe adds
+  // must be declared here - that is the strict contract working as designed, and it keeps
+  // a live probe-level test of the declaration machinery itself).
+  fs.writeFileSync(path.join(toolsDir, 'gate.conf'),
+    fs.readFileSync(path.join(toolsDir, 'gate.conf'), 'utf8').replace(
+      /SUITE_TIERS="[^"]*"\n?/,
+      'SUITE_TIERS="\n' + [
+        'tests/pass.test.js=node-test',
+        'tests/fail.test.js=node-test',
+        'tests/newimporter.test.js=node-test',
+        'tests/second.test.mjs=node-test',
+        'tests/dist-suite.test.js=node-test',
+        'tests/plain-suite.test.js=node-test',
+        // nh8y's build-plan fixture holds no node:test import and is never executed -
+        // script is its honest declaration (a file with no node:test symbols is not a
+        // node-test suite), and loop A's content audit agrees.
+        'tests/joined-suite.test.js=script',
+      ].join('\n') + '\n"\n'));
   fs.copyFileSync(path.join(root, 'tools', 'derive-coverage-contract.mjs'), path.join(toolsDir, 'derive-coverage-contract.mjs'));
   fs.writeFileSync(path.join(probe, 'package.json'),
     JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'true' } }));
@@ -282,7 +306,7 @@ test('the fleet contract recognises every rc-0 verdict line the gate emits (airh
     const noChangedLine = 'fast-gate: no changed files';
     const positiveLine = 'fast-gate: PASS (1 suite(s), 1 changed file(s))';
     const blessedExemptLine = 'fast-gate: ZERO-SUITE PASS (1 changed file(s), all 1 exempt; FAST_GATE_ALLOW_ZERO=1)';
-    const blessedPendingLine = 'fast-gate: ZERO-SUITE PASS (1 changed file(s), all 1 pending; FAST_GATE_ALLOW_ZERO=1)';
+    const blessedPendingLine = "fast-gate: ZERO-SUITE PASS (1 changed file(s) selected 1 suite(s), all of them '~'-pending; FAST_GATE_ALLOW_ZERO=1)";
     const blessedDeletedLine = 'fast-gate: ZERO-SUITE PASS (1 changed file(s): 0 exempt, 1 deleted-suite; FAST_GATE_ALLOW_ZERO=1)';
     for (const [name, r, line] of [['no-changed', noChanged, noChangedLine], ['positive', positive, positiveLine], ['blessed-exempt', blessedExempt, blessedExemptLine], ['blessed-pending', blessedPending, blessedPendingLine], ['blessed-deleted', blessedDeleted, blessedDeletedLine]]) {
       assert.ok(r.stdout.includes(line), `${name} must print the pinned verdict line ${line}, got:\n${r.stdout}`);
@@ -326,7 +350,7 @@ test("an all-'~'-pending change fails loudly: zero executed suites is not green 
     assert.ok(loud.stderr.includes('FAST_GATE_ALLOW_ZERO'), `the failure must name the acknowledgement: ${loud.stderr}`);
     const blessed = run(['--changed', 'pending-src.txt'], { FAST_GATE_ALLOW_ZERO: '1' });
     assert.equal(blessed.status, 0, `the explicit acknowledgement must pass: ${blessed.stderr}`);
-    assert.ok(blessed.stdout.includes('ZERO-SUITE PASS (1 changed file(s), all 1 pending; FAST_GATE_ALLOW_ZERO=1)'),
+    assert.ok(blessed.stdout.includes("ZERO-SUITE PASS (1 changed file(s) selected 1 suite(s), all of them '~'-pending; FAST_GATE_ALLOW_ZERO=1)"),
       `the pass must be labelled, not a bare PASS: ${blessed.stdout}`);
     // A MIXED selection is untouched: the landed suite still runs, the pending one stays loud.
     const mixed = run(['--changed', 'mixed-src.js']);
@@ -580,7 +604,19 @@ test('a suite whose own report counts failures is FAILED, not passed (airhorn-nx
     // runs under the REAL pinned runner and the real report hook, so nothing is stubbed:
     // the suite prints 'not ok - <name>' and exits 0 (tests/webmcp.test.mjs is one
     // forgotten process.exit(1) away from exactly this).
+    // The real conf's SUITE_TIERS declares real-repo suites this probe does not have, and
+    // this probe's own suites would read 'undeclared' at selection. Like buildGateProbe,
+    // the block is REPLACED (not stripped - the probe must run the strict-declaration
+    // path) with declarations for every suite file the probe holds: scriptsuite is the
+    // script tier this leg exercises; pass.test.js came from buildGateProbe; the stub
+    // legs' failcount/unparseable suites are still on disk, carry no node:test import,
+    // and are never run in this leg - script is their honest declaration (a file with no
+    // node:test symbols is not a node-test suite).
     fs.copyFileSync(path.join(root, 'tools', 'gate.conf'), path.join(probe, 'tools', 'gate.conf'));
+    fs.writeFileSync(path.join(probe, 'tools', 'gate.conf'),
+      fs.readFileSync(path.join(probe, 'tools', 'gate.conf'), 'utf8').replace(
+        /SUITE_TIERS="[^"]*"\n?/,
+        'SUITE_TIERS="\ntests/pass.test.js=node-test\ntests/failcount.test.js=script\ntests/unparseable.test.js=script\ntests/scriptsuite.mjs=script\n"\n'));
     fs.mkdirSync(path.join(probe, 'tests', 'support'), { recursive: true });
     fs.copyFileSync(path.join(root, 'tests', 'support', 'report-hook.mjs'),
       path.join(probe, 'tests', 'support', 'report-hook.mjs'));
@@ -616,6 +652,43 @@ test('a suite whose own report counts failures is FAILED, not passed (airhorn-nx
   } finally {
     fs.rmSync(probe, { recursive: true, force: true });
     if (stubDir) fs.rmSync(stubDir, { recursive: true, force: true });
+  }
+});
+
+test('a nested suite (tests/sub/*.test.js) is visible to the reverse check (map P2)', () => {
+  // The reverse check's tree enumeration was DEPTH-1 (tests/*.test.*), so a suite one
+  // directory deeper never reached the unmapped-suite check: the layer that exists to
+  // catch coverage blind spots had one. The probe writes its own minimal gate.conf
+  // WITHOUT SUITE_TIERS (the legacy extension mapping then applies) - copying the real
+  // conf declares real-repo suites a probe does not have, and the tier audit fails the
+  // probe before the reverse check runs (a pre-existing gate-tiermjs probe gap).
+  const { probe, run } = buildGateProbe();
+  try {
+    fs.writeFileSync(path.join(probe, 'tools', 'gate.conf'),
+      'FAST_GATE_RUNNER="node --test --test-reporter=tap"\nFAST_GATE_JOBS=1\n');
+
+    // GREEN: no nested suite at all - the broadened glob adds no false positive.
+    const plain = run(['--changed', 'src/a.js']);
+    assert.equal(plain.status, 0, `a plain depth-1 tree must stay green: ${plain.stdout}${plain.stderr}`);
+
+    // RED: present, unmapped - the reverse check must name it.
+    fs.mkdirSync(path.join(probe, 'tests', 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(probe, 'tests', 'sub', 'deep.test.js'),
+      "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('a nested suite', () => { assert.ok(true); });\n");
+    const unmapped = run(['--changed', 'src/a.js']);
+    assert.equal(unmapped.status, 1, `an unmapped nested suite must fail the gate: ${unmapped.stdout}`);
+    assert.ok(unmapped.stdout.includes('fast-gate: unmapped-suite: tests/sub/deep.test.js'),
+      `the nested suite must be NAMED as unmapped: ${unmapped.stdout}`);
+
+    // GREEN: mapped by its own row, the nested suite is reachable and nothing is flagged.
+    fs.writeFileSync(path.join(probe, 'src', 'deep.js'), '// deep\n');
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'src/deep.js\ttests/sub/deep.test.js\n');
+    const mapped = run(['--changed', 'src/a.js']);
+    assert.equal(mapped.status, 0, `a mapped nested suite must pass: ${mapped.stdout}${mapped.stderr}`);
+    assert.ok(!mapped.stdout.includes('unmapped-suite'),
+      `no unmapped-suite line may appear: ${mapped.stdout}`);
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
   }
 });
 
