@@ -266,23 +266,53 @@ async function closeBrowser(browser) {
 
 /* ----------------------------------------------------- page instrumentation */
 
+// Mutation seam (airhorn-nxuv.9): under test mode, the real start() is
+// replaced by one that throws, so the probe must leave its counters
+// UNCHANGED and record the throw - the proof the counter tracks playback,
+// not intent. Honoured only with RESILIENCE_TEST_MODE=1, like the stub seam.
+const START_THROWS_SEAM = process.env.RESILIENCE_TEST_MODE === '1'
+  && process.env.RESILIENCE_START_THROWS === '1';
+
 const PROBE = `
 (() => {
-  window.__probe = { bufferStarts: 0, oscStarts: 0 };
+  window.__probe = { bufferStarts: 0, oscStarts: 0, startThrows: 0, lastStartError: null };
   window.__errors = [];
   window.__marker = Math.random().toString(36).slice(2) + Date.now();
   window.addEventListener('error', (e) => window.__errors.push('error: ' + (e.message || String(e))));
   window.addEventListener('unhandledrejection', (e) => {
     window.__errors.push('unhandledrejection: ' + String((e.reason && e.reason.message) || e.reason));
   });
+  // A start() counts only when playback actually STARTED: run it FIRST and
+  // increment after it returns (airhorn-nxuv.9). The old order (++ before
+  // start) recorded intent, so a start() that threw still read as a buffer
+  // started - absence looked like success. A throw is counted as a THROW,
+  // with the message kept, so a failed start is an explicit outcome in the
+  // record, not a zero that looks healthy. (The app swallows start() throws
+  // - airhorn.js .catch(() => false) and horn.js try/catch around osc.start -
+  // so without this the failure would be invisible everywhere.)
+  const wrapStart = (node, field) => {
+    const start = ${START_THROWS_SEAM
+      ? '() => { throw new Error("start() forced to throw (mutation seam airhorn-nxuv.9)"); }'
+      : 'node.start.bind(node)'};
+    node.start = (...x) => {
+      try {
+        const r = start(...x);
+        window.__probe[field]++;
+        return r;
+      } catch (e) {
+        window.__probe.startThrows++;
+        window.__probe.lastStartError = String((e && e.message) || e);
+        throw e;
+      }
+    };
+  };
   const AC = window.AudioContext || window.webkitAudioContext;
   if (AC) {
     if (AC.prototype.createBufferSource) {
       const orig = AC.prototype.createBufferSource;
       AC.prototype.createBufferSource = function (...a) {
         const node = orig.apply(this, a);
-        const start = node.start.bind(node);
-        node.start = (...x) => { window.__probe.bufferStarts++; return start(...x); };
+        wrapStart(node, 'bufferStarts');
         return node;
       };
     }
@@ -290,8 +320,7 @@ const PROBE = `
       const orig = AC.prototype.createOscillator;
       AC.prototype.createOscillator = function (...a) {
         const node = orig.apply(this, a);
-        const start = node.start.bind(node);
-        node.start = (...x) => { window.__probe.oscStarts++; return start(...x); };
+        wrapStart(node, 'oscStarts');
         return node;
       };
     }
@@ -580,7 +609,14 @@ async function pressHorn(cdp, sessionId) {
   if (!box || box.w < 2 || box.h < 2) {
     return { dispatched: false, responded: false, sounded: false, reason: 'horn has no hit area' };
   }
-  const before = await evaluate(cdp, sessionId, 'window.__probe ? (window.__probe.bufferStarts + window.__probe.oscStarts) : -1');
+  const probeShot = 'window.__probe ? { starts: window.__probe.bufferStarts + window.__probe.oscStarts, throws: window.__probe.startThrows || 0, lastError: window.__probe.lastStartError || null } : null';
+  const before = await evaluate(cdp, sessionId, probeShot);
+  // A page WITH a hit area but no probe means the instrumentation never
+  // injected: hornUsable is UNMEASURABLE, and unmeasurable fails as itself
+  // (airhorn-nxuv.9) rather than reading as a horn that made no sound.
+  if (!before) {
+    throw new Error('horn press unmeasurable: the audio probe (__probe) was not injected into a document that has a horn');
+  }
   await cdp.send('Input.dispatchMouseEvent', {
     type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1,
   }, sessionId);
@@ -590,14 +626,22 @@ async function pressHorn(cdp, sessionId) {
     type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1,
   }, sessionId);
   await sleep(150);
-  const after = await evaluate(cdp, sessionId, 'window.__probe ? (window.__probe.bufferStarts + window.__probe.oscStarts) : -1');
-  const started = before >= 0 && after > before;
+  const after = await evaluate(cdp, sessionId, probeShot);
+  if (!after) {
+    throw new Error('horn press unmeasurable: the audio probe (__probe) vanished across the press');
+  }
+  const started = after.starts > before.starts;
+  const startThrows = after.throws - before.throws;
   return {
     dispatched: true,
     ariaPressedWhileHeld: mid.horn.ariaPressed,
     responded: mid.horn.ariaPressed === 'true',
     sounded: started,
-    audioStarts: { before, after },
+    audioStarts: { before: before.starts, after: after.starts },
+    // A start() that threw is an explicit failing outcome with the error in
+    // the record - never a zero that looks healthy (airhorn-nxuv.9).
+    startThrows,
+    ...(startThrows > 0 ? { startError: after.lastError } : {}),
   };
 }
 
@@ -699,7 +743,7 @@ async function withBrowser(id, name, fn) {
   results.push(result);
   const verdict = result.error
     ? `ERROR ${result.error}`
-    : `renders=${result.renders} hornVisible=${result.hornVisible} hornUsable=${result.hornUsable} explains=${result.explainsItself}`;
+    : `renders=${result.renders} hornVisible=${result.hornVisible} hornUsable=${result.hornUsable} explains=${result.explainsItself}${result.measuredDocument ? ` doc=${result.measuredDocument}` : ''}`;
   console.log(`[${id}] ${name}\n  ${verdict}`);
 }
 
@@ -1167,10 +1211,40 @@ async function runAudit() {
       const onlineAgain = await readState(cdp, sessionId);
       await reload(cdp, sessionId);
       const onlineSecond = await readState(cdp, sessionId);
-      await evaluate(cdp, sessionId, `navigator.serviceWorker.getRegistration()
-        .then((reg) => reg && reg.update()).then(() => true).catch(() => false)`);
+      // The recovery update is the mechanism under test, so its outcome is
+      // RECORDED, never swallowed (airhorn-v7ba, the same fix as nxuv.6's
+      // update scenario): a rejected reg.update() or a null registration used
+      // to fold into recoveredAfterSwUpdate:false, indistinguishable from
+      // 'the update ran and the app did not recover'. The same mutation seam
+      // as scenario 3 forces the rejection under test mode.
+      if (testMode && process.env.RESILIENCE_UPDATE_REJECT === '1') {
+        state.overrides.set('/sw.js', { status: 500, body: 'update forced to fail (mutation seam)' });
+      }
+      const recoveryFacts = await evaluate(cdp, sessionId, `navigator.serviceWorker.getRegistration()
+        .then((reg) => {
+          if (!reg) return { registrationPresent: false };
+          return reg.update().then(
+            () => ({ registrationPresent: true, settled: true }),
+            (err) => ({ registrationPresent: true, settled: false, errorMessage: String((err && err.message) || err) }),
+          );
+        })`);
+      // The PAGE reports facts; the TOOL decides (airhorn-nxuv.6, and the union
+      // repair: a page-side outcome literal here turns tests/update-outcome.test.js's
+      // page-facts assertion RED). Same pure rule as scenario 3, and the union's
+      // v7ba half: the recovery update is the mechanism under test, so a rejected
+      // or unmeasurable update fails the scenario AS ITSELF (airhorn-qp8k).
+      const recoveryUpdate = classifyUpdateOutcome(recoveryFacts);
+      // The recording half alone is not a fix (airhorn-qp8k, the v7ba review
+      // FAIL): swUpdate/recoveredAfterSwUpdate were read by NOTHING, so a
+      // rejected or unmeasurable recovery update left the row OK and the audit
+      // exit 0 - byte-for-byte the pre-fix gate outcome. The mechanism under
+      // test is the update itself: if it did not run to completion the scenario
+      // fails as itself, exactly as scenario 3 does (:951-953).
+      if (recoveryUpdate.outcome !== 'updated') {
+        throw new Error(`corrupt-cache measured nothing: recovery reg.update() ${recoveryUpdate.outcome} - ${recoveryUpdate.detail}`);
+      }
       await sleep(1500);
-      const afterUpdate = await readState(cdp, sessionId).catch(() => null);
+      const afterUpdate = await readState(cdp, sessionId).catch((err) => ({ unreadable: String((err && err.message) || err) }));
       const finalShot = await shot(cdp, sessionId, '6-corrupt-after-online-update');
 
       return {
@@ -1197,7 +1271,15 @@ async function runAudit() {
         hornUsable: hornAfterShell.sounded,
         recoveredOnline: !!onlineAgain && onlineAgain.horn.present,
         recoveredAfterSecondLoad: !!onlineSecond && onlineSecond.horn.present,
-        recoveredAfterSwUpdate: !!(afterUpdate && afterUpdate.horn.present),
+        swUpdate: recoveryUpdate,
+        // Claimed only when an update RAN and the page was READABLE
+        // (airhorn-v7ba): anything else is a named 'unmeasurable', never
+        // folded into false next to a real not-recovered.
+        recoveredAfterSwUpdate: recoveryUpdate.outcome !== 'updated'
+          ? `unmeasurable: reg.update() ${recoveryUpdate.outcome} - ${recoveryUpdate.detail}`
+          : afterUpdate.unreadable
+            ? `unmeasurable: state unreadable after the update (${afterUpdate.unreadable})`
+            : !!afterUpdate.horn.present,
         screenshots: [jsShot, shellShot, finalShot],
         console: collectors(sessionId).console,
         pageErrors: [...afterJsCorruption.errors, ...afterShellCorruption.errors],
@@ -1239,14 +1321,24 @@ export function writeReport(scenarios, outDir = OUT) {
   };
   fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify(report, null, 2));
 
+  // The named reason must reach the operator even when it explains a NO
+  // (airhorn-mslu): 'NO (the deep-link navigation never replaced the
+  // document...)' is a different row from 'NO', and measuredDocument is what
+  // tells a leftover cached page apart from the page under test.
   const row = (r) => [
     r.id,
     r.name,
     (r.status === 'ERROR' || r.error) ? 'ERROR' : (r.renders ? 'yes' : 'NO'),
     r.error ? '-' : (r.hornVisible ? 'yes' : 'NO'),
     r.error ? '-' : (r.hornUsable ? 'yes' : 'NO'),
-    r.error ? '-' : (r.explainsItself ? `yes (${r.explanationEvidence})` : 'NO'),
-    r.error || '',
+    r.error
+      ? '-'
+      : r.explainsItself
+        ? `yes (${r.explanationEvidence})`
+        : r.explanationEvidence && r.explanationEvidence !== 'none'
+          ? `NO (${r.explanationEvidence})`
+          : 'NO',
+    [r.measuredDocument ? `doc: ${r.measuredDocument}` : '', r.error || ''].filter(Boolean).join('; '),
   ];
   const lines = [
     '# Air Horner resilience audit',
