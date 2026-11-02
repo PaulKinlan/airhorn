@@ -406,10 +406,7 @@ async function main() {
     console.log(`  screenshots: ${httpEv.screenshot}, ${httpsEv.screenshot}`);
 
     if (!httpsEv.installPrompt.fired) throw new Error('beforeinstallprompt did NOT fire over HTTPS');
-    if (httpsEv.installButton.disabled !== false || !httpsEv.installButton.hasAvailableClass) {
-      throw new Error('Install button not enabled over HTTPS: ' + JSON.stringify(httpsEv.installButton));
-    }
-    if (httpEv.installPrompt.fired) throw new Error('the insecure-HTTP contrast fired the prompt - the contrast is invalid');
+    assertInstallEvidence(httpEv, httpsEv);
     console.log('install-https-proof: PASS');
   } finally {
     liveBrowser = null; // the handle's teardown owns it now; a late signal must not repeat it
@@ -426,6 +423,38 @@ async function main() {
 // Only drive the tool when this file is the entry point: the regression tests
 // import openBrowser to prove a refused launch leaves no profile behind, and an
 // import must not start a server. Same guard (and same reason) as
+// The button-state assertions, exported so a browser-free test can drive them
+// against synthetic evidence (the assertion-honesty sweep, tools/ map:
+// install-https-proof :406-411/:407 - the HTTP contrast asserted only
+// '!prompt fired', so an install button ENABLED over insecure HTTP landed green;
+// and the HTTPS leg collected visibility/pointerEvents but never asserted them,
+// so an invisible or unclickable 'enabled' button passed). The button's semantics
+// come from src/install.js: disabled=true until beforeinstallprompt fires, which
+// is also what adds the 'available' class - so over HTTP the honest contrast is
+// 'prompt never fired AND the button stayed disabled AND never got available'.
+export function assertInstallEvidence(httpEv, httpsEv) {
+  const httpsBtn = httpsEv.installButton;
+  if (httpsBtn === null || httpsBtn === undefined || httpsBtn.disabled === null) {
+    throw new Error('install button unmeasurable over HTTPS (no #installer wrap or no button in it) - cannot prove the affordance');
+  }
+  if (httpsBtn.disabled !== false || !httpsBtn.hasAvailableClass) {
+    throw new Error('Install button not enabled over HTTPS: ' + JSON.stringify(httpsBtn));
+  }
+  if (httpsBtn.visibility !== 'visible' || httpsBtn.pointerEvents === 'none') {
+    throw new Error('Install button enabled over HTTPS but not clickable/visible (visibility='
+      + httpsBtn.visibility + ', pointerEvents=' + httpsBtn.pointerEvents + ') - an affordance the user cannot use');
+  }
+  if (httpEv.installPrompt.fired) throw new Error('the insecure-HTTP contrast fired the prompt - the contrast is invalid');
+  const httpBtn = httpEv.installButton;
+  if (httpBtn === null || httpBtn === undefined || httpBtn.disabled === null) {
+    throw new Error('install button unmeasurable over HTTP (no #installer wrap or no button in it) - the contrast measures nothing');
+  }
+  if (httpBtn.disabled !== true || httpBtn.hasAvailableClass) {
+    throw new Error('Install button USABLE over insecure HTTP: ' + JSON.stringify(httpBtn)
+      + ' - the page exposes an install affordance that cannot work, and the contrast asserted only the prompt');
+  }
+}
+
 // tools/resilience-audit.mjs - import.meta.main is the reliable test (Node 24+),
 // and the argv fallback keeps older runtimes from turning a real run into a
 // silent no-op that exits 0.
