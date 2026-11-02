@@ -329,7 +329,16 @@ async function run() {
       `a failed upgrade was never reported to the user: ${JSON.stringify(report)}`);
     assert(after.length === before.length,
       `a failed upgrade left caches behind: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`);
-    console.log(`Reported: "${report.text}" (caches unchanged: ${JSON.stringify(after)})`);
+    // Cache IDENTITY, not a count (airhorn-g0qr.14). `after.length === before.length` is
+    // satisfied by SWAPPING one cache for another: the mutation deletes the previous
+    // build's cache and keeps the leaked quota-failed one, so the count is unchanged
+    // while the offline copy the user depends on is gone. The set must be IDENTICAL -
+    // nothing added (no leak) and nothing removed (the old build still owns its cache).
+    const beforeSet = JSON.stringify([...before].sort());
+    const afterSet = JSON.stringify([...after].sort());
+    assert(afterSet === beforeSet,
+      `a failed upgrade changed the cache set: before ${beforeSet} after ${afterSet} - a count alone cannot tell a leak from a swap`);
+    console.log(`Reported: "${report.text}" (cache set unchanged: ${afterSet})`);
 
     /* ------------------- the old build must still work offline after a failed upgrade */
     state.down = true;
