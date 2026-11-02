@@ -742,7 +742,10 @@ export function distance(sample, render) {
   // A render whose fundamental cannot be measured while the sample's can (a
   // noise render, a broken oscillator) is ranked as a 2x pitch error - the
   // worst plausible candidate - never as identical. If the SAMPLE's pitch is
-  // unmeasurable the metric cannot judge this pair, and 0 is honest there.
+  // unmeasurable the metric cannot judge this pair at all, so the ratio stays 1
+  // and its distance TERM is 0 (log2(1)): an honest zero contribution, not a
+  // claimed match - the wording matters, because "0" here is the term and "1" is
+  // the ratio the old bug defaulted to (airhorn-soa5).
   const fundamentalRatio =
     sample.fundamentalHz && render.fundamentalHz ? render.fundamentalHz / sample.fundamentalHz
       : sample.fundamentalHz ? 0.5 : 1;
