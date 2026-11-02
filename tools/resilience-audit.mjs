@@ -74,6 +74,29 @@ fs.mkdirSync(OUT, { recursive: true });
 function startServer() {
   const state = { version: '2.0.0-audit-base', overrides: new Map(), lieFi: null };
 
+  // The SW version shim's contract, validated BEFORE the first request (airhorn-7mwy):
+  // the /sw.js handler bumps the cache version by replacing exactly one
+  // 'const version = "...";' line. If public/sw.js ever changes shape (a quote style, a
+  // renamed const), String.replace becomes a SILENT no-op - the SW keeps the old version and
+  // the update scenario 'updates' nothing while reporting OK. So the pattern is matched
+  // against the real dist/sw.js here: exactly one match or the audit refuses to start,
+  // naming the pattern and the line the file actually carries. The regex is deliberately NOT
+  // broadened to any version-like string: a silent WRONG update is worse than a loud no-op.
+  const swSource = (() => {
+    try { return fs.readFileSync(path.join(distDir, 'sw.js'), 'utf8'); } catch (err) {
+      throw new Error(`resilience-audit: cannot shim the SW cache version: dist/sw.js is unreadable (${String((err && err.message) || err)}) - the update scenario would measure nothing`);
+    }
+  })();
+  const versionMatches = swSource.match(/const version = "[^"]*";/g) || [];
+  if (versionMatches.length !== 1) {
+    const hint = (swSource.match(/[^\n]*\bconst\b[^\n]*\bversion\b[^\n]*/i)
+      || swSource.match(/[^\n]*\bversion\b[^\n]*=[^\n]*/i)
+      || ['(no line mentions "version" at all)'])[0].trim();
+    throw new Error('resilience-audit: cannot shim the SW cache version: expected exactly one \'const version = "...";\' '
+      + `line in dist/sw.js, found ${versionMatches.length}. The file's version-looking line is: ${hint}. `
+      + 'Fix the pattern or the file - a silent no-op would let the update scenario update nothing and report OK.');
+  }
+
   const server = http.createServer((req, res) => {
     let pathname;
     try {
@@ -728,6 +751,21 @@ async function runAudit() {
 
   // RESILIENCE_ONLY=liefi,update re-runs just those scenarios (they all share one server).
   const only = (process.env.RESILIENCE_ONLY || '').split(',').map((s) => s.trim()).filter(Boolean);
+  // The selector is VALIDATED, not just applied (airhorn-7sfn): a typo'd name used to match
+  // no scenario, run zero of them, and exit 0 - a green audit that measured nothing. An
+  // explicit selection naming an unknown scenario is an ERROR naming it. The ONE deliberate
+  // empty selection keeps exit 0: 'none' is the documented way to ask for nothing (the
+  // auditExitCode contract, 'nothing wanted'). One entry per want('<id>') call below: a
+  // scenario added without an entry here is unreachable by name (its selector errors loudly),
+  // which is the failure direction this fix exists to produce.
+  const KNOWN_SCENARIOS = ['blocked', 'corrupt', 'liefi', 'offline', 'quota', 'update'];
+  const unknownSelectors = only.filter((s) => s !== 'none' && !KNOWN_SCENARIOS.includes(s));
+  if (unknownSelectors.length) {
+    console.error(`resilience-audit: RESILIENCE_ONLY names unknown scenario(s): ${unknownSelectors.join(', ')} - ` +
+      `known scenarios: ${KNOWN_SCENARIOS.join(', ')} (or 'none' for a deliberately empty run). ` +
+      'Refusing to report a green audit that measured nothing.');
+    process.exit(1);
+  }
   const want = (id) => only.length === 0 || only.includes(id);
 
   // Test seam (airhorn-w1wh review, rounds 3 and 4): a scenario error is otherwise
@@ -1061,9 +1099,12 @@ async function runAudit() {
         `getComputedStyle(document.querySelector('.horn')).fontFamily`);
       const fontShot = await shot(cdp, sessionId, '5-fonts');
 
+      const headline = blockedAssetHeadline(js, css);
       return {
-        // top-level row describes the worst blocked-asset case, the CSS one
-        ...css,
+        // The top-level row is the worst blocked-asset subcase, NAMED - see
+        // blockedAssetHeadline. Spreading one fixed subcase let its passing
+        // values mask the other subcase's failure in the summary table.
+        ...headline,
         subCases: { js, css },
         baselineHornSize: baseline.horn.present ? `${baseline.horn.width}x${baseline.horn.height}` : null,
         fonts: {
@@ -1279,6 +1320,34 @@ export function auditExitCode(scenarios) {
 
 // Extracted from runAudit so a browser-free test can hand it a stubbed failing
 // scenario and check the row really lands in the file, not just in memory.
+
+/*
+ * The blocked-asset scenario's headline row: the WORST subcase, NAMED. The row
+ * used to spread the CSS subcase unconditionally, so a JS-blocked failure
+ * (hornUsable false) was masked by the CSS subcase's true in the summary
+ * table - a recorded report read hornUsable 'yes' while its own
+ * subCases.js.hornUsable was false (the tools/ assertion-honesty sweep).
+ * 'Worst' = a subcase that measured a failure: the horn unusable, the render
+ * degraded, or the navigation incomplete. JS is listed first, so a run where
+ * both failed names the more basic asset. When neither measured a failure the
+ * CSS row stays the representative, exactly as before. Pure and exported so
+ * the replay harness drives the real row construction.
+ */
+export const blockedAssetHeadline = (js, css) => {
+  const measuredFailure = (s) => !s.hornUsable || s.degraded || !s.navigationCompleted;
+  const failed = [js, css].filter(measuredFailure);
+  const headline = failed.length ? failed[0] : css;
+  return {
+    ...headline,
+    name: failed.length ? `blocked JS / CSS / font (headline: ${headline.label})` : 'blocked JS / CSS / font',
+    headlineSubcase: headline.label,
+    headlineNote: failed.length === 0
+      ? 'no subcase measured a failure; the CSS subcase is shown'
+      : failed.length === 1
+        ? `${headline.label} measured the worst outcome and is shown as the headline`
+        : `both subcases measured failures (${failed.map((s) => s.label).join(', ')}); ${headline.label} is shown as the headline`,
+  };
+};
 export function writeReport(scenarios, outDir = OUT) {
   const results = scenarios;
   const OUT = outDir;
