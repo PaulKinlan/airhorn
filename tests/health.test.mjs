@@ -73,6 +73,11 @@ function childEnv(overrides = {}) {
 // commit from import.meta.dirname, so the copy reports that directory's git.
 function startServer(overrides = {}, readyTimeoutMs = 30000, where = {}) {
   return new Promise((resolve, reject) => {
+    // The spawn/listening bracket (airhorn-g0qr.6): server.ts fixes BUILD_TIMESTAMP at
+    // module load, which is after this line and before the listening line, so a fresh
+    // fallback timestamp must land inside [spawnedAt, listeningAt]. The bracket is what
+    // makes "fresh" falsifiable - a fixed window was not (see the assertion below).
+    const spawnedAt = Date.now();
     const child = spawn(deno, ['run', '--no-prompt', '--allow-net', '--allow-read', '--allow-env', '--allow-run=git', where.serverFile ?? serverTs], {
       cwd: where.cwd ?? root,
       env: childEnv(overrides),
@@ -97,6 +102,8 @@ function startServer(overrides = {}, readyTimeoutMs = 30000, where = {}) {
       const url = `http://127.0.0.1:${port}`;
       resolve({
         url,
+        spawnedAt,
+        listeningAt: Date.now(),
         fetch: (p, init) => fetch(url + p, { ...init, signal: AbortSignal.timeout(5000) }),
         kill: async () => {
           child.kill('SIGTERM');
@@ -138,8 +145,21 @@ test('GET /health on the real deno server: shape, truth, cheapness', async (t) =
     assert.equal(typeof body.buildTimestamp, 'string');
     const ts = Date.parse(body.buildTimestamp);
     assert.ok(Number.isFinite(ts), `buildTimestamp must be ISO-8601, got ${JSON.stringify(body.buildTimestamp)}`);
-    assert.ok(Math.abs(Date.now() - ts) < 5 * 60 * 1000,
-      `buildTimestamp falls back to server start time, got ${body.buildTimestamp}`);
+    // Bracket, not a fixed window (airhorn-g0qr.6). The old read was
+    // `Math.abs(Date.now() - ts) < 5 * 60 * 1000`, which accepted ANY timestamp within
+    // five minutes of the read - a hardcoded stamp offset by 60s at startup passed, and
+    // it never said the stamp was the SERVER's start rather than a build-time constant.
+    // The honest claim is that a non-injected stamp is this child's start: server.ts
+    // resolves it at module load, i.e. after `spawnedAt` and before the listening line,
+    // so the whole 5-minute window collapses to the two facts observed here.
+    assert.ok(ts >= srv.spawnedAt,
+      `buildTimestamp must not predate the server start (started ${new Date(srv.spawnedAt).toISOString()}, stamp ${body.buildTimestamp})`);
+    assert.ok(ts <= srv.listeningAt,
+      `buildTimestamp must not postdate the server listening (listening ${new Date(srv.listeningAt).toISOString()}, stamp ${body.buildTimestamp})`);
+    // The bracket is only evidence while it is narrow: a 5-minute-wide bracket would be
+    // the old assertion wearing a new shape, so the width itself is asserted.
+    assert.ok(srv.listeningAt - srv.spawnedAt < 60 * 1000,
+      `the start bracket must be under a minute to prove freshness, was ${srv.listeningAt - srv.spawnedAt}ms`);
 
     // A repeated GET is byte-identical. That alone is NOT proof of "resolved
     // once" — a per-request `git rev-parse` would also return the same sha. The
