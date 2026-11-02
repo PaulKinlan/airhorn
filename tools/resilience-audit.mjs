@@ -779,6 +779,17 @@ async function runAudit() {
   if (stub && !testMode) {
     console.warn('RESILIENCE_STUB_SCENARIO is honoured only with RESILIENCE_TEST_MODE=1 - ignoring it and running the real scenarios.');
   }
+  // Every OTHER seam env var set without the test mode must SAY it was dropped
+  // (airhorn-t00l): a silent ignore produces a GREEN, honest-looking audit that
+  // can be misrecorded as RED evidence. RESILIENCE_START_THROWS named a seam the
+  // pre-rework lineage carried; the current file has no such seam, and a var
+  // that names nothing must warn exactly the same way - a proof recipe that
+  // sets it expects an effect that never comes.
+  for (const seamVar of ['RESILIENCE_START_THROWS', 'RESILIENCE_UPDATE_REJECT', 'RESILIENCE_CACHE_MISS']) {
+    if (process.env[seamVar] && !testMode) {
+      console.warn(`${seamVar} is honoured only with RESILIENCE_TEST_MODE=1 - ignoring it and running the real scenarios.`);
+    }
+  }
   const useStub = Boolean(stub) && testMode;
 
   try {
