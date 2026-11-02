@@ -404,6 +404,15 @@ async function run() {
       assert(after.errors.length === 0, `tab A errored on press ${i}: ${JSON.stringify(after.errors)}`);
       AbadgeLog.push(...(await A.badge()).slice(-1));
     }
+    // The badge total has to be COMPUTED (airhorn-g0qr.9). Asserting only "tab B's last
+    // call was 4" cannot say so: the right answer and a hardcoded 4 are the same number, so
+    // a shared-total path that hardcodes or caps 4 passes it. Tab A's own three blasts
+    // separate the two - a real aggregate writes 1, then 2, then 3 - and pinning the
+    // sequence fixes the increment as well as the value.
+    assert(
+      JSON.stringify(AbadgeLog.map((e) => `${e.fn}:${e.arg}`)) === JSON.stringify(['setAppBadge:1', 'setAppBadge:2', 'setAppBadge:3']),
+      `tab A's badge did not follow its own blasts 1,2,3 (got ${JSON.stringify(AbadgeLog)}); a badge that only ever writes one number is a constant, not the shared total`
+    );
     console.log(`  tab A: 3 honest blasts; tab B never claimed one. badge calls during: ${JSON.stringify(AbadgeLog)}`);
 
     console.log('--- now one blast in tab B: the badge must read the shared total (airhorn-xkq) ---');
@@ -425,6 +434,26 @@ async function run() {
       console.log(`  shared badge: A wrote 1,2,3 then B wrote ${lastB[0].arg} - the app-wide badge tracks total blasts.`);
     }
 
+    // A fifth blast makes the shared total 5, so a path that hardcodes or caps 4 is out
+    // (airhorn-g0qr.9). Done before tab C boots, so C deriving the shared total below is
+    // still the same claim with the number the fixture actually earned.
+    if (badgeApi) {
+      const beforeFifth = (await B.badge()).length;
+      await B.clickHorn();
+      await waitUntil(async () => (await B.hornState()).playing === false, 6000);
+      // The count is bumped behind an origin lock, so the badge write lands after the
+      // sound stops: wait for it rather than sampling once.
+      const fifth = await waitUntil(async () => {
+        const sets = (await B.badge()).slice(beforeFifth).filter((e) => e.fn === 'setAppBadge');
+        return sets.length ? sets : null;
+      }, 6000) || [];
+      assert(fifth.length >= 1,
+        `a fifth blast wrote no badge at all (appended ${JSON.stringify(fifth)}) - the badge must follow every blast`);
+      assert(fifth.every((e) => e.arg === 5),
+        `a fifth blast set the badge to ${JSON.stringify(fifth.map((e) => e.arg))}, expected 5 - a badge that reads 4 for both four and five blasts is capped, not the shared total`);
+      console.log(`  fifth blast (second in tab B): badge 4 -> ${fifth[fifth.length - 1].arg}, so the total is computed.`);
+    }
+
     console.log('--- opening tab C must not damage the badge another tab set (airhorn-70k) ---');
     const C = await openTab('C', `${origin}/`);
     await sleep(200);
@@ -433,8 +462,11 @@ async function run() {
       assert(!blogC.some((e) => e.fn === 'clearAppBadge'),
         `a freshly opened tab cleared the app badge at boot: ${JSON.stringify(blogC)} - the badge is shared by every tab of the origin, so a new tab must derive it, never clear it (airhorn-70k)`);
       const cSet = blogC.filter((e) => e.fn === 'setAppBadge');
-      assert(cSet.length === 1 && cSet[0].arg === 4,
-        `a freshly opened tab did not derive the shared badge (expected setAppBadge(4)): ${JSON.stringify(blogC)} (airhorn-70k)`);
+      // 5 is the total the fixture has actually earned by here (3 in A + 2 in B); the
+      // assertion is unchanged in kind - a fresh tab must DERIVE the shared total - only the
+      // number moved with the extra blast that proves the total is computed.
+      assert(cSet.length === 1 && cSet[0].arg === 5,
+        `a freshly opened tab did not derive the shared badge (expected setAppBadge(5)): ${JSON.stringify(blogC)} (airhorn-70k)`);
       console.log(`  tab C booted and derived the badge: ${JSON.stringify(blogC)}`);
     }
     await closeTab(C);
