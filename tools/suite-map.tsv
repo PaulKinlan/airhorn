@@ -101,6 +101,10 @@ deno.lock	tests/health.test.mjs
 # tools/* is covered by a REAL smoke suite: the gate's own selection contract
 # plus syntax checks of the scripts it names (airhorn-1ye).
 tools/*	tests/gate-smoke.test.js tests/gate-map.test.js
+# The audio-parity measurement rules (pitch verdict, band, candidate distance) are proven
+# browser-free by their own suite, so a change to the decision selects it as well
+# (airhorn-nxuv.3): the tool needs Chrome, the RULE does not.
+tools/audio-parity.mjs	tests/audio-parity-verdict.test.js
 # The two tools that drive a browser for minutes and are SIGTERMed by the gate's
 # bound: their handler is behaviour, so a change to either runs the guard that
 # kills them mid-run and checks the tree is empty afterwards (airhorn-aaxm,

@@ -102,6 +102,9 @@
   "tests/gate-smoke.test.js",
   "tests/gate-map.test.js"
  ],
+ "tools/audio-parity.mjs": [
+  "tests/audio-parity-verdict.test.js"
+ ],
  "tools/cache-growth.mjs": [
   "tests/tool-bound-kill.test.mjs"
  ],

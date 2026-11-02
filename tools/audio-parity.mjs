@@ -63,7 +63,7 @@ const check = args.includes('--check');
 // A level change under ~1.5 dB reads as the same loudness, a length change over
 // 15% as a different honk, a centroid change over 25% as a different instrument,
 // and a fundamental more than a tone away as a different pitch.
-const TOLERANCE = {
+export const TOLERANCE = {
   // Peak is the transient; a blast whose crest factor differs slightly can be
   // the same loudness with a different peak, so loudness is gated on RMS and
   // peak is gated loosely (it is still reported, and still compared).
@@ -728,7 +728,7 @@ const show = (value, digits = 1) =>
   value === null || value === undefined ? 'n/a' : Number(value).toFixed(digits);
 
 /** Distance of a render from the sample, in tolerance units (0 = identical). */
-function distance(sample, render) {
+export function distance(sample, render) {
   const safeLog2 = (value) => (value > 0 ? Math.log2(value) : null);
   const durationRatio = sample.durationS > 0 ? render.durationS / sample.durationS : 1;
   // airhorn-qlnm: an UNMEASURABLE render centroid must not rank as a perfect
@@ -738,8 +738,14 @@ function distance(sample, render) {
   // SAMPLE cannot judge the pair, so 1 (zero distance) is honest there.
   const centroidRatio = sample.centroidHz > 0 && render.centroidHz > 0 ? render.centroidHz / sample.centroidHz
     : sample.centroidHz > 0 ? 0.5 : 1;
+  // airhorn-nxuv.3: an UNMEASURABLE pitch must not read as a perfect match.
+  // A render whose fundamental cannot be measured while the sample's can (a
+  // noise render, a broken oscillator) is ranked as a 2x pitch error - the
+  // worst plausible candidate - never as identical. If the SAMPLE's pitch is
+  // unmeasurable the metric cannot judge this pair, and 0 is honest there.
   const fundamentalRatio =
-    sample.fundamentalHz && render.fundamentalHz ? render.fundamentalHz / sample.fundamentalHz : 1;
+    sample.fundamentalHz && render.fundamentalHz ? render.fundamentalHz / sample.fundamentalHz
+      : sample.fundamentalHz ? 0.5 : 1;
   const terms = [
     Math.abs(render.peakDbfs - sample.peakDbfs) / TOLERANCE.peakDb,
     Math.abs(render.rmsDbfs - sample.rmsDbfs) / TOLERANCE.rmsDb,
@@ -803,13 +809,47 @@ function printTable(results) {
   console.log('\nreplica fidelity (replica@shipped vs the real fallback):', JSON.stringify(results.replica.delta));
 }
 
-function verdict(results) {
+/**
+ * The pitch row's whole decision, pure (airhorn-nxuv.3).
+ *
+ * The bug this exists to prevent: `fundamentalRatio` used to default to 1 when
+ * either side was unmeasurable, and 1 is dead centre of the accepted band - so an
+ * unpitched render (a noise fallback, a dead oscillator) reported as a PERFECT
+ * pitch match. Absence must be its own outcome: `measured: false`, ratio null, the
+ * gap named "unmeasurable", and pass false. The band itself is a measurement
+ * contract and is neither narrowed nor widened to make this distinction.
+ */
+export function pitchVerdict({ sampleHz, synthHz } = {}) {
+  const [low, high] = TOLERANCE.fundamentalRatio;
+  const measured = sampleHz > 0 && synthHz > 0;
+  if (!measured) {
+    return {
+      measured: false,
+      ratio: null,
+      gap: 'unmeasurable',
+      pass: false,
+      reason: 'pitch is unmeasurable on at least one side, so it cannot be said to be in the '
+        + `${low}-${high} band`,
+    };
+  }
+  const ratio = synthHz / sampleHz;
+  return {
+    measured: true,
+    ratio,
+    gap: `${((ratio - 1) * 100).toFixed(0)}%`,
+    pass: ratio >= low && ratio <= high,
+    reason: `ratio ${ratio.toFixed(3)} against the ${low}-${high} band`,
+  };
+}
+
+export function verdict(results) {
   const sample = results.paths.sampleBlast;
   const synth = results.paths.synthBlast;
   const durationRatio = sample.durationS > 0 ? synth.durationS / sample.durationS : 0;
   const centroidRatio = sample.centroidHz > 0 ? synth.centroidHz / sample.centroidHz : 0;
-  const fundamentalRatio =
-    sample.fundamentalHz && synth.fundamentalHz ? synth.fundamentalHz / sample.fundamentalHz : 1;
+  // airhorn-nxuv.3: pitch is only a verdict when BOTH sides were measured - the
+  // decision lives in pitchVerdict() so it can be proven without a browser.
+  const pitch = pitchVerdict({ sampleHz: sample.fundamentalHz, synthHz: synth.fundamentalHz });
   const rows = [
     {
       metric: 'peak level',
@@ -836,9 +876,8 @@ function verdict(results) {
       metric: 'pitch (fundamental)',
       sample: `${sample.fundamentalHz} Hz`,
       synth: `${synth.fundamentalHz} Hz`,
-      gap: `${((fundamentalRatio - 1) * 100).toFixed(0)}%`,
-      pass:
-        fundamentalRatio >= TOLERANCE.fundamentalRatio[0] && fundamentalRatio <= TOLERANCE.fundamentalRatio[1],
+      gap: pitch.gap,
+      pass: pitch.pass,
     },
     {
       metric: 'brightness (centroid)',
@@ -991,7 +1030,15 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('audio-parity failed:', err.message);
-  process.exit(1);
-});
+// Only drive the tool when this file is the entry point: the measurement rules
+// (pitchVerdict, verdict, distance, TOLERANCE) are imported by
+// tests/audio-parity-verdict.test.js to prove them browser-free, and an import must
+// not start a server, launch Chrome or exit the process. Same guard, and the same
+// reason, as tools/resilience-audit.mjs and tools/install-https-proof.mjs.
+const isMain = import.meta.main ?? (!!process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url));
+if (isMain) {
+  main().catch((err) => {
+    console.error('audio-parity failed:', err.message);
+    process.exit(1);
+  });
+}
