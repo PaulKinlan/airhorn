@@ -351,14 +351,22 @@ async function run() {
     await waitFor(() => evaluate('!!window.__airhorn'), { label: 'the app to boot', timeout: 15000 });
     await sleep(300);
     // The one voice, wrapped so an announcement can be counted as well as seen.
-    await evaluate(`(() => {
+    // The wrap must first prove there IS a voice (airhorn-g0qr.19): the old payload
+    // returned `typeof window.__airhornAnnounce === 'function'` AFTER assigning its own
+    // wrapper, so it re-read the value it had just written and its result was never even
+    // asserted. With no announcer on the page the wrapper was installed over undefined,
+    // and every announcement assertion below would have passed while recording nothing -
+    // the vacuous-green shape this sweep exists to find.
+    const announcerBound = await evaluate(`(() => {
       const voice = window.__airhornAnnounce;
+      if (typeof voice !== 'function') return false;
       window.__srLog = [];
       window.__airhornAnnounce = (message) => { window.__srLog.push(message); return voice(message); };
       return typeof window.__airhornAnnounce === 'function';
     })()`);
+    assert(announcerBound === true,
+      'the page exposes no window.__airhornAnnounce to observe, so the announcement log would stay empty and every announcer assertion in this suite would pass vacuously');
     const announcementLog = () => evaluate('window.__srLog');
-    const countAnnounced = async (message) => (await announcementLog()).filter((m) => m === message).length;
     console.log(`evidence: ${EVIDENCE_DIR}`);
 
     // ---------------------------------------------------------------- case 1
