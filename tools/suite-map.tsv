@@ -114,6 +114,11 @@ tools/soak.mjs	tests/tool-bound-kill.test.mjs
 # tools/derive-coverage-contract.mjs is covered by its own unit suite as well
 # as the tools/* gate-smoke check (airhorn-1qw6).
 tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
+# tools/mutation-check.mjs is the guard every sweep's mutation step runs through, so its
+# own behaviour (does the --from apply? did the write land? is the target product code?) is
+# covered by its own unit suite, which also needs the self-row below (airhorn-f41e).
+tools/mutation-check.mjs	tests/mutation-check.test.js
+tests/mutation-check.test.js	tests/mutation-check.test.js
 # tools/lib/** is the shared runtime the tools import (reap.mjs is the profile
 # marker sweep). It is NOT matched by `tools/*`, which does not cross a slash, so
 # a change to it used to select zero suites - a shared helper with no owner.
