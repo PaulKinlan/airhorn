@@ -306,7 +306,7 @@ test('the fleet contract recognises every rc-0 verdict line the gate emits (airh
     const noChangedLine = 'fast-gate: no changed files';
     const positiveLine = 'fast-gate: PASS (1 suite(s), 1 changed file(s))';
     const blessedExemptLine = 'fast-gate: ZERO-SUITE PASS (1 changed file(s), all 1 exempt; FAST_GATE_ALLOW_ZERO=1)';
-    const blessedPendingLine = 'fast-gate: ZERO-SUITE PASS (1 changed file(s), all 1 pending; FAST_GATE_ALLOW_ZERO=1)';
+    const blessedPendingLine = "fast-gate: ZERO-SUITE PASS (1 changed file(s) selected 1 suite(s), all of them '~'-pending; FAST_GATE_ALLOW_ZERO=1)";
     const blessedDeletedLine = 'fast-gate: ZERO-SUITE PASS (1 changed file(s): 0 exempt, 1 deleted-suite; FAST_GATE_ALLOW_ZERO=1)';
     for (const [name, r, line] of [['no-changed', noChanged, noChangedLine], ['positive', positive, positiveLine], ['blessed-exempt', blessedExempt, blessedExemptLine], ['blessed-pending', blessedPending, blessedPendingLine], ['blessed-deleted', blessedDeleted, blessedDeletedLine]]) {
       assert.ok(r.stdout.includes(line), `${name} must print the pinned verdict line ${line}, got:\n${r.stdout}`);
@@ -350,7 +350,7 @@ test("an all-'~'-pending change fails loudly: zero executed suites is not green 
     assert.ok(loud.stderr.includes('FAST_GATE_ALLOW_ZERO'), `the failure must name the acknowledgement: ${loud.stderr}`);
     const blessed = run(['--changed', 'pending-src.txt'], { FAST_GATE_ALLOW_ZERO: '1' });
     assert.equal(blessed.status, 0, `the explicit acknowledgement must pass: ${blessed.stderr}`);
-    assert.ok(blessed.stdout.includes('ZERO-SUITE PASS (1 changed file(s), all 1 pending; FAST_GATE_ALLOW_ZERO=1)'),
+    assert.ok(blessed.stdout.includes("ZERO-SUITE PASS (1 changed file(s) selected 1 suite(s), all of them '~'-pending; FAST_GATE_ALLOW_ZERO=1)"),
       `the pass must be labelled, not a bare PASS: ${blessed.stdout}`);
     // A MIXED selection is untouched: the landed suite still runs, the pending one stays loud.
     const mixed = run(['--changed', 'mixed-src.js']);
