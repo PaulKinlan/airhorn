@@ -505,6 +505,120 @@ test('fast-gate failure preserves failing-suite output and assertion text (airho
   }
 });
 
+test('a suite whose own report counts failures is FAILED, not passed (airhorn-nxuv.16)', () => {
+  // report_cases() used to read the PASS line and decide from its presence alone: the fail
+  // count beside it was parsed only to print extra diagnostics, and a fail count that did
+  // not parse was defaulted to 0 (${fail:-0}). So a summary reading 'pass=0 fail=1' from a
+  // process that exited 0 was reported as 'fast-gate: passed:' with the gate green - the
+  // same lie the script tier told by echoing the hook's ##CASES## line without reading its
+  // status= or failed-cases= fields. The pinned runner exits 1 on a failing case, so this
+  // needs an instrument that produces the report directly: a runner that prints a fixed
+  // TAP summary and exits 0. Changing the runner is a gate.conf edit - the sanctioned
+  // spelling (airhorn-v6th) - made in the probe's OWN copy of tools/.
+  const { probe, run } = buildGateProbe();
+  let stubDir = null;
+  try {
+    stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nxuv16-stub-'));
+    const fixtureDir = path.join(stubDir, 'fixtures');
+    fs.mkdirSync(fixtureDir);
+    // One stub, keyed by the suite it is handed, so each leg names its own report.
+    const stub = path.join(stubDir, 'stub-runner.sh');
+    fs.writeFileSync(stub,
+      '#!/usr/bin/env bash\ncat "${NXUV16_FIXTURE_DIR:?}/$(basename "$1").tap"\nexit 0\n');
+    fs.chmodSync(stub, 0o755);
+    fs.writeFileSync(path.join(fixtureDir, 'failcount.test.js.tap'), [
+      'TAP version 13', '# Subtest: the case that failed', 'not ok 1 - the case that failed',
+      '1..1', '# tests 1', '# suites 0', '# pass 0', '# fail 1', '# cancelled 0', '# skipped 0', '# todo 0', '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(fixtureDir, 'unparseable.test.js.tap'), [
+      'TAP version 13', 'ok 1 - a case', 'ok 2 - another case', 'ok 3 - a third case',
+      '1..3', '# tests 3', '# suites 0', '# pass 3', '# fail NaN', '# cancelled 0', '# skipped 0', '# todo 0', '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(probe, 'tools', 'gate.conf'),
+      `FAST_GATE_RUNNER="bash ${stub}"\nFAST_GATE_JOBS=1\n`);
+    fs.writeFileSync(path.join(probe, 'tests', 'failcount.test.js'), '// reported on by the stub\n');
+    fs.writeFileSync(path.join(probe, 'tests', 'unparseable.test.js'), '// reported on by the stub\n');
+    fs.writeFileSync(path.join(probe, 'fc-src.js'), '// fail count\n');
+    fs.writeFileSync(path.join(probe, 'un-src.js'), '// unparseable fail count\n');
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'),
+      'fc-src.js\ttests/failcount.test.js\nun-src.js\ttests/unparseable.test.js\n');
+
+    // A. A non-zero fail count is a failing outcome that NAMES the count - never a pass line.
+    const failCount = run(['--changed', 'fc-src.js'], { NXUV16_FIXTURE_DIR: fixtureDir });
+    assert.equal(failCount.status, 1,
+      `pass=0 fail=1 from an exit-0 suite must fail the gate: ${failCount.stdout}${failCount.stderr}`);
+    assert.ok(failCount.stdout.includes(
+      'fast-gate: cases: tests/failcount.test.js :: node:test pass=0 fail=1 FAILED (fail count 1)'),
+      `the reported line must name the fail count as a failure: ${failCount.stdout}`);
+    assert.ok(failCount.stdout.includes('fast-gate:   failing: the case that failed'),
+      `the failing case name must still be listed: ${failCount.stdout}`);
+    assert.ok(failCount.stdout.includes(
+      'fast-gate: failed: tests/failcount.test.js (exit 0 but its case report counts failures)'),
+      `the suite verdict must be 'failed' and say why: ${failCount.stdout}`);
+    assert.ok(failCount.stderr.includes('a non-zero fail count is a failing outcome'),
+      `the failure must state the rule it applied: ${failCount.stderr}`);
+    assert.ok(!failCount.stdout.includes('fast-gate: passed:'),
+      `no suite may be reported as passed: ${failCount.stdout}`);
+    assert.ok(!failCount.stdout.includes('fast-gate: PASS'),
+      `no PASS line may be printed: ${failCount.stdout}`);
+
+    // B. An unparseable fail count is its own failing outcome - it is NOT defaulted to 0.
+    const unparseable = run(['--changed', 'un-src.js'], { NXUV16_FIXTURE_DIR: fixtureDir });
+    assert.equal(unparseable.status, 1,
+      `a summary whose fail count does not parse must fail the gate: ${unparseable.stdout}${unparseable.stderr}`);
+    assert.ok(unparseable.stdout.includes('node:test pass=3 fail=UNKNOWN'),
+      `the unparseable count must be reported as UNKNOWN, next to the pass count: ${unparseable.stdout}`);
+    assert.ok(!unparseable.stdout.includes('fail=0'),
+      `an unknown fail count must never be restated as zero: ${unparseable.stdout}`);
+    assert.ok(unparseable.stdout.includes(
+      'fast-gate: failed: tests/unparseable.test.js (exit 0 but no usable result; reporting is broken)'),
+      `the suite verdict must be 'failed': ${unparseable.stdout}`);
+    assert.ok(!unparseable.stdout.includes('fast-gate: passed:') && !unparseable.stdout.includes('fast-gate: PASS'),
+      `no pass verdict may be printed: ${unparseable.stdout}`);
+
+    // C. Script tier: status=pass is not a pass when the hook NAMED failing cases. This leg
+    // runs under the REAL pinned runner and the real report hook, so nothing is stubbed:
+    // the suite prints 'not ok - <name>' and exits 0 (tests/webmcp.test.mjs is one
+    // forgotten process.exit(1) away from exactly this).
+    fs.copyFileSync(path.join(root, 'tools', 'gate.conf'), path.join(probe, 'tools', 'gate.conf'));
+    fs.mkdirSync(path.join(probe, 'tests', 'support'), { recursive: true });
+    fs.copyFileSync(path.join(root, 'tests', 'support', 'report-hook.mjs'),
+      path.join(probe, 'tests', 'support', 'report-hook.mjs'));
+    fs.writeFileSync(path.join(probe, 'tests', 'scriptsuite.mjs'), [
+      "console.log('ok - the case that passed');",
+      "console.error('not ok - the case that failed');",
+      '// exit 0 with a named failure on the record',
+    ].join('\n') + '\n');
+    fs.writeFileSync(path.join(probe, 'script-src.js'), '// script tier\n');
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'script-src.js\ttests/scriptsuite.mjs\n');
+    const namedFail = run(['--changed', 'script-src.js']);
+    assert.equal(namedFail.status, 1,
+      `an exit-0 script suite that named a failing case must fail the gate: ${namedFail.stdout}${namedFail.stderr}`);
+    assert.ok(namedFail.stdout.includes('status=pass') && namedFail.stdout.includes('failed-cases="the case that failed"'),
+      `the hook's report must be echoed as it wrote it: ${namedFail.stdout}`);
+    assert.ok(namedFail.stdout.includes('FAILED (1 named case(s) failed while status said pass: the case that failed)'),
+      `the verdict must name the failing cases: ${namedFail.stdout}`);
+    assert.ok(namedFail.stdout.includes('fast-gate: failed: tests/scriptsuite.mjs (exit 0 but its case report counts failures)'),
+      `the suite verdict must be 'failed': ${namedFail.stdout}`);
+    assert.ok(!namedFail.stdout.includes('fast-gate: passed:') && !namedFail.stdout.includes('fast-gate: PASS'),
+      `no pass verdict may be printed: ${namedFail.stdout}`);
+
+    // D. GREEN: the same gate, the same pinned runner, a genuinely all-pass suite. The fix
+    // must not turn an honest pass into a failure - the pass line is unchanged.
+    const honest = run(['--changed', 'src/a.js']);
+    assert.equal(honest.status, 0, `a genuine all-pass suite must still pass: ${honest.stdout}${honest.stderr}`);
+    assert.ok(honest.stdout.includes('fast-gate: cases: tests/pass.test.js :: node:test pass=1 fail=0'),
+      `the honest report line must be unchanged: ${honest.stdout}`);
+    assert.ok(honest.stdout.includes('fast-gate: passed: tests/pass.test.js'),
+      `the honest suite must be reported as passed: ${honest.stdout}`);
+    assert.ok(honest.stdout.includes('fast-gate: PASS (1 suite(s), 1 changed file(s))'),
+      `the pinned verdict line must be unchanged: ${honest.stdout}`);
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+    if (stubDir) fs.rmSync(stubDir, { recursive: true, force: true });
+  }
+});
+
 test('every tools script parses - recognised extensions at any depth (airhorn-7lm, airhorn-7z5, airhorn-h19)', () => {
   // Glob, not names (airhorn-v1n), and every RECOGNISED script extension,
   // not just .mjs (airhorn-h19: .cjs and .ts were unparseable, extensionless
