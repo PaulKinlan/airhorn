@@ -731,7 +731,13 @@ const show = (value, digits = 1) =>
 function distance(sample, render) {
   const safeLog2 = (value) => (value > 0 ? Math.log2(value) : null);
   const durationRatio = sample.durationS > 0 ? render.durationS / sample.durationS : 1;
-  const centroidRatio = sample.centroidHz > 0 && render.centroidHz > 0 ? render.centroidHz / sample.centroidHz : 1;
+  // airhorn-qlnm: an UNMEASURABLE render centroid must not rank as a perfect
+  // match (the same defect shape as the pitch default fixed in airhorn-nxuv.3,
+  // four lines below). Unmeasurable render against a measurable sample ranks as
+  // a 2x brightness error - the worst plausible candidate; an unmeasurable
+  // SAMPLE cannot judge the pair, so 1 (zero distance) is honest there.
+  const centroidRatio = sample.centroidHz > 0 && render.centroidHz > 0 ? render.centroidHz / sample.centroidHz
+    : sample.centroidHz > 0 ? 0.5 : 1;
   const fundamentalRatio =
     sample.fundamentalHz && render.fundamentalHz ? render.fundamentalHz / sample.fundamentalHz : 1;
   const terms = [
