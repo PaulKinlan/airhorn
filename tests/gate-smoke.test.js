@@ -231,6 +231,19 @@ test('a change that selects ZERO suites fails loudly, green only by explicit ack
   });
   const loud = run(['--changed', exemptOnly]);
   assert.equal(loud.status, 1, `an exempt-only change must not read green: ${loud.stdout}`);
+  // Assert the PRECONDITION before blaming the zero-suite block (airhorn-ljbq): the gate can
+  // refuse earlier - a tier refusal, a build failure, a missing map row, a base-resolution
+  // failure - and then it never reaches that block at all. With one message for both causes,
+  // an early refusal was diagnosed as "the exempt file must be named with its reason:" and
+  // printed an empty tail, which is how one defect looked like two.
+  // The zero-suite block always reports which changed file selected nothing, so the absence of
+  // any zero-suite line is the precondition that failed - the gate refused earlier (a tier
+  // refusal, a build failure, a missing map row, base resolution) and never got this far.
+  // Named as THAT, because the old single message blamed the naming rule and printed an empty
+  // tail: an early refusal writes its verdict to stderr, so stdout had nothing to show.
+  const gateOutput = `${loud.stdout}\n${loud.stderr}`;
+  assert.ok(gateOutput.includes('fast-gate: zero-suite:'),
+    `the gate refused BEFORE reaching the zero-suite block, so this is not a zero-suite naming failure (both streams, tail): ${gateOutput.slice(-1500)}`);
   assert.ok(loud.stdout.includes(`fast-gate: zero-suite: ${exemptOnly} (exempt)`),
     `the exempt file must be named with its reason: ${loud.stdout}`);
   assert.ok(loud.stderr.includes('FAST_GATE_ALLOW_ZERO'),
