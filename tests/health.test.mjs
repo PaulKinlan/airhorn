@@ -257,7 +257,13 @@ test('HEAD answers like GET (empty body), other methods get 405, and the app sti
 
     const post = await srv.fetch('/health', { method: 'POST' });
     assert.equal(post.status, 405);
-    assert.match(post.headers.get('allow') || '', /GET/);
+    // RFC 9110 15.5.6: a 405 MUST carry Allow listing every supported method.
+    // Assert the exact method SET, order-insensitive: a substring regex accepts
+    // GET_MUTATED and never notices a missing HEAD (airhorn-g0qr.7).
+    const allowMethods = (post.headers.get('allow') || '')
+      .split(',').map((m) => m.trim().toUpperCase()).filter(Boolean).sort();
+    assert.deepEqual(allowMethods, ['GET', 'HEAD'],
+      '405 Allow must list exactly the methods /health supports: GET and HEAD');
 
     const home = await srv.fetch('/');
     assert.equal(home.status, 200);
