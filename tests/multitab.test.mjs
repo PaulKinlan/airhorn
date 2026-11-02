@@ -831,14 +831,31 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       }, 5000);
       assert(held, 'the test could not hold the origin badge lock - sequence I cannot force the interleaving');
       await A2.evaluate(`window.__airhorn.start()`);
-      await sleep(300);
-      // The red assert: while the TEST owns the origin lock, a blast's
-      // read-modify-write must not have written. Unfixed code bumps
-      // immediately (count already before+1 under the hold); the fixed app
-      // queues its bump behind the lock. CDP dispatches the two tabs'
-      // evaluations sequentially, so an interleaving cannot be forced from
-      // outside - proving the bumps serialize IS proving no blast can be
-      // lost, because every bump then re-reads inside the lock.
+      // Wait for the bump to QUEUE, not for a clock (airhorn-g0qr.8). A fixed app asks
+      // the lock manager for the app's own lock in order to bump, and Web Locks reports
+      // that request in query().pending while the test holds it - so the queue is
+      // observable without waiting for a write. The old check slept a fixed 300 ms and
+      // then read storage, which only saw an unlocked write that happened to land inside
+      // that window: with the write delayed to 800 ms the suite went GREEN and printed
+      // "no blast lost" while increments could still clobber.
+      const queued = await waitUntil(async () => {
+        try {
+          const q = await A2.evaluate(`navigator.locks.query().then((q) => JSON.stringify({
+            held: q.held.map((l) => l.name),
+            pending: q.pending.map((l) => l.name),
+          }))`);
+          const parsed = JSON.parse(q);
+          return parsed.pending.includes('airhorn:blast-count') ? parsed : null;
+        } catch {
+          return null;
+        }
+      }, 5000);
+      assert(queued,
+        `a blast's increment never queued on the origin lock while the test held it (queues seen: ${JSON.stringify(queued)}) - ` +
+        `an unlocked read-modify-write lets interleaved tabs lose a blast (airhorn-rqz1)`);
+      // ...and with the bump queued, nothing may have been written. This is now
+      // deterministic rather than a race against 300 ms: the app is demonstrably
+      // still waiting, so any count here came from a write that bypassed the lock.
       const duringHold = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
       assert(duringHold === before,
         `a blast's increment was written while another holder owned the origin lock (count ${before} -> ${duringHold} under the hold) - ` +
