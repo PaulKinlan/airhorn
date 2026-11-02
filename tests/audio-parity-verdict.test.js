@@ -107,6 +107,29 @@ test('candidate ranking treats an unmeasurable render pitch as the worst match, 
   assert.ok(unpitched > 0, 'and never zero-distance, which is what "identical" means');
 });
 
+test('candidate ranking treats an unmeasurable render CENTROID as a 2x error, not a perfect match (airhorn-097h)', () => {
+  // The pitch twin above was pinned when airhorn-nxuv.3 landed; the centroid rule
+  // (airhorn-qlnm) shipped with NO test - qlnm changed only tools/audio-parity.mjs -
+  // and the nxuv3 merge then spliced the line in by hand. So the one behaviour that
+  // merge had to get right was protected by review alone. These are the same two
+  // assertions, for the other metric.
+  const unmeasured = distance(SAMPLE_BLAST, passingRender({ centroidHz: 0 }));
+  const goodCentroid = distance(SAMPLE_BLAST, passingRender());
+  const badCentroid = distance(SAMPLE_BLAST, passingRender({ centroidHz: 1800 })); // 2x 900
+  assert.ok(unmeasured > goodCentroid, 'an unmeasured centroid must rank worse than a 5.5% centroid error');
+  assert.equal(unmeasured, badCentroid, 'an unmeasured centroid ranks exactly as badly as a 2x error');
+  assert.ok(unmeasured > 0, 'and never zero-distance, which is what "identical" means');
+  // The other half of the rule: an unmeasurable SAMPLE cannot judge the pair, so the
+  // ratio stays 1 and its term is 0 - a measurable render must not be punished for a
+  // sample we cannot measure at all.
+  const sampleSilent = { ...SAMPLE_BLAST, centroidHz: 0 };
+  assert.equal(
+    distance(sampleSilent, passingRender({ centroidHz: 0 })),
+    distance(sampleSilent, passingRender({ centroidHz: 3600 })),
+    'an unmeasurable sample centroid must ignore the render centroid entirely (zero term, not a guessed one)'
+  );
+});
+
 test('the pitch decision lives in one exported rule that verdict() uses (airhorn-nxuv.3)', () => {
   // A rule a report can ignore is how this bug lived: the ratio was computed inline and
   // defaulted. Pin the wiring so the decision cannot drift back into a literal.
