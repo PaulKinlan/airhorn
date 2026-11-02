@@ -1225,6 +1225,15 @@ async function runAudit() {
             (err) => ({ outcome: 'rejected', detail: String((err && err.message) || err) }),
           );
         })`);
+      // The recording half alone is not a fix (airhorn-qp8k, the v7ba review
+      // FAIL): swUpdate/recoveredAfterSwUpdate were read by NOTHING, so a
+      // rejected or unmeasurable recovery update left the row OK and the audit
+      // exit 0 - byte-for-byte the pre-fix gate outcome. The mechanism under
+      // test is the update itself: if it did not run to completion the scenario
+      // fails as itself, exactly as scenario 3 does (:951-953).
+      if (recoveryUpdate.outcome !== 'updated') {
+        throw new Error(`corrupt-cache measured nothing: recovery reg.update() ${recoveryUpdate.outcome} - ${recoveryUpdate.detail}`);
+      }
       await sleep(1500);
       const afterUpdate = await readState(cdp, sessionId).catch((err) => ({ unreadable: String((err && err.message) || err) }));
       const finalShot = await shot(cdp, sessionId, '6-corrupt-after-online-update');
