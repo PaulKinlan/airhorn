@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
+import { measurementExitCode, unmeasured } from './lib/perf-metrics.mjs';
 
 // The teardown below lives in a try/finally, which a bound-kill (fleet-gate's
 // SIGTERM, a job-tree reaper, Ctrl-C) never reaches - so the chrome tree and its
@@ -360,6 +361,21 @@ async function main() {
         'CLS': repeatMetrics.cls.toFixed(4)
       }
     });
+
+    // A report is evidence only for what it measured (airhorn-lmlu): when the LCP
+    // observer registered but never fired, the table said "None (0 entries recorded)"
+    // and the tool STILL exited 0, so a CWV report could be quoted for a field it
+    // never measured. The row already told the truth; the exit code now agrees with it.
+    const notMeasured = unmeasured([
+      { label: 'cold load', metrics: coldMetrics },
+      { label: 'repeat (SW-cached) load', metrics: repeatMetrics },
+    ]);
+    if (notMeasured.length > 0) {
+      console.log('\nNOT MEASURED (this run is not evidence for these fields):');
+      for (const finding of notMeasured) console.log(`  - ${finding}`);
+      console.log('Exiting nonzero so an unmeasured report cannot be read as a green one.');
+    }
+    process.exitCode = measurementExitCode(notMeasured);
 
   } finally {
     try { ws.close(); } catch { /* already closed */ }

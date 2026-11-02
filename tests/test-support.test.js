@@ -1250,3 +1250,50 @@ test('opening the page socket is bounded and rejects on error or close (airhorn-
   const already = await outcome(awaitSocketOpen({ readyState: 1 }));
   assert.equal(already.state, 'resolved', `an already-open socket must resolve, not settle as ${already.state}`);
 });
+
+/*
+ * tools/lib/perf-metrics.mjs: a performance report is evidence only for what it actually
+ * measured. tools/measure-perf.mjs printed "LCP: None (0 entries recorded)" and exited 0,
+ * so a CWV report could be quoted for a field it never measured (airhorn-lmlu). The
+ * judgement is a pure function so it can be tested without a browser or a starved host.
+ */
+test('perf-metrics: an absent LCP is unmeasured, and the run says so instead of exiting 0', async () => {
+  const { isMeasured, measurementExitCode, unmeasured } = await import('../tools/lib/perf-metrics.mjs');
+
+  // Zero and null are both "no measurement": an LCP of 0 ms is an absent entry, not a
+  // fast page, which is exactly the shape the starved host produced.
+  assert.equal(isMeasured(null), false);
+  assert.equal(isMeasured(0), false);
+  assert.equal(isMeasured(undefined), false);
+  assert.equal(isMeasured(Number.NaN), false);
+  assert.equal(isMeasured(8204), true);
+
+  const measuredRun = [
+    { label: 'cold load', metrics: { lcp: 820, lcpEntriesCount: 1, cls: 0, rawEvents: [] } },
+    { label: 'repeat load', metrics: { lcp: 610, lcpEntriesCount: 1, cls: 0, rawEvents: [] } },
+  ];
+  assert.deepEqual(unmeasured(measuredRun), [], 'a fully measured run reports nothing');
+  assert.equal(measurementExitCode(unmeasured(measuredRun)), 0);
+
+  const starvedRun = [
+    { label: 'cold load', metrics: { lcp: null, lcpEntriesCount: 0, cls: 0, rawEvents: [] } },
+    { label: 'repeat load', metrics: { lcp: null, lcpEntriesCount: 0, cls: 0, rawEvents: [] } },
+  ];
+  const findings = unmeasured(starvedRun);
+  assert.equal(findings.length, 2, 'one finding per load, so an operator can see which run failed to paint');
+  assert.match(findings[0], /cold load: LCP was not measured \(0 entries recorded\)/);
+  assert.equal(measurementExitCode(findings), 2, 'unmeasured exits 2 - distinct from 1, which means the harness crashed');
+
+  // CLS of 0 is a real measurement (a page with no layout shift), not an absent one.
+  const noShift = [{ label: 'cold load', metrics: { lcp: 800, lcpEntriesCount: 1, cls: 0, rawEvents: [] } }];
+  assert.deepEqual(unmeasured(noShift), []);
+
+  // A missing metrics object and a missing event buffer are named, never thrown on.
+  const broken = unmeasured([
+    { label: 'cold load', metrics: null },
+    { label: 'repeat load', metrics: { lcp: 500, lcpEntriesCount: 1, cls: 0 } },
+  ]);
+  assert.match(broken.join(' | '), /cold load: no metrics object/);
+  assert.match(broken.join(' | '), /repeat load: the interaction events for INP were not collected/);
+  assert.equal(measurementExitCode(undefined), 0);
+});
