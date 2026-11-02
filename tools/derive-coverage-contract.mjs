@@ -141,14 +141,88 @@ export function globMatchesAny(pattern, { root = DEFAULT_ROOT, existsFn, fileExi
 /**
  * Validates suite-map integrity across all 4 violation classes:
  * 1. zero_match_glob: Pattern contains wildcards but matches 0 files under root.
- * 2. missing_literal: Plain pattern path does not exist on disk (! and ~ rows skipped).
+ * 2. missing_literal: Plain pattern path is not a regular file on disk (! and ~ rows skipped).
  * 3. glob_suite_token: Suite token contains wildcard metacharacters (*, ?, [).
  * 4. missing_suite: Suite file is missing from disk and not declared pending.
  *
  * Returns Array<{ type: string, token: string, pattern?: string, message: string }>
  */
+
+/*
+ * The default existence check must mean "a regular FILE is there", not
+ * "something is there": existsSync passes for directories, and path.join(root, '')
+ * resolves to root itself, so a row naming a directory - or a bare '!' row whose
+ * literal is empty - validated clean while watching nothing (the tools/
+ * assertion-honesty sweep). statSync().isFile() also fails a symlink TO A
+ * DIRECTORY (the target is not a file), while a symlink to a real file still
+ * passes. describeNonFile says WHAT is there instead, for the violation message;
+ * both are exported so the fixture harness drives the real predicates.
+ */
+export const defaultFileIsRegular = (root, relPath) => {
+  if (!relPath) return false;
+  try {
+    return fs.statSync(path.join(root, relPath)).isFile();
+  } catch {
+    return false;
+  }
+};
+
+/*
+ * What a path on disk IS, as a value logic can branch on. 'pending' means
+ * "not created yet"; a path that EXISTS but is not a regular file is a
+ * different world - it must surface as a violation, never read as pending
+ * (the tools/ sweep residual: with an isFile-style existence check a
+ * directory at a test/-spelled suite path read 'not a file' -> 'pending' and
+ * validated clean).
+ */
+export const pathKind = (root, relPath) => {
+  if (!relPath) return 'empty'; // path.join(root, '') resolves to the root itself
+  const full = path.join(root, relPath);
+  let lst;
+  try {
+    lst = fs.lstatSync(full);
+  } catch {
+    return 'missing';
+  }
+  if (lst.isSymbolicLink()) {
+    let target;
+    try {
+      target = fs.statSync(full);
+    } catch {
+      return 'symlink-broken';
+    }
+    if (target.isFile()) return 'file';
+    return target.isDirectory() ? 'symlink-to-directory' : 'symlink-to-nonfile';
+  }
+  if (lst.isFile()) return 'file';
+  if (lst.isDirectory()) return 'directory';
+  return 'other-nonfile';
+};
+
+export const describeNonFile = (root, relPath) => {
+  switch (pathKind(root, relPath)) {
+    case 'empty': return 'an empty path (path.join(root, \'\') resolves to the root itself)';
+    case 'missing': return 'missing from disk';
+    case 'symlink-to-directory': return 'a symlink to a directory, not a file';
+    case 'symlink-to-nonfile': return 'a symlink to a non-file';
+    case 'symlink-broken': return 'a symlink whose target does not resolve';
+    case 'directory': return 'a directory, not a file';
+    case 'other-nonfile': return 'a non-regular file (socket/fifo/device)';
+    default: return 'present';
+  }
+};
+
 export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
-  const fileExists = existsFn || fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  const usingDefault = !existsFn && !fileExistsOpt;
+  const fileExists = existsFn || fileExistsOpt || ((relPath) => defaultFileIsRegular(root, relPath));
+  // What the thing on disk IS, when the real-disk checker is the one that ran
+  // (an injected predicate has no disk to describe).
+  const what = (relPath) => (usingDefault ? ` (${describeNonFile(root, relPath)})` : '');
+  // The pending carve-out distinguishes 'not created yet' from 'exists but is
+  // not a file' only when the real-disk checker can say which (the sweep
+  // residual: a directory at a test/-spelled suite path must be a violation,
+  // not a silent pending).
+  const pathKindOf = usingDefault ? (relPath) => pathKind(root, relPath) : undefined;
   const pendingDeclared = extractPendingSuites(tsvText);
   const violations = [];
 
@@ -179,7 +253,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
           type: 'missing_literal',
           token: pattern,
           pattern,
-          message: `@importers row names a module that does not exist on disk: ${pattern}`,
+          message: `@importers row names a module that is not a regular file on disk: ${pattern}${what(pattern)}`,
         });
       }
       for (const d of directives.filter((t) => t.startsWith('except='))) {
@@ -189,7 +263,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
             type: 'missing_suite',
             token: target,
             pattern,
-            message: `except= names a suite that does not exist on disk: ${target} (referenced by ${pattern})`,
+            message: `except= names a suite that is not a regular file on disk: ${target} (referenced by ${pattern})${what(target)}`,
           });
         }
       }
@@ -226,7 +300,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
             type: 'missing_literal',
             token: pattern,
             pattern,
-            message: `Exemption path does not exist on disk: ${pattern}`,
+            message: `Exemption path is not a regular file on disk: ${pattern}${what(cleanPat)}`,
           });
         }
       }
@@ -247,7 +321,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
             type: 'missing_literal',
             token: pattern,
             pattern,
-            message: `Mapped path does not exist on disk: ${pattern}`,
+            message: `Mapped path is not a regular file on disk: ${pattern}${what(pattern)}`,
           });
         }
       }
@@ -265,7 +339,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
         continue;
       }
 
-      if (isPendingSuite(token, pendingDeclared, fileExists)) {
+      if (isPendingSuite(token, pendingDeclared, fileExists, pathKindOf)) {
         continue;
       }
 
@@ -274,7 +348,7 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
           type: 'missing_suite',
           token,
           pattern,
-          message: `Suite does not exist on disk: ${token} (referenced by ${pattern})`,
+          message: `Suite is not a regular file on disk: ${token} (referenced by ${pattern})${what(token)}`,
         });
       }
     }
@@ -305,10 +379,18 @@ export function extractPendingSuites(tsvText) {
 
 /**
  * Checks whether a suite is currently pending (declared pending or test/ spelling,
- * and absent from disk).
+ * and absent from disk). The carve-out covers "not created yet", NEVER "exists
+ * but is not a file": when the caller can supply pathKindOf (the real-disk
+ * checker can), a path present as a directory / symlink-to-directory is NOT
+ * pending - it falls through to the existence violation, named for what it is.
+ * Without a pathKindOf (an injected boolean predicate carries no type
+ * information) the honest fallback is the old boolean-only rule.
  */
-export function isPendingSuite(suite, pendingDeclared, fileExists) {
-  return (suite.startsWith('test/') || pendingDeclared.has(suite)) && !fileExists(suite);
+export function isPendingSuite(suite, pendingDeclared, fileExists, pathKindOf) {
+  if (fileExists(suite)) return false; // a regular file: active, not pending
+  if (!(suite.startsWith('test/') || pendingDeclared.has(suite))) return false;
+  if (pathKindOf && pathKindOf(suite) !== 'missing') return false; // present but wrong-typed
+  return true;
 }
 
 // --- `@importers` rows: the suite set is DERIVED from the tree, not hand-listed (airhorn-ooqm) ----
@@ -342,7 +424,9 @@ const isDirective = (tok) => tok.startsWith('@') || tok.startsWith('except=');
  * test-file pattern, and is explicit-only by design - airhorn-i8i).
  */
 export function suiteFiles(tsvText, { root = DEFAULT_ROOT, fileExists: fileExistsOpt } = {}) {
-  const fileExists = fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  // Same existence notion as validation (cc-derive): a regular FILE, so a map row
+  // naming a directory (or symlink-to-one) is never collected as a suite file.
+  const fileExists = fileExistsOpt || ((relPath) => defaultFileIsRegular(root, relPath));
   const named = new Set();
   for (const line of tsvText.split('\n')) {
     const trimmed = line.trim();
@@ -462,7 +546,16 @@ export function expandRow(pattern, rest, options = {}) {
  * - Accumulates multiple rows for the same pattern additively
  */
 export function deriveCoverageContract(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
-  const fileExists = existsFn || fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  // Same existence notion as validation (cc-derive): a regular FILE. With the old
+  // existsSync default a directory read as 'present', so a directory row was
+  // DERIVED into a clean-looking contract while --validate-map rejected the same
+  // row - and with a bare isFile swap a test/-spelled directory would instead
+  // read as 'pending' and be silently dropped, so pathKindOf rides along exactly
+  // as in validateSuiteMap: wrong-typed-but-present is NOT pending, it stays in
+  // the derived contract as written, for validation to name.
+  const usingDefault = !existsFn && !fileExistsOpt;
+  const fileExists = existsFn || fileExistsOpt || ((relPath) => defaultFileIsRegular(root, relPath));
+  const pathKindOf = usingDefault ? (relPath) => pathKind(root, relPath) : undefined;
   const pendingDeclared = extractPendingSuites(tsvText);
 
   const contract = {};
@@ -473,7 +566,7 @@ export function deriveCoverageContract(tsvText, { root = DEFAULT_ROOT, existsFn,
     const pat = parts[0] ? parts[0].trim() : '';
     if (!pat || pat.startsWith('!') || pat.startsWith('~')) continue;
     const { suites } = expandRow(pat, parts.slice(1).join(' '), { root, fileExists });
-    const activeSuites = suites.filter((s) => !isPendingSuite(s, pendingDeclared, fileExists));
+    const activeSuites = suites.filter((s) => !isPendingSuite(s, pendingDeclared, fileExists, pathKindOf));
     if (activeSuites.length > 0 && activeSuites.every((s) => s === pat)) continue;
     if (activeSuites.length > 0) {
       if (!contract[pat]) {
@@ -535,7 +628,20 @@ export function main(args = process.argv.slice(2), { root = DEFAULT_ROOT, exists
     return 0;
   }
 
+  // One report, three gates: --stdout, the default write, and --check all refuse
+  // an invalid map identically. (--stdout used to skip validation entirely, so a
+  // map --validate-map rejects still produced a clean-looking contract - the
+  // cc-derive asymmetry.)
+  const reportMapViolations = () => {
+    const violations = validateSuiteMap(tsvText, { root, existsFn, fileExists });
+    for (const v of violations) {
+      console.error(`FAIL: suite-map: [${v.type}] ${v.message}`);
+    }
+    return violations;
+  };
+
   if (args.includes('--stdout')) {
+    if (reportMapViolations().length > 0) return 1;
     const derived = deriveCoverageContract(tsvText, { root, existsFn, fileExists });
     const formatted = formatCoverageContract(derived);
     process.stdout.write(formatted);
@@ -543,23 +649,10 @@ export function main(args = process.argv.slice(2), { root = DEFAULT_ROOT, exists
   }
 
   if (args.includes('--validate-map')) {
-    const violations = validateSuiteMap(tsvText, { root, existsFn, fileExists });
-    if (violations.length > 0) {
-      for (const v of violations) {
-        console.error(`FAIL: suite-map: [${v.type}] ${v.message}`);
-      }
-      return 1;
-    }
-    return 0;
+    return reportMapViolations().length > 0 ? 1 : 0;
   }
 
-  const violations = validateSuiteMap(tsvText, { root, existsFn, fileExists });
-  if (violations.length > 0) {
-    for (const v of violations) {
-      console.error(`FAIL: suite-map: [${v.type}] ${v.message}`);
-    }
-    return 1;
-  }
+  if (reportMapViolations().length > 0) return 1;
 
   const derived = deriveCoverageContract(tsvText, { root, existsFn, fileExists });
   const formatted = formatCoverageContract(derived);

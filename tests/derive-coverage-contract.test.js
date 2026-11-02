@@ -148,9 +148,31 @@ test('formatCoverageContract formats with 1-space indentation and trailing newli
 test('CLI --stdout outputs formatted JSON to stdout', () => {
   const res = spawnSync(process.execPath, [tool, '--stdout'], { encoding: 'utf8' });
   assert.equal(res.status, 0);
+  // The output must BE the committed contract, not merely contain a key: a truthiness
+  // check passes when src/horn.js maps to [] (empty arrays are truthy) or to a broken
+  // suite (the tests/ sweep, g0qr #14). .fleet/coverage-contract.json is the reviewed
+  // artifact --check holds the derivation to; --stdout must print it byte for byte.
+  // P3a (from g0qr.11 review): a bare assert.equal on two ~200-line strings dumps a
+  // Node string diff on failure. Name the first differing line and the remedy instead.
+  const committed = fs.readFileSync(path.join(root, '.fleet', 'coverage-contract.json'), 'utf8');
+  if (res.stdout !== committed) {
+    const got = res.stdout.split('\n');
+    const want = committed.split('\n');
+    const firstDiff = got.findIndex((line, i) => line !== want[i]);
+    assert.fail(`--stdout drifted from .fleet/coverage-contract.json, first differing line ${firstDiff + 1}: derived ${JSON.stringify(got[firstDiff])} vs committed ${JSON.stringify(want[firstDiff])} - regenerate with \`node tools/derive-coverage-contract.mjs\` (or fix tools/suite-map.tsv if the drift is unintended)`);
+  }
+  // And the keys the old assertion named must be there with real rows, so a regression
+  // in WHICH sources are covered is named, not hidden in a diff dump.
   const parsed = JSON.parse(res.stdout);
-  assert.ok(parsed['src/horn.js']);
-  assert.ok(parsed['src/main.js']);
+  // Content, not truthiness (airhorn-g0qr.11): assert.ok(parsed[...]) accepts an
+  // EMPTY array or a wrong suite list - the contract could stop covering horn.js
+  // and this test still passed. Pinned to the map rows (suite-map.tsv:28, :41)
+  // minus the '~'-pending test/ dual-spellings, which derivation drops while
+  // pending; if a row changes, this pin changes with it, deliberately.
+  assert.deepStrictEqual(parsed['src/horn.js'], ['tests/horn.test.js', 'tests/a11y.test.mjs', 'tests/shortcuts.test.mjs'],
+    'src/horn.js must select exactly the suites its map row names (pending test/ spellings dropped)');
+  assert.deepStrictEqual(parsed['src/main.js'], ['tests/modules.test.js', 'tests/resilience-ui.test.mjs', 'tests/webmcp-browser.test.mjs'],
+    'src/main.js must select exactly the suites its map row names (pending test/ spellings dropped)');
 });
 
 test('validateSuiteMap returns zero_match_glob for glob matching zero files (airhorn-onz0)', () => {
@@ -159,7 +181,9 @@ test('validateSuiteMap returns zero_match_glob for glob matching zero files (air
   assert.equal(violations.length, 1);
   assert.equal(violations[0].type, 'zero_match_glob');
   assert.equal(violations[0].token, 'src/*.nonexistent-review.js');
-  assert.ok(violations[0].message.includes('src/*.nonexistent-review.js'));
+  assert.ok(violations[0].message.includes('src/*.nonexistent-review.js'), 'the message names the offending token');
+  assert.match(violations[0].message, /matches zero files on disk/,
+    'the message names the failure MODE: a message that merely restates the token must not pass (g0qr map #24)');
 });
 
 test('validateSuiteMap returns missing_literal for nonexistent literal path (airhorn-onz0)', () => {
@@ -168,7 +192,9 @@ test('validateSuiteMap returns missing_literal for nonexistent literal path (air
   assert.equal(violations.length, 1);
   assert.equal(violations[0].type, 'missing_literal');
   assert.equal(violations[0].token, 'src/does-not-exist.js');
-  assert.ok(violations[0].message.includes('src/does-not-exist.js'));
+  assert.ok(violations[0].message.includes('src/does-not-exist.js'), 'the message names the offending token');
+  assert.match(violations[0].message, /(does not exist|is not a regular file) on disk/,
+    'the message names the failure MODE: a message that merely restates the token must not pass (g0qr.21). Either wording: master says "does not exist", the cc chain says "is not a regular file ... (missing from disk)" - both name the mode');
 });
 
 test('validateSuiteMap returns glob_suite_token when suite token has wildcards (airhorn-onz0)', () => {
@@ -177,7 +203,10 @@ test('validateSuiteMap returns glob_suite_token when suite token has wildcards (
   assert.equal(violations.length, 1);
   assert.equal(violations[0].type, 'glob_suite_token');
   assert.equal(violations[0].token, 'src/*.bad.js');
-  assert.ok(violations[0].message.includes('src/*.bad.js'));
+  assert.ok(violations[0].message.includes('src/*.bad.js'), 'the message names the offending token');
+  assert.match(violations[0].message, /wildcard metacharacters/,
+    'the message names the failure MODE: a message that merely restates the token must not pass (g0qr map #24)');
+  assert.match(violations[0].message, /referenced by src\/horn\.js/, 'the message names the referencing source row');
 });
 
 test('validateSuiteMap returns missing_suite when suite does not exist (airhorn-onz0)', () => {
@@ -186,7 +215,10 @@ test('validateSuiteMap returns missing_suite when suite does not exist (airhorn-
   assert.equal(violations.length, 1);
   assert.equal(violations[0].type, 'missing_suite');
   assert.equal(violations[0].token, 'tests/missing.test.js');
-  assert.ok(violations[0].message.includes('tests/missing.test.js'));
+  assert.ok(violations[0].message.includes('tests/missing.test.js'), 'the message names the offending token');
+  assert.match(violations[0].message, /(does not exist|is not a regular file) on disk/,
+    'the message names the failure MODE: a message that merely restates the token must not pass (g0qr.21). Either wording: master says "does not exist", the cc chain says "is not a regular file ... (missing from disk)" - both name the mode');
+  assert.match(violations[0].message, /referenced by src\/horn\.js/, 'the message names the referencing source row');
 });
 
 test('validateSuiteMap returns [] for valid map rows (airhorn-onz0)', () => {
@@ -310,5 +342,7 @@ test('validateSuiteMap supports bracket/character-class globs (airhorn-onz0)', (
   assert.equal(failViolations.length, 1);
   assert.equal(failViolations[0].type, 'zero_match_glob');
   assert.equal(failViolations[0].token, 'src/[xy]orn.js');
-  assert.ok(failViolations[0].message.includes('src/[xy]orn.js'));
+  assert.ok(failViolations[0].message.includes('src/[xy]orn.js'), 'the message names the offending token');
+  assert.match(failViolations[0].message, /matches zero files on disk/,
+    'the message names the failure MODE: a message that merely restates the token must not pass (same genre as g0qr map #24)');
 });
