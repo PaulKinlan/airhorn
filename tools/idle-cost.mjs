@@ -46,7 +46,11 @@
  *
  * Budgets (of one core, measured on this VM's headless Chrome):
  *   A pristine idle   < 0.5%      nothing runs
- *   B after a blast   < 1.0%      a running-but-silent AudioContext is tolerated
+ *   B after a blast   < 1.0% main + renderer < 20%; the running-context cost
+ *                       (B - C renderer differential) is REPORTED on the verdict
+ *                       line with an explicit UNCALIBRATED marker, not gated -
+ *                       see afterBlastRenderer's comment for the failed
+ *                       calibration (airhorn-nxuv.15 P2b)
  *   D hidden          < 0.5%      and no audio may keep playing
  */
 
@@ -71,7 +75,58 @@ const mimeTypes = {
   '.ico': 'image/x-icon',
 };
 
-const BUDGET = { pristineIdle: 0.5, afterBlastIdle: 1.0, hidden: 0.5 };
+// afterBlastRenderer gates the RENDERER process in the same silent state
+// (airhorn-nxuv.15): the audio thread is where a Web Audio graph spins. The
+// value is EMPIRICAL, not mirrored: a healthy running-but-silent AudioContext
+// measured 7.3% renderer CPU on this fleet's starved VM (2026-10-31,
+// proof-sweep2 idle-green; 1.0% - the first value here - fails the healthy
+// app). 20% sits far above that noise and far below a runaway graph's ~100%.
+//
+// The RUNNING-CONTEXT cost (B - C renderer CPU, printed as
+// costOfRunningContext and carried on verdict B's own line) is REPORTED with an
+// explicit UNCALIBRATED marker but deliberately NOT gated (airhorn-nxuv.15 P2b,
+// review of fleet/audio-cost @21a3e80). A gated differential is the right
+// mechanism - the healthy ABSOLUTE swung 0.332%..7.302% run to run here, so no
+// absolute bound below 20% separates a moderate audio graph from noise - but
+// the only recorded calibration points are five 3s windows while the tool
+// ships 30s windows, and those five points (healthy +7.302/0/-6.983, audio-busy
+// +12.28/+38.858) leave both margins a fifth of the observed healthy spread:
+// a threshold drawn through them separates by luck, not evidence. Calibration
+// needs healthy AND audio-busy runs at the shipped length with a stated n; a
+// variance-aware rule was rejected on the same grounds (a k x spread gate with
+// k chosen to separate the same five points is the same mistake with extra
+// arithmetic). Until the runs exist, an honestly-marked measured value beats a
+// number that cannot defend itself. An UNMEASURED differential is named as
+// such on the verdict line.
+const BUDGET = { pristineIdle: 0.5, afterBlastIdle: 1.0, afterBlastRenderer: 20, hidden: 0.5 };
+
+// Verdict B's pass decision, pure and exported so the mutation harness replays
+// the recorded runs through the REAL gate rather than a copy (airhorn-nxuv.15
+// P2b). b is the B phase sample. An UNMEASURED renderer on B fails as itself -
+// unknown is not a pass. The running-context cost is not an input: it is
+// reported, not gated (see above).
+export const afterBlastSilentPass = (b) =>
+  b.mainThreadCpuPct < BUDGET.afterBlastIdle && b.intervalTicks === 0
+  && b.rendererCpuPct !== null && b.rendererCpuPct < BUDGET.afterBlastRenderer;
+
+// How verdict B's line carries the running-context cost: always present, always
+// honest about what the number is. Exported so the mutation harness asserts the
+// marker through the real code (airhorn-nxuv.15 P2b).
+export const describeContextCost = (cost) => (cost.rendererPct === null
+  ? 'unmeasured (a renderer process was not comparable across the B and C windows)'
+  : `${cost.rendererPct}% of one core (B - C; UNCALIBRATED - reported, not gated)`);
+
+// Mutation seam (airhorn-nxuv.15): under test mode, a Web Audio convolver
+// bank spins the audio thread through the whole B window - renderer-process
+// CPU, off the main thread, no intervals - so verdict B must FAIL on
+// rendererCpuPct instead of passing green. Honoured only with
+// IDLE_COST_TEST_MODE=1, the same guard family as the resilience-audit stub
+// seam (airhorn-w1wh).
+const TEST_MODE = process.env.IDLE_COST_TEST_MODE === '1';
+const SPIN_RENDERER_SEAM = TEST_MODE && process.env.IDLE_COST_SPIN_RENDERER === '1';
+if (process.env.IDLE_COST_SPIN_RENDERER && !TEST_MODE) {
+  console.warn('IDLE_COST_SPIN_RENDERER is honoured only with IDLE_COST_TEST_MODE=1 - ignoring it and running the real measurement.');
+}
 
 // Scheduling instrumentation, installed before any page script runs: the app's
 // own timers and frames are what is being counted, so this must be in place for
@@ -353,7 +408,44 @@ async function main() {
       contextState: window.__airhornContext ? window.__airhornContext.state : null,
       samplerate: window.__airhornContext ? window.__airhornContext.sampleRate : null,
     })`);
+    if (SPIN_RENDERER_SEAM) {
+      // A Web Audio convolver bank: real audio-thread load in the page's OWN
+      // renderer process. (The first version of this seam spun a Worker and
+      // verdict B stayed green - Chrome runs dedicated workers in a
+      // non-'renderer' process that SystemInfo.getProcessInfo never reports
+      // to this metric. Measured, not guessed.)
+      await evaluate(`(async () => {
+        const prev = window.__airhornContext; // the constructor hook would rebind it
+        const ctx = new AudioContext();
+        const sr = ctx.sampleRate;
+        const noise = ctx.createBuffer(1, sr, sr);
+        const impulse = ctx.createBuffer(1, sr >> 2, sr);
+        const nc = noise.getChannelData(0);
+        const ic = impulse.getChannelData(0);
+        for (let i = 0; i < nc.length; i++) nc[i] = Math.random() * 2 - 1;
+        for (let i = 0; i < ic.length; i++) ic[i] = Math.random() * 2 - 1;
+        // 8 convolvers on 0.25s impulses: 4 measured only 12.28% (under the
+        // 20% bound - healthy noise already reaches 7.3%); 8 x 0.5s flipped
+        // the busiest-renderer identity mid-window ('unmeasured'). This is
+        // the measured middle.
+        for (let i = 0; i < 8; i++) {
+          const src = ctx.createBufferSource();
+          src.buffer = noise; src.loop = true;
+          const conv = ctx.createConvolver();
+          conv.buffer = impulse;
+          src.connect(conv); conv.connect(ctx.destination); src.start();
+        }
+        window.__spinCtx = ctx;
+        window.__airhornContext = prev; // restore: phase C suspends the APP's context
+        return true;
+      })()`);
+    }
     report.phases.push(await windowOf('B idle after a blast (context left running)', seconds * 1000));
+    if (SPIN_RENDERER_SEAM) {
+      // The load belongs to window B only: left running it would pollute the
+      // C/D/E windows' renderer figures.
+      await evaluate(`window.__spinCtx ? window.__spinCtx.close().then(() => true) : true`);
+    }
 
     // ------------------------------------------------------------------ C
     const suspended = await evaluate(`(async () => {
@@ -472,8 +564,23 @@ async function main() {
       },
       {
         what: 'B after a blast: silent page still under budget',
-        pass: byName('B').mainThreadCpuPct < BUDGET.afterBlastIdle && byName('B').intervalTicks === 0,
-        measured: `${byName('B').mainThreadCpuPct}% main thread, renderer ${describeRenderer(byName('B'))}`,
+        // The audio thread is where a Web Audio graph spins, so the main
+        // thread alone cannot prove 'silent page under budget': a 100%-CPU
+        // audio graph passed it (airhorn-nxuv.15). The renderer side is gated
+        // too - and an UNMEASURED renderer (no comparable process across the
+        // window) fails as itself, it is not a pass.
+        // The ABSOLUTE renderer bound (20%) is only the runaway backstop: a
+        // moderate audio graph at 12.28% passed it green, and the healthy
+        // absolute swings 0.3%..7.3% run to run, so no absolute bound below
+        // 20% can separate them. The running-context cost (B - C, ambient
+        // cancels) is the mechanism that could - but the five recorded
+        // calibration points are all 3s windows against a shipped 30s default
+        // with margins a fifth of the observed spread, so the differential is
+        // REPORTED with an UNCALIBRATED marker, not asserted on (airhorn-nxuv.15
+        // P2b review). B-unmeasured still fails as itself.
+        pass: afterBlastSilentPass(byName('B')),
+        measured: `${byName('B').mainThreadCpuPct}% main thread, renderer ${describeRenderer(byName('B'))}, ` +
+          `running-context cost ${describeContextCost(report.costOfRunningContext)}`,
       },
       {
         what: 'E foregrounded: the return path is quiet and the horn still works',
@@ -533,7 +640,13 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('idle-cost failed:', err.message);
-  process.exit(1);
-});
+// Only a direct `node tools/idle-cost.mjs` runs the measurement: importing the
+// module (the mutation harness replays recorded runs through afterBlastSilentPass)
+// must not launch a browser.
+const invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedAsScript) {
+  main().catch((err) => {
+    console.error('idle-cost failed:', err.message);
+    process.exit(1);
+  });
+}
