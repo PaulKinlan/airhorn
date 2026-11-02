@@ -78,8 +78,16 @@ async function testSwAndManifest() {
   if (!Array.isArray(manifest.shortcuts) || manifest.shortcuts.length === 0) {
     throw new Error('Expected manifest.shortcuts to contain entries');
   }
-  if (!Array.isArray(manifest.screenshots) || manifest.screenshots.length < 2) {
-    throw new Error(`Expected manifest.screenshots to contain wide and narrow screenshots`);
+  // Count is not content (the assertion sweep, sw-offline:82): `length >= 2`
+  // passes for two 'wide' screenshots or two entries with NO form_factor at all,
+  // while the store listing the manifest claims to describe gets no narrow shot.
+  // The claim is one of EACH factor; an entry without a form_factor is
+  // unmeasurable and fails named, never counted as either.
+  const shots = Array.isArray(manifest.screenshots) ? manifest.screenshots : [];
+  const wide = shots.filter((s) => s.form_factor === 'wide').length;
+  const narrow = shots.filter((s) => s.form_factor === 'narrow').length;
+  if (wide < 1 || narrow < 1) {
+    throw new Error(`Expected manifest.screenshots to contain at least one form_factor 'wide' and one 'narrow' entry; got ${JSON.stringify(shots.map((s) => s.form_factor ?? '(no form_factor)'))}`);
   }
   for (const s of manifest.screenshots) {
     const sPath = path.join(distDir, s.src.replace(/^\//, ''));
