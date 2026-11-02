@@ -622,6 +622,19 @@ async function run() {
           throw new Error(`${entry.label} should not have looped: ${JSON.stringify(entry.result)}`);
         }
       }
+      // An unmeasurable state must fail AS ITSELF (airhorn-mhhz, airhorn-5bvj): a refusal
+      // that carries a code but no message used to crash this line with "Cannot read
+      // properties of undefined (reading 'length')", which reads as a harness bug rather than
+      // as the product defect it is - an agent told "invalid_input" and nothing else has
+      // nothing to act on. "No message" includes a message with no CONTENT: a type-only check
+      // accepted error:"" and error:"   ", which are the same defect wearing a string. The
+      // test is a TRIM-based blank test rather than a length test, because whitespace is what
+      // a template produced around an empty value looks like; trimming is used ONLY to decide
+      // presence, never to change the value that the 200-character bound below measures.
+      const hasUsableMessage = typeof entry.result.error === 'string' && entry.result.error.trim() !== '';
+      if (entry.result.code && !hasUsableMessage) {
+        throw new Error(`${entry.label} was refused with code ${JSON.stringify(entry.result.code)} but carried no usable error message (blank or absent, got ${JSON.stringify(entry.result.error ?? null)})`);
+      }
       if (entry.result.code && entry.result.error.length > 200) {
         throw new Error(`${entry.label} returned a ${entry.result.error.length}-character error message`);
       }
