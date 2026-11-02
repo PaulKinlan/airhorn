@@ -261,6 +261,43 @@ test('identity is the run marker plus the exact user-data-dir token, never a pre
         // --user-data-dir token: still not ours.
         assert.deepEqual(oursProcesses({ key: 'AIRHORN_BOUNDKILL_RUN', value: 'different' }, runDir), [],
           'a different run\'s marker must not be claimed');
+
+        // POSITIVE CONTROLS (airhorn-g0qr.22). Every assertion above is a `[]`, and
+        // a predicate that can only ever return [] satisfies all of them: `runProfiles`
+        // rewritten as `() => []` passed this whole suite, so "no leftovers" was
+        // unpinned in the one place the identity rules are supposed to be pinned. Both
+        // helpers are therefore shown to REPORT a match before their empty answers above
+        // are allowed to mean anything.
+        const profileDir = path.join(runDir, 'chrome-positive-control');
+        fs.mkdirSync(profileDir, { mode: 0o700 });
+        fs.mkdirSync(path.join(runDir, 'firefox-not-a-profile'), { mode: 0o700 });
+        assert.deepEqual(runProfiles(runDir), ['chrome-positive-control'],
+          'a chrome-* directory inside the run must be reported, and only that one');
+
+        // The same positive control for process identity: THIS run's marker plus the exact
+        // --user-data-dir token must be claimed. The token is passed as an argv entry to a
+        // sleeping child, which is the shape oursProcesses() reads out of /proc. It is a shell
+        // positional argument, not a node one: `node -e ... --user-data-dir=x` makes node itself
+        // exit 9 on 'bad option', which is how the first version of this control passed only when
+        // it happened to read /proc in the instant before that exit.
+        const ours = spawn('/bin/sh', ['-c', 'sleep 20', 'airhorn-positive-control', `--user-data-dir=${profileDir}`], {
+          detached: true,
+          stdio: 'ignore',
+          env: { ...process.env, [marker.key]: marker.value },
+        });
+        try {
+          await waitFor(() => oursProcesses(marker, runDir).length > 0,
+            { timeoutMs: 5000, label: 'the positive-control process to appear in /proc' });
+          assert.deepEqual(oursProcesses(marker, runDir),
+            [{ pid: ours.pid, dir: profileDir }],
+            'this run\'s marker plus the exact --user-data-dir token must be claimed');
+        } finally {
+          if (procPgrp(ours.pid) === ours.pid) {
+            try { process.kill(-ours.pid, 'SIGKILL'); } catch {}
+          }
+          await waitFor(() => oursProcesses(marker, runDir).length === 0,
+            { timeoutMs: 5000, label: 'the positive-control process to die' }).catch(() => {});
+        }
       } finally {
         if (procPgrp(child.pid) === child.pid) {
           try { process.kill(-child.pid, 'SIGKILL'); } catch {}
