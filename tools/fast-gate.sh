@@ -742,7 +742,13 @@ if [ "${#RUN[@]}" -eq 0 ]; then
     echo "fast-gate: change genuinely must execute nothing - re-run with FAST_GATE_ALLOW_ZERO=1." >&2
     exit 1
   fi
-  echo "fast-gate: ZERO-SUITE PASS (${#CHANGED[@]} changed file(s), all ${#PENDING[@]} pending; FAST_GATE_ALLOW_ZERO=1)"
+  # Report the counts in their OWN units (airhorn-nxuv.18): the old line's
+  # 'all ${#PENDING[@]} pending' sat a SUITE count next to the changed-FILE count
+  # and let 'all' read as if it quantified the files - '3 changed file(s), all 1
+  # pending' is a lie that can mask a real zero-suite condition. The decision
+  # above is already like-with-like (RUN empty after the pending split, MISSING
+  # having exited), so SELECTED == PENDING here and both are suite counts.
+  echo "fast-gate: ZERO-SUITE PASS (${#CHANGED[@]} changed file(s) selected ${#SELECTED[@]} suite(s), all of them '~'-pending; FAST_GATE_ALLOW_ZERO=1)"
   exit 0
 fi
 
