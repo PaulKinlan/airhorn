@@ -361,6 +361,13 @@ async function run() {
     if (discovered.loopParam !== 'boolean') {
       throw new Error(`play_horn.loop schema should be boolean, got ${discovered.loopParam}`);
     }
+    // `descriptions` was collected here and never asserted (airhorn-g0qr.23): a tool with a
+    // blank or one-word description is effectively undiscoverable however right its name and
+    // schema are, because an agent picks a tool by reading what it says it does.
+    const undescribed = discovered.names.filter((_, index) => !discovered.descriptions[index]);
+    if (undescribed.length) {
+      throw new Error(`tool(s) with no usable description (an agent chooses tools by description): ${undescribed.join(', ')}`);
+    }
     if (discovered.readOnly.get_horn_state !== true) {
       throw new Error('get_horn_state should be annotated readOnlyHint: true');
     }
