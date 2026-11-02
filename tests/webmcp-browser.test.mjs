@@ -615,6 +615,14 @@ async function run() {
           throw new Error(`${entry.label} should not have looped: ${JSON.stringify(entry.result)}`);
         }
       }
+      // An unmeasurable state must fail AS ITSELF (airhorn-mhhz): a refusal that carries a
+      // code but no message used to crash this line with "Cannot read properties of
+      // undefined (reading 'length')", which reads as a harness bug rather than as the
+      // product defect it is - an agent told "invalid_input" and nothing else has nothing
+      // to act on.
+      if (entry.result.code && typeof entry.result.error !== 'string') {
+        throw new Error(`${entry.label} was refused with code ${JSON.stringify(entry.result.code)} but carried no error message (${JSON.stringify(entry.result)})`);
+      }
       if (entry.result.code && entry.result.error.length > 200) {
         throw new Error(`${entry.label} returned a ${entry.result.error.length}-character error message`);
       }
