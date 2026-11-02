@@ -149,8 +149,15 @@ test('CLI --stdout outputs formatted JSON to stdout', () => {
   const res = spawnSync(process.execPath, [tool, '--stdout'], { encoding: 'utf8' });
   assert.equal(res.status, 0);
   const parsed = JSON.parse(res.stdout);
-  assert.ok(parsed['src/horn.js']);
-  assert.ok(parsed['src/main.js']);
+  // Content, not truthiness (airhorn-g0qr.11): assert.ok(parsed[...]) accepts an
+  // EMPTY array or a wrong suite list - the contract could stop covering horn.js
+  // and this test still passed. Pinned to the map rows (suite-map.tsv:28, :41)
+  // minus the '~'-pending test/ dual-spellings, which derivation drops while
+  // pending; if a row changes, this pin changes with it, deliberately.
+  assert.deepStrictEqual(parsed['src/horn.js'], ['tests/horn.test.js', 'tests/a11y.test.mjs', 'tests/shortcuts.test.mjs'],
+    'src/horn.js must select exactly the suites its map row names (pending test/ spellings dropped)');
+  assert.deepStrictEqual(parsed['src/main.js'], ['tests/modules.test.js', 'tests/resilience-ui.test.mjs', 'tests/webmcp-browser.test.mjs'],
+    'src/main.js must select exactly the suites its map row names (pending test/ spellings dropped)');
 });
 
 test('validateSuiteMap returns zero_match_glob for glob matching zero files (airhorn-onz0)', () => {
