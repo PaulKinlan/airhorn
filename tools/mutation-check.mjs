@@ -93,6 +93,43 @@ export function restoreVerified({ original, onDisk }) {
 }
 
 /**
+ * A suite that FAILED TO RUN is not a suite that caught the mutant (review finding
+ * airhorn-cmr1: `--suite tests/does-not-exist.test.mjs` scored "mutant-caught" exit 0,
+ * because node exits non-zero when it cannot load the file - the tool read that as "the
+ * suite fails the mutant", which is the exact confusion between "the check fired" and "the
+ * check never ran" this tool exists to prevent).
+ *
+ * Two answers, both named:
+ *   suitePresenceProblem  the file is not there at all;
+ *   suiteLoadProblem      node's own stderr says it could not load/parse the file.
+ * Anything else - a genuine assertion failure, a timeout inside a test - stays a failure.
+ */
+export function suitePresenceProblem(suite, cwd) {
+  const resolved = path.resolve(cwd, suite);
+  if (!fs.existsSync(resolved)) {
+    return `the suite ${suite} does not exist (${resolved}) - nothing was measured, so a non-zero exit from node's loader must not count as the suite catching the mutant`;
+  }
+  return null;
+}
+
+const LOAD_FAILURES = [
+  [/Cannot find module/, 'the module could not be found'],
+  [/ERR_MODULE_NOT_FOUND/, 'a module could not be resolved'],
+  [/ERR_UNSUPPORTED_DIR_IMPORT/, 'a directory was imported as a module'],
+  [/SyntaxError:/, 'the file does not parse'],
+];
+
+export function suiteLoadProblem(stderr) {
+  const text = String(stderr || '');
+  for (const [pattern, reason] of LOAD_FAILURES) {
+    if (pattern.test(text)) {
+      return `could not run (${reason}) - a suite that never loaded proves nothing about the mutant`;
+    }
+  }
+  return null;
+}
+
+/**
  * The triad. `oldRc` is the pre-change suite against the mutant, `newRc` the current one;
  * null means "not measured", which is never a pass.
  */
@@ -132,9 +169,24 @@ function parseArgs(argv) {
   return args;
 }
 
-function run(command, shellArgs, cwd) {
-  const result = spawnSync(command, shellArgs, { cwd, stdio: 'inherit' });
-  return result.status === null ? 1 : result.status;
+function run(command, shellArgs, cwd, { captureStderr = false } = {}) {
+  const result = spawnSync(command, shellArgs, {
+    cwd,
+    stdio: captureStderr ? ['ignore', 'inherit', 'pipe'] : 'inherit',
+    encoding: 'utf8',
+  });
+  if (captureStderr && result.stderr) process.stderr.write(result.stderr);
+  return { rc: result.status === null ? 1 : result.status, stderr: result.stderr || '' };
+}
+
+/** Run a suite and say both what it exited with and whether it ran at all. */
+function runSuite(suite, cwd, label) {
+  const presence = suitePresenceProblem(suite, cwd);
+  if (presence) return { problem: presence };
+  const ran = run(process.execPath, [suite], cwd, { captureStderr: true });
+  const loadProblem = suiteLoadProblem(ran.stderr);
+  if (loadProblem) return { problem: `${label} ${loadProblem}` };
+  return { rc: ran.rc };
 }
 
 export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
@@ -178,7 +230,7 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
 
     if (args.build) {
       console.log(`building: ${args.build}`);
-      const buildRc = run('bash', ['-lc', args.build], cwd);
+      const buildRc = run('bash', ['-lc', args.build], cwd).rc;
       if (buildRc !== 0) {
         console.error(`mutation-check: the build failed (rc=${buildRc}) - a mutant that does not build proves nothing`);
         mutantRc = 3;
@@ -186,8 +238,23 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
       }
     }
 
-    if (args.suiteOld) baselineRc = run(process.execPath, [args.suiteOld], cwd);
-    mutantRc = run(process.execPath, [args.suite], cwd);
+    // A suite that could not run is UNMEASURED, never "caught the mutant" (airhorn-cmr1).
+    if (args.suiteOld) {
+      const baseline = runSuite(args.suiteOld, cwd, 'the OLD suite');
+      if (baseline.problem) {
+        console.error(`mutation-check: refusing: ${baseline.problem}`);
+        mutantRc = 3;
+        return 3;
+      }
+      baselineRc = baseline.rc;
+    }
+    const judged = runSuite(args.suite, cwd, 'the suite');
+    if (judged.problem) {
+      console.error(`mutation-check: refusing: ${judged.problem}`);
+      mutantRc = 3;
+      return 3;
+    }
+    mutantRc = judged.rc;
   } finally {
     fs.writeFileSync(absolute, original);
     const restored = restoreVerified({ original, onDisk: fs.readFileSync(absolute, 'utf8') });
