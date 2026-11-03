@@ -119,6 +119,9 @@ const LOAD_FAILURES = [
   [/SyntaxError:/, 'the file does not parse'],
 ];
 
+/** The reserved code tools/lib/suite-guard.cjs exits with: the suite never measured anything. */
+export const SUITE_NEVER_RAN = 97;
+
 export function suiteLoadProblem(stderr) {
   const text = String(stderr || '');
   for (const [pattern, reason] of LOAD_FAILURES) {
@@ -169,9 +172,10 @@ function parseArgs(argv) {
   return args;
 }
 
-function run(command, shellArgs, cwd, { captureStderr = false } = {}) {
+function run(command, shellArgs, cwd, { captureStderr = false, env = process.env } = {}) {
   const result = spawnSync(command, shellArgs, {
     cwd,
+    env,
     stdio: captureStderr ? ['ignore', 'inherit', 'pipe'] : 'inherit',
     encoding: 'utf8',
   });
@@ -180,10 +184,36 @@ function run(command, shellArgs, cwd, { captureStderr = false } = {}) {
 }
 
 /** Run a suite and say both what it exited with and whether it ran at all. */
+const GUARD = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lib', 'suite-guard.cjs');
+
+/**
+ * Only a node:test suite gets the never-ran guard. In a node:test file node itself reports a
+ * failing test (exit 1, "not ok ...") and a top-level throw means the file never ran; in a
+ * SCRIPT suite (tests/multitab.test.mjs and friends) the top-level throw IS the failure, so
+ * treating it as "never ran" would hide real red - the opposite mistake (airhorn-ba6d).
+ */
+export function suiteUsesNodeTest(file, cwd) {
+  try {
+    const source = fs.readFileSync(path.resolve(cwd, file), 'utf8');
+    return /from\s+['"]node:test['"]|require\(\s*['"]node:test['"]\s*\)/.test(source);
+  } catch {
+    return false;
+  }
+}
+
 function runSuite(suite, cwd, label) {
   const presence = suitePresenceProblem(suite, cwd);
   if (presence) return { problem: presence };
-  const ran = run(process.execPath, [suite], cwd, { captureStderr: true });
+  // The guard hook is what makes "threw while loading" distinguishable from "failed a test"
+  // (airhorn-ba6d): node exits non-zero for both, so the failure MODE is recorded instead of
+  // matching error strings.
+  const options = suiteUsesNodeTest(suite, cwd)
+    ? { captureStderr: true, env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require ${GUARD}`.trim() } }
+    : { captureStderr: true };
+  const ran = run(process.execPath, [suite], cwd, options);
+  if (options.env && ran.rc === SUITE_NEVER_RAN) {
+    return { problem: `${label} threw outside any test, so nothing was measured (exit ${SUITE_NEVER_RAN}) - a suite that never ran proves nothing about the mutant` };
+  }
   const loadProblem = suiteLoadProblem(ran.stderr);
   if (loadProblem) return { problem: `${label} ${loadProblem}` };
   return { rc: ran.rc };

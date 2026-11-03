@@ -12,6 +12,7 @@ import {
   restoreVerified,
   suiteLoadProblem,
   suitePresenceProblem,
+  suiteUsesNodeTest,
   verdictFor,
 } from '../tools/mutation-check.mjs';
 
@@ -181,4 +182,50 @@ test('the verdict is unreachable for an unmeasured suite: only a real failure be
   assert.equal(verdictFor({ oldRc: null, newRc: null }).verdict, 'unmeasured');
   assert.equal(verdictFor({ oldRc: null, newRc: null }).exit, 3);
   assert.equal(verdictFor({ oldRc: null, newRc: 1 }).verdict, 'mutant-caught');
+});
+
+// airhorn-ba6d: a node:test suite whose IMPORT throws exits non-zero, which the tool used to
+// read as "the suite fails the mutant". Marker matching missed it (a plain `throw new Error
+// ("boom")` matches none of them), so the failure MODE is recorded instead: a hook exits 97
+// when something is thrown outside a test, and that reserves the verdict "nothing measured".
+test('a node:test suite is run with the never-ran guard; a script suite is not', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'suiteguard-'));
+  try {
+    fs.writeFileSync(path.join(tmp, 'unit.test.js'), "import test from 'node:test';\ntest('x', () => {});\n");
+    fs.writeFileSync(path.join(tmp, 'script.mjs'), "import assert from 'node:assert';\nassert.equal(1, 1);\n");
+    assert.equal(suiteUsesNodeTest('unit.test.js', tmp), true);
+    assert.equal(suiteUsesNodeTest('script.mjs', tmp), false,
+      'a script suite throws AT TOP LEVEL when it fails, so it must keep normal exit-code semantics');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('an import-time throw is refused as unmeasured, while a real failure still catches the mutant', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ba6d-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    fs.writeFileSync(path.join(tmp, 'setup.mjs'), "throw new Error('boom');\n");
+    // the reviewer's repro: the suite file exists, imports fine as text, and dies at load
+    fs.writeFileSync(path.join(tmp, 'suite.mjs'), 'import "./setup.mjs";\nimport test from "node:test";\ntest("x", () => {});\n');
+    // the negative control: a suite that really runs and asserts the pre-mutation value
+    fs.writeFileSync(path.join(tmp, 'catches.mjs'), 'import test from "node:test";\nimport assert from "node:assert";\nimport { answer } from "./src/subject.js";\ntest("answer", () => assert.equal(answer, 41));\n');
+    // and a script suite, whose top-level throw IS a failure and must stay one
+    fs.writeFileSync(path.join(tmp, 'script.mjs'), 'import assert from "node:assert";\nconst answer = 42;\nassert.equal(answer, 41);\n');
+
+    const never = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.mjs'], { cwd: tmp, encoding: 'utf8' });
+    assert.equal(never.status, 3, `an import-time throw must exit 3 (got ${never.status}): ${never.stdout}${never.stderr}`);
+    assert.match(never.stderr + never.stdout, /threw outside any test|nothing was measured/);
+
+    const real = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'catches.mjs'], { cwd: tmp, encoding: 'utf8' });
+    assert.equal(real.status, 0, `a real catching suite must still prove the hole (got ${real.status}): ${real.stdout}${real.stderr}`);
+    assert.match(real.stdout, /verdict: mutant-caught/);
+
+    const script = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'script.mjs'], { cwd: tmp, encoding: 'utf8' });
+    assert.equal(script.status, 0, `a failing SCRIPT suite must stay a caught mutant (got ${script.status}): ${script.stdout}${script.stderr}`);
+    assert.match(script.stdout, /verdict: mutant-caught/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
