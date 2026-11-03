@@ -815,6 +815,15 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       // serialize on release - the shared count must end at before+2. Without
       // the lock both tabs read the pre-blast count and write before+1:
       // one blast lost.
+      //
+      // SCOPE (airhorn-lg0e): everything below is about bumps that QUEUE ON THE
+      // ORIGIN LOCK. It does not, and cannot, rule out a writer that never asks
+      // for the lock - the reviewer scheduled a stale unlocked write of count=1
+      // 1200 ms later and the shared count ended at 1 while this guard stayed
+      // green {queued:true,during:0,settled:2,after:1}. An unlocked writer is
+      // outside the lock's contract: serializing it is not something the app can
+      // do, so the assertion messages say "a bump that takes the origin lock"
+      // rather than "no blast can ever be lost".
       await send('Target.activateTarget', { targetId: A2.targetId });
       await waitUntil(async () => (await A2.evaluate(`document.visibilityState`)) === 'visible', 5000);
       const before = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
@@ -852,14 +861,14 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       }, 5000);
       assert(queued,
         `a blast's increment never queued on the origin lock while the test held it (queues seen: ${JSON.stringify(queued)}) - ` +
-        `an unlocked read-modify-write lets interleaved tabs lose a blast (airhorn-rqz1)`);
+        `the app's bump is then an unlocked read-modify-write, and interleaved tabs can lose a blast (airhorn-rqz1)`);
       // ...and with the bump queued, nothing may have been written. This is now
       // deterministic rather than a race against 300 ms: the app is demonstrably
       // still waiting, so any count here came from a write that bypassed the lock.
       const duringHold = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
       assert(duringHold === before,
         `a blast's increment was written while another holder owned the origin lock (count ${before} -> ${duringHold} under the hold) - ` +
-        `the increment is a non-atomic read-modify-write, so interleaved tabs can lose a blast (airhorn-rqz1)`);
+        `the bump did not take the lock, so it is a non-atomic read-modify-write and interleaved tabs can lose a blast (airhorn-rqz1)`);
       await A2.evaluate(`window.__rqz1Release && window.__rqz1Release()`);
       await B.evaluate(`window.__airhorn.start()`);
       const settled = await waitUntil(async () => {
@@ -869,10 +878,12 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       const after = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
       assert(settled,
         `two blasts in two tabs produced a shared count of ${after}, expected ${before + 2} - ` +
-        `the increment is a non-atomic read-modify-write, so the second writer clobbered the first and a blast was lost (airhorn-rqz1)`);
+        `the two bumps, which both queued on the origin lock, were not serialized: one clobbered the other and a blast was lost (airhorn-rqz1). ` +
+        `(A separate, unlocked writer is not covered here - airhorn-lg0e)`);
       await A2.evaluate(`window.__airhorn.stop({ immediate: true })`);
       await B.evaluate(`window.__airhorn.stop({ immediate: true })`);
-      console.log(`  simultaneous bumps serialized: ${before} -> ${after}, no blast lost.`);
+      console.log(`  simultaneous bumps that take the origin lock serialized: ${before} -> ${after}, neither lost ` +
+        `(an unlocked writer is outside the lock's contract - airhorn-lg0e).`);
     } else {
       console.log('  navigator.locks unavailable in this browser; nothing to assert.');
     }
