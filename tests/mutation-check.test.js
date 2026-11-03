@@ -10,6 +10,8 @@ import {
   mutationApplied,
   mutationTargetProblem,
   restoreVerified,
+  suiteLoadProblem,
+  suitePresenceProblem,
   verdictFor,
 } from '../tools/mutation-check.mjs';
 
@@ -150,4 +152,33 @@ test('the tool refuses to mutate a test file, because that proves nothing about 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// airhorn-cmr1: a suite that cannot run must never be scored as a suite that caught the
+// mutant. node exits non-zero when it cannot find or parse the file, and the tool used to
+// read that as "the suite fails the mutant" -> "mutant-caught" exit 0.
+test('a suite that does not exist is refused as unmeasured, not scored as mutant-caught', () => {
+  const problem = suitePresenceProblem('tests/does-not-exist.test.mjs', process.cwd());
+  assert.match(problem, /does not exist/);
+  assert.match(problem, /nothing was measured/);
+  assert.equal(suitePresenceProblem('tests/mutation-check.test.js', process.cwd()), null,
+    'a suite that is really there raises no presence problem');
+});
+
+test('a suite that cannot load is unmeasured - a loader error is not a caught mutant', () => {
+  assert.match(suiteLoadProblem("Error: Cannot find module '/tmp/x/tests/missing.mjs'"), /could not run/);
+  assert.match(suiteLoadProblem('node:internal/modules/esm/resolve:1 Error [ERR_MODULE_NOT_FOUND]'), /could not run/);
+  assert.match(suiteLoadProblem('SyntaxError: Unexpected token'), /could not run/);
+  // A REAL test failure has none of those markers and must stay a failure: that is the shape
+  // the verdict reads as "the suite caught the mutant".
+  assert.equal(suiteLoadProblem('not ok 1 - the horn blasts\n  AssertionError [ERR_ASSERTION]'), null);
+  assert.equal(suiteLoadProblem(''), null);
+});
+
+test('the verdict is unreachable for an unmeasured suite: only a real failure becomes mutant-caught', () => {
+  // The triad is unchanged; what changed is which inputs reach it. null (not measured) can
+  // never produce a pass.
+  assert.equal(verdictFor({ oldRc: null, newRc: null }).verdict, 'unmeasured');
+  assert.equal(verdictFor({ oldRc: null, newRc: null }).exit, 3);
+  assert.equal(verdictFor({ oldRc: null, newRc: 1 }).verdict, 'mutant-caught');
 });
