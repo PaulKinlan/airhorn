@@ -197,6 +197,7 @@
   "tests/docs-recipe.test.mjs",
   "tests/health.test.mjs",
   "tests/keyboard.test.mjs",
+  "tests/lost-upgrade-copy.test.mjs",
   "tests/multitab.test.mjs",
   "tests/nav-guard.test.mjs",
   "tests/press-guard.test.mjs",

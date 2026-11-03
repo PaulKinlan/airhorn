@@ -229,16 +229,17 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
     `index.html must not select the SW-update suite, got ${JSON.stringify(pageRow)}`);
   assert.ok(pageRow.includes('tests/resilience-ui.test.mjs'),
     `index.html must select resilience-ui, got ${JSON.stringify(pageRow)}`);
-  // (b) the coverage it must not have lost with it: the lost-upgrade
-  // announcement is authored in index.html, and the suite that runs on this row
-  // has to assert that copy. Read both files: the page's copy and the suite's
-  // assertion cannot silently diverge into a suite that checks nothing real.
+  // (b) index.html authors the copy; the selected suite delegates its live
+  // observation to a pure enforcer whose throw is proven by its own unit test.
+  // Do not scan the suite's prose for copy: a comment/non-enforcing action used
+  // to pass that check (airhorn-rrme). Pin the one guarded call site instead.
   const page = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
   const suite = fs.readFileSync(path.join(root, 'tests', 'resilience-ui.test.mjs'), 'utf8');
   for (const copy of ['The app could not update', 'previous version']) {
     assert.ok(page.includes(copy), `index.html must author the lost-upgrade copy "${copy}"`);
-    assert.ok(suite.includes(copy), `resilience-ui must assert the page's lost-upgrade copy "${copy}"`);
   }
+  assert.ok(suite.includes('assertLostUpgradeNotice(lost.text);'),
+    'resilience-ui must delegate the live lost-upgrade notice to the tested enforcer');
   // The worker's own failure story is still the failover suite's job, and the
   // suite still has a row owner (the worker). No page module carries worker code
   // since the split (airhorn-1l04): the registration handler is inline in
