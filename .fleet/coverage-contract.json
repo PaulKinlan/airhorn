@@ -64,6 +64,7 @@
   "tests/webmcp-browser.test.mjs"
  ],
  "index.html": [
+  "tests/preload-priority.test.js",
   "tests/horn.test.js",
   "tests/a11y.test.mjs",
   "tests/webmcp-browser.test.mjs",

@@ -87,7 +87,7 @@ src/webmcp.js	tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs test/webmcp.test.
 # dropping sw-failover from this row does not drop its coverage. Keep it that
 # way: move the branch, or add a suite - never a comment claiming a suite you
 # stopped running covers it.
-index.html	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs
+index.html	tests/preload-priority.test.js tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs
 vite.config.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
 package.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
 package-lock.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
@@ -158,6 +158,7 @@ tests/sw-offline.test.mjs	tests/sw-offline.test.mjs
 tests/sw-failover.test.mjs	tests/sw-failover.test.mjs
 tests/webmcp.test.mjs	tests/webmcp.test.mjs
 tests/gate-smoke.test.js	tests/gate-smoke.test.js
+tests/preload-priority.test.js	tests/preload-priority.test.js
 # The fast half's own self-row: a change to it must run it (airhorn-gkqu).
 tests/gate-map.test.js	tests/gate-map.test.js
 tests/webmcp-browser.test.mjs	tests/webmcp-browser.test.mjs

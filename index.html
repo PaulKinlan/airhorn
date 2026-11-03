@@ -265,7 +265,7 @@
          without JS this inline critical block is all there is either way. -->
     <link rel='stylesheet' href='/styles/main.css' media='print' onload="this.media='all'" onerror="document.documentElement.classList.add('stylesheet-failed')">
     <noscript><link rel='stylesheet' href='/styles/main.css'></noscript>
-    <link rel='preload' href='/sounds/airhorn.mp3' as='fetch' crossorigin>
+    <link rel='preload' href='/sounds/airhorn.mp3' as='fetch' crossorigin fetchpriority='low'>
   </head>
   <body>
     <main id='container'>
