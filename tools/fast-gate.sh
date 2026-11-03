@@ -253,22 +253,75 @@ if ! verify_suite_tiers; then
   exit 1
 fi
 if [ "$CHECK_TIERS" -eq 1 ]; then echo "fast-gate: tier declarations agree with suite content"; exit 0; fi
+# --- git discovery must NOT swallow errors (airhorn-epbp) ------------------------------------------
+# The discovery block used to end in `2>/dev/null`, so a git that failed for any reason produced an
+# empty CHANGED set - and the gate then printed `fast-gate: no changed files` and exited 0, having
+# tested nothing. A git that works for `rev-parse` but not for `diff`/`ls-files` (a corrupt index, a
+# shim that refuses, a repo mid-repair) therefore greened ANY change. Discovery failures are fatal and
+# named now, so the one world that reaches `no changed files` is the one where git answered.
+FG_OUT=''
+git_discover() { # <purpose> <git args...>; sets FG_OUT, or exits 1 with a refusal
+  # Deliberately NOT a command substitution on the caller's side: `x=$(git_discover ...)` would run this
+  # body in a subshell, where `exit 1` kills only the substitution and the gate would carry on with an
+  # empty value - the very bug this function exists to close. Callers read $FG_OUT instead.
+  local purpose=$1; shift
+  local out rc
+  out=$(git -C "$ROOT" "$@" 2>&1); rc=$?     # only git runs in the subshell; the refusal does not
+  if [ "$rc" -ne 0 ]; then
+    echo "fast-gate: FAIL - git discovery ($purpose) failed (git $1 exited $rc), so the changed set is" >&2
+    echo "fast-gate: UNKNOWN, and UNKNOWN is not EMPTY. Refusing to report a verdict: 'no changed files'" >&2
+    echo "fast-gate: would be a guess about a tree nothing read. Fix git in this checkout, or pass" >&2
+    echo "fast-gate: --changed <path> to skip discovery entirely. git said:" >&2
+    printf '%s\n' "$out" | sed 's/^/    /' >&2
+    exit 1
+  fi
+  FG_OUT=$out
+}
+
+FG_OUT=''
+fg_filter() { # <purpose> <raw text>; sets FG_OUT or exits 1 with a refusal. Never call through $( ).
+  # The same trap as git_discover's $( ), one layer along (airhorn-oxmj): `mapfile -t X < <(a | b)`
+  # throws away the status of BOTH a and b, so a failing sed/sort produced an EMPTY array - and an
+  # empty changed-file list is indistinguishable from "nothing changed", i.e. a green gate that read
+  # a list it never computed. UNKNOWN is not EMPTY here either.
+  local purpose=$1 raw=$2 out rc
+  out=$(set -o pipefail; printf '%s' "$raw" | sed '/^$/d' | sort -u); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "fast-gate: FAIL - filtering the $purpose list failed (the sed/sort pipeline exited $rc), so" >&2
+    echo "fast-gate: the list is UNKNOWN, and UNKNOWN is not EMPTY: every decision after this point -" >&2
+    echo "fast-gate: which files changed, which suites to run - reads an empty list as 'nothing to do'," >&2
+    echo "fast-gate: which is how a broken filter greens a change. Fix the filter, or pass" >&2
+    echo "fast-gate: --changed <path> to skip discovery entirely." >&2
+    exit 1
+  fi
+  FG_OUT=$out
+}
 
 # --- the base: origin/master (this repo's default), then main variants, then HEAD~1. Never "everything".
 if [ "${#EXPLICIT[@]}" -eq 0 ]; then
+  # Prove git itself runs BEFORE probing for a base ref: `--verify --quiet` is silent by design (it asks
+  # "does this ref exist?"), so a git that cannot run at all used to be reported as "no base ref" - a
+  # message that names the wrong cause and sends the reader hunting for a missing branch.
+  git_discover 'rev-parse --git-dir' rev-parse --git-dir
   if [ -z "$BASE" ]; then
     for b in origin/master master origin/main main; do
       git -C "$ROOT" rev-parse --verify --quiet "$b" >/dev/null 2>&1 && { BASE=$b; break; }
     done
   fi
   [ -n "$BASE" ] || { echo "fast-gate: no base ref (no origin/master, no main) and no --changed given" >&2; exit 1; }
-  MB=$(git -C "$ROOT" merge-base "$BASE" HEAD) || { echo "fast-gate: cannot merge-base $BASE..HEAD" >&2; exit 1; }
+  git_discover "merge-base $BASE..HEAD" merge-base "$BASE" HEAD
+  MB=$FG_OUT
   # Committed, uncommitted and untracked all count. Over-inclusion is deliberate: a selector that MISSES
   # a file you just wrote is the defect this script exists to prevent.
-  mapfile -t CHANGED < <( { git -C "$ROOT" diff --name-only "$MB"..HEAD
-                            git -C "$ROOT" diff --name-only
-                            git -C "$ROOT" ls-files --others --exclude-standard; } 2>/dev/null \
-                          | sed '/^$/d' | sort -u )
+  git_discover 'diff <base>..HEAD' diff --name-only "$MB"..HEAD
+  _fg_committed=$FG_OUT
+  git_discover 'diff (working tree)' diff --name-only
+  _fg_worktree=$FG_OUT
+  git_discover 'ls-files --others' ls-files --others --exclude-standard
+  _fg_untracked=$FG_OUT
+  fg_filter 'changed-file' "$(printf '%s\n%s\n%s\n' "$_fg_committed" "$_fg_worktree" "$_fg_untracked")"
+  CHANGED=()
+  if [ -n "$FG_OUT" ]; then mapfile -t CHANGED <<< "$FG_OUT"; fi
 else
   CHANGED=("${EXPLICIT[@]}")
 fi
@@ -633,7 +686,9 @@ fi
 
 # --- fail loudly on anything unmapped, BEFORE running a subset that would look green ------------------
 if [ "${#UNMAPPED[@]}" -gt 0 ]; then
-  mapfile -t _unmapped_sorted < <(printf '%s\n' "${UNMAPPED[@]}" | sort -u)
+  fg_filter 'unmapped-change' "$(printf '%s\n' "${UNMAPPED[@]}")"
+  _unmapped_sorted=()
+  if [ -n "$FG_OUT" ]; then mapfile -t _unmapped_sorted <<< "$FG_OUT"; fi
   for f in "${_unmapped_sorted[@]}"; do [ -n "$f" ] && echo "fast-gate: unmapped: $f"; done
   echo "fast-gate: FAIL - ${#UNMAPPED[@]} changed file(s) map to no suite in tools/suite-map.tsv." >&2
   echo "fast-gate: add a row to tools/suite-map.tsv naming EVERY suite that covers the file, or - if" >&2
@@ -670,7 +725,9 @@ if [ "${#TREE_SUITE_NOT_REACHABLE[@]}" -gt 0 ]; then
   exit 1
 fi
 
-mapfile -t SELECTED < <(printf '%s\n' ${SELECTED[@]+"${SELECTED[@]}"} | sed '/^$/d' | sort -u)
+fg_filter 'selected-suite' "$(printf '%s\n' ${SELECTED[@]+"${SELECTED[@]}"})"
+SELECTED=()
+if [ -n "$FG_OUT" ]; then mapfile -t SELECTED <<< "$FG_OUT"; fi
 
 # --list is a QUERY, not a verdict: it prints what WOULD run and exits 0, however empty - the
 # zero-suite rule below is about a verdict that reads green, and a listing reads as nothing.
