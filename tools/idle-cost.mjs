@@ -59,6 +59,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectPage, launchChrome } from './lib/chrome.mjs';
+import { resolveRequestUrl } from './lib/request-path.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -196,7 +197,17 @@ const instrumentation = `
 
 function startServer() {
   const server = http.createServer((req, res) => {
-    let filePath = path.join(DIST, req.url === '/' ? 'index.html' : req.url.split('?')[0]);
+    // The request path is untrusted even on loopback (embargoed factory finding): it was
+    // joined straight onto DIST, so '/../../etc/passwd' (or %2e%2e, which was never even
+    // decoded here) was served from outside the root. Now a malformed escape is a 400 and
+    // an escaping path is a 403, each naming what was refused.
+    let served = resolveRequestUrl(DIST, req.url);
+    if (!served.ok) {
+      res.writeHead(served.status, { 'Content-Type': 'text/plain' });
+      res.end(served.reason);
+      return;
+    }
+    let filePath = served.filePath;
     if (!fs.existsSync(filePath)) {
       res.writeHead(404);
       res.end('Not found');

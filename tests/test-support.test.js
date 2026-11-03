@@ -1297,3 +1297,126 @@ test('perf-metrics: an absent LCP is unmeasured, and the run says so instead of 
   assert.match(broken.join(' | '), /repeat load: the interaction events for INP were not collected/);
   assert.equal(measurementExitCode(undefined), 0);
 });
+
+/*
+ * tools/lib/request-path.mjs: the tools serve dist/ on loopback and each one turned req.url
+ * into a file path by hand. Two embargoed factory findings came from that — an unguarded
+ * decodeURIComponent (URIError kills the run mid-measurement) and an unchecked path.join
+ * ('..' walked out of the root) — so the decisions are pure functions here, testable with
+ * no browser, and every refusal carries a reason an operator can read.
+ */
+test('request-path: a malformed percent-escape is a 400 naming the URL, not a URIError', async () => {
+  const { decodeRequestPath, resolveRequestUrl } = await import('../tools/lib/request-path.mjs');
+  const root = path.join(os.tmpdir(), 'request-path-root');
+
+  const bad = resolveRequestUrl(root, '/%zz/assets/app.js');
+  assert.equal(bad.ok, false);
+  assert.equal(bad.status, 400, 'a path that cannot be decoded is a client error, not a crash');
+  assert.match(bad.reason, /bad percent-escape in the request URL "\/%zz\/assets\/app\.js"/);
+  assert.match(bad.reason, /refused instead of throwing/);
+
+  // The old shape: decodeURIComponent throws and takes the whole run with it.
+  assert.throws(() => decodeURIComponent('/%zz/assets/app.js'), /URIError|URI malformed/,
+    'the thing being guarded really does throw - this is not a hypothetical');
+
+  const good = decodeRequestPath('/assets/app.js?v=2');
+  assert.deepEqual(good, { ok: true, pathname: '/assets/app.js' }, 'the query is dropped, not decoded into the path');
+  assert.equal(decodeRequestPath(undefined).pathname, '/', 'a missing url is the root');
+});
+
+test('request-path: a path that escapes the served root is a 403 naming what was refused', async () => {
+  const { resolveWithinRoot, resolveRequestUrl } = await import('../tools/lib/request-path.mjs');
+  const root = path.join(os.tmpdir(), 'request-path-root');
+
+  const escaped = resolveRequestUrl(root, '/../../etc/passwd');
+  assert.equal(escaped.ok, false);
+  assert.equal(escaped.status, 403);
+  assert.match(escaped.reason, /refusing to serve "\/\.\.\/\.\.\/etc\/passwd"/);
+  assert.match(escaped.reason, /outside the served root/);
+
+  // Encoded traversal decodes first and is refused for the same reason - this is the shape
+  // idle-cost and measure-perf had (they never decoded at all).
+  const encoded = resolveRequestUrl(root, '/%2e%2e/%2e%2e/etc/passwd');
+  assert.equal(encoded.ok, false, 'percent-encoded .. must not be a way around the check');
+  assert.equal(encoded.status, 403);
+
+  // A sibling directory sharing a string prefix with the root must not pass: the check is a
+  // path prefix with a separator, not a startsWith on the raw string.
+  const sibling = resolveWithinRoot(root, '/../request-path-root-evil/x');
+  assert.equal(sibling.ok, false);
+
+  // The ordinary cases still resolve, inside the root, with the query already gone.
+  const index = resolveRequestUrl(root, '/');
+  assert.equal(index.ok, true);
+  assert.equal(index.filePath, path.join(root, 'index.html'));
+  assert.equal(index.pathname, '/', 'soak matches /sw.js on the decoded path before reading anything');
+  const asset = resolveRequestUrl(root, '/assets/app.js?x=1');
+  assert.equal(asset.ok, true);
+  assert.equal(asset.filePath, path.join(root, 'assets', 'app.js'));
+  const dotted = resolveWithinRoot(root, '/assets/./app.js');
+  assert.equal(dotted.ok, true, 'a harmless dot segment is not a refusal');
+});
+
+test('request-path: every tool serves through the shared guard, none keeps its own decode/join', async () => {
+  // The helper being correct is not the fix - the TOOLS calling it is. This pins the wiring
+  // so a future edit cannot quietly reintroduce the bare decode (which throws) or the bare
+  // path.join (which follows '..') in one tool while the shared helper stays green.
+  const toolsDir = path.join(import.meta.dirname, '..', 'tools');
+  const served = ['install-https-proof.mjs', 'soak.mjs', 'idle-cost.mjs', 'measure-perf.mjs'];
+  for (const name of served) {
+    const source = fs.readFileSync(path.join(toolsDir, name), 'utf8');
+    assert.match(source, /resolveRequestUrl\(/,
+      `${name} must resolve its request path through tools/lib/request-path.mjs`);
+    assert.doesNotMatch(source, /decodeURIComponent\(/,
+      `${name} must not decode a request URL itself - an unguarded decode throws URIError and kills the run`);
+    assert.doesNotMatch(source, /path\.join\((DIST|distDir),\s*(req\.url|requestPath|reqUrl)/,
+      `${name} must not join a request path onto the served root without a containment check`);
+  }
+});
+
+test('request-path: the install-proof server answers a malformed escape with 400 and a traversal with 403 (real socket)', async () => {
+  // Behaviour, not source: a real http server from the shipped module, driven over a real
+  // socket. Before the fix the first request threw URIError out of the handler and killed
+  // the run; the second was never checked at all in idle-cost/measure-perf.
+  const { makeServer } = await import('../tools/install-https-proof.mjs');
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-path-dist-'));
+  fs.writeFileSync(path.join(distDir, 'index.html'), '<!doctype html>ok');
+  const server = await makeServer(distDir, null);
+  try {
+    const port = server.address().port;
+    // node:http with an explicit `path`, not fetch: a WHATWG URL parser normalises dot
+    // segments (%2e%2e included) before the request leaves, so a traversal cannot be sent
+    // through fetch at all. The raw path is what an attacker controls, so it is what the
+    // handler must be shown.
+    const get = (requestPath) => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: requestPath, method: 'GET' }, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    const ok = await get('/');
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body, '<!doctype html>ok');
+
+    const badEscape = await get('/%zz/app.js');
+    assert.equal(badEscape.status, 400, 'a malformed escape is a client error, not a crash');
+    assert.match(badEscape.body, /bad percent-escape in the request URL "\/%zz\/app\.js"/);
+
+    // The dots are ENCODED on purpose: an HTTP client normalises a literal '/../..' before
+    // it ever reaches the wire (that request arrives as '/etc/passwd', which is inside the
+    // root and simply 404s). %2e%2e is what actually crosses the socket, and it is the shape
+    // idle-cost and measure-perf never even decoded.
+    const traversal = await get('/%2e%2e/%2e%2e/etc/passwd');
+    assert.equal(traversal.status, 403, 'a path outside dist/ must never be served');
+    assert.match(traversal.body, /refusing to serve/);
+    assert.match(traversal.body, /outside the served root/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});

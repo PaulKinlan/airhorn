@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
+import { resolveRequestUrl } from './lib/request-path.mjs';
 import { measurementExitCode, unmeasured } from './lib/perf-metrics.mjs';
 
 // The teardown below lives in a try/finally, which a bound-kill (fleet-gate's
@@ -41,13 +42,23 @@ async function main() {
   }
 
   const server = http.createServer((req, res) => {
-    let reqUrl = req.url.split('?')[0];
-    let filePath = path.join(distDir, reqUrl === '/' ? 'index.html' : reqUrl);
+    // Untrusted request path (embargoed factory finding): this used to join req.url onto
+    // dist/ with no containment check, so '/../..' was followed out of the root. A
+    // malformed escape is a 400 and an escaping path is a 403, both naming the refusal.
+    const served = resolveRequestUrl(distDir, req.url);
+    if (!served.ok) {
+      res.writeHead(served.status, { 'Content-Type': 'text/plain' });
+      res.end(served.reason);
+      return;
+    }
+    let filePath = served.filePath;
     if (!fs.existsSync(filePath)) {
       res.writeHead(404);
       res.end('Not found');
       return;
     }
+    // A directory is served as its index.html; the traversal question is already answered
+    // by the helper, and the appended name stays inside a path that is inside the root.
     if (fs.statSync(filePath).isDirectory()) {
       filePath = path.join(filePath, 'index.html');
     }

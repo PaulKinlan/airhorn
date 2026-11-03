@@ -60,6 +60,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { quiescenceProbe, waitForQuiescence } from '../tests/support/quiescence.mjs';
+import { resolveRequestUrl } from './lib/request-path.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
 
@@ -484,7 +485,17 @@ async function main() {
       req.destroy();
       return;
     }
-    const requestPath = decodeURIComponent((req.url || '/').split('?')[0]);
+    // Decode through the shared guard (embargoed factory finding): a malformed
+    // percent-escape used to throw URIError out of the handler and kill the soak run
+    // mid-cycle, which loses the measurement AND the cleanup. It is a 400 now, the same
+    // shape resilience-audit.mjs uses, with the offending URL named.
+    const served = resolveRequestUrl(distDir, req.url);
+    if (!served.ok) {
+      res.writeHead(served.status, { 'Content-Type': 'text/plain' });
+      res.end(served.reason);
+      return;
+    }
+    const requestPath = served.pathname;
     if (requestPath === '/sw.js' && worker.version) {
       const body = builtWorker.replace(/const version = "[^"]+"/, `const version = "${worker.version}"`);
       res.writeHead(200, {
@@ -495,8 +506,8 @@ async function main() {
       res.end(body);
       return;
     }
-    let filePath = path.join(distDir, requestPath === '/' ? 'index.html' : requestPath);
-    if (!path.resolve(filePath).startsWith(path.resolve(distDir)) || !fs.existsSync(filePath)) {
+    let filePath = served.filePath;
+    if (!fs.existsSync(filePath)) {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not found');
       return;

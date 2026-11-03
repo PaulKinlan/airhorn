@@ -40,6 +40,7 @@ import { fileURLToPath } from 'node:url';
 
 import { sweepStaleProfiles, writeOwnerMarker } from './lib/reap.mjs';
 import { connectPage, launchChrome } from './lib/chrome.mjs';
+import { resolveRequestUrl } from './lib/request-path.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 // The bound-kill handler (airhorn-y6mi): this is the one tool of the four that
@@ -99,13 +100,18 @@ function makeSelfSignedCert(dir) {
   return { key, cert, spki };
 }
 
-function makeServer(distDir, tlsOptions) {
+// Exported for the browser-free proof in tests/test-support.test.js: the handler's refusal of
+// a malformed escape and of an escaping path is behaviour, so it is driven over a real
+// socket rather than read.
+export function makeServer(distDir, tlsOptions) {
   const handler = (req, res) => {
-    let reqUrl = decodeURIComponent(req.url.split('?')[0]);
-    let filePath = path.join(distDir, reqUrl === '/' ? 'index.html' : reqUrl);
-    if (!path.resolve(filePath).startsWith(path.resolve(distDir))) {
-      res.writeHead(403); res.end('Forbidden'); return;
-    }
+    // A malformed percent-escape used to throw URIError here and kill the run (embargoed
+    // factory finding): it is now a 400 naming the URL, the shape resilience-audit.mjs
+    // already used. The containment check is the same one as before, moved into the shared
+    // helper so it also covers a path that escapes the root after decoding.
+    const served = resolveRequestUrl(distDir, req.url);
+    if (!served.ok) { res.writeHead(served.status, { 'Content-Type': 'text/plain' }).end(served.reason); return; }
+    let filePath = served.filePath;
     if (!fs.existsSync(filePath)) { res.writeHead(404); res.end('Not found'); return; }
     if (fs.statSync(filePath).isDirectory()) filePath = path.join(filePath, 'index.html');
     const ext = path.extname(filePath);
