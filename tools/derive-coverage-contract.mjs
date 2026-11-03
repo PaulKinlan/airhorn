@@ -89,7 +89,13 @@ export function globToRegex(glob) {
  * Checks whether a glob pattern matches at least one file on disk.
  */
 export function globMatchesAny(pattern, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
-  const fileExists = existsFn || fileExistsOpt || ((relPath) => fs.existsSync(path.join(root, relPath)));
+  // The default is the SAME predicate the validator uses, not fs.existsSync (airhorn-xs2m,
+  // P2 from the review of this branch): the function's own contract is "matches at least
+  // one FILE on disk", and existsSync answers true for a DIRECTORY - so a direct caller of
+  // this exported helper still counted a symlink to a directory, exactly the false green
+  // the walk fix below closed for the validator. existsSync now appears nowhere on this
+  // path: a caller that wants different semantics passes its own predicate.
+  const fileExists = existsFn || fileExistsOpt || ((relPath) => defaultFileIsRegular(root, relPath));
 
   if (!pattern.includes('*') && !pattern.includes('?') && !pattern.includes('[')) {
     return fileExists(pattern);
@@ -127,7 +133,15 @@ export function globMatchesAny(pattern, { root = DEFAULT_ROOT, existsFn, fileExi
           return true;
         }
       } else {
-        if (regex.test(childRel)) {
+        // A dirent that is not a directory is not evidence of a FILE: withFileTypes
+        // reports a symlink as a symlink, so a symlink -> EMPTY DIRECTORY and a symlink
+        // LOOP both matched the pattern by name alone and the glob validated clean while
+        // selecting nothing (airhorn-nxuv.21). The name match has to be confirmed by the
+        // same presence predicate a literal path uses - master's defaultFileIsRegular when
+        // it is the default (isFile, so a symlink to a real file still passes, a symlink to
+        // a directory does not, and a loop throws -> false), or the caller's injected
+        // predicate when the caller supplied one.
+        if (regex.test(childRel) && fileExists(childRel)) {
           return true;
         }
       }
