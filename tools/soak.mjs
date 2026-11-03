@@ -60,7 +60,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { quiescenceProbe, waitForQuiescence } from '../tests/support/quiescence.mjs';
-import { resolveRequestUrl } from './lib/request-path.mjs';
+import { decodeRequestPath, openWithinRoot } from './lib/request-path.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
 
@@ -489,14 +489,15 @@ async function main() {
     // percent-escape used to throw URIError out of the handler and kill the soak run
     // mid-cycle, which loses the measurement AND the cleanup. It is a 400 now, the same
     // shape resilience-audit.mjs uses, with the offending URL named.
-    const served = resolveRequestUrl(distDir, req.url);
-    if (!served.ok) {
-      res.writeHead(served.status, { 'Content-Type': 'text/plain' });
-      res.end(served.reason);
+    // The sw.js shim is answered BEFORE any file is resolved (it may not exist in the
+    // published tree), so the path is decoded first - a malformed escape is a 400 naming it.
+    const decoded = decodeRequestPath(req.url);
+    if (!decoded.ok) {
+      res.writeHead(decoded.status, { 'Content-Type': 'text/plain' });
+      res.end(decoded.reason);
       return;
     }
-    const requestPath = served.pathname;
-    if (requestPath === '/sw.js' && worker.version) {
+    if (decoded.pathname === '/sw.js' && worker.version) {
       const body = builtWorker.replace(/const version = "[^"]+"/, `const version = "${worker.version}"`);
       res.writeHead(200, {
         'Content-Type': 'application/javascript',
@@ -506,21 +507,26 @@ async function main() {
       res.end(body);
       return;
     }
-    let filePath = served.filePath;
-    if (!fs.existsSync(filePath)) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('Not found');
+    // OPEN FIRST, THEN DECIDE (airhorn-dklf): containment is read off the OPENED handle,
+    // so a name re-pointed after the check cannot redirect the read.
+    const served = openWithinRoot(distDir, decoded.pathname);
+    if (!served.ok) {
+      res.writeHead(served.status, { 'Content-Type': 'text/plain' });
+      res.end(served.reason);
       return;
     }
-    if (fs.statSync(filePath).isDirectory()) filePath = path.join(filePath, 'index.html');
     res.writeHead(200, {
-      'Content-Type': mimeTypes[path.extname(filePath)] || 'application/octet-stream',
+      'Content-Type': mimeTypes[path.extname(served.realPath)] || 'application/octet-stream',
+      'Content-Length': served.size,
       'Service-Worker-Allowed': '/',
       // no-store: a re-fetch after an update must reach this origin, not an
       // HTTP-cache copy of the previous build.
       'Cache-Control': 'no-store',
     });
-    fs.createReadStream(filePath).pipe(res);
+    // The bytes come from the descriptor that was verified, not from the checked name.
+    const fileStream = fs.createReadStream(null, { fd: served.fd });
+    fileStream.on('error', () => res.destroy());
+    fileStream.pipe(res);
   });
 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));

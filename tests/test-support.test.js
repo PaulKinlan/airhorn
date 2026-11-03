@@ -1375,8 +1375,11 @@ test('request-path: every tool serves through the shared guard, none keeps its o
   const served = ['install-https-proof.mjs', 'soak.mjs', 'idle-cost.mjs', 'measure-perf.mjs'];
   for (const name of served) {
     const source = fs.readFileSync(path.join(toolsDir, name), 'utf8');
-    assert.match(source, /resolveRequestUrl\(/,
-      `${name} must resolve its request path through tools/lib/request-path.mjs`);
+    // openRequestUrl, not resolveRequestUrl: the guard must OPEN the file and decide on the
+    // handle (airhorn-dklf), so pinning the opening call is what keeps the TOCTOU window shut
+    // in every tool rather than only in the helper.
+    assert.match(source, /(openRequestUrl|openWithinRoot)\(/,
+      `${name} must OPEN and verify its request path through tools/lib/request-path.mjs, not resolve it and open the name later`);
     assert.doesNotMatch(source, /decodeURIComponent\(/,
       `${name} must not decode a request URL itself - an unguarded decode throws URIError and kills the run`);
     assert.doesNotMatch(source, /path\.join\((DIST|distDir),\s*(req\.url|requestPath|reqUrl)/,
@@ -1541,6 +1544,101 @@ test('request-path: the served matrix over a real socket — 200, 400, 403 (trav
     assert.match(linked.body, /resolves through a symlink to .*secret\.txt/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('request-path: containment is decided on the OPENED handle, so the dklf swap window is closed by construction', async () => {
+  // airhorn-dklf: resolve-then-open leaves an interval in which the name can be re-pointed at
+  // a file outside the root. That interval is not a timing artefact to be caught by luck - it
+  // is the difference between deciding on a NAME and deciding on a HANDLE, so both halves are
+  // shown deterministically here rather than raced.
+  const { openWithinRoot, resolveWithinRoot } = await import('../tools/lib/request-path.mjs');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'dklf-'));
+  const root = path.join(base, 'dist');
+  const outside = path.join(base, 'outside');
+  fs.mkdirSync(root, { recursive: true });
+  fs.mkdirSync(outside, { recursive: true });
+  fs.writeFileSync(path.join(root, 'index.html'), 'INDEX');
+  fs.writeFileSync(path.join(root, 'inside.txt'), 'INSIDE_MARKER');
+  fs.writeFileSync(path.join(outside, 'secret.txt'), 'OUTSIDE_MARKER');
+  const link = path.join(root, 'page.txt');
+  fs.symlinkSync(path.join(root, 'inside.txt'), link);
+  try {
+    // (a) The OLD ordering: verify a name, then open the SAME NAME later. The verification
+    //     passes, the name is re-pointed, and the read follows the new target - the window
+    //     airhorn-dklf named, shown without needing to win a race.
+    const verified = resolveWithinRoot(root, '/page.txt');
+    assert.equal(verified.ok, true, verified.reason);
+    assert.equal(verified.filePath, fs.realpathSync(path.join(root, 'inside.txt')), 'the verification passed on a file inside the root');
+    const nameTheOldHandlerWouldOpen = path.join(root, 'page.txt');
+    assert.equal(fs.readFileSync(nameTheOldHandlerWouldOpen, 'utf8'), 'INSIDE_MARKER', 'the name resolves inside the root first');
+    fs.unlinkSync(link);
+    fs.symlinkSync(path.join(outside, 'secret.txt'), link);
+    assert.equal(fs.readFileSync(nameTheOldHandlerWouldOpen, 'utf8'), 'OUTSIDE_MARKER',
+      'this is exactly the window airhorn-dklf named: a verified NAME re-pointed before the open');
+
+    // (b) The shipped ordering: open first, verify the HANDLE. Re-point the name after the
+    //     open and the bytes are still the verified file's, because the read uses the fd.
+    fs.unlinkSync(link);
+    fs.symlinkSync(path.join(root, 'inside.txt'), link);
+    const opened = openWithinRoot(root, '/page.txt');
+    assert.equal(opened.ok, true, opened.reason);
+    fs.unlinkSync(link);
+    fs.symlinkSync(path.join(outside, 'secret.txt'), link);
+    const viaHandle = fs.readFileSync(`/proc/self/fd/${opened.fd}`, 'utf8');
+    fs.closeSync(opened.fd);
+    assert.equal(viaHandle, 'INSIDE_MARKER',
+      'the response reads the descriptor that was VERIFIED, so re-pointing the name afterwards cannot redirect it');
+
+    // (c) THE WINDOW ITSELF, closed: the probe re-points the name in the exact interval the
+    //     old ordering left open (after the name was verified, before it was opened). A design
+    //     that decides on the name returns ok here; the shipped design opens first and refuses,
+    //     because the handle it got lives outside the root.
+    fs.unlinkSync(link);
+    fs.symlinkSync(path.join(root, 'inside.txt'), link);
+    const raced = openWithinRoot(root, '/page.txt', {
+      afterResolve: (resolvedPath) => {
+        // The attacker's move mid-interval, with no timing luck involved: the RESOLVED path
+        // itself is replaced by a symlink to a file outside the root. A design that trusts the
+        // verified name then opens straight through it; the shipped design opens first and
+        // asks the handle where it lives.
+        fs.unlinkSync(resolvedPath);
+        fs.symlinkSync(path.join(outside, 'secret.txt'), resolvedPath);
+      },
+    });
+    assert.equal(raced.ok, false, 'a file swapped in during the resolve->open interval must be REFUSED, not served');
+    assert.equal(raced.status, 403);
+    assert.match(raced.reason, /the OPENED file lives at .*outside\/secret\.txt, which is outside the served root/);
+
+    // The tree is now compromised at the resolved path; restore it for the rest of the test.
+    fs.unlinkSync(path.join(root, 'inside.txt'));
+    fs.writeFileSync(path.join(root, 'inside.txt'), 'INSIDE_MARKER');
+
+    // (d) A request for a name that points outside is refused outright - the ordinary
+    //     symlink case, unchanged by the reordering.
+    fs.unlinkSync(link);
+    fs.symlinkSync(path.join(outside, 'secret.txt'), link);
+    const after = openWithinRoot(root, '/page.txt');
+    assert.equal(after.ok, false);
+    assert.equal(after.status, 403);
+    assert.match(after.reason, /outside the served root/);
+
+    // (e) Ordinary serving is unchanged: the 200/403/404 matrix still holds.
+    const ok = openWithinRoot(root, '/');
+    assert.equal(ok.ok, true);
+    assert.equal(ok.realPath, fs.realpathSync(path.join(root, 'index.html')));
+    fs.closeSync(ok.fd);
+    assert.equal(openWithinRoot(root, '/nope.txt').status, 404, 'a missing file has no handle to verify: fail closed');
+    const loopRoot = path.join(base, 'loop');
+    fs.mkdirSync(loopRoot, { recursive: true });
+    fs.symlinkSync(path.join(loopRoot, 'b.txt'), path.join(loopRoot, 'a.txt'));
+    fs.symlinkSync(path.join(loopRoot, 'a.txt'), path.join(loopRoot, 'b.txt'));
+    const loop = openWithinRoot(loopRoot, '/a.txt');
+    assert.equal(loop.ok, false);
+    assert.equal(loop.status, 403);
+    assert.match(loop.reason, /symlink loop \(ELOOP\)/, 'a loop is named as a loop, not reported as missing');
+  } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
 });

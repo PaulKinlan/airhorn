@@ -40,7 +40,7 @@ import { fileURLToPath } from 'node:url';
 
 import { sweepStaleProfiles, writeOwnerMarker } from './lib/reap.mjs';
 import { connectPage, launchChrome } from './lib/chrome.mjs';
-import { resolveRequestUrl } from './lib/request-path.mjs';
+import { openRequestUrl } from './lib/request-path.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 // The bound-kill handler (airhorn-y6mi): this is the one tool of the four that
@@ -109,17 +109,20 @@ export function makeServer(distDir, tlsOptions) {
     // factory finding): it is now a 400 naming the URL, the shape resilience-audit.mjs
     // already used. The containment check is the same one as before, moved into the shared
     // helper so it also covers a path that escapes the root after decoding.
-    const served = resolveRequestUrl(distDir, req.url);
+    // OPEN FIRST, THEN DECIDE (airhorn-dklf): the containment answer is taken from the
+    // OPENED handle, so a name re-pointed after the check cannot redirect the read.
+    const served = openRequestUrl(distDir, req.url);
     if (!served.ok) { res.writeHead(served.status, { 'Content-Type': 'text/plain' }).end(served.reason); return; }
-    let filePath = served.filePath;
-    if (!fs.existsSync(filePath)) { res.writeHead(404); res.end('Not found'); return; }
-    if (fs.statSync(filePath).isDirectory()) filePath = path.join(filePath, 'index.html');
-    const ext = path.extname(filePath);
+    const ext = path.extname(served.realPath);
     res.writeHead(200, {
       'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+      'Content-Length': served.size,
       'Service-Worker-Allowed': '/',
     });
-    fs.createReadStream(filePath).pipe(res);
+    // The bytes come from the descriptor that was verified, not from the checked name.
+    const stream = fs.createReadStream(null, { fd: served.fd });
+    stream.on('error', () => res.destroy());
+    stream.pipe(res);
   };
   const server = tlsOptions ? https.createServer(tlsOptions, handler) : http.createServer(handler);
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server)));

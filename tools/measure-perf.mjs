@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
-import { resolveRequestUrl } from './lib/request-path.mjs';
+import { openRequestUrl } from './lib/request-path.mjs';
 import { measurementExitCode, unmeasured } from './lib/perf-metrics.mjs';
 
 // The teardown below lives in a try/finally, which a bound-kill (fleet-gate's
@@ -45,29 +45,25 @@ async function main() {
     // Untrusted request path (embargoed factory finding): this used to join req.url onto
     // dist/ with no containment check, so '/../..' was followed out of the root. A
     // malformed escape is a 400 and an escaping path is a 403, both naming the refusal.
-    const served = resolveRequestUrl(distDir, req.url);
+    // OPEN FIRST, THEN DECIDE (airhorn-dklf): containment is read off the OPENED handle,
+    // so a name re-pointed after the check cannot redirect the read. A directory is served
+    // as its index.html inside the same verification.
+    const served = openRequestUrl(distDir, req.url);
     if (!served.ok) {
       res.writeHead(served.status, { 'Content-Type': 'text/plain' });
       res.end(served.reason);
       return;
     }
-    let filePath = served.filePath;
-    if (!fs.existsSync(filePath)) {
-      res.writeHead(404);
-      res.end('Not found');
-      return;
-    }
-    // A directory is served as its index.html; the traversal question is already answered
-    // by the helper, and the appended name stays inside a path that is inside the root.
-    if (fs.statSync(filePath).isDirectory()) {
-      filePath = path.join(filePath, 'index.html');
-    }
-    const ext = path.extname(filePath);
+    const ext = path.extname(served.realPath);
     res.writeHead(200, {
       'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+      'Content-Length': served.size,
       'Service-Worker-Allowed': '/'
     });
-    fs.createReadStream(filePath).pipe(res);
+    // The bytes come from the descriptor that was verified, not from the checked name.
+    const fileStream = fs.createReadStream(null, { fd: served.fd });
+    fileStream.on('error', () => res.destroy());
+    fileStream.pipe(res);
   });
 
   await new Promise(r => server.listen(0, '127.0.0.1', r));

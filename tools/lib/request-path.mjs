@@ -167,3 +167,107 @@ export function resolveRequestUrl(root, rawUrl) {
   // it reads anything, so returning only the file would force a second decode in the handler.
   return contained.ok ? { ...contained, pathname: decoded.pathname } : contained;
 }
+
+/* ------------------------------------------------------------------ opening ---- */
+
+/*
+ * OPEN FIRST, THEN DECIDE (airhorn-dklf).
+ *
+ * resolveWithinRoot above answers "is this NAME inside the root?", and that answer is stale
+ * the moment it is given: between the realpath and the caller's createReadStream, the name
+ * can be re-pointed at a file outside the root, and the read follows the new target. The
+ * window is not theoretical - it is the difference between deciding on a name and deciding
+ * on a handle.
+ *
+ * openWithinRoot closes it by inverting the order:
+ *   1. open the target (fs.openSync, O_RDONLY) - following symlinks, so the served tree keeps
+ *      working exactly as measured;
+ *   2. ask the OPENED DESCRIPTOR where it actually lives:
+ *      fs.realpathSync('/proc/self/fd/<fd>'). That path describes the same inode the response
+ *      will read, so re-pointing the name afterwards cannot redirect the read, and a file
+ *      unlinked after the open still serves the verified bytes (the kernel appends
+ *      " (deleted)", which is stripped before comparing);
+ *   3. require that path inside the realpath'd root, else close the handle and refuse;
+ *   4. hand back the fd and its size, so the caller streams the descriptor it verified.
+ *
+ * The lexical check is still done FIRST (resolveWithinRoot), because it keeps the '..' and
+ * sibling-prefix answers identical to the behaviour already measured - this function only
+ * changes WHEN the file answer is trusted, not what is refused.
+ */
+export function openWithinRoot(root, requestPath, { realpath = fs.realpathSync.bind(fs), afterResolve = null } = {}) {
+  const contained = resolveWithinRoot(root, requestPath, { realpath });
+  if (!contained.ok) return contained;
+
+  // Test seam ONLY: runs in the interval the old ordering left open (after the name was
+  // verified, before it is opened), so a probe can prove the window is closed rather than
+  // hope to win a race. Never passed by a tool.
+  if (afterResolve) afterResolve(contained.filePath);
+
+  let fd;
+  try {
+    fd = fs.openSync(contained.filePath, 'r');
+  } catch (error) {
+    const code = (error && error.code) || 'unknown';
+    if (code === 'ELOOP') {
+      return { ok: false, status: 403, reason: `refusing to serve ${JSON.stringify(requestPath)}: ${contained.filePath} is a symlink loop (ELOOP)` };
+    }
+    if (code === 'ENOENT') {
+      return { ok: false, status: 404, reason: `not found: ${JSON.stringify(requestPath)} has no handle to verify under the served root` };
+    }
+    return { ok: false, status: 403, reason: `refusing to serve ${JSON.stringify(requestPath)}: cannot open ${contained.filePath} (${code})` };
+  }
+
+  let realRoot;
+  try {
+    realRoot = realpath(root);
+  } catch {
+    fs.closeSync(fd);
+    return { ok: false, status: 403, reason: `refusing to serve ${JSON.stringify(requestPath)}: the served root ${root} cannot be resolved` };
+  }
+
+  const handlePath = pathOfHandle(fd);
+  const decided = handlePath
+    ? stripDeleted(handlePath)
+    : contained.filePath;
+  if (!insideOf(realRoot, decided)) {
+    fs.closeSync(fd);
+    return {
+      ok: false,
+      status: 403,
+      reason: `refusing to serve ${JSON.stringify(requestPath)}: the OPENED file lives at ${decided}, which is outside the served root ${realRoot}`,
+    };
+  }
+
+  let stats;
+  try {
+    stats = fs.fstatSync(fd);
+  } catch {
+    fs.closeSync(fd);
+    return { ok: false, status: 403, reason: `refusing to serve ${JSON.stringify(requestPath)}: the opened handle cannot be stat'ed` };
+  }
+
+  return { ok: true, fd, realPath: decided, filePath: decided, size: stats.size, pathname: requestPath };
+}
+
+/** '/tmp/x (deleted)' -> '/tmp/x': the handle still is the verified file. */
+const stripDeleted = (handlePath) =>
+  handlePath.endsWith(' (deleted)') ? handlePath.slice(0, -' (deleted)'.length) : handlePath;
+
+function pathOfHandle(fd) {
+  try {
+    return fs.realpathSync(`/proc/self/fd/${fd}`);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The whole request in one call for a handler that streams a descriptor:
+ * decode, contain, open, verify the handle. `ok:false` carries status + named reason;
+ * `ok:true` carries `fd` (close it by streaming it) and `size`.
+ */
+export function openRequestUrl(root, rawUrl, options) {
+  const decoded = decodeRequestPath(rawUrl);
+  if (!decoded.ok) return decoded;
+  return openWithinRoot(root, decoded.pathname, options);
+}
