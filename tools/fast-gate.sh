@@ -278,6 +278,25 @@ git_discover() { # <purpose> <git args...>; sets FG_OUT, or exits 1 with a refus
   FG_OUT=$out
 }
 
+FG_OUT=''
+fg_filter() { # <purpose> <raw text>; sets FG_OUT or exits 1 with a refusal. Never call through $( ).
+  # The same trap as git_discover's $( ), one layer along (airhorn-oxmj): `mapfile -t X < <(a | b)`
+  # throws away the status of BOTH a and b, so a failing sed/sort produced an EMPTY array - and an
+  # empty changed-file list is indistinguishable from "nothing changed", i.e. a green gate that read
+  # a list it never computed. UNKNOWN is not EMPTY here either.
+  local purpose=$1 raw=$2 out rc
+  out=$(set -o pipefail; printf '%s' "$raw" | sed '/^$/d' | sort -u); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "fast-gate: FAIL - filtering the $purpose list failed (the sed/sort pipeline exited $rc), so" >&2
+    echo "fast-gate: the list is UNKNOWN, and UNKNOWN is not EMPTY: every decision after this point -" >&2
+    echo "fast-gate: which files changed, which suites to run - reads an empty list as 'nothing to do'," >&2
+    echo "fast-gate: which is how a broken filter greens a change. Fix the filter, or pass" >&2
+    echo "fast-gate: --changed <path> to skip discovery entirely." >&2
+    exit 1
+  fi
+  FG_OUT=$out
+}
+
 # --- the base: origin/master (this repo's default), then main variants, then HEAD~1. Never "everything".
 if [ "${#EXPLICIT[@]}" -eq 0 ]; then
   # Prove git itself runs BEFORE probing for a base ref: `--verify --quiet` is silent by design (it asks
@@ -300,8 +319,9 @@ if [ "${#EXPLICIT[@]}" -eq 0 ]; then
   _fg_worktree=$FG_OUT
   git_discover 'ls-files --others' ls-files --others --exclude-standard
   _fg_untracked=$FG_OUT
-  mapfile -t CHANGED < <(printf '%s\n%s\n%s\n' "$_fg_committed" "$_fg_worktree" "$_fg_untracked" \
-                          | sed '/^$/d' | sort -u)
+  fg_filter 'changed-file' "$(printf '%s\n%s\n%s\n' "$_fg_committed" "$_fg_worktree" "$_fg_untracked")"
+  CHANGED=()
+  if [ -n "$FG_OUT" ]; then mapfile -t CHANGED <<< "$FG_OUT"; fi
 else
   CHANGED=("${EXPLICIT[@]}")
 fi
@@ -666,7 +686,9 @@ fi
 
 # --- fail loudly on anything unmapped, BEFORE running a subset that would look green ------------------
 if [ "${#UNMAPPED[@]}" -gt 0 ]; then
-  mapfile -t _unmapped_sorted < <(printf '%s\n' "${UNMAPPED[@]}" | sort -u)
+  fg_filter 'unmapped-change' "$(printf '%s\n' "${UNMAPPED[@]}")"
+  _unmapped_sorted=()
+  if [ -n "$FG_OUT" ]; then mapfile -t _unmapped_sorted <<< "$FG_OUT"; fi
   for f in "${_unmapped_sorted[@]}"; do [ -n "$f" ] && echo "fast-gate: unmapped: $f"; done
   echo "fast-gate: FAIL - ${#UNMAPPED[@]} changed file(s) map to no suite in tools/suite-map.tsv." >&2
   echo "fast-gate: add a row to tools/suite-map.tsv naming EVERY suite that covers the file, or - if" >&2
@@ -703,7 +725,9 @@ if [ "${#TREE_SUITE_NOT_REACHABLE[@]}" -gt 0 ]; then
   exit 1
 fi
 
-mapfile -t SELECTED < <(printf '%s\n' ${SELECTED[@]+"${SELECTED[@]}"} | sed '/^$/d' | sort -u)
+fg_filter 'selected-suite' "$(printf '%s\n' ${SELECTED[@]+"${SELECTED[@]}"})"
+SELECTED=()
+if [ -n "$FG_OUT" ]; then mapfile -t SELECTED <<< "$FG_OUT"; fi
 
 # --list is a QUERY, not a verdict: it prints what WOULD run and exits 0, however empty - the
 # zero-suite rule below is about a verdict that reads green, and a listing reads as nothing.

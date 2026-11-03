@@ -261,6 +261,47 @@ test('a git that cannot be read fails the gate instead of greening "no changed f
   }
 });
 
+test('a failing sed/sort filter fails the gate instead of greening "no changed files" (airhorn-oxmj)', () => {
+  // epbp closed the git half of this: discovery failures are fatal and named. The FILTER half was still
+  // open. `mapfile -t CHANGED < <(printf ... | sed | sort)` throws away the status of sed and sort, so a
+  // broken filter produced an EMPTY changed set - and the gate's next two lines read EMPTY as "nothing
+  // changed" and exited 0. UNKNOWN is not EMPTY, in the filter exactly as in git. The same shape sat at
+  // the selected-suite list, where an empty result is at best a misleading "selected no suites" and at
+  // worst (FAST_GATE_ALLOW_ZERO=1) a blessed green that ran nothing.
+  const { probe, run } = buildGateProbe();
+  const sortFails = { 'BASH_FUNC_sort%%': '() { return 1; }' };
+  try {
+    // 1. control: a healthy filter on an unchanged tree still takes the ordinary rc-0 path.
+    const clean = run([]);
+    assert.equal(clean.status, 0, `a healthy filter must still exit 0: ${clean.stdout}${clean.stderr}`);
+    assert.match(clean.stdout, /^fast-gate: no changed files$/m, clean.stdout);
+
+    // 2. the filter itself fails: the tree is unchanged, but the gate no longer KNOWS that, so it must
+    //    refuse rather than report the emptiest possible verdict off an empty array.
+    const broken = run([], sortFails);
+    assert.equal(broken.status, 1,
+      `a failing filter must fail the gate, not green it: rc=${broken.status} stdout=${broken.stdout}`);
+    assert.match(broken.stderr, /filtering the changed-file list failed \(the sed\/sort pipeline exited 1\)/,
+      `the refusal must name the filter: ${broken.stderr}`);
+    assert.match(broken.stderr, /UNKNOWN, and UNKNOWN is not EMPTY/,
+      `the refusal must distinguish unknown from empty: ${broken.stderr}`);
+    assert.ok(!broken.stdout.includes('fast-gate: no changed files'),
+      `a failing filter must never reach the no-changed-files verdict: ${broken.stdout}`);
+    assert.ok(!broken.stdout.includes('fast-gate: running:'),
+      `nothing may run when the changed set is unknown: ${broken.stdout}`);
+
+    // 3. the selection list has the same guard: even with an explicit --changed (no git, no discovery
+    //    filter), a broken sort cannot be allowed to mean "the change selected nothing".
+    const bypass = run(['--changed', 'tests/pass.test.js'], sortFails);
+    assert.equal(bypass.status, 1,
+      `a failing sort must fail the explicit path too: rc=${bypass.status} stdout=${bypass.stdout}`);
+    assert.match(bypass.stderr, /filtering the selected-suite list failed/,
+      `the refusal must name the selection filter: ${bypass.stderr}`);
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
+
 test('a change that selects ZERO suites fails loudly, green only by explicit acknowledgement (airhorn-n0jd)', () => {
   // CONTRIBUTING.md matches the !*.md exemption row: no suite covers it. (README.md
   // used to be the example; it now selects tests/docs-recipe.test.mjs because its
