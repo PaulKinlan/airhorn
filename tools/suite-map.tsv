@@ -132,7 +132,7 @@ tools/install-https-proof.mjs	tests/gate-smoke.test.js tests/test-support.test.j
 # not two). It is gated on the worker itself - not on index.html, whose markup the a11y suite
 # already covers, because that would double the gate on the most frequently edited file for no
 # extra signal.
-public/sw.js	tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/sw-failover.test.mjs
+public/sw.js	tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/sw-failover.test.mjs tests/sw-redirect.test.mjs
 public/manifest.json	tests/sw-offline.test.mjs test/sw-offline.test.mjs
 public/sounds/**	tests/sw-offline.test.mjs test/sw-offline.test.mjs
 # The stylesheet is behaviour, not decoration: the a11y suite pins computed
