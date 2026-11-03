@@ -33,6 +33,7 @@
 
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -119,9 +120,6 @@ const LOAD_FAILURES = [
   [/SyntaxError:/, 'the file does not parse'],
 ];
 
-/** The reserved code tools/lib/suite-guard.cjs exits with: the suite never measured anything. */
-export const SUITE_NEVER_RAN = 97;
-
 export function suiteLoadProblem(stderr) {
   const text = String(stderr || '');
   for (const [pattern, reason] of LOAD_FAILURES) {
@@ -157,6 +155,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === '--allow-test-mutation') { args.allowTestMutation = true; continue; }
+    if (flag === '--suite-mode') { args.suiteMode = argv[++i]; continue; }
     if (flag === '--dry-run') { args.dryRun = true; continue; }
     const value = argv[i + 1];
     if (value === undefined) throw new Error(`${flag} needs a value`);
@@ -184,39 +183,72 @@ function run(command, shellArgs, cwd, { captureStderr = false, env = process.env
 }
 
 /** Run a suite and say both what it exited with and whether it ran at all. */
-const GUARD = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lib', 'suite-guard.cjs');
-
 /**
- * Only a node:test suite gets the never-ran guard. In a node:test file node itself reports a
- * failing test (exit 1, "not ok ...") and a top-level throw means the file never ran; in a
- * SCRIPT suite (tests/multitab.test.mjs and friends) the top-level throw IS the failure, so
- * treating it as "never ran" would hide real red - the opposite mistake (airhorn-ba6d).
+ * Classify a run by WHAT EXECUTED, never by what the source looks like (airhorn-u1v2).
+ *
+ * `report` is tools/lib/suite-mode-reporter.mjs's JSON for this run, or null when the runner wrote
+ * nothing. Note what is NOT here: no regex over imports, no module-specifier scanning, no comment
+ * reading - a reviewer showed that a single `// from "node:test"` comment flipped the old
+ * classification, so anything source-shaped is out.
+ *
+ *   report === null                       -> never-ran: the runner produced no report at all
+ *   realTests === 0 && fileLevelFailed    -> never-ran: the file failed as a whole, so no test ran
+ *                                              (direct import crash, indirect import crash, missing
+ *                                              dependency, syntax error, or a script suite whose
+ *                                              top-level assert threw - see --suite-mode)
+ *   realFailed > 0                        -> caught: real tests executed and failed
+ *   realTests > 0 && realFailed === 0     -> passed: the suite does not catch this mutant
  */
-export function suiteUsesNodeTest(file, cwd) {
-  try {
-    const source = fs.readFileSync(path.resolve(cwd, file), 'utf8');
-    return /from\s+['"]node:test['"]|require\(\s*['"]node:test['"]\s*\)/.test(source);
-  } catch {
-    return false;
+export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
+  if (!report) {
+    return { mode: 'never-ran', problem: `the test runner produced no report (exit ${exitCode}), so nothing was measured - a suite that never ran proves nothing about the mutant` };
   }
+  if (report.realTests === 0) {
+    if (suiteMode === 'script') {
+      // The caller declared a script suite, where a top-level throw IS the failure: its
+      // verdict is the exit code and there is no "never-ran" to detect.
+      return exitCode === 0 ? { mode: 'passed', rc: 0 } : { mode: 'caught', rc: exitCode };
+    }
+    return { mode: 'never-ran', problem: `the suite executed no tests and failed as a file (exit ${exitCode})${report.fileLevelFailed ? '' : ' without reporting a file-level failure'}, so nothing was measured - a suite that never ran proves nothing about the mutant. If this is a script suite (assertions at top level, no node:test), pass --suite-mode script` };
+  }
+  if (report.realFailed > 0) return { mode: 'caught', rc: 1, failing: report.failing };
+  return { mode: 'passed', rc: 0 };
 }
 
-function runSuite(suite, cwd, label) {
+const REPORTER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lib', 'suite-mode-reporter.mjs');
+
+/**
+ * The suite must run as its own test-runner invocation. A parent `node --test` exports
+ * NODE_TEST_CONTEXT, and the runner then SKIPS the child ("run() is being called recursively"),
+ * producing no report - which would read as never-ran for every case when the mutation checker is
+ * itself under test.
+ */
+function childEnv(reportPath, suitePath) {
+  const env = { ...process.env, MUTATION_SUITE_REPORT: reportPath, MUTATION_SUITE_FILE: suitePath };
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_TEST_ISOLATION;
+  return env;
+}
+
+function runSuite(suite, cwd, label, suiteMode) {
   const presence = suitePresenceProblem(suite, cwd);
   if (presence) return { problem: presence };
-  // The guard hook is what makes "threw while loading" distinguishable from "failed a test"
-  // (airhorn-ba6d): node exits non-zero for both, so the failure MODE is recorded instead of
-  // matching error strings.
-  const options = suiteUsesNodeTest(suite, cwd)
-    ? { captureStderr: true, env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require ${GUARD}`.trim() } }
-    : { captureStderr: true };
-  const ran = run(process.execPath, [suite], cwd, options);
-  if (options.env && ran.rc === SUITE_NEVER_RAN) {
-    return { problem: `${label} threw outside any test, so nothing was measured (exit ${SUITE_NEVER_RAN}) - a suite that never ran proves nothing about the mutant` };
+  const reportPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-report-')), 'report.json');
+  // Run under the test runner with the reporting hook: the runner tells us whether any test
+  // executed, instead of us guessing the suite's kind from its text (airhorn-u1v2).
+  const ran = run(process.execPath, ['--test', '--test-reporter', REPORTER, suite], cwd, {
+    captureStderr: true,
+    env: childEnv(reportPath, path.resolve(cwd, suite)),
+  });
+  let report = null;
+  try {
+    report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+  } catch {
+    report = null;
   }
-  const loadProblem = suiteLoadProblem(ran.stderr);
-  if (loadProblem) return { problem: `${label} ${loadProblem}` };
-  return { rc: ran.rc };
+  const classified = classifyRun({ report, exitCode: ran.rc, suiteMode });
+  if (classified.problem) return { problem: `${label} ${classified.problem}` };
+  return { rc: classified.rc };
 }
 
 export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
@@ -270,7 +302,7 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
 
     // A suite that could not run is UNMEASURED, never "caught the mutant" (airhorn-cmr1).
     if (args.suiteOld) {
-      const baseline = runSuite(args.suiteOld, cwd, 'the OLD suite');
+      const baseline = runSuite(args.suiteOld, cwd, 'the OLD suite', args.suiteMode || 'node-test');
       if (baseline.problem) {
         console.error(`mutation-check: refusing: ${baseline.problem}`);
         mutantRc = 3;
@@ -278,7 +310,7 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
       }
       baselineRc = baseline.rc;
     }
-    const judged = runSuite(args.suite, cwd, 'the suite');
+    const judged = runSuite(args.suite, cwd, 'the suite', args.suiteMode || 'node-test');
     if (judged.problem) {
       console.error(`mutation-check: refusing: ${judged.problem}`);
       mutantRc = 3;
