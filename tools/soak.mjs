@@ -62,6 +62,7 @@ import { fileURLToPath } from 'node:url';
 import { quiescenceProbe, waitForQuiescence } from '../tests/support/quiescence.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
+import { createStaticServer, decodeRequestPath } from './lib/static-server.mjs';
 
 // A bound-kill (fleet-gate's SIGTERM, a job-tree reaper, Ctrl-C) never runs the
 // try/finally below, so a mid-run kill left the chrome tree and its /tmp profile
@@ -461,6 +462,45 @@ const mb = (bytes) => (bytes / (1024 * 1024)).toFixed(2);
 
 /* ---------------------------------- main ---------------------------------- */
 
+// Exported for the browser-free probes in tests/test-support.test.js (airhorn-k77v): the
+// soak's own server is one of the three the probes hit, so its containment is driven over a
+// socket rather than inferred from the helper.
+export function createSoakServer({ distDir, worker, builtWorker, mime = mimeTypes }) {
+  return createStaticServer({
+    root: distDir,
+    mimeTypes: mime,
+    headers: {
+      'Service-Worker-Allowed': '/',
+      // no-store: a re-fetch after an update must reach this origin, not an
+      // HTTP-cache copy of the previous build.
+      'Cache-Control': 'no-store',
+    },
+    // The soak intercepts two requests BEFORE any file is resolved: the unpublished worker
+    // (connection dropped) and the version-shimmed sw.js. Everything else goes through the
+    // shared server, whose containment is decided on the opened handle (airhorn-k0xp).
+    onRequest(req, res) {
+      if (worker.unpublished) {
+        req.destroy();
+        return true;
+      }
+      const decoded = decodeRequestPath(req.url);
+      if (!decoded.ok) return false;
+      if (decoded.pathname === '/sw.js' && worker.version) {
+        const body = builtWorker.replace(/const version = "[^"]+"/, `const version = "${worker.version}"`);
+        res.writeHead(200, {
+          'Content-Type': 'application/javascript',
+          'Service-Worker-Allowed': '/',
+          'Cache-Control': 'no-store',
+        });
+        res.end(body);
+        return true;
+      }
+      return false;
+    },
+  });
+
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (!fs.existsSync(distDir)) {
@@ -479,38 +519,7 @@ async function main() {
   const worker = { version: null };
   const builtWorker = fs.readFileSync(path.join(distDir, 'sw.js'), 'utf-8');
 
-  const server = http.createServer((req, res) => {
-    if (worker.unpublished) {
-      req.destroy();
-      return;
-    }
-    const requestPath = decodeURIComponent((req.url || '/').split('?')[0]);
-    if (requestPath === '/sw.js' && worker.version) {
-      const body = builtWorker.replace(/const version = "[^"]+"/, `const version = "${worker.version}"`);
-      res.writeHead(200, {
-        'Content-Type': 'application/javascript',
-        'Service-Worker-Allowed': '/',
-        'Cache-Control': 'no-store',
-      });
-      res.end(body);
-      return;
-    }
-    let filePath = path.join(distDir, requestPath === '/' ? 'index.html' : requestPath);
-    if (!path.resolve(filePath).startsWith(path.resolve(distDir)) || !fs.existsSync(filePath)) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('Not found');
-      return;
-    }
-    if (fs.statSync(filePath).isDirectory()) filePath = path.join(filePath, 'index.html');
-    res.writeHead(200, {
-      'Content-Type': mimeTypes[path.extname(filePath)] || 'application/octet-stream',
-      'Service-Worker-Allowed': '/',
-      // no-store: a re-fetch after an update must reach this origin, not an
-      // HTTP-cache copy of the previous build.
-      'Cache-Control': 'no-store',
-    });
-    fs.createReadStream(filePath).pipe(res);
-  });
+  const server = createSoakServer({ distDir, worker, builtWorker });
 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;

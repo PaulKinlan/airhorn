@@ -59,6 +59,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectPage, launchChrome } from './lib/chrome.mjs';
+import { createStaticServer } from './lib/static-server.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -194,22 +195,19 @@ const instrumentation = `
   window.addEventListener('unhandledrejection', (e) => window.__idle.errors.push(String(e.reason && e.reason.message || e.reason)));
 `;
 
-function startServer() {
-  const server = http.createServer((req, res) => {
-    let filePath = path.join(DIST, req.url === '/' ? 'index.html' : req.url.split('?')[0]);
-    if (!fs.existsSync(filePath)) {
-      res.writeHead(404);
-      res.end('Not found');
-      return;
-    }
-    if (fs.statSync(filePath).isDirectory()) filePath = path.join(filePath, 'index.html');
-    res.writeHead(200, {
-      'Content-Type': mimeTypes[path.extname(filePath)] || 'application/octet-stream',
+// Exported for the browser-free probes in tests/test-support.test.js (airhorn-k77v).
+export function startServer() {
+  // The shared server decides containment on the OPENED handle (airhorn-k0xp/-k77v):
+  // this handler used to join req.url onto DIST with no check at all and never decoded, so
+  // '/../..' was followed and %2e%2e was not even seen.
+  const server = createStaticServer({
+    root: DIST,
+    mimeTypes,
+    headers: {
       // Every phase is measured on the same bytes: a 304 revalidation would put
       // network work inside an "idle" window.
       'Cache-Control': 'no-store',
-    });
-    fs.createReadStream(filePath).pipe(res);
+    },
   });
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }

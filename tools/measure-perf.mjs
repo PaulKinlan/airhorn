@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
+import { createStaticServer } from './lib/static-server.mjs';
 import { measurementExitCode, unmeasured } from './lib/perf-metrics.mjs';
 
 // The teardown below lives in a try/finally, which a bound-kill (fleet-gate's
@@ -35,29 +36,23 @@ const mimeTypes = {
   '.ico': 'image/x-icon',
 };
 
+// Exported for the browser-free probes in tests/test-support.test.js (airhorn-k77v).
+// The shared server decides containment on the OPENED handle (airhorn-k0xp/-dklf); this
+// handler used to join req.url onto dist/ with no check at all, so '/../..' was followed.
+export function createPerfServer(distDir) {
+  return createStaticServer({
+    root: distDir,
+    mimeTypes,
+    headers: { 'Service-Worker-Allowed': '/' },
+  });
+}
+
 async function main() {
   if (!fs.existsSync(distDir)) {
     throw new Error('dist directory does not exist. Run build first.');
   }
 
-  const server = http.createServer((req, res) => {
-    let reqUrl = req.url.split('?')[0];
-    let filePath = path.join(distDir, reqUrl === '/' ? 'index.html' : reqUrl);
-    if (!fs.existsSync(filePath)) {
-      res.writeHead(404);
-      res.end('Not found');
-      return;
-    }
-    if (fs.statSync(filePath).isDirectory()) {
-      filePath = path.join(filePath, 'index.html');
-    }
-    const ext = path.extname(filePath);
-    res.writeHead(200, {
-      'Content-Type': mimeTypes[ext] || 'application/octet-stream',
-      'Service-Worker-Allowed': '/'
-    });
-    fs.createReadStream(filePath).pipe(res);
-  });
+  const server = createPerfServer(distDir);
 
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
@@ -393,7 +388,13 @@ async function main() {
   }
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+// Only a direct `node tools/measure-perf.mjs` runs the measurement: importing the module
+// (the browser-free server probes in tests/test-support.test.js) must not launch Chrome.
+// Same idiom as resilience-audit.mjs and idle-cost.mjs (airhorn-k77v).
+const invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedAsScript) {
+  main().catch(err => {
+    console.error(err);
+    process.exit(1);
+  });
+}

@@ -1297,3 +1297,147 @@ test('perf-metrics: an absent LCP is unmeasured, and the run says so instead of 
   assert.match(broken.join(' | '), /repeat load: the interaction events for INP were not collected/);
   assert.equal(measurementExitCode(undefined), 0);
 });
+
+/*
+ * tools/lib/static-server.mjs — containment for the dev servers that serve dist/.
+ * Factory findings airhorn-k0xp / -k77v / -dklf: an untrusted request path was turned into a
+ * file by hand in four tools. Probed here over real sockets, because the failure was a
+ * status code, not an opinion.
+ */
+const probeGet = (port, requestPath) => new Promise((resolve, reject) => {
+  // node:http with an explicit path: a WHATWG URL parser normalises dot segments before the
+  // wire, so fetch cannot send a traversal at all.
+  const req = http.request({ host: '127.0.0.1', port, path: requestPath }, (res) => {
+    let body = '';
+    res.setEncoding('utf8');
+    res.on('data', (chunk) => { body += chunk; });
+    res.on('end', () => resolve({ status: res.statusCode, body }));
+  });
+  req.on('error', reject);
+  req.end();
+});
+
+function containmentFixture() {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'containment-'));
+  const root = path.join(base, 'dist');
+  const sibling = path.join(base, 'dist-evil');   // shares the root's NAME prefix
+  const outside = path.join(base, 'outside');
+  for (const dir of [root, sibling, outside]) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(root, 'index.html'), 'INDEX');
+  fs.writeFileSync(path.join(root, 'inside.txt'), 'INSIDE_MARKER');
+  fs.writeFileSync(path.join(sibling, 'secret.txt'), 'SIBLING_MARKER');
+  fs.writeFileSync(path.join(outside, 'secret.txt'), 'OUTSIDE_MARKER');
+  fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'linked.txt'));
+  fs.symlinkSync(path.join(root, 'inside.txt'), path.join(root, 'inside-link.txt'));
+  fs.symlinkSync(path.join(outside), path.join(root, 'out-dir'));
+  fs.symlinkSync(path.join(root, 'lb.txt'), path.join(root, 'la.txt'));
+  fs.symlinkSync(path.join(root, 'la.txt'), path.join(root, 'lb.txt'));
+  fs.symlinkSync(path.join(outside, 'nope.txt'), path.join(root, 'dangling.txt'));
+  return { base, root, sibling, outside };
+}
+
+const CONTAINMENT_MATRIX = [
+  ['/', 200, 'INDEX', 'a normal file still serves'],
+  ['/inside.txt', 200, 'INSIDE_MARKER', 'a plain file inside the root serves'],
+  ['/inside-link.txt', 200, 'INSIDE_MARKER', 'a symlink that stays inside the root serves'],
+  ['/%zz/app.js', 400, /bad percent-escape/, 'a malformed escape is a named 400, not a URIError'],
+  ['/%2e%2e/%2e%2e/etc/passwd', 403, /outside the served root/, 'encoded traversal is refused'],
+  ['/../dist-evil/secret.txt', 403, /outside the served root/, 'a SIBLING path sharing the root prefix is refused (airhorn-k77v)'],
+  ['/linked.txt', 403, /outside the served root/, 'a symlink inside the root that points outside is refused (airhorn-k0xp)'],
+  ['/out-dir/secret.txt', 403, /outside the served root/, 'a symlink to a directory outside cannot be walked through'],
+  ['/dangling.txt', 404, /does not exist under the served root/, 'a dangling symlink fails closed'],
+  ['/la.txt', 403, /symlink loop \(ELOOP\)/, 'a symlink loop is named as a loop'],
+];
+
+async function probeServer(name, server) {
+  // makeServer() already listened (it returns a bound server); the factories do not.
+  if (!server.listening) await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  try {
+    for (const [requestPath, status, bodyExpect, why] of CONTAINMENT_MATRIX) {
+      const response = await probeGet(port, requestPath);
+      assert.equal(response.status, status, `${name}: ${why} (${requestPath} -> ${response.status}: ${response.body.slice(0, 120)})`);
+      assert.doesNotMatch(response.body, /OUTSIDE_MARKER|SIBLING_MARKER/,
+        `${name}: ${requestPath} must never carry bytes from outside the root`);
+      if (bodyExpect instanceof RegExp) assert.match(response.body, bodyExpect, `${name}: ${requestPath} reason`);
+      else if (status === 200) assert.equal(response.body, bodyExpect, `${name}: ${requestPath} body`);
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+test('containment: all four dev servers refuse sibling traversal, an outside symlink, a loop and a dangling target', async () => {
+  const { makeServer } = await import('../tools/install-https-proof.mjs');
+  const { createPerfServer } = await import('../tools/measure-perf.mjs');
+  const { createSoakServer } = await import('../tools/soak.mjs');
+  const { startServer } = await import('../tools/idle-cost.mjs');
+
+  const fixture = containmentFixture();
+  try {
+    // The three servers that can be pointed at a fixture tree.
+    await probeServer('install-https-proof', await makeServer(fixture.root, null));
+    await probeServer('measure-perf', createPerfServer(fixture.root));
+    await probeServer('soak', createSoakServer({ distDir: fixture.root, worker: { version: null }, builtWorker: 'x' }));
+
+    // idle-cost serves the repo's own dist/, so it is probed for the traversal it used to
+    // allow (no containment at all) rather than with symlinks planted in dist/.
+    // startServer() resolves already listening, like makeServer().
+    const idle = await startServer();
+    try {
+      const port = idle.address().port;
+      const traversal = await probeGet(port, '/%2e%2e/package.json');
+      assert.equal(traversal.status, 403, `idle-cost must refuse a path outside dist/ (got ${traversal.status})`);
+      assert.doesNotMatch(traversal.body, /"name":\s*"airhorn"/, 'idle-cost must not serve package.json from outside dist/');
+      const inside = await probeGet(port, '/');
+      assert.equal(inside.status, 200, 'idle-cost still serves dist/index.html');
+    } finally {
+      await new Promise((resolve) => idle.close(resolve));
+    }
+  } finally {
+    fs.rmSync(fixture.base, { recursive: true, force: true });
+  }
+});
+
+test('containment: the decision is made on the OPENED handle - the resolve-then-open window is deterministic, not a race', async () => {
+  // The reviewer's TOCTOU finding (airhorn-dklf): resolve-then-open leaves a window in which
+  // the name can be re-pointed between the check and the read. That window is not a timing
+  // artefact to be caught by luck - it is the difference between deciding on a NAME and
+  // deciding on a HANDLE, so both halves are shown deterministically below.
+  const { openWithinRoot, lexicalPath } = await import('../tools/lib/static-server.mjs');
+  const fixture = containmentFixture();
+  try {
+    const linkPath = path.join(fixture.root, 'inside-link.txt');     // -> root/inside.txt
+    const outsideTarget = path.join(fixture.outside, 'secret.txt');
+
+    // (a) The OLD design: check a path, open it later. Re-point the name in between and the
+    //     read yields bytes from outside the root, even though the path was verified.
+    const verifiedPath = lexicalPath(fixture.root, '/inside-link.txt');
+    assert.equal(fs.readFileSync(verifiedPath, 'utf8'), 'INSIDE_MARKER', 'the name resolves inside the root to begin with');
+    fs.unlinkSync(linkPath);
+    fs.symlinkSync(outsideTarget, linkPath);
+    assert.equal(fs.readFileSync(verifiedPath, 'utf8'), 'OUTSIDE_MARKER',
+      'this is the window airhorn-dklf named: a checked NAME re-pointed before the open serves outside bytes');
+    fs.unlinkSync(linkPath);
+    fs.symlinkSync(path.join(fixture.root, 'inside.txt'), linkPath);
+
+    // (b) The shipped design: open first, verify the OPENED handle. Re-point the name after
+    //     the open and the bytes are still the verified file's.
+    const opened = openWithinRoot(fixture.root, '/inside-link.txt');
+    assert.equal(opened.ok, true, opened.reason);
+    fs.unlinkSync(linkPath);
+    fs.symlinkSync(outsideTarget, linkPath);
+    const viaHandle = fs.readFileSync(`/proc/self/fd/${opened.fd}`, 'utf8');
+    fs.closeSync(opened.fd);
+    assert.equal(viaHandle, 'INSIDE_MARKER',
+      'the response reads the descriptor that was VERIFIED, so re-pointing the name afterwards cannot redirect it');
+
+    // And a NEW request for that name is refused, because now the name itself points outside.
+    const after = openWithinRoot(fixture.root, '/inside-link.txt');
+    assert.equal(after.ok, false);
+    assert.equal(after.status, 403);
+    assert.match(after.reason, /outside the served root/);
+  } finally {
+    fs.rmSync(fixture.base, { recursive: true, force: true });
+  }
+});

@@ -40,6 +40,7 @@ import { fileURLToPath } from 'node:url';
 
 import { sweepStaleProfiles, writeOwnerMarker } from './lib/reap.mjs';
 import { connectPage, launchChrome } from './lib/chrome.mjs';
+import { createStaticServer, listenLoopback } from './lib/static-server.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 // The bound-kill handler (airhorn-y6mi): this is the one tool of the four that
@@ -99,24 +100,20 @@ function makeSelfSignedCert(dir) {
   return { key, cert, spki };
 }
 
-function makeServer(distDir, tlsOptions) {
-  const handler = (req, res) => {
-    let reqUrl = decodeURIComponent(req.url.split('?')[0]);
-    let filePath = path.join(distDir, reqUrl === '/' ? 'index.html' : reqUrl);
-    if (!path.resolve(filePath).startsWith(path.resolve(distDir))) {
-      res.writeHead(403); res.end('Forbidden'); return;
-    }
-    if (!fs.existsSync(filePath)) { res.writeHead(404); res.end('Not found'); return; }
-    if (fs.statSync(filePath).isDirectory()) filePath = path.join(filePath, 'index.html');
-    const ext = path.extname(filePath);
-    res.writeHead(200, {
-      'Content-Type': mimeTypes[ext] || 'application/octet-stream',
-      'Service-Worker-Allowed': '/',
-    });
-    fs.createReadStream(filePath).pipe(res);
-  };
-  const server = tlsOptions ? https.createServer(tlsOptions, handler) : http.createServer(handler);
-  return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server)));
+// Exported for the browser-free probes in tests/test-support.test.js: containment is
+// behaviour, so it is driven over a real socket (airhorn-k0xp, -k77v, -dklf).
+export function makeServer(distDir, tlsOptions) {
+  // The one static server every tool now shares: it decides containment on the OPENED file
+  // handle (tools/lib/static-server.mjs), so a symlink inside dist pointing outside it is
+  // refused, a sibling directory sharing the root's name prefix is refused, a malformed
+  // escape is a named 400, and a dangling target fails closed.
+  const server = createStaticServer({
+    root: distDir,
+    mimeTypes,
+    tls: tlsOptions,
+    headers: { 'Service-Worker-Allowed': '/' },
+  });
+  return listenLoopback(server);
 }
 
 // One Chrome for both origins: fresh profile, the certificate-ignoring and
