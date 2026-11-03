@@ -1326,7 +1326,14 @@ test('request-path: a malformed percent-escape is a 400 naming the URL, not a UR
 
 test('request-path: a path that escapes the served root is a 403 naming what was refused', async () => {
   const { resolveWithinRoot, resolveRequestUrl } = await import('../tools/lib/request-path.mjs');
-  const root = path.join(os.tmpdir(), 'request-path-root');
+  // A real root on disk: containment is decided on REAL paths now, so the fixture has to
+  // exist (that is the point of the check, not an inconvenience).
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'request-path-'));
+  const root = path.join(base, 'root');
+  fs.mkdirSync(path.join(root, 'assets'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'index.html'), 'index');
+  fs.writeFileSync(path.join(root, 'assets', 'app.js'), 'app');
+  try {
 
   const escaped = resolveRequestUrl(root, '/../../etc/passwd');
   assert.equal(escaped.ok, false);
@@ -1355,6 +1362,9 @@ test('request-path: a path that escapes the served root is a 403 naming what was
   assert.equal(asset.filePath, path.join(root, 'assets', 'app.js'));
   const dotted = resolveWithinRoot(root, '/assets/./app.js');
   assert.equal(dotted.ok, true, 'a harmless dot segment is not a refusal');
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test('request-path: every tool serves through the shared guard, none keeps its own decode/join', async () => {
@@ -1418,5 +1428,119 @@ test('request-path: the install-proof server answers a malformed escape with 400
   } finally {
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+/*
+ * The reviewer's own reproduction of the containment hole (airhorn-k0xp review FAIL): a
+ * symlink INSIDE dist that points OUTSIDE it. A lexical containment check approves
+ * '/linked.txt' because the request path is inside the root; the bytes came from outside.
+ * Containment is now decided on realpath, and an unresolvable target fails CLOSED.
+ */
+test('request-path: a symlink inside the root that points outside it is REFUSED, not followed', async () => {
+  const { resolveRequestUrl } = await import('../tools/lib/request-path.mjs');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'request-path-link-'));
+  const root = path.join(base, 'dist');
+  const outside = path.join(base, 'outside');
+  fs.mkdirSync(root);
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(root, 'index.html'), 'index');
+  fs.writeFileSync(path.join(root, 'inside.txt'), 'INSIDE_ROOT_MARKER');
+  fs.writeFileSync(path.join(outside, 'secret.txt'), 'OUTSIDE_ROOT_MARKER');
+  try {
+    fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'linked.txt'));
+    fs.symlinkSync(path.join(root, 'inside.txt'), path.join(root, 'inside-link.txt'));
+    fs.symlinkSync(path.join(outside), path.join(root, 'out-dir'));
+    fs.symlinkSync(path.join(root, 'loop-b.txt'), path.join(root, 'loop-a.txt'));
+    fs.symlinkSync(path.join(root, 'loop-a.txt'), path.join(root, 'loop-b.txt'));
+    fs.symlinkSync(path.join(outside, 'not-there.txt'), path.join(root, 'dangling.txt'));
+
+    // 1. The hole: lexically inside, really outside.
+    const escaped = resolveRequestUrl(root, '/linked.txt');
+    assert.equal(escaped.ok, false, 'a symlink inside the root must not be a way out of it');
+    assert.equal(escaped.status, 403);
+    assert.match(escaped.reason, /resolves through a symlink to .*secret\.txt, which is outside the served root/);
+
+    // 2. A symlink that stays inside is still served, and the caller gets the real path.
+    const insideLink = resolveRequestUrl(root, '/inside-link.txt');
+    assert.equal(insideLink.ok, true, 'a symlink to a file inside the root is not a defect');
+    assert.equal(insideLink.filePath, fs.realpathSync(path.join(root, 'inside.txt')));
+
+    // 3. A symlink to a DIRECTORY outside the root cannot serve that directory or its index.
+    const outDir = resolveRequestUrl(root, '/out-dir/secret.txt');
+    assert.equal(outDir.ok, false);
+    assert.equal(outDir.status, 403);
+    assert.match(outDir.reason, /outside the served root/);
+
+    // 4. A loop fails AS ITSELF (ELOOP), not as "not found".
+    const loop = resolveRequestUrl(root, '/loop-a.txt');
+    assert.equal(loop.ok, false);
+    assert.equal(loop.status, 403);
+    assert.match(loop.reason, /symlink loop \(ELOOP\)/);
+
+    // 5. A dangling symlink fails closed with a named 404 - never a lexical guess.
+    const dangling = resolveRequestUrl(root, '/dangling.txt');
+    assert.equal(dangling.ok, false);
+    assert.equal(dangling.status, 404);
+    assert.match(dangling.reason, /no real path to verify/);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('request-path: the served matrix over a real socket — 200, 400, 403 (traversal and symlink), ELOOP', async () => {
+  const { makeServer } = await import('../tools/install-https-proof.mjs');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'request-path-matrix-'));
+  const distDir = path.join(base, 'dist');
+  const outside = path.join(base, 'outside');
+  fs.mkdirSync(distDir);
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(distDir, 'index.html'), '<!doctype html>ok');
+  fs.writeFileSync(path.join(distDir, 'inside.txt'), 'INSIDE_ROOT_MARKER');
+  fs.writeFileSync(path.join(outside, 'secret.txt'), 'OUTSIDE_ROOT_MARKER');
+  fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(distDir, 'linked.txt'));
+  fs.symlinkSync(path.join(distDir, 'inside.txt'), path.join(distDir, 'inside-link.txt'));
+  const server = await makeServer(distDir, null);
+  try {
+    const port = server.address().port;
+    const get = (requestPath) => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: requestPath, method: 'GET' }, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    const index = await get('/');
+    assert.equal(index.status, 200);
+    assert.equal(index.body, '<!doctype html>ok');
+
+    const direct = await get('/inside.txt');
+    assert.equal(direct.status, 200);
+    assert.equal(direct.body, 'INSIDE_ROOT_MARKER');
+
+    const insideLink = await get('/inside-link.txt');
+    assert.equal(insideLink.status, 200, 'a symlink to a file inside the root still serves');
+    assert.equal(insideLink.body, 'INSIDE_ROOT_MARKER');
+
+    const badEscape = await get('/%zz/app.js');
+    assert.equal(badEscape.status, 400);
+    assert.match(badEscape.body, /bad percent-escape/);
+
+    const traversal = await get('/%2e%2e/%2e%2e/etc/passwd');
+    assert.equal(traversal.status, 403);
+    assert.match(traversal.body, /outside the served root/);
+
+    // THE REVIEWER'S REPRODUCTION: before this fix this returned 200 with OUTSIDE_ROOT_MARKER.
+    const linked = await get('/linked.txt');
+    assert.equal(linked.status, 403, 'a symlink inside dist must never serve a file outside it');
+    assert.doesNotMatch(linked.body, /OUTSIDE_ROOT_MARKER/, 'the outside bytes must not reach the caller');
+    assert.match(linked.body, /resolves through a symlink to .*secret\.txt/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(base, { recursive: true, force: true });
   }
 });

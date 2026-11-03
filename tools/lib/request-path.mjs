@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 
 /*
@@ -35,23 +36,123 @@ export function decodeRequestPath(rawUrl) {
   }
 }
 
+const insideOf = (root, candidate) => {
+  const resolvedRoot = root.endsWith(path.sep) ? root : root + path.sep;
+  return candidate === path.resolve(root) || candidate.startsWith(resolvedRoot);
+};
+
 /**
  * Join a decoded request path onto the served root, refusing anything that escapes it.
- * Containment is checked as a path PREFIX with a separator, so /dist-evil cannot pass by
- * sharing a string prefix with /dist.
+ *
+ * TWO checks, and the second is the one that matters (review finding on airhorn-k0xp):
+ *  1. LEXICAL: the joined path must stay under the root, so '..' is refused even when the
+ *     target does not exist. This is a path prefix WITH a separator, so a sibling directory
+ *     sharing a string prefix cannot pass.
+ *  2. REAL: the joined path is resolved with realpath and the RESULT must still be inside the
+ *     real root. A lexical check alone is bypassed by a symlink that lives inside the root and
+ *     points outside it: '/linked.txt' looks contained and reads /etc/passwd. The reviewer
+ *     reproduced exactly that (200 with a file from outside dist).
+ *
+ * Unresolvable real paths fail CLOSED rather than falling back to the lexical answer:
+ *   - ENOENT  -> 404 naming the missing target (the file genuinely is not there);
+ *   - ELOOP   -> 403 naming the loop, so a symlink cycle is not silently "not found";
+ *   - anything else (EACCES, ENOTDIR) -> 403 naming the code.
+ * A directory resolves through its index.html, and THAT path is re-checked, so a symlinked
+ * directory cannot serve a listing or a file from outside the root.
+ *
+ * TOCTOU: this resolves first and hands back the REAL path, which the caller opens. A symlink
+ * swapped between the check and the read is therefore not followed - the read uses the target
+ * the check approved. Residual risk, stated rather than claimed closed: a component of the
+ * real path could be renamed and re-created between resolution and open, so the bytes could
+ * differ from the ones checked; they would still come from a path inside the root, which is
+ * the same power an operator editing dist/ already has. Containment is not bypassed by that.
  */
-export function resolveWithinRoot(root, requestPath) {
+export function resolveWithinRoot(root, requestPath, { realpath = fs.realpathSync.bind(fs) } = {}) {
   const relative = requestPath === '/' || requestPath === '' ? 'index.html' : requestPath;
-  const resolvedRoot = root.endsWith(path.sep) ? root : root + path.sep;
-  const filePath = path.resolve(root, '.' + (relative.startsWith('/') ? relative : `/${relative}`));
-  if (filePath !== path.resolve(root) && !filePath.startsWith(resolvedRoot)) {
+  const lexical = path.resolve(root, '.' + (relative.startsWith('/') ? relative : `/${relative}`));
+
+  if (!insideOf(root, lexical)) {
     return {
       ok: false,
       status: 403,
-      reason: `refusing to serve ${JSON.stringify(requestPath)}: it resolves to ${filePath}, which is outside the served root ${root}`,
+      reason: `refusing to serve ${JSON.stringify(requestPath)}: it resolves to ${lexical}, which is outside the served root ${root}`,
     };
   }
-  return { ok: true, filePath };
+
+  let realRoot;
+  try {
+    realRoot = realpath(root);
+  } catch {
+    // The root itself is unreadable: we cannot prove containment, so nothing is served.
+    return { ok: false, status: 403, reason: `refusing to serve ${JSON.stringify(requestPath)}: the served root ${root} cannot be resolved` };
+  }
+
+  const resolveTarget = (candidate) => {
+    try {
+      return { real: realpath(candidate) };
+    } catch (error) {
+      const code = error && error.code ? error.code : 'unknown';
+      if (code === 'ELOOP') {
+        return {
+          refusal: {
+            ok: false,
+            status: 403,
+            reason: `refusing to serve ${JSON.stringify(requestPath)}: ${candidate} is a symlink loop (ELOOP) - the target can never be contained, so it is refused as a loop rather than reported as missing`,
+          },
+        };
+      }
+      if (code === 'ENOENT') {
+        return {
+          refusal: {
+            ok: false,
+            status: 404,
+            reason: `not found: ${JSON.stringify(requestPath)} does not exist under the served root (no real path to verify, so it is not served from a lexical guess)`,
+          },
+        };
+      }
+      return {
+        refusal: {
+          ok: false,
+          status: 403,
+          reason: `refusing to serve ${JSON.stringify(requestPath)}: its real path cannot be resolved (${code})`,
+        },
+      };
+    }
+  };
+
+  const first = resolveTarget(lexical);
+  if (first.refusal) return first.refusal;
+
+  let real = first.real;
+  if (real !== realpath(root) && !insideOf(realRoot, real)) {
+    return {
+      ok: false,
+      status: 403,
+      reason: `refusing to serve ${JSON.stringify(requestPath)}: it resolves through a symlink to ${real}, which is outside the served root ${realRoot}`,
+    };
+  }
+
+  let stats = null;
+  try {
+    stats = fs.statSync(real);
+  } catch {
+    stats = null;
+  }
+  if (stats && stats.isDirectory()) {
+    const indexPath = path.join(real, 'index.html');
+    const second = resolveTarget(indexPath);
+    if (second.refusal) return second.refusal;
+    if (second.real !== realRoot && !insideOf(realRoot, second.real)) {
+      return {
+        ok: false,
+        status: 403,
+        reason: `refusing to serve ${JSON.stringify(requestPath)}: its index.html resolves to ${second.real}, which is outside the served root ${realRoot}`,
+      };
+    }
+    real = second.real;
+  }
+
+  return { ok: true, filePath: real };
 }
 
 /**
