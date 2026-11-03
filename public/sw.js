@@ -111,11 +111,19 @@ async function verifiedFromCache(cache, meta, request) {
 // vouches for the poison. Fetch, verify the bytes came from the URL they will
 // be stored under, then put - and a redirect fails the install as ITSELF,
 // naming both URLs, rather than recording poison.
+// ONE statement of the redirect rule (airhorn-98mt), because both guards below enforce the same thing
+// and two hand-copied expressions drift. The rule: a response may only be trusted for the URL it was
+// REQUESTED as. A redirect means the bytes came from somewhere else; storing them under the requested
+// pathname is what cache.addAll() did silently, and the integrity record then vouches for the poison.
+function redirectedAwayFrom(response, pathname) {
+  return response.redirected || new URL(response.url).pathname !== pathname;
+}
+
 async function putVerified(cache, url) {
   const pathname = new URL(url, self.location.origin).pathname;
   const response = await fetch(requestFor(pathname));
   if (!response.ok) throw new Error(`precache fetch failed for ${pathname}: HTTP ${response.status}`);
-  if (response.redirected || new URL(response.url).pathname !== pathname) {
+  if (redirectedAwayFrom(response, pathname)) {
     throw new Error(`precache refuses a redirected response for ${pathname} (final URL ${response.url}): the bytes would be stored and recorded as ${pathname}`);
   }
   await cache.put(requestFor(pathname), response);
@@ -253,7 +261,7 @@ self.addEventListener('fetch', event => {
       // record would vouch for them (the same root cause putVerified() refuses
       // at install). Serving the network's answer is fine; caching it is not.
       if (response && response.ok && precachePaths.has(url.pathname)) {
-        if (response.redirected || new URL(response.url).pathname !== url.pathname) {
+        if (redirectedAwayFrom(response, url.pathname)) {
           console.warn(`sw: not caching ${url.pathname}: the response came from ${response.url} (redirected=${response.redirected})`);
         } else {
           await store(cache, meta, url.pathname, response.clone()).catch(() => {});
