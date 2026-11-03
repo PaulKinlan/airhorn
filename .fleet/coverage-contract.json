@@ -126,7 +126,8 @@
  ],
  "public/sw.js": [
   "tests/sw-offline.test.mjs",
-  "tests/sw-failover.test.mjs"
+  "tests/sw-failover.test.mjs",
+  "tests/sw-redirect.test.mjs"
  ],
  "public/manifest.json": [
   "tests/sw-offline.test.mjs"
@@ -204,6 +205,7 @@
   "tests/shortcuts.test.mjs",
   "tests/sw-failover.test.mjs",
   "tests/sw-offline.test.mjs",
+  "tests/sw-redirect.test.mjs",
   "tests/tool-bound-kill.test.mjs",
   "tests/visual-overrides.test.mjs",
   "tests/webmcp-browser.test.mjs",

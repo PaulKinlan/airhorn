@@ -104,11 +104,28 @@ async function verifiedFromCache(cache, meta, request) {
   return cached;
 }
 
+// A redirect must never be cached or recorded as the thing it was asked for
+// (factory audit 2026-11-03, the root cause behind both sw.js findings):
+// cache.addAll() follows redirects silently and keys the FINAL body under the
+// REQUESTED URL, so a 302 poisons the cache and the integrity record then
+// vouches for the poison. Fetch, verify the bytes came from the URL they will
+// be stored under, then put - and a redirect fails the install as ITSELF,
+// naming both URLs, rather than recording poison.
+async function putVerified(cache, url) {
+  const pathname = new URL(url, self.location.origin).pathname;
+  const response = await fetch(requestFor(pathname));
+  if (!response.ok) throw new Error(`precache fetch failed for ${pathname}: HTTP ${response.status}`);
+  if (response.redirected || new URL(response.url).pathname !== pathname) {
+    throw new Error(`precache refuses a redirected response for ${pathname} (final URL ${response.url}): the bytes would be stored and recorded as ${pathname}`);
+  }
+  await cache.put(requestFor(pathname), response);
+}
+
 async function precache() {
   const cache = await caches.open(cacheName);
   const meta = await caches.open(metaCacheName);
   const validUrls = precacheUrls.filter(url => typeof url === 'string' && url.length > 0);
-  await cache.addAll(validUrls);
+  for (const url of validUrls) await putVerified(cache, url);
   const storedUrls = [...validUrls];
 
   // Dynamic fallback: ensure any hashed /assets/ in index.html are precached
@@ -118,10 +135,8 @@ async function precache() {
       const html = await res.text();
       const assetMatches = html.matchAll(/(?:src|href)=['"](\/assets\/[^'"]+)['"]/g);
       const dynamicUrls = Array.from(assetMatches, m => m[1]);
-      if (dynamicUrls.length > 0) {
-        await cache.addAll(dynamicUrls);
-        storedUrls.push(...dynamicUrls);
-      }
+      for (const url of dynamicUrls) await putVerified(cache, url);
+      storedUrls.push(...dynamicUrls);
     }
   } catch (err) {
     console.warn('Fallback asset precaching error:', err);
@@ -232,9 +247,17 @@ self.addEventListener('fetch', event => {
       const response = await fetch(request, {
         signal: AbortSignal.timeout(isNavigation ? NAVIGATION_TIMEOUT_MS : FETCH_TIMEOUT_MS),
       });
-      // Storing is a side effect of serving, never a precondition for it.
+      // Storing is a side effect of serving, never a precondition for it - and
+      // a REDIRECTED response is never stored at all: its bytes would sit under
+      // the requested pathname, poisoning offline recovery, and the integrity
+      // record would vouch for them (the same root cause putVerified() refuses
+      // at install). Serving the network's answer is fine; caching it is not.
       if (response && response.ok && precachePaths.has(url.pathname)) {
-        await store(cache, meta, url.pathname, response.clone()).catch(() => {});
+        if (response.redirected || new URL(response.url).pathname !== url.pathname) {
+          console.warn(`sw: not caching ${url.pathname}: the response came from ${response.url} (redirected=${response.redirected})`);
+        } else {
+          await store(cache, meta, url.pathname, response.clone()).catch(() => {});
+        }
       }
       return response;
     } catch (err) {

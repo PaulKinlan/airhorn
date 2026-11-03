@@ -252,16 +252,22 @@ async function testSwAndManifest() {
     console.log('--- Loading page online to install Service Worker ---');
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
 
-    // Wait for service worker to register and activate
+    // Wait for service worker to register and activate. Poll the registration
+    // STATE instead of awaiting navigator.serviceWorker.ready: ready only ever
+    // settles when a worker activates, so a FAILED install (e.g. a precache
+    // refusal) would hang the CDP awaitPromise forever - an install that never
+    // completes must fail as itself, named, not hang the suite.
     console.log('Waiting for Service Worker activation...');
     let swActive = false;
+    let lastSwState = 'none';
     for (let i = 0; i < 30; i++) {
       const res = await send('Runtime.evaluate', {
-        expression: `navigator.serviceWorker.ready.then(reg => reg.active ? reg.active.state : null)`,
+        expression: `navigator.serviceWorker.getRegistration().then(reg => !reg ? 'unregistered' : reg.active ? reg.active.state : (reg.installing ? 'installing' : (reg.waiting ? 'waiting' : 'no-worker')))`,
         awaitPromise: true,
         returnByValue: true
       });
-      if (res.result.value === 'activated') {
+      lastSwState = String(res.result.value);
+      if (lastSwState === 'activated') {
         swActive = true;
         break;
       }
@@ -269,7 +275,7 @@ async function testSwAndManifest() {
     }
 
     if (!swActive) {
-      throw new Error('Service Worker failed to activate within 6s');
+      throw new Error(`Service Worker failed to activate within 6s (last registration state: ${lastSwState}) - check the worker console for the install's named refusal`);
     }
     console.log('Service Worker is active!');
 

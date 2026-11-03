@@ -299,7 +299,14 @@ async function run() {
     const before = await evaluate(`caches.keys()`);
 
     state.version = '2.0.0-failover-quota';
+    // Stub BOTH write paths (airhorn-fdp6): precache() used cache.addAll() and now
+    // writes with cache.put() per URL, so a shim that stubs only addAll stops
+    // denying anything and this stage silently becomes a no-op - the upgrade
+    // succeeds and nothing is reported, which is how the sw-redirect fix first
+    // took this suite from green to red for the wrong reason.
     state.swShim = `Cache.prototype.addAll = () => Promise.reject(
+      new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+      Cache.prototype.put = () => Promise.reject(
       new DOMException('The quota has been exceeded.', 'QuotaExceededError'));`;
     await evaluate(`navigator.serviceWorker.getRegistration()
       .then((reg) => reg && reg.update()).then(() => true).catch(() => false)`);
