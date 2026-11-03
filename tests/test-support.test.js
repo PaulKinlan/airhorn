@@ -1297,3 +1297,348 @@ test('perf-metrics: an absent LCP is unmeasured, and the run says so instead of 
   assert.match(broken.join(' | '), /repeat load: the interaction events for INP were not collected/);
   assert.equal(measurementExitCode(undefined), 0);
 });
+
+/*
+ * tools/lib/request-path.mjs: the tools serve dist/ on loopback and each one turned req.url
+ * into a file path by hand. Two embargoed factory findings came from that — an unguarded
+ * decodeURIComponent (URIError kills the run mid-measurement) and an unchecked path.join
+ * ('..' walked out of the root) — so the decisions are pure functions here, testable with
+ * no browser, and every refusal carries a reason an operator can read.
+ */
+test('request-path: a malformed percent-escape is a 400 naming the URL, not a URIError', async () => {
+  const { decodeRequestPath, resolveRequestUrl } = await import('../tools/lib/request-path.mjs');
+  const root = path.join(os.tmpdir(), 'request-path-root');
+
+  const bad = resolveRequestUrl(root, '/%zz/assets/app.js');
+  assert.equal(bad.ok, false);
+  assert.equal(bad.status, 400, 'a path that cannot be decoded is a client error, not a crash');
+  assert.match(bad.reason, /bad percent-escape in the request URL "\/%zz\/assets\/app\.js"/);
+  assert.match(bad.reason, /refused instead of throwing/);
+
+  // The old shape: decodeURIComponent throws and takes the whole run with it.
+  assert.throws(() => decodeURIComponent('/%zz/assets/app.js'), /URIError|URI malformed/,
+    'the thing being guarded really does throw - this is not a hypothetical');
+
+  const good = decodeRequestPath('/assets/app.js?v=2');
+  assert.deepEqual(good, { ok: true, pathname: '/assets/app.js' }, 'the query is dropped, not decoded into the path');
+  assert.equal(decodeRequestPath(undefined).pathname, '/', 'a missing url is the root');
+});
+
+test('request-path: a path that escapes the served root is a 403 naming what was refused', async () => {
+  const { resolveWithinRoot, resolveRequestUrl } = await import('../tools/lib/request-path.mjs');
+  // A real root on disk: containment is decided on REAL paths now, so the fixture has to
+  // exist (that is the point of the check, not an inconvenience).
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'request-path-'));
+  const root = path.join(base, 'root');
+  fs.mkdirSync(path.join(root, 'assets'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'index.html'), 'index');
+  fs.writeFileSync(path.join(root, 'assets', 'app.js'), 'app');
+  try {
+
+  const escaped = resolveRequestUrl(root, '/../../etc/passwd');
+  assert.equal(escaped.ok, false);
+  assert.equal(escaped.status, 403);
+  assert.match(escaped.reason, /refusing to serve "\/\.\.\/\.\.\/etc\/passwd"/);
+  assert.match(escaped.reason, /outside the served root/);
+
+  // Encoded traversal decodes first and is refused for the same reason - this is the shape
+  // idle-cost and measure-perf had (they never decoded at all).
+  const encoded = resolveRequestUrl(root, '/%2e%2e/%2e%2e/etc/passwd');
+  assert.equal(encoded.ok, false, 'percent-encoded .. must not be a way around the check');
+  assert.equal(encoded.status, 403);
+
+  // A sibling directory sharing a string prefix with the root must not pass: the check is a
+  // path prefix with a separator, not a startsWith on the raw string.
+  const sibling = resolveWithinRoot(root, '/../request-path-root-evil/x');
+  assert.equal(sibling.ok, false);
+
+  // The ordinary cases still resolve, inside the root, with the query already gone.
+  const index = resolveRequestUrl(root, '/');
+  assert.equal(index.ok, true);
+  assert.equal(index.filePath, path.join(root, 'index.html'));
+  assert.equal(index.pathname, '/', 'soak matches /sw.js on the decoded path before reading anything');
+  const asset = resolveRequestUrl(root, '/assets/app.js?x=1');
+  assert.equal(asset.ok, true);
+  assert.equal(asset.filePath, path.join(root, 'assets', 'app.js'));
+  const dotted = resolveWithinRoot(root, '/assets/./app.js');
+  assert.equal(dotted.ok, true, 'a harmless dot segment is not a refusal');
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('request-path: every tool serves through the shared guard, none keeps its own decode/join', async () => {
+  // The helper being correct is not the fix - the TOOLS calling it is. This pins the wiring
+  // so a future edit cannot quietly reintroduce the bare decode (which throws) or the bare
+  // path.join (which follows '..') in one tool while the shared helper stays green.
+  const toolsDir = path.join(import.meta.dirname, '..', 'tools');
+  const served = ['install-https-proof.mjs', 'soak.mjs', 'idle-cost.mjs', 'measure-perf.mjs'];
+  for (const name of served) {
+    const source = fs.readFileSync(path.join(toolsDir, name), 'utf8');
+    // openRequestUrl, not resolveRequestUrl: the guard must OPEN the file and decide on the
+    // handle (airhorn-dklf), so pinning the opening call is what keeps the TOCTOU window shut
+    // in every tool rather than only in the helper.
+    assert.match(source, /(openRequestUrl|openWithinRoot)\(/,
+      `${name} must OPEN and verify its request path through tools/lib/request-path.mjs, not resolve it and open the name later`);
+    assert.doesNotMatch(source, /decodeURIComponent\(/,
+      `${name} must not decode a request URL itself - an unguarded decode throws URIError and kills the run`);
+    assert.doesNotMatch(source, /path\.join\((DIST|distDir),\s*(req\.url|requestPath|reqUrl)/,
+      `${name} must not join a request path onto the served root without a containment check`);
+  }
+});
+
+test('request-path: the install-proof server answers a malformed escape with 400 and a traversal with 403 (real socket)', async () => {
+  // Behaviour, not source: a real http server from the shipped module, driven over a real
+  // socket. Before the fix the first request threw URIError out of the handler and killed
+  // the run; the second was never checked at all in idle-cost/measure-perf.
+  const { makeServer } = await import('../tools/install-https-proof.mjs');
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-path-dist-'));
+  fs.writeFileSync(path.join(distDir, 'index.html'), '<!doctype html>ok');
+  const server = await makeServer(distDir, null);
+  try {
+    const port = server.address().port;
+    // node:http with an explicit `path`, not fetch: a WHATWG URL parser normalises dot
+    // segments (%2e%2e included) before the request leaves, so a traversal cannot be sent
+    // through fetch at all. The raw path is what an attacker controls, so it is what the
+    // handler must be shown.
+    const get = (requestPath) => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: requestPath, method: 'GET' }, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    const ok = await get('/');
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body, '<!doctype html>ok');
+
+    const badEscape = await get('/%zz/app.js');
+    assert.equal(badEscape.status, 400, 'a malformed escape is a client error, not a crash');
+    assert.match(badEscape.body, /bad percent-escape in the request URL "\/%zz\/app\.js"/);
+
+    // The dots are ENCODED on purpose: an HTTP client normalises a literal '/../..' before
+    // it ever reaches the wire (that request arrives as '/etc/passwd', which is inside the
+    // root and simply 404s). %2e%2e is what actually crosses the socket, and it is the shape
+    // idle-cost and measure-perf never even decoded.
+    const traversal = await get('/%2e%2e/%2e%2e/etc/passwd');
+    assert.equal(traversal.status, 403, 'a path outside dist/ must never be served');
+    assert.match(traversal.body, /refusing to serve/);
+    assert.match(traversal.body, /outside the served root/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+/*
+ * The reviewer's own reproduction of the containment hole (airhorn-k0xp review FAIL): a
+ * symlink INSIDE dist that points OUTSIDE it. A lexical containment check approves
+ * '/linked.txt' because the request path is inside the root; the bytes came from outside.
+ * Containment is now decided on realpath, and an unresolvable target fails CLOSED.
+ */
+test('request-path: a symlink inside the root that points outside it is REFUSED, not followed', async () => {
+  const { resolveRequestUrl } = await import('../tools/lib/request-path.mjs');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'request-path-link-'));
+  const root = path.join(base, 'dist');
+  const outside = path.join(base, 'outside');
+  fs.mkdirSync(root);
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(root, 'index.html'), 'index');
+  fs.writeFileSync(path.join(root, 'inside.txt'), 'INSIDE_ROOT_MARKER');
+  fs.writeFileSync(path.join(outside, 'secret.txt'), 'OUTSIDE_ROOT_MARKER');
+  try {
+    fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'linked.txt'));
+    fs.symlinkSync(path.join(root, 'inside.txt'), path.join(root, 'inside-link.txt'));
+    fs.symlinkSync(path.join(outside), path.join(root, 'out-dir'));
+    fs.symlinkSync(path.join(root, 'loop-b.txt'), path.join(root, 'loop-a.txt'));
+    fs.symlinkSync(path.join(root, 'loop-a.txt'), path.join(root, 'loop-b.txt'));
+    fs.symlinkSync(path.join(outside, 'not-there.txt'), path.join(root, 'dangling.txt'));
+
+    // 1. The hole: lexically inside, really outside.
+    const escaped = resolveRequestUrl(root, '/linked.txt');
+    assert.equal(escaped.ok, false, 'a symlink inside the root must not be a way out of it');
+    assert.equal(escaped.status, 403);
+    assert.match(escaped.reason, /resolves through a symlink to .*secret\.txt, which is outside the served root/);
+
+    // 2. A symlink that stays inside is still served, and the caller gets the real path.
+    const insideLink = resolveRequestUrl(root, '/inside-link.txt');
+    assert.equal(insideLink.ok, true, 'a symlink to a file inside the root is not a defect');
+    assert.equal(insideLink.filePath, fs.realpathSync(path.join(root, 'inside.txt')));
+
+    // 3. A symlink to a DIRECTORY outside the root cannot serve that directory or its index.
+    const outDir = resolveRequestUrl(root, '/out-dir/secret.txt');
+    assert.equal(outDir.ok, false);
+    assert.equal(outDir.status, 403);
+    assert.match(outDir.reason, /outside the served root/);
+
+    // 4. A loop fails AS ITSELF (ELOOP), not as "not found".
+    const loop = resolveRequestUrl(root, '/loop-a.txt');
+    assert.equal(loop.ok, false);
+    assert.equal(loop.status, 403);
+    assert.match(loop.reason, /symlink loop \(ELOOP\)/);
+
+    // 5. A dangling symlink fails closed with a named 404 - never a lexical guess.
+    const dangling = resolveRequestUrl(root, '/dangling.txt');
+    assert.equal(dangling.ok, false);
+    assert.equal(dangling.status, 404);
+    assert.match(dangling.reason, /no real path to verify/);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('request-path: the served matrix over a real socket — 200, 400, 403 (traversal and symlink), ELOOP', async () => {
+  const { makeServer } = await import('../tools/install-https-proof.mjs');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'request-path-matrix-'));
+  const distDir = path.join(base, 'dist');
+  const outside = path.join(base, 'outside');
+  fs.mkdirSync(distDir);
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(distDir, 'index.html'), '<!doctype html>ok');
+  fs.writeFileSync(path.join(distDir, 'inside.txt'), 'INSIDE_ROOT_MARKER');
+  fs.writeFileSync(path.join(outside, 'secret.txt'), 'OUTSIDE_ROOT_MARKER');
+  fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(distDir, 'linked.txt'));
+  fs.symlinkSync(path.join(distDir, 'inside.txt'), path.join(distDir, 'inside-link.txt'));
+  const server = await makeServer(distDir, null);
+  try {
+    const port = server.address().port;
+    const get = (requestPath) => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: requestPath, method: 'GET' }, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    const index = await get('/');
+    assert.equal(index.status, 200);
+    assert.equal(index.body, '<!doctype html>ok');
+
+    const direct = await get('/inside.txt');
+    assert.equal(direct.status, 200);
+    assert.equal(direct.body, 'INSIDE_ROOT_MARKER');
+
+    const insideLink = await get('/inside-link.txt');
+    assert.equal(insideLink.status, 200, 'a symlink to a file inside the root still serves');
+    assert.equal(insideLink.body, 'INSIDE_ROOT_MARKER');
+
+    const badEscape = await get('/%zz/app.js');
+    assert.equal(badEscape.status, 400);
+    assert.match(badEscape.body, /bad percent-escape/);
+
+    const traversal = await get('/%2e%2e/%2e%2e/etc/passwd');
+    assert.equal(traversal.status, 403);
+    assert.match(traversal.body, /outside the served root/);
+
+    // THE REVIEWER'S REPRODUCTION: before this fix this returned 200 with OUTSIDE_ROOT_MARKER.
+    const linked = await get('/linked.txt');
+    assert.equal(linked.status, 403, 'a symlink inside dist must never serve a file outside it');
+    assert.doesNotMatch(linked.body, /OUTSIDE_ROOT_MARKER/, 'the outside bytes must not reach the caller');
+    assert.match(linked.body, /resolves through a symlink to .*secret\.txt/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('request-path: containment is decided on the OPENED handle, so the dklf swap window is closed by construction', async () => {
+  // airhorn-dklf: resolve-then-open leaves an interval in which the name can be re-pointed at
+  // a file outside the root. That interval is not a timing artefact to be caught by luck - it
+  // is the difference between deciding on a NAME and deciding on a HANDLE, so both halves are
+  // shown deterministically here rather than raced.
+  const { openWithinRoot, resolveWithinRoot } = await import('../tools/lib/request-path.mjs');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'dklf-'));
+  const root = path.join(base, 'dist');
+  const outside = path.join(base, 'outside');
+  fs.mkdirSync(root, { recursive: true });
+  fs.mkdirSync(outside, { recursive: true });
+  fs.writeFileSync(path.join(root, 'index.html'), 'INDEX');
+  fs.writeFileSync(path.join(root, 'inside.txt'), 'INSIDE_MARKER');
+  fs.writeFileSync(path.join(outside, 'secret.txt'), 'OUTSIDE_MARKER');
+  const link = path.join(root, 'page.txt');
+  fs.symlinkSync(path.join(root, 'inside.txt'), link);
+  try {
+    // (a) The OLD ordering: verify a name, then open the SAME NAME later. The verification
+    //     passes, the name is re-pointed, and the read follows the new target - the window
+    //     airhorn-dklf named, shown without needing to win a race.
+    const verified = resolveWithinRoot(root, '/page.txt');
+    assert.equal(verified.ok, true, verified.reason);
+    assert.equal(verified.filePath, fs.realpathSync(path.join(root, 'inside.txt')), 'the verification passed on a file inside the root');
+    const nameTheOldHandlerWouldOpen = path.join(root, 'page.txt');
+    assert.equal(fs.readFileSync(nameTheOldHandlerWouldOpen, 'utf8'), 'INSIDE_MARKER', 'the name resolves inside the root first');
+    fs.unlinkSync(link);
+    fs.symlinkSync(path.join(outside, 'secret.txt'), link);
+    assert.equal(fs.readFileSync(nameTheOldHandlerWouldOpen, 'utf8'), 'OUTSIDE_MARKER',
+      'this is exactly the window airhorn-dklf named: a verified NAME re-pointed before the open');
+
+    // (b) The shipped ordering: open first, verify the HANDLE. Re-point the name after the
+    //     open and the bytes are still the verified file's, because the read uses the fd.
+    fs.unlinkSync(link);
+    fs.symlinkSync(path.join(root, 'inside.txt'), link);
+    const opened = openWithinRoot(root, '/page.txt');
+    assert.equal(opened.ok, true, opened.reason);
+    fs.unlinkSync(link);
+    fs.symlinkSync(path.join(outside, 'secret.txt'), link);
+    const viaHandle = fs.readFileSync(`/proc/self/fd/${opened.fd}`, 'utf8');
+    fs.closeSync(opened.fd);
+    assert.equal(viaHandle, 'INSIDE_MARKER',
+      'the response reads the descriptor that was VERIFIED, so re-pointing the name afterwards cannot redirect it');
+
+    // (c) THE WINDOW ITSELF, closed: the probe re-points the name in the exact interval the
+    //     old ordering left open (after the name was verified, before it was opened). A design
+    //     that decides on the name returns ok here; the shipped design opens first and refuses,
+    //     because the handle it got lives outside the root.
+    fs.unlinkSync(link);
+    fs.symlinkSync(path.join(root, 'inside.txt'), link);
+    const raced = openWithinRoot(root, '/page.txt', {
+      afterResolve: (resolvedPath) => {
+        // The attacker's move mid-interval, with no timing luck involved: the RESOLVED path
+        // itself is replaced by a symlink to a file outside the root. A design that trusts the
+        // verified name then opens straight through it; the shipped design opens first and
+        // asks the handle where it lives.
+        fs.unlinkSync(resolvedPath);
+        fs.symlinkSync(path.join(outside, 'secret.txt'), resolvedPath);
+      },
+    });
+    assert.equal(raced.ok, false, 'a file swapped in during the resolve->open interval must be REFUSED, not served');
+    assert.equal(raced.status, 403);
+    assert.match(raced.reason, /the OPENED file lives at .*outside\/secret\.txt, which is outside the served root/);
+
+    // The tree is now compromised at the resolved path; restore it for the rest of the test.
+    fs.unlinkSync(path.join(root, 'inside.txt'));
+    fs.writeFileSync(path.join(root, 'inside.txt'), 'INSIDE_MARKER');
+
+    // (d) A request for a name that points outside is refused outright - the ordinary
+    //     symlink case, unchanged by the reordering.
+    fs.unlinkSync(link);
+    fs.symlinkSync(path.join(outside, 'secret.txt'), link);
+    const after = openWithinRoot(root, '/page.txt');
+    assert.equal(after.ok, false);
+    assert.equal(after.status, 403);
+    assert.match(after.reason, /outside the served root/);
+
+    // (e) Ordinary serving is unchanged: the 200/403/404 matrix still holds.
+    const ok = openWithinRoot(root, '/');
+    assert.equal(ok.ok, true);
+    assert.equal(ok.realPath, fs.realpathSync(path.join(root, 'index.html')));
+    fs.closeSync(ok.fd);
+    assert.equal(openWithinRoot(root, '/nope.txt').status, 404, 'a missing file has no handle to verify: fail closed');
+    const loopRoot = path.join(base, 'loop');
+    fs.mkdirSync(loopRoot, { recursive: true });
+    fs.symlinkSync(path.join(loopRoot, 'b.txt'), path.join(loopRoot, 'a.txt'));
+    fs.symlinkSync(path.join(loopRoot, 'a.txt'), path.join(loopRoot, 'b.txt'));
+    const loop = openWithinRoot(loopRoot, '/a.txt');
+    assert.equal(loop.ok, false);
+    assert.equal(loop.status, 403);
+    assert.match(loop.reason, /symlink loop \(ELOOP\)/, 'a loop is named as a loop, not reported as missing');
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});

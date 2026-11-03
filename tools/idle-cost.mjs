@@ -59,6 +59,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectPage, launchChrome } from './lib/chrome.mjs';
+import { openRequestUrl } from './lib/request-path.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -196,20 +197,29 @@ const instrumentation = `
 
 function startServer() {
   const server = http.createServer((req, res) => {
-    let filePath = path.join(DIST, req.url === '/' ? 'index.html' : req.url.split('?')[0]);
-    if (!fs.existsSync(filePath)) {
-      res.writeHead(404);
-      res.end('Not found');
+    // The request path is untrusted even on loopback (embargoed factory finding): it was
+    // joined straight onto DIST, so '/../../etc/passwd' (or %2e%2e, which was never even
+    // decoded here) was served from outside the root. Now a malformed escape is a 400 and
+    // an escaping path is a 403, each naming what was refused.
+    // OPEN FIRST, THEN DECIDE (airhorn-dklf): containment is read off the OPENED handle,
+    // so a name re-pointed after the check cannot redirect the read.
+    const served = openRequestUrl(DIST, req.url);
+    if (!served.ok) {
+      res.writeHead(served.status, { 'Content-Type': 'text/plain' });
+      res.end(served.reason);
       return;
     }
-    if (fs.statSync(filePath).isDirectory()) filePath = path.join(filePath, 'index.html');
     res.writeHead(200, {
-      'Content-Type': mimeTypes[path.extname(filePath)] || 'application/octet-stream',
+      'Content-Type': mimeTypes[path.extname(served.realPath)] || 'application/octet-stream',
+      'Content-Length': served.size,
       // Every phase is measured on the same bytes: a 304 revalidation would put
       // network work inside an "idle" window.
       'Cache-Control': 'no-store',
     });
-    fs.createReadStream(filePath).pipe(res);
+    // The bytes come from the descriptor that was verified, not from the checked name.
+    const fileStream = fs.createReadStream(null, { fd: served.fd });
+    fileStream.on('error', () => res.destroy());
+    fileStream.pipe(res);
   });
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
