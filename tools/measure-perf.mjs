@@ -41,8 +41,21 @@ async function main() {
   }
 
   const server = http.createServer((req, res) => {
-    let reqUrl = req.url.split('?')[0];
+    // A malformed percent-escape must not kill the run (factory audit), and a
+    // path that escapes the served root must be refused, not followed - both
+    // named, the same shape resilience-audit's server already uses.
+    let reqUrl;
+    try {
+      reqUrl = decodeURIComponent(req.url.split('?')[0]);
+    } catch {
+      res.writeHead(400); res.end('bad url'); return;
+    }
     let filePath = path.join(distDir, reqUrl === '/' ? 'index.html' : reqUrl);
+    if (!path.resolve(filePath).startsWith(path.resolve(distDir) + path.sep)) {
+      res.writeHead(403);
+      res.end(`refused: ${reqUrl} escapes the served directory`);
+      return;
+    }
     if (!fs.existsSync(filePath)) {
       res.writeHead(404);
       res.end('Not found');

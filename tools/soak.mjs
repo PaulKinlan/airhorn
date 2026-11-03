@@ -484,7 +484,12 @@ async function main() {
       req.destroy();
       return;
     }
-    const requestPath = decodeURIComponent((req.url || '/').split('?')[0]);
+    let requestPath;
+    try {
+      requestPath = decodeURIComponent((req.url || '/').split('?')[0]);
+    } catch {
+      res.writeHead(400); res.end('bad url'); return;
+    }
     if (requestPath === '/sw.js' && worker.version) {
       const body = builtWorker.replace(/const version = "[^"]+"/, `const version = "${worker.version}"`);
       res.writeHead(200, {

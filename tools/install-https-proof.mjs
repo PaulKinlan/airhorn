@@ -101,7 +101,12 @@ function makeSelfSignedCert(dir) {
 
 function makeServer(distDir, tlsOptions) {
   const handler = (req, res) => {
-    let reqUrl = decodeURIComponent(req.url.split('?')[0]);
+    let reqUrl;
+    try {
+      reqUrl = decodeURIComponent(req.url.split('?')[0]);
+    } catch {
+      res.writeHead(400); res.end('bad url'); return;
+    }
     let filePath = path.join(distDir, reqUrl === '/' ? 'index.html' : reqUrl);
     if (!path.resolve(filePath).startsWith(path.resolve(distDir))) {
       res.writeHead(403); res.end('Forbidden'); return;
