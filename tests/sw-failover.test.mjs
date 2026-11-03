@@ -299,7 +299,12 @@ async function run() {
     const before = await evaluate(`caches.keys()`);
 
     state.version = '2.0.0-failover-quota';
-    state.swShim = `Cache.prototype.addAll = () => Promise.reject(
+    // Stage the quota denial at the storage write primitive precache actually
+    // uses. It used to be addAll; the redirect fix (fleet/sw-redirect) made
+    // putVerified() write via cache.put directly, so the denial moves to
+    // Cache.prototype.put - the layer a real QuotaExceededError comes from,
+    // whichever API triggered it.
+    state.swShim = `Cache.prototype.put = () => Promise.reject(
       new DOMException('The quota has been exceeded.', 'QuotaExceededError'));`;
     await evaluate(`navigator.serviceWorker.getRegistration()
       .then((reg) => reg && reg.update()).then(() => true).catch(() => false)`);
