@@ -440,6 +440,7 @@ async function checkPromptAndShareable(base) {
     // source's tail is still in the analyser window and "peak stayed low" says
     // nothing about the launch being tested (the gate caught exactly that).
     await browser.waitFor((s) => s.playing === false, { label: 'the repeat blast to finish', timeout: 8000 });
+    const beforeRootLaunch = await browser.snapshot();
     await browser.evaluate(`window.__probe.reset(); window.__fireLaunch(${JSON.stringify(base + '/')}); 1`);
     await browser.sleep(700);
     const otherLaunch = await browser.snapshot();
@@ -447,7 +448,16 @@ async function checkPromptAndShareable(base) {
     // analyser window. Anything below the blast threshold means nothing sounded.
     assert(otherLaunch.peak < 0.05 && otherLaunch.starts === relaunched.starts,
       `a launch of / sounded the horn (peak ${otherLaunch.peak.toFixed(6)}, starts ${relaunched.starts} -> ${otherLaunch.starts})`);
-    assert(otherLaunch.hash === '#instant', `a launch of / moved the URL to ${otherLaunch.href}`);
+    // The page has been at #instant since the load step, so an absolute
+    // '#instant' check reads the LEFTOVER, not this launch's effect (the tests/
+    // sweep): a handler that ignores a '/' launch passes it - and ignoring a
+    // '/' launch is the CORRECT behaviour (src/launch.js returns early on a
+    // non-'#instant' targetURL). The invariant this step can prove is the
+    // negative one: a '/' launch must neither blast (above) nor NAVIGATE the
+    // page. (The launch handler's liveness is proven by the repeat-blast step
+    // above: 'starts' must increase there, which a dead handler cannot do.)
+    assert(otherLaunch.href === beforeRootLaunch.href && otherLaunch.hash === beforeRootLaunch.hash,
+      `a launch of / navigated the page (${beforeRootLaunch.href} -> ${otherLaunch.href})`);
 
     console.log('--- 5. an unknown hash: nothing blasts, the horn still works ---');
     await browser.navigate('about:blank', { wait: 50 });
