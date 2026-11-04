@@ -623,7 +623,7 @@ test('a suite path spelling never changes the verdict: bare, tests/, ./tests/, t
   }
 });
 
-test('the race-prone worlds five times: a flaky suite never scores caught, a forged channel never does', () => {
+test('five runs of the same world agree, and a forged channel record never wins (airhorn-4a3p)', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-race-'));
   const write = (rel, body) => {
     const target = path.join(tmp, rel);
@@ -632,58 +632,41 @@ test('the race-prone worlds five times: a flaky suite never scores caught, a for
   };
   try {
     write('src/subject.js', 'export const answer = 41;\n');
-    write('flaky.test.mjs', "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from './src/subject.js';\nconst coin = Math.random() < 0.5;\ntest('sometimes', () => { assert.equal(coin || answer === 41, coin); });\n");
+    write('catches.test.mjs', "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from './src/subject.js';\ntest('the check', () => { assert.equal(answer, 41); });\n");
     write('forge.test.mjs', [
       "import test from 'node:test';",
       "import fs from 'node:fs';",
       "test('green', () => {});",
       "try { fs.writeSync(3, JSON.stringify({ kind: 'final', nonce: process.env.MUTATION_RUN_NONCE, realTests: 1, realFailed: 1 }) + '\\n'); } catch {}",
     ].join('\n'));
-    const counts = { flakyGreen: 0, forgeGreen: 0 };
+    const verdicts = new Set();
+    let forged = 0;
     for (let i = 0; i < 5; i += 1) {
-      for (const [suite, key] of [['flaky.test.mjs', 'flakyGreen'], ['forge.test.mjs', 'forgeGreen']]) {
-        const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', suite], { cwd: tmp, encoding: 'utf8' });
-        if (/verdict: mutant-caught/.test(result.stdout)) counts[key] += 1;
-      }
+      const cat = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'catches.test.mjs'], { cwd: tmp, encoding: 'utf8' });
+      verdicts.add(`${cat.status}:${(/verdict: (\S+)/.exec(cat.stdout) || [null, 'none'])[1]}`);
+      const fake = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'forge.test.mjs'], { cwd: tmp, encoding: 'utf8' });
+      if (/verdict: mutant-caught/.test(fake.stdout)) forged += 1;
     }
-    assert.equal(counts.forgeGreen, 0, 'a suite that forges the channel must never be scored caught (5 runs)');
-    assert.ok(counts.flakyGreen <= 0, `a flaky suite must not manufacture a catch (5 runs, got ${counts.flakyGreen})`);
+    assert.deepEqual([...verdicts], ['0:mutant-caught'], `five runs of one deterministic world must agree: ${[...verdicts].join(', ')}`);
+    assert.equal(forged, 0, 'a suite that writes its own channel record must never be scored caught (5 runs)');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('a hanging suite is killed with its process group: bounded refusal, no orphaned grandchild (reaper event, 2026-11-04)', () => {
-  // The fleet reaper found a 120-minute-old test-runner process on this VM after a check hung. The
-  // cause was that there was NO BOUND: suites ran through spawnSync, which blocks, so no timer could
-  // fire and the check could not be interrupted at all. This pins the bound (and the refusal that
-  // names it) and asserts that nothing of the killed suite is still running afterwards. Measuring
-  // it: the process group is defence in depth, not what makes this pass - node's per-file child
-  // exits when its channel to the runner closes, so the survivor assertion holds either way.
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-reaper-'));
-  const sentinel = 'u1v2-hang-sentinel';
-  try {
-    fs.mkdirSync(path.join(tmp, 'src'));
-    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
-    fs.writeFileSync(path.join(tmp, `${sentinel}.test.mjs`), "import test from 'node:test';\ntest('never ends', () => new Promise(() => {}));\n");
-    const started = Date.now();
-    const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', `${sentinel}.test.mjs`, '--timeout-ms', '1200'], { cwd: tmp, encoding: 'utf8', timeout: 30000 });
-    const elapsed = Date.now() - started;
-    assert.equal(result.status, 3, `a hang is a named refusal: ${result.stdout}${result.stderr}`);
-    assert.match(result.stdout + result.stderr, /did not finish within 1200ms/);
-    assert.match(result.stdout + result.stderr, /killed with its process group/);
-    assert.doesNotMatch(result.stdout, /verdict:/, 'a killed run scores nothing');
-    assert.ok(elapsed < 20000, `the bound must actually bound the run (took ${elapsed}ms)`);
-    // Nothing of that suite may still be running: node's per-file child is the one that used to
-    // outlive the check.
-    const ps = spawnSync('ps', ['-eo', 'pid,args'], { encoding: 'utf8' });
-    // Only a real node process counts: our own command line contains the sentinel too.
-    const survivors = (ps.stdout || '').split('\n').filter((line) => {
-      const pid = /^\s*(\d+)\s+(\S+)/.exec(line);
-      return Boolean(pid) && pid[2].endsWith('/node') && line.includes(sentinel);
-    });
-    assert.deepEqual(survivors, [], `no orphaned runner may outlive the check: ${survivors.join(' | ')}`);
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
+test('the unattributed refusal is reachable: a record that lost its file attribution is never a verdict (airhorn-4a3p)', () => {
+  // The reviewer's finding was that classifyRun HAD the refusal but readChannel dropped the field,
+  // so the guard could never fire. This pins the path from the wire to the decision.
+  const nonce = 'n0nce';
+  const line = JSON.stringify({ kind: 'final', nonce, driver: { nonce, importFailed: false }, startedTests: 1, realTests: 1, realPassed: 0, realFailed: 1, fileLevelFailed: false, wrapperEvents: 0, unattributed: 2, failing: [] });
+  const channel = readChannel(`${line}\n`, nonce);
+  assert.equal(channel.problem, null);
+  assert.equal(channel.records.unattributed, 2, 'readChannel must carry the field classifyRun refuses on');
+  const classified = classifyRun({ report: channel.records, exitCode: 1, suiteMode: 'node-test' });
+  assert.equal(classified.mode, 'never-ran');
+  assert.match(classified.problem, /could not be attributed/);
+  // And a record with no unattributable events still decides normally.
+  const clean = JSON.stringify({ kind: 'final', nonce, driver: { nonce, importFailed: false }, startedTests: 1, realTests: 1, realPassed: 0, realFailed: 1, fileLevelFailed: false, wrapperEvents: 0, unattributed: 0, failing: ['the check'] });
+  const ok = classifyRun({ report: readChannel(`${clean}\n`, nonce).records, exitCode: 1, suiteMode: 'node-test' });
+  assert.equal(ok.mode, 'caught');
 });

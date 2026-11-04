@@ -298,8 +298,8 @@ export function readChannel(text, nonce) {
       realFailed: final.realFailed,
       fileLevelFailed: final.fileLevelFailed,
       wrapperEvents: final.wrapperEvents,
-      // Carried, not dropped: without this the conservative refusal below is unreachable through the
-      // real call path (review finding airhorn-4a3p).
+      // Carried, not dropped: without this the conservative refusal in classifyRun is unreachable
+      // through the real call path (review finding airhorn-4a3p).
       unattributed: final.unattributed,
       failing: final.failing,
     },
