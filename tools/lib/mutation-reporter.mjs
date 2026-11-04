@@ -18,11 +18,18 @@
  *                       throw after the tests finished, a top-level script assertion, or a
  *                       file that registered no test - and is recognised in two ways, both
  *                       from the event's own fields:
- *                         (a) its name IS its file: name === basename(file), or the two
- *                             resolve to the same path. node names that entry with the path
- *                             AS PASSED ('tests/x.test.mjs'), so comparing against basename
- *                             alone marks every directory-qualified suite as a real test -
- *                             the airhorn-lnme trap, one level deeper (round 4);
+ *                         (a) its name IS its file, decided FOUR ways that must not depend on
+ *                             how the suite was spelled or on whether the path crosses a
+ *                             symlink: name === basename(file); basename(name) ===
+ *                             basename(file); the two canonicalise (realpath) to the same
+ *                             file; or the two resolve to the same path. node names that
+ *                             entry with the path AS PASSED ('tests/x.test.mjs'), so
+ *                             comparing against basename alone marked every
+ *                             directory-qualified suite as a real test - the airhorn-lnme
+ *                             trap, one level deeper (round 4). Path identity is checked
+ *                             through realpath as well as resolve, because a suite reached
+ *                             through a symlinked directory is the same file and node's
+ *                             choice of spelling in data.file is not something to rely on;
  *                         (b) it carries node's own wrapper error: code ERR_TEST_FAILURE
  *                             with the message 'test failed'.
  *   a REAL TEST         has its own name and its own error.
@@ -32,6 +39,7 @@
  *
  * Output: one JSON object per line, on stdout, for the tool to parse.
  */
+import fs from 'node:fs';
 import path from 'node:path';
 
 export default async function* mutationReporter(source) {
@@ -51,8 +59,28 @@ export default async function* mutationReporter(source) {
         return null;
       }
     };
-    // (a) the entry's name IS its file, however the file was spelled on the command line
-    const nameIsFile = Boolean(file) && (name === path.basename(file) || resolve(name) === resolve(file));
+    const canonical = (value) => {
+      try {
+        return fs.realpathSync(path.resolve(value));
+      } catch {
+        return resolve(value);
+      }
+    };
+    const base = (value) => {
+      try {
+        return path.basename(value);
+      } catch {
+        return null;
+      }
+    };
+    // (a) the entry's name IS its file, however the file was spelled on the command line and
+    // however the path got there (a symlinked directory is the same file)
+    const nameIsFile = Boolean(file) && (
+      name === base(file)
+      || base(name) === base(file)
+      || canonical(name) === canonical(file)
+      || resolve(name) === resolve(file)
+    );
     // (b) node's own wrapper error for "the file failed", as opposed to a test that failed
     const wrapperError = kind === 'fail' && Boolean(error) && error.code === 'ERR_TEST_FAILURE' && /^test failed/.test(String(error.message || ''));
     yield `${JSON.stringify({

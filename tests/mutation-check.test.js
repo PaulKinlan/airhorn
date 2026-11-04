@@ -392,6 +392,36 @@ test('a mutant that breaks the module graph is a NAMED refusal, not a caught mut
   }
 });
 
+test('path identity: a suite reached through a SYMLINKED directory is the same wrapper, and a relative and absolute path agree', () => {
+  // Coord's round-4 bound: the fix's claim is about PATH IDENTITY, and that is exactly what a
+  // basename-shaped fix breaks for a symlinked root or an absolute spelling. A zero-test file
+  // is the sharp case: it has no error to fall back on, so only the name-is-file test can
+  // recognise the wrapper.
+  const dir = world({
+    'tests/suite.test.mjs': "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from '../src/subject.js';\ntest('the answer is the documented value', () => { assert.equal(answer, 41); });\n",
+    'tests/empty.test.mjs': '// registers nothing\n',
+  });
+  try {
+    fs.symlinkSync(path.join(dir, 'tests'), path.join(dir, 'testslink'));
+    const cases = [
+      { suite: 'tests/empty.test.mjs', expect: 3, why: /registered no test/ },
+      { suite: 'testslink/empty.test.mjs', expect: 3, why: /registered no test/ },
+      { suite: './testslink//empty.test.mjs', expect: 3, why: /registered no test/ },
+      { suite: path.join(dir, 'testslink', 'empty.test.mjs'), expect: 3, why: /registered no test/ },
+      { suite: 'testslink/suite.test.mjs', expect: 0, why: /verdict: mutant-caught/ },
+      { suite: './tests//suite.test.mjs', expect: 0, why: /verdict: mutant-caught/ },
+      { suite: path.join(dir, 'tests', 'suite.test.mjs'), expect: 0, why: /verdict: mutant-caught/ },
+    ];
+    for (const { suite, expect: want, why } of cases) {
+      const result = check(dir, [suite]);
+      assert.equal(result.status, want, `${suite}: ${result.stdout}${result.stderr}`);
+      assert.match(want === 0 ? result.stdout : result.stderr, why, `${suite}: ${result.stdout}${result.stderr}`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the run pair is invariant to the suite path spelling: caught, zero-test and load-crash all agree', () => {
   // airhorn-lnme, round 4: the reporter identified the file-level entry by basename, so any
   // directory-qualified SPARING counted it as a real test. The same three worlds are driven
