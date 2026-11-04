@@ -1,0 +1,378 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  applyMutation,
+  mutationApplied,
+  mutationTargetProblem,
+  restoreVerified,
+  classifyRun,
+  readChannel,
+  suiteLoadProblem,
+  suitePresenceProblem,
+  verdictFor,
+} from '../tools/mutation-check.mjs';
+
+const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const tool = path.join(root, 'tools', 'mutation-check.mjs');
+
+/* --- the guards: a mutation that did not apply is an error, never a result ---- */
+
+test('applyMutation replaces exactly one occurrence', () => {
+  const result = applyMutation('const a = 1;\nconst b = 2;\n', 'const b = 2;', 'const b = 3;');
+  assert.equal(result.ok, true);
+  assert.match(result.content, /const b = 3;/);
+  assert.match(result.content, /const a = 1;/, 'untouched text survives');
+});
+
+test('applyMutation refuses text that does not occur, so a stale mutation cannot be scored', () => {
+  const result = applyMutation('const a = 1;\n', 'const z = 9;', 'const z = 0;');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /does not occur/);
+});
+
+test('applyMutation refuses an ambiguous occurrence rather than picking one', () => {
+  const result = applyMutation('go();\ngo();\n', 'go();', 'stop();');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /occurs 2 times/);
+});
+
+test('applyMutation refuses a no-op', () => {
+  assert.equal(applyMutation('x', 'x', 'x').ok, false);
+  assert.equal(applyMutation('x', '', 'y').ok, false, 'an empty --from would match everywhere');
+});
+
+/* --- the compare-and-discard guard: the defect airhorn-f41e is about ---------- */
+
+test('mutationApplied fails when the file on disk is unchanged', () => {
+  const check = mutationApplied({ original: 'a', onDisk: 'a', to: 'b' });
+  assert.equal(check.applied, false);
+  assert.match(check.reason, /identical to the original/);
+});
+
+test('mutationApplied fails when the write landed but something rewrote it', () => {
+  const check = mutationApplied({ original: 'a', onDisk: 'a FORMATTED', to: 'b' });
+  assert.equal(check.applied, false);
+  assert.match(check.reason, /does not contain the mutant text/);
+});
+
+test('mutationApplied accepts a landed deletion, where there is no mutant text to look for', () => {
+  assert.equal(mutationApplied({ original: 'keep\ndrop\n', onDisk: 'keep\n' }).applied, true);
+});
+
+test('restoreVerified is a byte comparison, not a hopeful true', () => {
+  assert.equal(restoreVerified({ original: 'a', onDisk: 'a' }), true);
+  assert.equal(restoreVerified({ original: 'a', onDisk: 'a ' }), false);
+});
+
+/* --- the product/test target guard: the shape of two falsified sweeps --------- */
+
+test('a test file is refused as a mutation target by default', () => {
+  assert.match(mutationTargetProblem('tests/multitab.test.mjs'), /TEST file/);
+  assert.match(mutationTargetProblem('./tests/x.mjs'), /TEST file/);
+  assert.equal(mutationTargetProblem('src/badge.js'), null);
+  assert.equal(mutationTargetProblem('tests/x.mjs', { allowTestMutation: true }), null);
+});
+
+/* --- the triad --------------------------------------------------------------- */
+
+test('the verdict is a triad, and a missing measurement is not a pass', () => {
+  assert.equal(verdictFor({ oldRc: 0, newRc: 1 }).verdict, 'hole-proven');
+  assert.equal(verdictFor({ oldRc: 1, newRc: 1 }).verdict, 'not-reproducible');
+  assert.equal(verdictFor({ oldRc: 0, newRc: 0 }).verdict, 'fix-does-not-close');
+  assert.equal(verdictFor({ oldRc: null, newRc: 1 }).verdict, 'mutant-caught', 'without a baseline the tool still says the suite catches it');
+  assert.equal(verdictFor({ oldRc: null, newRc: 1 }).exit, 0);
+  assert.equal(verdictFor({ oldRc: 0, newRc: null }).verdict, 'unmeasured');
+  assert.equal(verdictFor({ oldRc: 0, newRc: 1 }).exit, 0);
+  assert.equal(verdictFor({ oldRc: 1, newRc: 1 }).exit, 1);
+  assert.equal(verdictFor({ oldRc: 0, newRc: 0 }).exit, 2);
+});
+
+/* --- end to end: the file is always restored, and a non-applying mutation is refused
+       before anything runs ------------------------------------------------------ */
+
+function tempTree() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-check-'));
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.writeFileSync(path.join(dir, 'src', 'subject.js'), 'export const answer = 41;\n');
+  // A "suite" that FAILS while the mutant is in place (and passes on the original), so the
+  // tool can be driven through a full run without a browser or a build. It is a SCRIPT suite
+  // (no node:test, it exits non-zero), so the cases below declare --suite-mode script - the tool
+  // refuses to guess that from source text (airhorn-u1v2).
+  fs.writeFileSync(
+    path.join(dir, 'suite.mjs'),
+    "import fs from 'node:fs';\nconst body = fs.readFileSync(new URL('./src/subject.js', import.meta.url), 'utf8');\nprocess.exit(body.includes('42') ? 1 : 0);\n",
+  );
+  return dir;
+}
+
+test('a full run restores the file and reports that the suite catches the mutant', () => {
+  const dir = tempTree();
+  try {
+    const before = fs.readFileSync(path.join(dir, 'src', 'subject.js'), 'utf8');
+    const result = spawnSync(process.execPath, [
+      tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.mjs', '--suite-mode', 'script',
+    ], { cwd: dir, encoding: 'utf8' });
+    assert.equal(result.status, 0, 'the suite fails the mutant, so the check under test is live');
+    assert.match(result.stdout, /verdict: mutant-caught/);
+    assert.match(result.stdout, /--suite-old/);
+    assert.match(result.stdout, /restored src\/subject\.js: verified/);
+    assert.equal(fs.readFileSync(path.join(dir, 'src', 'subject.js'), 'utf8'), before, 'the original is back, byte for byte');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the tool refuses a mutation that does not apply, and touches nothing', () => {
+  const dir = tempTree();
+  try {
+    const before = fs.readFileSync(path.join(dir, 'src', 'subject.js'), 'utf8');
+    const result = spawnSync(process.execPath, [
+      tool, '--file', 'src/subject.js', '--from', 'nothing like this', '--to', '42', '--suite', 'suite.mjs',
+    ], { cwd: dir, encoding: 'utf8' });
+    assert.equal(result.status, 3);
+    assert.match(result.stderr, /does not occur/);
+    assert.equal(fs.readFileSync(path.join(dir, 'src', 'subject.js'), 'utf8'), before);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the tool refuses to mutate a test file, because that proves nothing about the product', () => {
+  const dir = tempTree();
+  try {
+    fs.mkdirSync(path.join(dir, 'tests'));
+    fs.writeFileSync(path.join(dir, 'tests', 'thing.test.mjs'), 'assert.equal(1, 1);\n');
+    const result = spawnSync(process.execPath, [
+      tool, '--file', 'tests/thing.test.mjs', '--from', '1, 1', '--to', '1, 2', '--suite', 'suite.mjs',
+    ], { cwd: dir, encoding: 'utf8' });
+    assert.equal(result.status, 3);
+    assert.match(result.stderr, /TEST file/);
+    assert.match(fs.readFileSync(path.join(dir, 'tests', 'thing.test.mjs'), 'utf8'), /1, 1/, 'the test file is untouched');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// airhorn-cmr1: a suite that cannot run must never be scored as a suite that caught the
+// mutant. node exits non-zero when it cannot find or parse the file, and the tool used to
+// read that as "the suite fails the mutant" -> "mutant-caught" exit 0.
+test('a suite that does not exist is refused as unmeasured, not scored as mutant-caught', () => {
+  const problem = suitePresenceProblem('tests/does-not-exist.test.mjs', process.cwd());
+  assert.match(problem, /does not exist/);
+  assert.match(problem, /nothing was measured/);
+  assert.equal(suitePresenceProblem('tests/mutation-check.test.js', process.cwd()), null,
+    'a suite that is really there raises no presence problem');
+});
+
+test('a suite that cannot load is unmeasured - a loader error is not a caught mutant', () => {
+  assert.match(suiteLoadProblem("Error: Cannot find module '/tmp/x/tests/missing.mjs'"), /could not run/);
+  assert.match(suiteLoadProblem('node:internal/modules/esm/resolve:1 Error [ERR_MODULE_NOT_FOUND]'), /could not run/);
+  assert.match(suiteLoadProblem('SyntaxError: Unexpected token'), /could not run/);
+  // A REAL test failure has none of those markers and must stay a failure: that is the shape
+  // the verdict reads as "the suite caught the mutant".
+  assert.equal(suiteLoadProblem('not ok 1 - the horn blasts\n  AssertionError [ERR_ASSERTION]'), null);
+  assert.equal(suiteLoadProblem(''), null);
+});
+
+test('the verdict is unreachable for an unmeasured suite: only a real failure becomes mutant-caught', () => {
+  // The triad is unchanged; what changed is which inputs reach it. null (not measured) can
+  // never produce a pass.
+  assert.equal(verdictFor({ oldRc: null, newRc: null }).verdict, 'unmeasured');
+  assert.equal(verdictFor({ oldRc: null, newRc: null }).exit, 3);
+  assert.equal(verdictFor({ oldRc: null, newRc: 1 }).verdict, 'mutant-caught');
+});
+
+// airhorn-u1v2: the classification must come from what EXECUTED, never from source text. The
+// previous attempt scanned the file for `node:test`, and a reviewer defeated it twice: an
+// indirect import escaped it, and adding the comment `// from "node:test"` to a script flipped a
+// real assertion failure into "nothing was measured". These cases pin the mode, not the text.
+test('classifyRun decides from execution evidence only: the driver record and the runner counts', () => {
+  const loaded = { importFailed: false, suite: '/x/suite.mjs' };
+  const threw = { importFailed: true, reason: 'boom' };
+  const caught = { driver: loaded, realTests: 3, realPassed: 2, realFailed: 1, failing: ['answer'] };
+  const passed = { driver: loaded, realTests: 3, realPassed: 3, realFailed: 0, failing: [] };
+
+  assert.deepEqual(classifyRun({ report: caught, exitCode: 1 }), { mode: 'caught', rc: 1, failing: ['answer'] });
+  assert.deepEqual(classifyRun({ report: passed, exitCode: 0 }), { mode: 'passed', rc: 0 });
+  // the one case a comment cannot fake: the import threw
+  for (const report of [{ driver: threw, realTests: 0, realFailed: 0 }, { driver: threw, realTests: 4, realFailed: 1 }]) {
+    const never = classifyRun({ report, exitCode: 1 });
+    assert.equal(never.mode, 'never-ran', 'a suite that threw while loading never ran, whatever events were seen');
+    assert.match(never.problem, /threw while loading/);
+  }
+  assert.equal(classifyRun({ report: null, exitCode: 7 }).mode, 'never-ran');
+  assert.match(classifyRun({ report: null, exitCode: 7 }).problem, /no record/);
+  // no driver record at all is not a measurement either
+  assert.equal(classifyRun({ report: { realTests: 2, realFailed: 1 }, exitCode: 1 }).mode, 'never-ran');
+
+  // airhorn-so88: a failure AFTER a clean import is not a test failing - no test ran
+  const crashed = classifyRun({ report: { driver: { importFailed: false, crashedOutsideTest: true, reason: 'uncaught exception after the suite loaded: Error: async boom' }, realTests: 1, realFailed: 1 }, exitCode: 0 });
+  assert.equal(crashed.mode, 'threw-outside-a-test', 'a crash outside any test is its own named state, never a caught mutant');
+  assert.match(crashed.problem, /after the suite loaded/);
+  // counts missing entirely is also not a measurement
+  assert.equal(classifyRun({ report: { driver: { importFailed: false } }, exitCode: 0 }).mode, 'never-ran');
+
+  // airhorn-a6ch: the driver's own file-level event is separated by data.file (the driver path),
+  // so a suite that strips the driver's handlers and then crashes cannot be scored as a caught
+  // mutant; and a run that exits non-zero with no failing test measured nothing.
+  const stripped = classifyRun({ report: { driver: { importFailed: false }, realTests: 1, realPassed: 1, realFailed: 0, wrapperEvents: 1, fileLevelFailed: true }, exitCode: 1 });
+  assert.equal(stripped.mode, 'threw-outside-a-test', 'a run that died outside its tests is a named state, never a caught mutant');
+  assert.match(stripped.problem, /exited 1 with no failing test/);
+  const noTests = classifyRun({ report: { driver: { importFailed: false }, realTests: 0, realFailed: 0, wrapperEvents: 1, fileLevelFailed: true }, exitCode: 1 });
+  assert.equal(noTests.mode, 'never-ran');
+  assert.match(noTests.problem, /registered no tests/);
+
+  // a declared script suite is judged by its exit code: its top-level throw IS the failure
+  assert.deepEqual(classifyRun({ report: null, exitCode: 1, suiteMode: 'script' }), { mode: 'caught', rc: 1 });
+  assert.deepEqual(classifyRun({ report: null, exitCode: 0, suiteMode: 'script' }), { mode: 'passed', rc: 0 });
+});
+
+test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy comment, passing, script', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-'));
+  const write = (name, body) => fs.writeFileSync(path.join(tmp, name), body);
+  const runWorld = (args) => spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', ...args], { cwd: tmp, encoding: 'utf8' });
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    write('src/subject.js', 'export const answer = 41;\n');
+    write('setup.mjs', "throw new Error('boom');\n");
+    write('indirect.mjs', "import './setup.mjs';\n");
+    write('a-catches.mjs', "import test from 'node:test';\nimport assert from 'node:assert';\nimport { answer } from './src/subject.js';\ntest('answer', () => assert.equal(answer, 41));\n");
+    write('b-direct.mjs', "import './setup.mjs';\nimport test from 'node:test';\ntest('x', () => {});\n");
+    write('b-indirect.mjs', "import './indirect.mjs';\nimport test from 'node:test';\ntest('x', () => {});\n");
+    // the reviewer's INDIRECT shape: the suite file never mentions node:test, a helper registers
+    write('register.mjs', "import test from 'node:test';\nimport assert from 'node:assert';\nimport { answer } from './src/subject.js';\ntest('answer', () => assert.equal(answer, 41));\n");
+    write('b-indirect-registration.mjs', "import './register.mjs';\nimport './setup.mjs';\n");
+    write('c-decoy.mjs', "// from \"node:test\" - a DECOY comment: it must not change the classification\nimport './indirect.mjs';\nimport test from 'node:test';\ntest('x', () => {});\n");
+    write('d-passes.mjs', "import test from 'node:test';\ntest('green', () => {});\n");
+    // airhorn-so88 worlds: async failure after the import registers a test that never runs,
+    // plus the decoy comment and the INDIRECT-registration variant
+    write('h-async-no-test.mjs', "import test from 'node:test';\nsetTimeout(() => { throw new Error('async boom'); }, 5);\ntest('never runs', () => {});\n");
+    write('i-async-decoy.mjs', "// from \"node:test\" - decoy\nimport test from 'node:test';\nsetTimeout(() => { throw new Error('async boom'); }, 5);\ntest('never runs', () => {});\n");
+    write('j-indirect-async.mjs', "import './register.mjs';\nsetTimeout(() => { throw new Error('async boom'); }, 5);\n");
+    // airhorn-gwcm: the report channel is checked before any verdict, because the suite is handed
+    // the fd and can write to it. Every forgery has to land on a NAMED refusal, never a verdict.
+    const nonce = 'run-nonce';
+    assert.match(readChannel('', nonce).problem, /no report/);
+    assert.match(readChannel('not json\n', nonce).problem, /malformed/);
+    assert.match(readChannel(JSON.stringify({ kind: 'final', nonce: 'other', realTests: 1 }) + '\n', nonce).problem, /nonce/);
+    const twoFinals = [JSON.stringify({ kind: 'final', nonce, realTests: 0 }), JSON.stringify({ kind: 'final', nonce, realTests: 1, realFailed: 1 })].join('\n');
+    assert.match(readChannel(twoFinals, nonce).problem, /final records/);
+    assert.match(readChannel(JSON.stringify({ kind: 'mystery', nonce }) + '\n', nonce).problem, /unknown record kind/);
+    // the honest single record still reads
+    const honest = readChannel(JSON.stringify({ kind: 'final', nonce, driver: { importFailed: false }, startedTests: 1, realTests: 1, realFailed: 1, failing: ['x'] }) + '\n', nonce);
+    assert.equal(honest.problem, null);
+    assert.equal(honest.records.realFailed, 1);
+
+    // and the same forgeries END TO END: a suite that writes a forged record to the channel,
+    // forges the driver record and spawns a detached sibling to keep rewriting it must NOT be
+    // scored as a caught mutant (it is a green suite that measured nothing).
+    write('k-forge-channel.mjs', [
+      "import test from 'node:test';",
+      "import fs from 'node:fs';",
+      "import { spawn } from 'node:child_process';",
+      "test('green', () => {});",
+      "const p = process.env.MUTATION_DRIVER_REPORT;",
+      "const forged = JSON.stringify({ nonce: process.env.MUTATION_RUN_NONCE, importFailed: false, crashedOutsideTest: false });",
+      "if (p) {",
+      "  try { fs.writeFileSync(p, forged); } catch {}",
+      "  const child = spawn(process.execPath, ['-e', `const fs=require('node:fs');setInterval(()=>{try{fs.writeFileSync(${JSON.stringify(p)},${JSON.stringify(forged)})}catch{}},2)`], { detached: true, stdio: 'ignore' });",
+      "  child.unref();",
+      "}",
+      "try { fs.writeSync(3, JSON.stringify({ kind: 'final', nonce: process.env.MUTATION_RUN_NONCE, realTests: 1, realFailed: 1 }) + '\\n'); } catch {}",
+      "",
+    ].join('\n'));
+    const forged = runWorld(['--suite', 'k-forge-channel.mjs']);
+    assert.notEqual(forged.status, 0, `a green suite that forges the channel must never be scored caught: ${forged.stdout}${forged.stderr}`);
+    assert.doesNotMatch(forged.stdout, /verdict: mutant-caught/, 'forging the channel must not produce the dangerous false green');
+
+    // a run that dies before the reporter's final record is a named refusal, not "unmeasured"
+    write('l-no-report.mjs', "import test from 'node:test';\ntest('green', () => {});\nprocess.exit(0);\n");
+    const noReport = runWorld(['--suite', 'l-no-report.mjs']);
+    assert.equal(noReport.status, 3, `a missing final record must be refused by name: ${noReport.stdout}${noReport.stderr}`);
+
+    // airhorn-a6ch: invoked through a SYMLINK, the tool must still do its job. It used to exit 0
+    // having printed nothing at all, because main-detection compared the symlinked argv[1] to the
+    // module's real path - a silent pass, the worst possible answer for a gate.
+    const linkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-link-'));
+    const link = path.join(linkDir, 'mutation-check.mjs');
+    fs.symlinkSync(tool, link);
+    const viaLink = spawnSync(process.execPath, [link, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'a-catches.mjs'], { cwd: tmp, encoding: 'utf8' });
+    assert.equal(viaLink.status, 0, 'a symlinked invocation must return the same exit code as the real path');
+    assert.match(viaLink.stdout + viaLink.stderr, /verdict: mutant-caught/, 'the symlinked invocation must reach the same verdict as the real path');
+
+    // airhorn-a6ch: the suite strips the driver's crash handlers, then crashes asynchronously -
+    // the wrapper event must be attributed to the DRIVER, not counted as a failing test.
+    write('g-strip-handlers.mjs', "import test from 'node:test';\ntest('one', () => {});\nprocess.removeAllListeners('uncaughtException');\nprocess.removeAllListeners('unhandledRejection');\nsetImmediate(() => { throw new Error('strip boom'); });\n");
+    // airhorn-so88: an async throw AFTER a clean import (the reviewer's repro shape)
+    write('f-async-crash.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetImmediate(() => { throw new Error('async boot failure'); });\n");
+    // airhorn-lnme: node names the file-level event with the path AS PASSED, so a
+    // directory-qualified suite path used to read as a failed test. Same worlds, one level down.
+    fs.mkdirSync(path.join(tmp, 'sub'));
+    write('sub/setup-throw.mjs', "import '../setup.mjs';\nimport test from 'node:test';\ntest('x', () => {});\n");
+    write('sub/catches.mjs', "import test from 'node:test';\nimport assert from 'node:assert';\nimport { answer } from '../src/subject.js';\ntest('answer', () => assert.equal(answer, 41));\n");
+    write('sub/passes.mjs', "import test from 'node:test';\ntest('green', () => {});\n");
+    write('e-script.mjs', "import assert from 'node:assert';\nimport { answer } from './src/subject.js';\nassert.equal(answer, 41);\n// from \"node:test\" - the same decoy, in a script\n");
+
+    const a = runWorld(['--suite', 'a-catches.mjs']);
+    assert.equal(a.status, 0, `a real assertion failure inside a test must be caught: ${a.stdout}${a.stderr}`);
+    assert.match(a.stdout, /verdict: mutant-caught/);
+
+    for (const world of ['b-direct.mjs', 'b-indirect.mjs', 'b-indirect-registration.mjs', 'c-decoy.mjs']) {
+      const r = runWorld(['--suite', world]);
+      assert.equal(r.status, 3, `${world} must be never-ran (exit 3), got ${r.status}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr + r.stdout, /threw while loading/, `${world} must name the mode`);
+    }
+    // the decoy changes NOTHING: identical classification to the indirect crash without it
+    const plain = runWorld(['--suite', 'b-indirect.mjs']);
+    const decoy = runWorld(['--suite', 'c-decoy.mjs']);
+    assert.equal(decoy.status, plain.status, 'a comment must not move the classification');
+
+    const d = runWorld(['--suite', 'd-passes.mjs']);
+    assert.equal(d.status, 2, `a passing suite must be fix-does-not-close, not unmeasured: ${d.stdout}${d.stderr}`);
+    assert.match(d.stdout, /verdict: fix-does-not-close/);
+
+    const stripped = runWorld(['--suite', 'g-strip-handlers.mjs']);
+    assert.equal(stripped.status, 3, `a suite that strips the handlers then crashes must be never-ran, got ${stripped.status}: ${stripped.stdout}${stripped.stderr}`);
+    assert.match(stripped.stderr + stripped.stdout, /exited 1 with no failing test|registered no tests|crashed/i);
+
+    for (const world of ['h-async-no-test.mjs', 'i-async-decoy.mjs', 'j-indirect-async.mjs']) {
+      const r = runWorld(['--suite', world]);
+      assert.equal(r.status, 3, `${world} must be a named refusal, got ${r.status}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr + r.stdout, /\[(never-ran|threw-outside-a-test)\]/, `${world} must NAME its state`);
+      assert.doesNotMatch(r.stdout, /verdict: mutant-caught/, `${world} must never be scored as caught`);
+    }
+    // the decoy must not change the state
+    const plainAsync = runWorld(['--suite', 'h-async-no-test.mjs']);
+    const decoyAsync = runWorld(['--suite', 'i-async-decoy.mjs']);
+    assert.equal(decoyAsync.status, plainAsync.status, 'a comment must not move the state');
+
+    const asyncCrash = runWorld(['--suite', 'f-async-crash.mjs']);
+    assert.equal(asyncCrash.status, 3, `an async crash after the import must be never-ran, got ${asyncCrash.status}: ${asyncCrash.stdout}${asyncCrash.stderr}`);
+    assert.match(asyncCrash.stderr + asyncCrash.stdout, /after the suite loaded/);
+
+    // directory-qualified paths (the tool's own documented usage) must classify identically
+    const subCrash = runWorld(['--suite', 'sub/setup-throw.mjs']);
+    assert.equal(subCrash.status, 3, `sub/setup-throw.mjs must be never-ran, got ${subCrash.status}: ${subCrash.stdout}${subCrash.stderr}`);
+    assert.match(subCrash.stderr + subCrash.stdout, /threw while loading/);
+    const subCatches = runWorld(['--suite', 'sub/catches.mjs']);
+    assert.equal(subCatches.status, 0, `sub/catches.mjs must still be caught: ${subCatches.stdout}${subCatches.stderr}`);
+    assert.match(subCatches.stdout, /verdict: mutant-caught/);
+    const subPasses = runWorld(['--suite', 'sub/passes.mjs']);
+    assert.equal(subPasses.status, 2, `sub/passes.mjs must be fix-does-not-close: ${subPasses.stdout}${subPasses.stderr}`);
+
+    // a script suite is out of scope unless declared, and then the SAME decoy comment is inert
+    const eDefault = runWorld(['--suite', 'e-script.mjs']);
+    assert.equal(eDefault.status, 3, 'a script suite must be refused by default and say how to declare it');
+    assert.match(eDefault.stderr + eDefault.stdout, /--suite-mode script/);
+    const eScript = runWorld(['--suite', 'e-script.mjs', '--suite-mode', 'script']);
+    assert.equal(eScript.status, 0, `with --suite-mode script the assertion failure is caught: ${eScript.stdout}${eScript.stderr}`);
+    assert.match(eScript.stdout, /verdict: mutant-caught/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
