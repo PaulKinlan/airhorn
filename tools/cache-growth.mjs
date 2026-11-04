@@ -677,7 +677,13 @@ async function main() {
     );
 
     const bytesSeries = records.map((record) => record.totalBytes);
-    const byteGrowth = (median(bytesSeries.slice(-2)) - median(bytesSeries.slice(0, 2)));
+    // The windowed median self-cancels when the windows overlap (airhorn-yobt):
+    // --versions 2 records two measurements, slice(0,2) and slice(-2) are the
+    // same pair, and drift read 0 by construction. Under 4 records the
+    // endpoints are the honest measure - a real delta, never a silent zero.
+    const byteGrowth = bytesSeries.length >= 4
+      ? (median(bytesSeries.slice(-2)) - median(bytesSeries.slice(0, 2)))
+      : bytesSeries[bytesSeries.length - 1] - bytesSeries[0];
     const bytesCheck = check(
       'stored bytes stay flat across deploys (one version, not one per deploy)',
       Math.abs(byteGrowth) < 8 * 1024 && !growsMonotonically(bytesSeries, 4 * 1024),
@@ -711,12 +717,22 @@ async function main() {
           `(e.g. ${last.previous[last.previous.length - 1]?.assetPath})`,
     );
 
-    const usageSeries = records.map((record) => record.usage ?? 0);
-    const usageGrowth = median(usageSeries.slice(-2)) - median(usageSeries.slice(0, 2));
+    // A missing storage estimate must not read as 0 (airhorn-yobt): a null
+    // folded into the series flatters the growth figure with a measurement
+    // nobody made. Unmeasured is named, never averaged in.
+    const usageSeries = records.map((record) => record.usage ?? null);
+    const usageMeasured = usageSeries.every((value) => value !== null);
+    const usageGrowth = !usageMeasured ? null
+      : usageSeries.length >= 4
+        ? median(usageSeries.slice(-2)) - median(usageSeries.slice(0, 2))
+        : usageSeries[usageSeries.length - 1] - usageSeries[0];
     const usageCheck = check(
       'the origin\'s storage estimate stays bounded',
-      usageGrowth < 512 * 1024 && !growsMonotonically(usageSeries, 64 * 1024),
-      `${usageSeries.map((bytes) => kb(bytes)).join(' -> ')} KB, growth ${kb(usageGrowth)} KB ` +
+      usageMeasured && usageGrowth < 512 * 1024 && !growsMonotonically(usageSeries, 64 * 1024),
+      (usageMeasured
+        ? `${usageSeries.map((bytes) => kb(bytes)).join(' -> ')} KB, growth ${kb(usageGrowth)} KB `
+        : 'NOT MEASURED: a storage estimate was absent (usage is null in ' +
+          `${usageSeries.filter((v) => v === null).length}/${usageSeries.length} records) `) +
       `(usageDetails ${JSON.stringify(records[records.length - 1].usageDetails)})`,
     );
 
