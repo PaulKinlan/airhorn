@@ -486,6 +486,28 @@ test('an interrupt between the write and the restore puts the file back (airhorn
   }
 });
 
+test('--build on a REFUSAL path still rebuilds from the restored source: dist/ never keeps the mutant (airhorn-br28 round 2)', () => {
+  // The reviewer's adversarial shape: the mutant run times out, so the tool refuses from
+  // inside the try block. Before the fix the restored build sat after the try, so every
+  // early refusal returned past it and left the MUTANT build in dist/.
+  const hangOn42 = [
+    "import fs from 'node:fs';",
+    "import test from 'node:test';",
+    "const body = fs.readFileSync(new URL('./dist/product.js', import.meta.url), 'utf8');",
+    "test('hangs only when dist carries the mutant', async () => { if (body.includes('42')) await new Promise(() => {}); });",
+  ].join('\n');
+  const dir = world({ 'dist/product.js': 'export const answer = 41;\n', 'hangs.test.mjs': hangOn42 });
+  const dist = path.join(dir, 'dist', 'product.js');
+  try {
+    const result = check(dir, ['hangs.test.mjs', '--build', 'cp src/subject.js dist/product.js', '--timeout-ms', '1500']);
+    assert.equal(result.status, 3, `the mutant run times out, so the check is refused: ${result.stdout}${result.stderr}`);
+    assert.equal(fs.readFileSync(path.join(dir, 'src', 'subject.js'), 'utf8'), 'export const answer = 41;\n', 'the source is restored');
+    assert.equal(fs.readFileSync(dist, 'utf8'), 'export const answer = 41;\n', 'and dist/ is rebuilt from the restored source, not left holding the mutant');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the tool refuses a mutation that does not apply, and touches nothing', () => {
   const dir = world({ 'suite.test.mjs': NODE_TEST_SUITE });
   try {

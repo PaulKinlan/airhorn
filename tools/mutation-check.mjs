@@ -422,6 +422,9 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   };
   const onSignal = (signal) => {
     restoreNow(signal);
+    // The mutant build is the same hazard as the mutant source: rebuild from the restored
+    // source before leaving, or dist/ keeps mutant bytes with no message (airhorn-br28).
+    if (args.build) buildPhase('restored');
     console.error(`mutation-check: interrupted by ${signal} - the mutation was not scored`);
     process.exit(signal === 'SIGINT' ? 130 : 143);
   };
@@ -462,15 +465,14 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     mutantRc = classified.rc;
   } finally {
     if (!restoreNow()) refused = true;
+    // The restored build belongs HERE, not after the try: every refusal inside the try -
+    // a mutant that does not build, an OLD suite that will not run, a mutant run that times
+    // out - returns from inside it, and dist/ would keep the mutant bytes on exactly the
+    // paths where the operator is already reading a refusal (airhorn-br28, round 2).
+    if (!buildPhase('restored')) refused = true;
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
   }
-
-  // The restore left build output from the mutant behind unless the build runs again, so
-  // the tree must be rebuilt from the restored source before anything else measures it
-  // (airhorn-br28). This happens whether or not the mutant was caught: dist/ must never
-  // keep the mutant bytes for the next invocation.
-  if (!buildPhase('restored')) refused = true;
 
   if (refused) return 3;
 
