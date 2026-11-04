@@ -103,6 +103,9 @@
   "tests/gate-smoke.test.js",
   "tests/gate-map.test.js"
  ],
+ "tools/guarded-call.mjs": [
+  "tests/lost-upgrade-copy.test.mjs"
+ ],
  "tools/audio-parity.mjs": [
   "tests/audio-parity-verdict.test.js"
  ],
@@ -197,6 +200,7 @@
   "tests/docs-recipe.test.mjs",
   "tests/health.test.mjs",
   "tests/keyboard.test.mjs",
+  "tests/lost-upgrade-copy.test.mjs",
   "tests/multitab.test.mjs",
   "tests/nav-guard.test.mjs",
   "tests/press-guard.test.mjs",

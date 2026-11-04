@@ -8,6 +8,7 @@ import { awaitSocketOpen, boundCommand } from './cdp-command-bound.mjs';
 import { createNavigateFresh, createReloadFresh } from './support/nav-guard.mjs';
 import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 import { checkPressPoint, readInputLog, classifyPressTimeout } from './support/press-guard.mjs';
+import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EVIDENCE_DIR = '/tmp/airhorn-boot-watchdog';
@@ -1020,15 +1021,9 @@ async function testBootWatchdog() {
     })()`);
     swBody = swV1;
     await shot('lost-upgrade-announced');
-    // The page owns this copy (index.html, inline registration handler); assert
-    // it literally, so a reworded notice is a red test rather than a quietly
-    // still-passing regex. gate-smoke reads both strings and pins them to the
-    // page (airhorn-906).
-    for (const copy of ['The app could not update', 'previous version']) {
-      if (!lost.text.includes(copy)) {
-        throw new Error(`the lost-upgrade notice is missing "${copy}": ${JSON.stringify(lost.text)}`);
-      }
-    }
+    // The page owns this copy (index.html); the pure enforcer has browser-free
+    // failure tests, and gate-map pins this delegation rather than scanning prose.
+    assertLostUpgradeNotice(lost.text);
     if (/new version is ready/i.test(lost.text)) {
       throw new Error(`a dropped upgrade announced a successful update: ${JSON.stringify(lost.text)}`);
     }

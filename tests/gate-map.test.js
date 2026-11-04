@@ -35,6 +35,7 @@ import esbuild from 'esbuild';
 import { makeRenderModel } from '../tools/render-model.mjs';
 import { READ_STATE } from '../tools/resilience-audit.mjs';
 import { main as deriveContractMain, deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites, isPendingSuite, importersOf } from '../tools/derive-coverage-contract.mjs';
+import { assertGuardedCall } from '../tools/guarded-call.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const gate = path.join(root, 'tools', 'fast-gate.sh');
@@ -229,16 +230,30 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
     `index.html must not select the SW-update suite, got ${JSON.stringify(pageRow)}`);
   assert.ok(pageRow.includes('tests/resilience-ui.test.mjs'),
     `index.html must select resilience-ui, got ${JSON.stringify(pageRow)}`);
-  // (b) the coverage it must not have lost with it: the lost-upgrade
-  // announcement is authored in index.html, and the suite that runs on this row
-  // has to assert that copy. Read both files: the page's copy and the suite's
-  // assertion cannot silently diverge into a suite that checks nothing real.
+  // (b) index.html authors the copy; the selected suite delegates its live
+  // observation to an enforcer whose failure is proven by its own browser-free
+  // unit test. Do not scan the suite's prose for copy: a comment/non-enforcing
+  // action used to pass that check (airhorn-rrme), and so did a commented-out
+  // call, a stringified call and a swallowed call (airhorn-nqje).
+  //
+  // The pin asks the SYNTAX TREE (tools/guarded-call.mjs) whether the call is
+  // there, whether it resolves to the tested import, and whether it can actually
+  // run. It deliberately does NOT police swallowing shapes (try/catch, a wrapper,
+  // a .catch()): an earlier revision did, and the next shape was found within
+  // minutes of review (airhorn-f96y), because "can this throw reach the harness"
+  // depends on the whole calling graph. That class is closed at the ENFORCER
+  // instead: a missing copy schedules a non-zero exit that a caught throw cannot
+  // cancel, and tests/lost-upgrade-copy.test.mjs proves it in child processes for
+  // try/catch, a catch-all wrapper and a promise .catch() - including a caller that
+  // stubs process.exit. So a wrapped call here is GREEN because it is harmless, and
+  // the enforcement is measured rather than inferred from a call expression.
   const page = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
   const suite = fs.readFileSync(path.join(root, 'tests', 'resilience-ui.test.mjs'), 'utf8');
   for (const copy of ['The app could not update', 'previous version']) {
     assert.ok(page.includes(copy), `index.html must author the lost-upgrade copy "${copy}"`);
-    assert.ok(suite.includes(copy), `resilience-ui must assert the page's lost-upgrade copy "${copy}"`);
   }
+  assertGuardedCall(suite, { callee: 'assertLostUpgradeNotice', from: './support/lost-upgrade-copy.mjs' },
+    'tests/resilience-ui.test.mjs');
   // The worker's own failure story is still the failover suite's job, and the
   // suite still has a row owner (the worker). No page module carries worker code
   // since the split (airhorn-1l04): the registration handler is inline in
