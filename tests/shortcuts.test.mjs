@@ -432,7 +432,11 @@ async function checkPromptAndShareable(base) {
       `a repeat launch did not start anything (starts ${beforeLaunch.starts} -> ${relaunched.starts})`);
     assert(relaunched.pressed === 'true' && relaunched.playing === true,
       `a repeat launch left the horn unpressed/unplaying (aria-pressed ${relaunched.pressed}, playing ${relaunched.playing})`);
-    assert(relaunched.hash === '#instant', `a repeat launch moved the URL to ${relaunched.href}`);
+    // Compare the PRE/POST pair: the page has been at #instant since the load step, so an
+    // absolute '#instant' check reads the leftover and cannot fail - it never measured this
+    // launch (airhorn-cyzg). A repeat launch must not navigate the page it is already on.
+    assert(relaunched.href === beforeLaunch.href && relaunched.hash === beforeLaunch.hash,
+      `a repeat launch navigated the page (${beforeLaunch.href} -> ${relaunched.href})`);
     console.log(`  repeat launch blasted again (${queue.source} queue): starts ${beforeLaunch.starts} -> ${relaunched.starts}, peak ${relaunched.peak.toFixed(3)}`);
 
     // A launch that is not the instant deep link must not sound the horn. Wait
