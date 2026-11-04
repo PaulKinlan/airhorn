@@ -453,34 +453,50 @@ test('--suite-old gets its own control, so a crashed OLD suite is refused instea
   }
 });
 
-test('an interrupt between the write and the restore puts the file back (airhorn-rf0u)', async () => {
-  const dir = world({
-    'slow.test.mjs': [
-      "import test from 'node:test';",
-      "test('long enough to interrupt', async () => { await new Promise((r) => setTimeout(r, 1200)); });",
-    ].join('\n'),
-  });
+test('an interrupt between the write and the restore exits 130/143 and scores no verdict (airhorn-rf0u round 2)', async () => {
+  // The round-1 handler was dead code: spawnSync blocked the event loop, so a SIGTERM during
+  // a run was ignored and the check could go on to print "verdict: mutant-caught". This is the
+  // reviewer's shape - the run would otherwise END IN A CATCH, so a green here proves the
+  // signal was swallowed. The child processes are asynchronous for exactly this reason.
+  const slowSuite = [
+    "import fs from 'node:fs';",
+    "import test from 'node:test';",
+    "import assert from 'node:assert/strict';",
+    "const body = fs.readFileSync(new URL('./dist/product.js', import.meta.url), 'utf8');",
+    "test('dist says 41', async () => { await new Promise((r) => setTimeout(r, 1200)); assert.equal(body.includes('42'), false, 'dist carries the mutant'); });",
+  ].join('\n');
+  const dir = world({ 'dist/product.js': 'export const answer = 41;\n', 'slow.test.mjs': slowSuite });
   const subject = path.join(dir, 'src', 'subject.js');
+  const dist = path.join(dir, 'dist', 'product.js');
   const original = fs.readFileSync(subject, 'utf8');
   const { spawn } = await import('node:child_process');
   try {
-    const child = spawn(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'slow.test.mjs', '--timeout-ms', '30000'], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
-    // Wait for the mutation to be ON DISK (not for a log line: stdout is a pipe and the
-    // write to it can trail the write to the file), then interrupt mid-run.
-    const deadline = Date.now() + 15000;
-    let mutated = false;
+    const child = spawn(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'slow.test.mjs', '--build', 'cp src/subject.js dist/product.js', '--timeout-ms', '30000'], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (chunk) => { out += String(chunk); });
+    child.stderr.on('data', (chunk) => { err += String(chunk); });
+    // Interrupt only once BOTH artefacts hold the mutant: the source and the build output.
+    const deadline = Date.now() + 20000;
+    let both = false;
     while (Date.now() < deadline) {
-      if (fs.readFileSync(subject, 'utf8') !== original) {
-        mutated = true;
+      const srcMutated = fs.readFileSync(subject, 'utf8') !== original;
+      const distMutated = fs.existsSync(dist) && fs.readFileSync(dist, 'utf8') !== original;
+      if (srcMutated && distMutated) {
+        both = true;
         break;
       }
-      await new Promise((r) => setTimeout(r, 25));
+      await new Promise((r) => setTimeout(r, 20));
     }
-    assert.equal(mutated, true, 'the tool put the mutant on disk');
+    assert.equal(both, true, `the mutant is on disk (source and build output) before the signal: ${out}`);
     child.kill('SIGTERM');
     const code = await new Promise((resolve) => child.on('close', resolve));
-    assert.notEqual(code, 0, 'an interrupted check does not report success');
+    assert.equal(code, 143, `SIGTERM exits 143, not a verdict: ${out}${err}`);
+    assert.match(err, /interrupted by SIGTERM - no verdict was scored/);
+    assert.doesNotMatch(out, /verdict:/, 'a cancelled check scores nothing');
+    assert.equal(out.match(/restored src\/subject\.js/g)?.length, 1, `exactly one restore, not a race: ${out}`);
     assert.equal(fs.readFileSync(subject, 'utf8'), original, 'the interrupted run leaves the original, byte for byte');
+    assert.equal(fs.readFileSync(dist, 'utf8'), original, 'and rebuilds dist/ from the restored source');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

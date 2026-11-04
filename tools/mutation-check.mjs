@@ -98,7 +98,7 @@
  *       3 refused/unmeasured (nothing was measured, or the run pair could not be trusted).
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -292,19 +292,64 @@ function parseArgs(argv) {
   return args;
 }
 
+/**
+ * One child process, ASYNCHRONOUSLY. This is not a style choice: `spawnSync` blocks the
+ * event loop, so a JS signal handler cannot run until the child is already finished - a
+ * SIGTERM during a suite run was simply ignored, and a cancelled check could go on to print
+ * "verdict: mutant-caught" (airhorn-rf0u round 2). With an async child the handler runs when
+ * the signal arrives, kills the run, restores, rebuilds and exits 130/143.
+ *
+ * `activeChild` is exported to the module so the signal handler can kill what is in flight.
+ */
+let activeChild = null;
+
+export function killActiveChild() {
+  if (activeChild) {
+    try {
+      activeChild.kill('SIGKILL');
+    } catch {
+      // the child is already gone
+    }
+  }
+}
+
+function spawnAsync(command, argv, cwd, timeoutMs, env = process.env) {
+  return new Promise((resolve) => {
+    const child = spawn(command, argv, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    activeChild = child;
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (activeChild === child) activeChild = null;
+      resolve(value);
+    };
+    // A bound, not a habit: a suite that hangs must refuse, never wedge a sweep.
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+    }, timeoutMs);
+    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    child.on('error', () => finish({ rc: 1, status: 1, timedOut, stdout, stderr }));
+    child.on('close', (code) => finish({ rc: code === null ? 1 : code, status: code, timedOut, stdout, stderr }));
+  });
+}
+
 /** A plain `node` run. Never inherits NODE_TEST_CONTEXT: a parent runner would skip the child. */
 function spawnNode(argv, cwd, timeoutMs) {
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   delete env.NODE_TEST_ISOLATION;
-  const result = spawnSync(process.execPath, argv, { cwd, env, encoding: 'utf8', timeout: timeoutMs, stdio: ['ignore', 'pipe', 'pipe'] });
-  const timedOut = result.error ? result.error.code === 'ETIMEDOUT' : false;
-  return {
-    rc: result.status === null ? 1 : result.status,
-    timedOut,
-    stdout: result.stdout || '',
-    stderr: result.stderr || '',
-  };
+  return spawnAsync(process.execPath, argv, cwd, timeoutMs, env);
 }
 
 /** Run the suite once. The same invocation is used for the control and the mutant run. */
@@ -313,10 +358,10 @@ export function runSuite({ suite, cwd, suiteMode = 'node-test', timeoutMs = DEFA
 }
 
 function runBuild(build, cwd, timeoutMs) {
-  return spawnSync('bash', ['-lc', build], { cwd, encoding: 'utf8', timeout: timeoutMs, stdio: ['ignore', 'pipe', 'pipe'] });
+  return spawnAsync('bash', ['-lc', build], cwd, timeoutMs);
 }
 
-export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
+export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   let args;
   try {
     args = parseArgs(argv);
@@ -351,6 +396,8 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   }
 
   const runArgs = { cwd, suiteMode: args.suiteMode, timeoutMs: args.timeoutMs };
+  /** Set by the SIGINT/SIGTERM handler: everything after it is a cancelled check. */
+  let interrupted = null;
 
   /**
    * Build once for the phase that is on disk right now, and say which phase it was for.
@@ -358,10 +405,10 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
    * the SAME source it is supposed to be measuring (airhorn-br28). Returns false when the
    * build failed: that is a refusal, never a result.
    */
-  const buildPhase = (label) => {
+  const buildPhase = async (label) => {
     if (!args.build) return true;
     console.log(`build (${label}): ${args.build}`);
-    const built = runBuild(args.build, cwd, args.timeoutMs);
+    const built = await runBuild(args.build, cwd, args.timeoutMs);
     if (built.status === 0) return true;
     console.error(`mutation-check: refusing: the build failed for the ${label} phase (rc=${built.status}) - a run whose build output does not match the source it measures proves nothing${tail(built.stderr || built.stdout)}`);
     return false;
@@ -369,13 +416,13 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
 
   // The restored source may still be sitting next to build output from a previous run, so
   // the control build comes FIRST: the control run must measure the code as written.
-  if (!buildPhase('unmutated')) return 3;
+  if (!await buildPhase('unmutated')) return 3;
 
   // An OLD suite needs a control of its own, or "the OLD suite already fails the mutant"
   // cannot be told apart from "the OLD suite crashes on anything" (rc 1 either way).
   if (args.suiteOld) {
     console.log(`old control: ${args.suiteOld} against the unmutated ${args.file}`);
-    const oldControl = runSuite({ suite: args.suiteOld, ...runArgs });
+    const oldControl = await runSuite({ suite: args.suiteOld, ...runArgs });
     const judged = classifyPair({ control: oldControl, mutant: oldControl });
     if (judged.mode === 'never-ran') {
       console.error(`mutation-check: refusing: the OLD suite ${args.suiteOld} does not pass the unmutated ${args.file} (${describeRun(oldControl)}), so it cannot be used as a baseline - nothing was measured${tail(oldControl.stderr || oldControl.stdout)}`);
@@ -387,7 +434,8 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   // THE CONTROL RUN. Nothing has been written yet, so this is the code as it stands.
   // Everything downstream is only meaningful if this passes.
   console.log(`control: ${args.suite} against the unmutated ${args.file}`);
-  const control = runSuite({ suite: args.suite, ...runArgs });
+  const control = await runSuite({ suite: args.suite, ...runArgs });
+  if (interrupted) return 143;
   const preCheck = classifyPair({ control, mutant: control });
   if (preCheck.mode === 'never-ran' && (control.timedOut || control.rc !== 0)) {
     console.error(`mutation-check: refusing: ${preCheck.problem}${tail(control.stderr || control.stdout)}`);
@@ -420,16 +468,19 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     console.log(`restored ${args.file}: ${restored ? 'verified' : `NOT VERIFIED${why ? ` (${why})` : ''} - recover with \`git checkout -- ${args.file}\``}`);
     return restored;
   };
-  const onSignal = (signal) => {
-    restoreNow(signal);
+  const onSignal = async (signal) => {
+    if (interrupted) return;
+    interrupted = signal;
+    killActiveChild();
+    const restored = restoreNow(signal);
     // The mutant build is the same hazard as the mutant source: rebuild from the restored
-    // source before leaving, or dist/ keeps mutant bytes with no message (airhorn-br28).
-    if (args.build) buildPhase('restored');
-    console.error(`mutation-check: interrupted by ${signal} - the mutation was not scored`);
+    // source before leaving, or dist/ keeps mutant bytes (airhorn-br28).
+    if (restored && args.build) await buildPhase('restored');
+    console.error(`mutation-check: interrupted by ${signal} - no verdict was scored, and the mutant was not measured`);
     process.exit(signal === 'SIGINT' ? 130 : 143);
   };
-  process.on('SIGINT', onSignal);
-  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', () => { void onSignal('SIGINT'); });
+  process.on('SIGTERM', () => { void onSignal('SIGTERM'); });
   try {
     fs.writeFileSync(absolute, applied.content);
     const check = mutationApplied({ original, onDisk: fs.readFileSync(absolute, 'utf8'), to: args.to });
@@ -440,13 +491,14 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     }
     console.log(`mutant applied to ${args.file} (${applied.content.length - original.length >= 0 ? '+' : ''}${applied.content.length - original.length} bytes), verified on disk`);
 
-    if (!buildPhase('mutant')) {
+    if (interrupted) return 143;
+    if (!await buildPhase('mutant')) {
       refused = true;
       return 3;
     }
 
     if (args.suiteOld) {
-      const old = runSuite({ suite: args.suiteOld, ...runArgs });
+      const old = await runSuite({ suite: args.suiteOld, ...runArgs });
       if (old.timedOut) {
         console.error(`mutation-check: refusing: the OLD suite ${args.suiteOld} did not finish against the mutant, so nothing was measured`);
         refused = true;
@@ -455,7 +507,8 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
       baselineRc = old.rc;
     }
 
-    const mutant = runSuite({ suite: args.suite, ...runArgs });
+    const mutant = await runSuite({ suite: args.suite, ...runArgs });
+    if (interrupted) return 143;
     const classified = classifyPair({ control, mutant });
     if (classified.mode === 'never-ran') {
       console.error(`mutation-check: refusing: ${classified.problem}${tail(mutant.stderr || mutant.stdout)}`);
@@ -464,14 +517,18 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     }
     mutantRc = classified.rc;
   } finally {
-    if (!restoreNow()) refused = true;
+    // The signal handler has already restored, rebuilt and printed; doing it again here would
+    // race it and print a second "restored" line (airhorn-rf0u round 2).
+    if (interrupted) return 143;
+    const restoredOk = restoreNow();
+    if (!restoredOk) refused = true;
     // The restored build belongs HERE, not after the try: every refusal inside the try -
     // a mutant that does not build, an OLD suite that will not run, a mutant run that times
     // out - returns from inside it, and dist/ would keep the mutant bytes on exactly the
-    // paths where the operator is already reading a refusal (airhorn-br28, round 2).
-    if (!buildPhase('restored')) refused = true;
-    process.off('SIGINT', onSignal);
-    process.off('SIGTERM', onSignal);
+    // paths where the operator is already reading a refusal (airhorn-br28).
+    // It only runs when the restore VERIFIED: rebuilding on a failed restore would copy the
+    // still-mutated source into dist/ and leave two mutant artefacts instead of one.
+    if (restoredOk && !await buildPhase('restored')) refused = true;
   }
 
   if (refused) return 3;
@@ -480,7 +537,7 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   // control passes again. A flaky suite would otherwise manufacture a caught mutant.
   if (mutantRc !== 0) {
     console.log(`re-check: ${args.suite} against the restored ${args.file}`);
-    const recheck = runSuite({ suite: args.suite, ...runArgs });
+    const recheck = await runSuite({ suite: args.suite, ...runArgs });
     const verdictOnSuite = classifyRecheck({ recheck });
     if (verdictOnSuite.mode === 'never-ran') {
       console.error(`mutation-check: refusing: ${verdictOnSuite.problem}${tail(recheck.stderr || recheck.stdout)}`);
@@ -497,5 +554,5 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  process.exitCode = main();
+  process.exitCode = await main();
 }
