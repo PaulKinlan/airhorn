@@ -232,8 +232,13 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
   return { mode: 'passed', rc: 0 };
 }
 
-const REPORTER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lib', 'suite-mode-reporter.mjs');
-const DRIVER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lib', 'suite-driver.mjs');
+// Real paths, so an invocation through a symlink (tool-link/mutation-check.mjs) still finds its own
+// helper files AND still recognises itself as main. Before this, a symlinked invocation exited 0
+// having done nothing at all - a silent pass, which is worse than any wrong verdict
+// (airhorn-a6ch/so88 tool-honesty rule: no verdict may be faked, including by doing nothing).
+const SELF = fs.realpathSync(fileURLToPath(import.meta.url));
+const REPORTER = path.join(path.dirname(SELF), 'lib', 'suite-mode-reporter.mjs');
+const DRIVER = path.join(path.dirname(SELF), 'lib', 'suite-driver.mjs');
 
 /**
  * The suite must run as its own test-runner invocation. A parent `node --test` exports
@@ -365,6 +370,15 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   return result.exit === 3 && mutantRc !== 3 ? 3 : result.exit;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(process.argv[1]) === SELF;
+  } catch {
+    return path.resolve(process.argv[1]) === SELF;
+  }
+}
+
+if (invokedDirectly()) {
   process.exitCode = main();
 }

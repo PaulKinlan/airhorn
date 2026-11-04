@@ -37,7 +37,18 @@ export default async function* suiteModeReporter(source) {
   // and it stays separable even if the suite strips the driver's uncaughtException handlers
   // (airhorn-a6ch). Note nesting does NOT separate them: measured on node 24, real tests and the
   // wrapper both report nesting 0.
-  const driverFile = process.env.MUTATION_DRIVER_FILE || null;
+  // Compare REAL paths: an invocation through a symlink, or any path spelling the OS normalises,
+  // must not stop the driver's own event from being recognised as the driver's. Without this the
+  // wrapper silently re-enters the "real test" counts under a different spelling of the same file
+  // (airhorn-a6ch).
+  let driverFile = process.env.MUTATION_DRIVER_FILE || null;
+  if (driverFile) {
+    try { driverFile = fs.realpathSync(driverFile); } catch {}
+  }
+  const fileOf = (data) => {
+    if (typeof data.file !== 'string') return null;
+    try { return fs.realpathSync(data.file); } catch { return data.file; }
+  };
   let wrapperEvents = 0;
   // "caught" may only be claimed when a test actually STARTED inside the suite and failed
   // (airhorn-so88). A start is the runner's own evidence that execution reached a test, so it
@@ -48,13 +59,13 @@ export default async function* suiteModeReporter(source) {
   for await (const event of source) {
     if (event.type === 'test:start') {
       const data = event.data || {};
-      if (!(driverFile && data.file === driverFile)) startedTests += 1;
+      if (!(driverFile && fileOf(data) === driverFile)) startedTests += 1;
       continue;
     }
     if (event.type !== 'test:pass' && event.type !== 'test:fail') continue;
     const data = event.data || {};
     const name = typeof data.name === 'string' ? data.name : '<unnamed>';
-    if (driverFile && data.file === driverFile) {
+    if (driverFile && fileOf(data) === driverFile) {
       wrapperEvents += 1;
       if (event.type === 'test:fail') fileLevelFailed = true;
       continue;

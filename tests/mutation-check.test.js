@@ -253,6 +253,16 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     write('h-async-no-test.mjs', "import test from 'node:test';\nsetTimeout(() => { throw new Error('async boom'); }, 5);\ntest('never runs', () => {});\n");
     write('i-async-decoy.mjs', "// from \"node:test\" - decoy\nimport test from 'node:test';\nsetTimeout(() => { throw new Error('async boom'); }, 5);\ntest('never runs', () => {});\n");
     write('j-indirect-async.mjs', "import './register.mjs';\nsetTimeout(() => { throw new Error('async boom'); }, 5);\n");
+    // airhorn-a6ch: invoked through a SYMLINK, the tool must still do its job. It used to exit 0
+    // having printed nothing at all, because main-detection compared the symlinked argv[1] to the
+    // module's real path - a silent pass, the worst possible answer for a gate.
+    const linkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-link-'));
+    const link = path.join(linkDir, 'mutation-check.mjs');
+    fs.symlinkSync(tool, link);
+    const viaLink = spawnSync(process.execPath, [link, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'a-catches.mjs'], { cwd: tmp, encoding: 'utf8' });
+    assert.equal(viaLink.status, 0, 'a symlinked invocation must return the same exit code as the real path');
+    assert.match(viaLink.stdout + viaLink.stderr, /verdict: mutant-caught/, 'the symlinked invocation must reach the same verdict as the real path');
+
     // airhorn-a6ch: the suite strips the driver's crash handlers, then crashes asynchronously -
     // the wrapper event must be attributed to the DRIVER, not counted as a failing test.
     write('g-strip-handlers.mjs', "import test from 'node:test';\ntest('one', () => {});\nprocess.removeAllListeners('uncaughtException');\nprocess.removeAllListeners('unhandledRejection');\nsetImmediate(() => { throw new Error('strip boom'); });\n");
