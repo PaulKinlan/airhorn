@@ -129,11 +129,33 @@ async function putVerified(cache, url) {
   await cache.put(requestFor(pathname), response);
 }
 
+// Bounded concurrency (airhorn-86mz): the redirect fix's per-URL
+// fetch-then-put made precaching N assets N sequential round trips, where
+// addAll fetched concurrently. A small pool restores the overlap WITHOUT
+// relaxing the guarantee: every URL still goes through putVerified (fetch,
+// refuse a redirect, then put), and a rejection propagates out of the pool
+// exactly as it did out of the serial loop - the install fails, named, and
+// the install catch deletes the half-built caches, so no half-populated
+// cache can survive to be recorded.
+const PRECACHE_CONCURRENCY = 6;
+async function mapPooled(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 async function precache() {
   const cache = await caches.open(cacheName);
   const meta = await caches.open(metaCacheName);
   const validUrls = precacheUrls.filter(url => typeof url === 'string' && url.length > 0);
-  for (const url of validUrls) await putVerified(cache, url);
+  await mapPooled(validUrls, PRECACHE_CONCURRENCY, (url) => putVerified(cache, url));
   const storedUrls = [...validUrls];
 
   // Dynamic fallback: ensure any hashed /assets/ in index.html are precached
@@ -143,7 +165,7 @@ async function precache() {
       const html = await res.text();
       const assetMatches = html.matchAll(/(?:src|href)=['"](\/assets\/[^'"]+)['"]/g);
       const dynamicUrls = Array.from(assetMatches, m => m[1]);
-      for (const url of dynamicUrls) await putVerified(cache, url);
+      await mapPooled(dynamicUrls, PRECACHE_CONCURRENCY, (url) => putVerified(cache, url));
       storedUrls.push(...dynamicUrls);
     }
   } catch (err) {
