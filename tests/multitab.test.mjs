@@ -230,6 +230,68 @@ const tabInstrumentation = `
       };
     }
   }
+  // Write spy + lock spy (airhorn-lg0e). The guard in sequence I used to claim
+  // "no blast can be lost" while only proving a lock request was QUEUED, which
+  // says nothing about where the storage write happens. These two wrappers make
+  // that observable: every setItem of the shared count records whether it ran
+  // inside a navigator.locks.request callback for that lock. A bump that writes
+  // outside the lock is exactly the read-modify-write the guard exists to stop,
+  // so the assertion can go red for it (and does - see the mutant in the bead).
+  window.__badgeWrites = [];
+  window.__heldLocks = [];
+  try {
+    const request = navigator.locks && navigator.locks.request;
+    if (request) {
+      navigator.locks.request = function (name, ...rest) {
+        const cb = rest[rest.length - 1];
+        if (typeof cb !== 'function') return request.call(this, name, ...rest);
+        const wrapped = (...args) => {
+          window.__heldLocks.push(name);
+          try {
+            return cb(...args);
+          } finally {
+            const at = window.__heldLocks.lastIndexOf(name);
+            if (at >= 0) window.__heldLocks.splice(at, 1);
+          }
+        };
+        rest[rest.length - 1] = wrapped;
+        return request.call(this, name, ...rest);
+      };
+    }
+    const setItem = Storage.prototype.setItem;
+    const note = (value) => {
+      // Named lock, not "some lock": a write while an unrelated lock is held is
+      // still an unlocked write of THIS counter.
+      window.__badgeWrites.push({ value: String(value), inLock: window.__heldLocks.includes('airhorn:blast-count') });
+    };
+    Storage.prototype.setItem = function (key, value) {
+      if (key === 'airhorn:blast-count') note(value);
+      return setItem.call(this, key, value);
+    };
+    // setItem is NOT the only way to write: a named-property assignment on the
+    // storage object goes through the WebIDL named setter and never calls setItem,
+    // so a wrapper on
+    // setItem alone recorded nothing and the guard stayed green while an unlocked
+    // writer clobbered the count (airhorn-srpo, review of airhorn-lg0e). Proxy the
+    // Storage object behind the window getter so BOTH paths are recorded.
+    const realStorage = window.localStorage;
+    const proxied = new Proxy(realStorage, {
+      get(target, key) {
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+      set(target, key, value) {
+        if (key === 'airhorn:blast-count') note(value);
+        return Reflect.set(target, key, value);
+      },
+      deleteProperty(target, key) {
+        if (key === 'airhorn:blast-count') note('<deleted>');
+        return Reflect.deleteProperty(target, key);
+      },
+    });
+    Object.defineProperty(window, 'localStorage', { configurable: true, get: () => proxied });
+  } catch {}
+
   // Announcer logger, race-free against the app's own installer.
   window.__annLog = [];
   try {
@@ -815,6 +877,15 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       // serialize on release - the shared count must end at before+2. Without
       // the lock both tabs read the pre-blast count and write before+1:
       // one blast lost.
+      //
+      // SCOPE (airhorn-lg0e): everything below is about bumps that QUEUE ON THE
+      // ORIGIN LOCK. It does not, and cannot, rule out a writer that never asks
+      // for the lock - the reviewer scheduled a stale unlocked write of count=1
+      // 1200 ms later and the shared count ended at 1 while this guard stayed
+      // green {queued:true,during:0,settled:2,after:1}. An unlocked writer is
+      // outside the lock's contract: serializing it is not something the app can
+      // do, so the assertion messages say "a bump that takes the origin lock"
+      // rather than "no blast can ever be lost".
       await send('Target.activateTarget', { targetId: A2.targetId });
       await waitUntil(async () => (await A2.evaluate(`document.visibilityState`)) === 'visible', 5000);
       const before = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
@@ -831,18 +902,35 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       }, 5000);
       assert(held, 'the test could not hold the origin badge lock - sequence I cannot force the interleaving');
       await A2.evaluate(`window.__airhorn.start()`);
-      await sleep(300);
-      // The red assert: while the TEST owns the origin lock, a blast's
-      // read-modify-write must not have written. Unfixed code bumps
-      // immediately (count already before+1 under the hold); the fixed app
-      // queues its bump behind the lock. CDP dispatches the two tabs'
-      // evaluations sequentially, so an interleaving cannot be forced from
-      // outside - proving the bumps serialize IS proving no blast can be
-      // lost, because every bump then re-reads inside the lock.
+      // Wait for the bump to QUEUE, not for a clock (airhorn-g0qr.8). A fixed app asks
+      // the lock manager for the app's own lock in order to bump, and Web Locks reports
+      // that request in query().pending while the test holds it - so the queue is
+      // observable without waiting for a write. The old check slept a fixed 300 ms and
+      // then read storage, which only saw an unlocked write that happened to land inside
+      // that window: with the write delayed to 800 ms the suite went GREEN and printed
+      // "no blast lost" while increments could still clobber.
+      const queued = await waitUntil(async () => {
+        try {
+          const q = await A2.evaluate(`navigator.locks.query().then((q) => JSON.stringify({
+            held: q.held.map((l) => l.name),
+            pending: q.pending.map((l) => l.name),
+          }))`);
+          const parsed = JSON.parse(q);
+          return parsed.pending.includes('airhorn:blast-count') ? parsed : null;
+        } catch {
+          return null;
+        }
+      }, 5000);
+      assert(queued,
+        `a blast's increment never queued on the origin lock while the test held it (queues seen: ${JSON.stringify(queued)}) - ` +
+        `the app's bump is then an unlocked read-modify-write, and interleaved tabs can lose a blast (airhorn-rqz1)`);
+      // ...and with the bump queued, nothing may have been written. This is now
+      // deterministic rather than a race against 300 ms: the app is demonstrably
+      // still waiting, so any count here came from a write that bypassed the lock.
       const duringHold = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
       assert(duringHold === before,
         `a blast's increment was written while another holder owned the origin lock (count ${before} -> ${duringHold} under the hold) - ` +
-        `the increment is a non-atomic read-modify-write, so interleaved tabs can lose a blast (airhorn-rqz1)`);
+        `the bump did not take the lock, so it is a non-atomic read-modify-write and interleaved tabs can lose a blast (airhorn-rqz1)`);
       await A2.evaluate(`window.__rqz1Release && window.__rqz1Release()`);
       await B.evaluate(`window.__airhorn.start()`);
       const settled = await waitUntil(async () => {
@@ -852,10 +940,68 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       const after = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
       assert(settled,
         `two blasts in two tabs produced a shared count of ${after}, expected ${before + 2} - ` +
-        `the increment is a non-atomic read-modify-write, so the second writer clobbered the first and a blast was lost (airhorn-rqz1)`);
+        `the two bumps, which both queued on the origin lock, were not serialized: one clobbered the other and a blast was lost (airhorn-rqz1). ` +
+        `(A separate, unlocked writer is not covered here - airhorn-lg0e)`);
+      // The claim this sequence makes is that a blast's increment is a LOCKED
+      // read-modify-write, because that is what makes interleaved tabs add up
+      // instead of clobbering (airhorn-rqz1). "A request was queued" is not that
+      // claim: it says nothing about where the write happened (airhorn-lg0e).
+      // Every write of the shared count must therefore be observed INSIDE a
+      // navigator.locks.request callback for the same lock - recorded at the
+      // moment of the write, so no sleep decides it.
+      // Both tabs blasted: a bump writes in whichever page pressed, so both
+      // pages' records count (a write is either inside the lock or it is not).
+      const fromA2 = JSON.parse(await A2.evaluate(`JSON.stringify(window.__badgeWrites || [])`));
+      const fromB = JSON.parse(await B.evaluate(`JSON.stringify(window.__badgeWrites || [])`));
+      const records = [...fromA2, ...fromB];
+      // COMPLETENESS (airhorn-srpo): "every write happened inside the lock" is only
+      // as good as the spy's coverage. A wrapper on setItem alone missed the WebIDL
+      // named setter, so an unlocked named-property write clobbered the count and the
+      // guard stayed green. Two defences: the proxy above records that path too, and
+      // this check refuses to trust the record when the value actually stored was not
+      // produced by any write the spy saw - so a NEW bypass fails loudly instead of
+      // passing quietly.
+      const storedNow = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      const lastRecorded = records.length ? Number(records[records.length - 1].value) : null;
+      assert(records.length > 0 && lastRecorded === storedNow,
+        `the stored blast count is ${storedNow} but the last write the spy recorded is ${JSON.stringify(lastRecorded)} ` +
+        `(records: ${JSON.stringify(records)}) - a write happened that the instrument did not observe, so "every write was ` +
+        `inside the lock" is untested on that path (airhorn-srpo)`);
+      const writes = JSON.stringify(records);
+      assert(records.length > 0,
+        `no write of the shared blast count was observed in the tab that blasted (records: ${writes}) - ` +
+        `the guard cannot claim a locked increment if it never saw the write (airhorn-lg0e)`);
+      const unlocked = records.filter((r) => !r.inLock);
+      assert(unlocked.length === 0,
+        `${unlocked.length} of ${records.length} write(s) of the shared blast count happened OUTSIDE the origin lock ` +
+        `(${JSON.stringify(unlocked)}) - an unlocked read-modify-write is what lets interleaved tabs lose a blast (airhorn-rqz1, airhorn-lg0e)`);
+
+      // THE BOUNDARY, measured rather than asserted away (airhorn-lg0e, second finding). The guard
+      // used to imply that no blast can be lost; the truth is narrower - serialization holds for
+      // writers that TAKE the origin lock. So perform the unlocked stale write the reviewer
+      // performed and pin BOTH facts:
+      //   * the spy records it as an unlocked write (so the assertion above is live against a real
+      //     write, not only against a mutant), and
+      //   * it CLOBBERS the queued result (2 -> 1), which is the app's actual contract. If someone
+      //     later makes the counter monotonic or versioned, this assertion fails and the contract
+      //     is re-stated deliberately instead of drifting.
+      await B.evaluate(`(window.localStorage.setItem('airhorn:blast-count', '1'), true)`);
+      const afterUnlocked = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count'))`);
+      const lateRecords = JSON.parse(await B.evaluate(`JSON.stringify(window.__badgeWrites || [])`));
+      const late = lateRecords.filter((r) => !r.inLock);
+      assert(late.length >= 1,
+        `the unlocked write performed by this test was NOT recorded as an unlocked write (records: ${JSON.stringify(lateRecords)}) - ` +
+        `the guard cannot tell a locked increment from an unlocked one, so its "inside the lock" claim is untested (airhorn-lg0e)`);
+      assert(afterUnlocked === 1,
+        `an unlocked stale write of 1 left the shared count at ${afterUnlocked} after the queued bumps had settled at ${before + 2}. ` +
+        `The app serializes writers that TAKE the origin lock; it does not and cannot defend the counter against a writer that does not, ` +
+        `so that writer clobbers it (measured here). A monotonic/versioned counter would be a PRODUCT change - airhorn-lg0e is the test-side finding.`);
+      console.log(`  simultaneous bumps that take the origin lock serialized: ${before} -> ${after}, neither lost ` +
+        `(every one of ${records.length} count write(s) observed inside the lock); an unlocked stale write then took it to ${afterUnlocked}, ` +
+        `which is outside the lock's contract (airhorn-lg0e).`);
+
       await A2.evaluate(`window.__airhorn.stop({ immediate: true })`);
       await B.evaluate(`window.__airhorn.stop({ immediate: true })`);
-      console.log(`  simultaneous bumps serialized: ${before} -> ${after}, no blast lost.`);
     } else {
       console.log('  navigator.locks unavailable in this browser; nothing to assert.');
     }
