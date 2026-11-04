@@ -926,13 +926,22 @@ async function main() {
       `nodes ${Math.min(...nodeSeries)}..${Math.max(...nodeSeries)} (delta ${nodeDelta})`,
     );
 
+    // This canary counts CALLS to two APIs only (airhorn-nxuv.32, measured):
+    // innerHTML= creates nodes without createElement, and remove() /
+    // replaceChildren() / innerHTML='' detach without the removeChild wrapper -
+    // all four invisible here. So the name says exactly what is measured, and
+    // the API-AGNOSTIC coverage lives where it can actually fail on a leak:
+    // the node-delta check above (the platform's live tree count, which a
+    // parser-created attached node DOES move) and the heap checks (which a
+    // retained detached subtree moves).
     const domCheck = check(
-      'the session creates no DOM nodes (so no detached subtree can be retained)',
+      'the session makes no createElement/removeChild calls (white-box canary)',
       afterCycles.domNodesCreated === baseline.domNodesCreated &&
       afterCycles.domNodesRemoved === baseline.domNodesRemoved,
       `createElement ${baseline.domNodesCreated} -> ${afterCycles.domNodesCreated}, ` +
       `append/insert/remove ${baseline.domNodesRemoved} -> ${afterCycles.domNodesRemoved} ` +
-      '(boot-time creation by the browser tooling is not the app; the cycle phase must add none)',
+      '(calls to these two APIs only; innerHTML/remove()/replaceChildren() are not ' +
+      'counted - the node-delta and heap checks are the API-agnostic guards)',
     );
 
     const drainCheck = check(
@@ -1064,7 +1073,16 @@ async function main() {
     );
 
     const offlineHeap = offlineResults.map((result) => result.heapUsed);
-    const offlineGrowth = offlineHeap.length ? median(offlineHeap.slice(-2)) - median(offlineHeap.slice(0, 2)) : 0;
+    // The windowed median self-cancels when the two windows overlap
+    // (airhorn-nxuv.32): with --offline 2, slice(0,2) and slice(-2) are the SAME
+    // two samples, so growth read 0 no matter what the heap did - a zero that
+    // meant 'we did not look'. Fewer than 4 samples -> the endpoints are the
+    // honest measure; a real delta, never a structural zero.
+    const offlineGrowth = offlineHeap.length
+      ? (offlineHeap.length >= 4
+          ? median(offlineHeap.slice(-2)) - median(offlineHeap.slice(0, 2))
+          : offlineHeap[offlineHeap.length - 1] - offlineHeap[0])
+      : 0;
     const offlineHeapCheck = offlineHeap.length < 2 ? null : check(
       'heap after repeated reloads stays bounded',
       offlineGrowth < heapBudget && !growsMonotonically(offlineHeap, 256 * 1024),
