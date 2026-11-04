@@ -20,6 +20,15 @@ import { pathToFileURL } from 'node:url';
 const suite = process.env.MUTATION_SUITE_FILE;
 const reportPath = process.env.MUTATION_SUITE_REPORT;
 
+const read = () => {
+  if (!reportPath) return null;
+  try {
+    return JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+  } catch {
+    return null;
+  }
+};
+
 const record = (value) => {
   if (!reportPath) return;
   try {
@@ -28,6 +37,21 @@ const record = (value) => {
     /* the caller treats a missing record as "not measured" */
   }
 };
+
+/*
+ * A failure that happens AFTER a clean import - a module-level setTimeout that throws, a rejected
+ * promise nobody awaited - is not a test failing: no test ever ran (airhorn-so88). node's runner
+ * reports it as a failure of the DRIVER file, which the reporter would otherwise count as a caught
+ * mutant. These handlers are installed before the import so they are first in line, and they turn
+ * the failure into a record instead of a verdict.
+ */
+const markCrash = (kind) => (error) => {
+  const detail = error && error.stack ? error.stack.split('\n')[0] : String(error);
+  record({ ...(read() || {}), crashedOutsideTest: true, reason: `${kind} after the suite loaded: ${detail}` });
+  process.exit(0);
+};
+process.once('uncaughtException', markCrash('uncaught exception'));
+process.once('unhandledRejection', markCrash('unhandled rejection'));
 
 if (!suite) {
   record({ importFailed: true, reason: 'MUTATION_SUITE_FILE was not set, so no suite was loaded' });

@@ -205,8 +205,14 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
   if (!report || !report.driver) {
     return { mode: 'never-ran', problem: `produced no record of the suite loading (exit ${exitCode}), so nothing was measured - a suite that never ran proves nothing about the mutant` };
   }
+  if (report.driver.crashedOutsideTest) {
+    return { mode: 'never-ran', problem: `${report.driver.reason || 'the suite failed outside any test after it loaded'}, so NO test ever ran and this is not a caught mutant (exit ${exitCode})` };
+  }
   if (report.driver.importFailed) {
     return { mode: 'never-ran', problem: `threw while loading (${report.driver.reason || 'no reason reported'}), so NO test ever ran and this is not a caught mutant (exit ${exitCode}, ${report.realTests} test event(s) seen). If this is a script suite whose top-level assertion failed, say so with --suite-mode script` };
+  }
+  if (typeof report.realFailed !== 'number') {
+    return { mode: 'never-ran', problem: `the run produced no test counts (exit ${exitCode}), so nothing was measured` };
   }
   if (report.realFailed > 0) return { mode: 'caught', rc: 1, failing: report.failing };
   return { mode: 'passed', rc: 0 };
