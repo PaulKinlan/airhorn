@@ -22,33 +22,18 @@
  * be moved by any of them.
  */
 import fs from 'node:fs';
-import path from 'node:path';
 
 export default async function* suiteModeReporter(source) {
   let realTests = 0;
   let realPassed = 0;
   let realFailed = 0;
-  let fileLevelFailed = false;
-  let fileLevelPassed = false;
   const failing = [];
   let n = 0;
-
-  // The runner reports the FILE WRAPPER under the suite's own name; everything else is a test.
-  // Identity comparison, not text analysis: nothing about the source can change this.
-  const suiteName = process.env.MUTATION_SUITE_FILE ? path.basename(process.env.MUTATION_SUITE_FILE) : null;
 
   for await (const event of source) {
     if (event.type !== 'test:pass' && event.type !== 'test:fail') continue;
     const data = event.data || {};
     const name = typeof data.name === 'string' ? data.name : '<unnamed>';
-
-    if (suiteName !== null && name === suiteName) {
-      // The file wrapper: the only pass/fail that exists when nothing inside it ran.
-      if (event.type === 'test:fail') fileLevelFailed = true;
-      else fileLevelPassed = true;
-      continue;
-    }
-
     realTests += 1;
     if (event.type === 'test:fail') {
       realFailed += 1;
@@ -60,8 +45,18 @@ export default async function* suiteModeReporter(source) {
     }
   }
 
-  const report = { realTests, realPassed, realFailed, fileLevelFailed, fileLevelPassed, failing: failing.slice(0, 10) };
+  // The driver's record says whether the suite LOADED at all. It is written before any test runs,
+  // and it is the only thing that decides "never ran" - no name or path comparison anywhere.
+  let driver = null;
   const target = process.env.MUTATION_SUITE_REPORT;
+  if (target) {
+    try {
+      driver = JSON.parse(fs.readFileSync(target, 'utf8'));
+    } catch {
+      driver = null;
+    }
+  }
+  const report = { driver, realTests, realPassed, realFailed, failing: failing.slice(0, 10) };
   if (target) {
     try {
       fs.writeFileSync(target, JSON.stringify(report));

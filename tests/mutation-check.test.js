@@ -190,21 +190,28 @@ test('the verdict is unreachable for an unmeasured suite: only a real failure be
 // previous attempt scanned the file for `node:test`, and a reviewer defeated it twice: an
 // indirect import escaped it, and adding the comment `// from "node:test"` to a script flipped a
 // real assertion failure into "nothing was measured". These cases pin the mode, not the text.
-test('classifyRun reads the runner report, so no comment, whitespace or specifier can move it', () => {
-  const caught = { realTests: 3, realPassed: 2, realFailed: 1, fileLevelFailed: false, fileLevelPassed: true, failing: ['answer'] };
-  const passed = { realTests: 3, realPassed: 3, realFailed: 0, fileLevelFailed: false, fileLevelPassed: true, failing: [] };
-  const neverRan = { realTests: 0, realPassed: 0, realFailed: 0, fileLevelFailed: true, fileLevelPassed: false, failing: [] };
+test('classifyRun decides from execution evidence only: the driver record and the runner counts', () => {
+  const loaded = { importFailed: false, suite: '/x/suite.mjs' };
+  const threw = { importFailed: true, reason: 'boom' };
+  const caught = { driver: loaded, realTests: 3, realPassed: 2, realFailed: 1, failing: ['answer'] };
+  const passed = { driver: loaded, realTests: 3, realPassed: 3, realFailed: 0, failing: [] };
 
   assert.deepEqual(classifyRun({ report: caught, exitCode: 1 }), { mode: 'caught', rc: 1, failing: ['answer'] });
   assert.deepEqual(classifyRun({ report: passed, exitCode: 0 }), { mode: 'passed', rc: 0 });
-  assert.equal(classifyRun({ report: neverRan, exitCode: 1 }).mode, 'never-ran');
-  assert.match(classifyRun({ report: neverRan, exitCode: 1 }).problem, /executed no tests/);
+  // the one case a comment cannot fake: the import threw
+  for (const report of [{ driver: threw, realTests: 0, realFailed: 0 }, { driver: threw, realTests: 4, realFailed: 1 }]) {
+    const never = classifyRun({ report, exitCode: 1 });
+    assert.equal(never.mode, 'never-ran', 'a suite that threw while loading never ran, whatever events were seen');
+    assert.match(never.problem, /threw while loading/);
+  }
   assert.equal(classifyRun({ report: null, exitCode: 7 }).mode, 'never-ran');
-  assert.match(classifyRun({ report: null, exitCode: 7 }).problem, /no report/);
+  assert.match(classifyRun({ report: null, exitCode: 7 }).problem, /no record/);
+  // no driver record at all is not a measurement either
+  assert.equal(classifyRun({ report: { realTests: 2, realFailed: 1 }, exitCode: 1 }).mode, 'never-ran');
 
-  // a declared script suite is judged by its exit code, because a top-level throw IS its failure
-  assert.deepEqual(classifyRun({ report: neverRan, exitCode: 1, suiteMode: 'script' }), { mode: 'caught', rc: 1 });
-  assert.deepEqual(classifyRun({ report: neverRan, exitCode: 0, suiteMode: 'script' }), { mode: 'passed', rc: 0 });
+  // a declared script suite is judged by its exit code: its top-level throw IS the failure
+  assert.deepEqual(classifyRun({ report: null, exitCode: 1, suiteMode: 'script' }), { mode: 'caught', rc: 1 });
+  assert.deepEqual(classifyRun({ report: null, exitCode: 0, suiteMode: 'script' }), { mode: 'passed', rc: 0 });
 });
 
 test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy comment, passing, script', () => {
@@ -224,6 +231,12 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     write('b-indirect-registration.mjs', "import './register.mjs';\nimport './setup.mjs';\n");
     write('c-decoy.mjs', "// from \"node:test\" - a DECOY comment: it must not change the classification\nimport './indirect.mjs';\nimport test from 'node:test';\ntest('x', () => {});\n");
     write('d-passes.mjs', "import test from 'node:test';\ntest('green', () => {});\n");
+    // airhorn-lnme: node names the file-level event with the path AS PASSED, so a
+    // directory-qualified suite path used to read as a failed test. Same worlds, one level down.
+    fs.mkdirSync(path.join(tmp, 'sub'));
+    write('sub/setup-throw.mjs', "import '../setup.mjs';\nimport test from 'node:test';\ntest('x', () => {});\n");
+    write('sub/catches.mjs', "import test from 'node:test';\nimport assert from 'node:assert';\nimport { answer } from '../src/subject.js';\ntest('answer', () => assert.equal(answer, 41));\n");
+    write('sub/passes.mjs', "import test from 'node:test';\ntest('green', () => {});\n");
     write('e-script.mjs', "import assert from 'node:assert';\nimport { answer } from './src/subject.js';\nassert.equal(answer, 41);\n// from \"node:test\" - the same decoy, in a script\n");
 
     const a = runWorld(['--suite', 'a-catches.mjs']);
@@ -233,7 +246,7 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     for (const world of ['b-direct.mjs', 'b-indirect.mjs', 'b-indirect-registration.mjs', 'c-decoy.mjs']) {
       const r = runWorld(['--suite', world]);
       assert.equal(r.status, 3, `${world} must be never-ran (exit 3), got ${r.status}: ${r.stdout}${r.stderr}`);
-      assert.match(r.stderr + r.stdout, /executed no tests/, `${world} must name the mode`);
+      assert.match(r.stderr + r.stdout, /threw while loading/, `${world} must name the mode`);
     }
     // the decoy changes NOTHING: identical classification to the indirect crash without it
     const plain = runWorld(['--suite', 'b-indirect.mjs']);
@@ -243,6 +256,16 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     const d = runWorld(['--suite', 'd-passes.mjs']);
     assert.equal(d.status, 2, `a passing suite must be fix-does-not-close, not unmeasured: ${d.stdout}${d.stderr}`);
     assert.match(d.stdout, /verdict: fix-does-not-close/);
+
+    // directory-qualified paths (the tool's own documented usage) must classify identically
+    const subCrash = runWorld(['--suite', 'sub/setup-throw.mjs']);
+    assert.equal(subCrash.status, 3, `sub/setup-throw.mjs must be never-ran, got ${subCrash.status}: ${subCrash.stdout}${subCrash.stderr}`);
+    assert.match(subCrash.stderr + subCrash.stdout, /threw while loading/);
+    const subCatches = runWorld(['--suite', 'sub/catches.mjs']);
+    assert.equal(subCatches.status, 0, `sub/catches.mjs must still be caught: ${subCatches.stdout}${subCatches.stderr}`);
+    assert.match(subCatches.stdout, /verdict: mutant-caught/);
+    const subPasses = runWorld(['--suite', 'sub/passes.mjs']);
+    assert.equal(subPasses.status, 2, `sub/passes.mjs must be fix-does-not-close: ${subPasses.stdout}${subPasses.stderr}`);
 
     // a script suite is out of scope unless declared, and then the SAME decoy comment is inert
     const eDefault = runWorld(['--suite', 'e-script.mjs']);
