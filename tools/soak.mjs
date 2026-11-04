@@ -1150,7 +1150,10 @@ async function main() {
       `${options.cycles} cycles, ${options.updates} worker updates, ${options.offline} offline toggles`);
     console.log(`  heap (after GC): ${heapSeries.map((bytes) => mb(bytes)).join(' -> ')} MB ` +
       `(growth ${mb(heapGrowth)} MB, budget ${options.heapBudgetMb} MB)`);
-    console.log(`  audio: contexts ${contextMin}..${contextMax}, live sources max ${liveSourcesMax}, ` +
+    // liveSourcesMax lived inside audioNodesReleased() - out of scope here, so the
+    // summary crashed with a ReferenceError AFTER the verdict printed (pre-existing
+    // since fa14fb5; found by the nxuv.32 GREEN run, which read PASS and exited 1).
+    console.log(`  audio: contexts ${contextMin}..${contextMax}, live sources max ${Math.max(...samples.map((point) => point.liveSources))}, ` +
       `created ${afterCycles.sourcesCreated}, ended ${afterCycles.sourcesEnded}`);
     console.log(`  renderer: listeners delta ${listenerDelta}, nodes delta ${nodeDelta}, ` +
       `documents ${finalSample.documents}`);
