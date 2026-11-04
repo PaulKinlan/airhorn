@@ -31,7 +31,7 @@
  * Exit: 0 hole-proven, 1 not-reproducible, 2 fix-does-not-close, 3 refused/error.
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
@@ -152,7 +152,7 @@ export function verdictFor({ oldRc, newRc }) {
 }
 
 function parseArgs(argv) {
-  const args = { allowTestMutation: false, dryRun: false };
+  const args = { allowTestMutation: false, dryRun: false, timeoutMs: DEFAULT_TIMEOUT_MS };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === '--allow-test-mutation') { args.allowTestMutation = true; continue; }
@@ -167,27 +167,92 @@ function parseArgs(argv) {
     else if (flag === '--suite') args.suite = value;
     else if (flag === '--suite-old') args.suiteOld = value;
     else if (flag === '--build') args.build = value;
+    else if (flag === '--timeout-ms') {
+      const ms = Number(value);
+      if (!Number.isFinite(ms) || ms <= 0) throw new Error(`--timeout-ms must be a positive number of milliseconds, not ${value}`);
+      args.timeoutMs = ms;
+    }
     else throw new Error(`unknown flag ${flag}`);
   }
   return args;
 }
 
-function run(command, shellArgs, cwd, { captureStderr = false, env = process.env, reportPipe = false } = {}) {
-  const result = spawnSync(command, shellArgs, {
-    cwd,
-    env,
-    // fd 3 is a PIPE, not a path (airhorn-gwcm): the suite is handed a channel it can only write
-    // to, never a filename it or a sibling it spawns can poll and rewrite after the reporter's
-    // final write. The parent is the only reader.
-    stdio: reportPipe ? ['ignore', 'inherit', 'pipe', 'pipe'] : captureStderr ? ['ignore', 'inherit', 'pipe'] : 'inherit',
-    encoding: 'utf8',
+/** How long one child run may take before it is killed. A bound, not a habit. */
+export const DEFAULT_TIMEOUT_MS = 120000;
+/** The child in flight, so a signal or a bound can reach it. */
+let activeChild = null;
+
+/**
+ * Kill the run in flight AND the processes it started.
+ *
+ * Both halves are load-bearing, and this is measured: a check once sat for 120 minutes because
+ * suites ran through spawnSync, which blocks, so no timer could fire (reaper event 2026-11-04).
+ * Bounding the run alone is not enough either - node's test runner runs each suite in a child of
+ * the process we spawn, and that child survives a kill sent to our direct child only. So every run
+ * is the leader of its own process group and the kill goes to the GROUP. Where containment is
+ * available the run also lives in a PID namespace (airhorn-4h8l), which is the real guarantee; this
+ * is the path that works when it is not.
+ */
+export function killRunTree(signal = 'SIGKILL') {
+  if (!activeChild) return false;
+  const { pid } = activeChild;
+  let killed = false;
+  try {
+    process.kill(-pid, signal);
+    killed = true;
+  } catch {
+    // the group is gone (or was never a group leader): fall back to the process itself
+  }
+  try {
+    activeChild.kill(signal);
+    killed = true;
+  } catch {
+    // already gone
+  }
+  return killed;
+}
+
+/**
+ * One child, asynchronously, BOUNDED, in its own process group.
+ *
+ * spawnSync cannot do this: it blocks, so nothing can interrupt it and no timer can fire - which is
+ * exactly how a hanging suite became a 120-minute process. The result carries `timedOut`, and a
+ * timed-out run is a named refusal - never a verdict.
+ */
+function run(command, shellArgs, cwd, { captureStderr = false, env = process.env, reportPipe = false, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(command, shellArgs, {
+      cwd,
+      env,
+      // fd 3 is a PIPE, not a path (airhorn-gwcm): the suite is handed a channel it can only write
+      // to, never a filename it or a sibling it spawns can poll and rewrite after the reporter's
+      // final write. The parent is the only reader.
+      stdio: reportPipe ? ['ignore', 'inherit', 'pipe', 'pipe'] : captureStderr ? ['ignore', 'inherit', 'pipe'] : 'inherit',
+      // Its own process group, so killRunTree reaches node's per-file child as well.
+      detached: true,
+    });
+    activeChild = child;
+    let stderr = '';
+    let channel = '';
+    let timedOut = false;
+    let settled = false;
+    const finish = (rc) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (activeChild === child) activeChild = null;
+      if (captureStderr && stderr) process.stderr.write(stderr);
+      resolve({ rc, stderr, channel, timedOut });
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killRunTree('SIGKILL');
+    }, timeoutMs);
+    if (child.stderr) child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    if (reportPipe && child.stdio[3]) child.stdio[3].on('data', (chunk) => { channel += String(chunk); });
+    child.on('error', () => finish(1));
+    child.on('close', (code) => finish(code === null ? 1 : code));
   });
-  if (captureStderr && result.stderr) process.stderr.write(result.stderr);
-  return {
-    rc: result.status === null ? 1 : result.status,
-    stderr: result.stderr || '',
-    channel: reportPipe ? (result.output && result.output[3]) || '' : '',
-  };
 }
 
 /**
@@ -233,6 +298,9 @@ export function readChannel(text, nonce) {
       realFailed: final.realFailed,
       fileLevelFailed: final.fileLevelFailed,
       wrapperEvents: final.wrapperEvents,
+      // Carried, not dropped: without this the conservative refusal below is unreachable through the
+      // real call path (review finding airhorn-4a3p).
+      unattributed: final.unattributed,
       failing: final.failing,
     },
     problem: null,
@@ -268,14 +336,14 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
   if (report.driver.importFailed) {
     return { mode: 'never-ran', problem: `threw while loading (${report.driver.reason || 'no reason reported'}), so NO test ever ran and this is not a caught mutant (exit ${exitCode}, ${report.realTests} test event(s) seen). If this is a script suite whose top-level assertion failed, say so with --suite-mode script` };
   }
-  if (typeof report.realTests !== 'number') {
-    return { mode: 'never-ran', problem: `produced no test counts (exit ${exitCode}), so nothing was measured` };
-  }
   // An event the reporter could not attribute to a file could be the driver's own file-level entry
   // under a spelling it did not recognise. Letting it pass as a real test is how a run with no test
   // in it becomes a caught mutant, so it is refused by name instead (airhorn-u1v2).
   if (typeof report.unattributed === 'number' && report.unattributed > 0) {
     return { mode: 'never-ran', problem: `${report.unattributed} runner event(s) could not be attributed to a file, so nothing about the mutant is attributable (exit ${exitCode})` };
+  }
+  if (typeof report.realTests !== 'number') {
+    return { mode: 'never-ran', problem: `produced no test counts (exit ${exitCode}), so nothing was measured` };
   }
   // A failure OUTSIDE any test is its own named state, whatever the exit code: the driver saw a
   // crash after the load, or the run ended non-zero with no failing test (airhorn-so88/a6ch).
@@ -356,13 +424,16 @@ export function containmentGuaranteeLine() {
     : 'containment: NONE - PID namespaces are unavailable here, so a detached child of a suite run SURVIVES the verdict; the verdict is still honest about the mutant, but the host is not cleaned (airhorn-4h8l)';
 }
 
-function runSuite(suite, cwd, label, suiteMode) {
+async function runSuite(suite, cwd, label, suiteMode, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const presence = suitePresenceProblem(suite, cwd);
   if (presence) return { problem: presence };
+  // Containment and the bound are separate guarantees: a contained run can still hang, and a
+  // hanging run is a wedge with a namespace around it.
+  const contained = containmentPrefix();
   if (suiteMode === 'script') {
-    const contained = containmentPrefix();
-    const ran = run(contained.length ? contained[0] : process.execPath,
-      contained.length ? [...contained.slice(1), process.execPath, suite] : [suite], cwd, { captureStderr: true });
+    const ran = await run(contained.length ? contained[0] : process.execPath,
+      contained.length ? [...contained.slice(1), process.execPath, suite] : [suite], cwd, { captureStderr: true, timeoutMs });
+    if (ran.timedOut) return { rc: null, timedOut: true, problem: `${label} [never-ran] did not finish within ${timeoutMs}ms and was killed with its process group, so nothing was measured` };
     const classified = classifyRun({ report: null, exitCode: ran.rc, suiteMode });
     if (classified.problem) return { problem: `${label} [${classified.mode}] ${classified.problem}` };
     return { rc: classified.rc };
@@ -372,14 +443,16 @@ function runSuite(suite, cwd, label, suiteMode) {
   // executed, instead of us guessing the suite's kind from its text (airhorn-u1v2).
   // The runner is pointed at the driver, not at the suite: the driver records whether the suite
   // LOADED, which is the only spelling-proof evidence that any test could have run (airhorn-lnme).
-  const contained = containmentPrefix();
   const nodeArgs = ['--test', '--test-reporter', REPORTER, DRIVER];
-  const ran = run(contained.length ? contained[0] : process.execPath,
+  const ran = await run(contained.length ? contained[0] : process.execPath,
     contained.length ? [...contained.slice(1), process.execPath, ...nodeArgs] : nodeArgs, cwd, {
     captureStderr: true,
     reportPipe: true,
+    timeoutMs,
     env: childEnv(path.resolve(cwd, suite), nonce),
   });
+  // A run we had to kill measured nothing - not even a report worth reading.
+  if (ran.timedOut) return { rc: null, timedOut: true, problem: `${label} [never-ran] did not finish within ${timeoutMs}ms and was killed with its process group, so nothing was measured` };
   const channel = readChannel(ran.channel, nonce);
   const report = channel.records;
   if (channel.problem) return { problem: `${label} [report-not-trustworthy] ${channel.problem}` };
@@ -390,7 +463,7 @@ function runSuite(suite, cwd, label, suiteMode) {
   return { rc: classified.rc };
 }
 
-export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
+export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   let args;
   try {
     args = parseArgs(argv);
@@ -435,7 +508,15 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
 
     if (args.build) {
       console.log(`building: ${args.build}`);
-      const buildRc = run('bash', ['-lc', args.build], cwd).rc;
+      // run() is async: an un-awaited call puts a PROMISE where an exit code belongs, and a Promise
+      // is truthy, so the build could never fail. Every call site is awaited.
+      const build = await run('bash', ['-lc', args.build], cwd, { timeoutMs: args.timeoutMs });
+      if (build.timedOut) {
+        console.error(`mutation-check: refusing: the build did not finish within ${args.timeoutMs}ms and was killed - an unbuilt mutant proves nothing`);
+        mutantRc = 3;
+        return 3;
+      }
+      const buildRc = build.rc;
       if (buildRc !== 0) {
         console.error(`mutation-check: the build failed (rc=${buildRc}) - a mutant that does not build proves nothing`);
         mutantRc = 3;
@@ -445,7 +526,7 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
 
     // A suite that could not run is UNMEASURED, never "caught the mutant" (airhorn-cmr1).
     if (args.suiteOld) {
-      const baseline = runSuite(args.suiteOld, cwd, 'the OLD suite', args.suiteMode || 'node-test');
+      const baseline = await runSuite(args.suiteOld, cwd, 'the OLD suite', args.suiteMode || 'node-test', args.timeoutMs);
       if (baseline.problem) {
         console.error(`mutation-check: refusing: ${baseline.problem}`);
         mutantRc = 3;
@@ -453,7 +534,7 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
       }
       baselineRc = baseline.rc;
     }
-    const judged = runSuite(args.suite, cwd, 'the suite', args.suiteMode || 'node-test');
+    const judged = await runSuite(args.suite, cwd, 'the suite', args.suiteMode || 'node-test', args.timeoutMs);
     if (judged.problem) {
       console.error(`mutation-check: refusing: ${judged.problem}`);
       mutantRc = 3;
@@ -485,5 +566,13 @@ function invokedDirectly() {
 }
 
 if (invokedDirectly()) {
-  process.exitCode = main();
+  // A fleet SIGTERM (the reaper) must not leave the run's process group behind either.
+  const onSignal = (signal) => {
+    killRunTree('SIGKILL');
+    console.error(`mutation-check: interrupted by ${signal} - the run was killed with its process group and no verdict was scored`);
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  };
+  process.on('SIGINT', () => onSignal('SIGINT'));
+  process.on('SIGTERM', () => onSignal('SIGTERM'));
+  process.exitCode = await main();
 }
