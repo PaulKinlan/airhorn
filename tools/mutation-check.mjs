@@ -205,6 +205,12 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
   if (!report || !report.driver) {
     return { mode: 'never-ran', problem: `produced no record of the suite loading (exit ${exitCode}), so nothing was measured - a suite that never ran proves nothing about the mutant` };
   }
+  if (report.driver.importFailed) {
+    return { mode: 'never-ran', problem: `threw while loading (${report.driver.reason || 'no reason reported'}), so NO test ever ran and this is not a caught mutant (exit ${exitCode}, ${report.realTests} test event(s) seen). If this is a script suite whose top-level assertion failed, say so with --suite-mode script` };
+  }
+  if (typeof report.realTests === 'number' && report.realTests === 0) {
+    return { mode: 'never-ran', problem: `registered no tests (${report.wrapperEvents || 0} driver-level event(s) seen${report.fileLevelFailed ? ', the driver file failed as a whole' : ''}), so nothing was measured - a suite with no tests proves nothing about the mutant` };
+  }
   if (report.driver.crashedOutsideTest) {
     return { mode: 'never-ran', problem: `${report.driver.reason || 'the suite failed outside any test after it loaded'}, so NO test ever ran and this is not a caught mutant (exit ${exitCode})` };
   }
@@ -215,6 +221,13 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
     return { mode: 'never-ran', problem: `the run produced no test counts (exit ${exitCode}), so nothing was measured` };
   }
   if (report.realFailed > 0) return { mode: 'caught', rc: 1, failing: report.failing };
+  // Tests ran and none failed, but the RUN did not end cleanly: something failed outside the
+  // tests (a suite that strips the driver's handlers and then crashes asynchronously is the
+  // concrete case, airhorn-a6ch). A clean pass exits 0; anything else is not a measurement of
+  // "the suite accepts this mutant".
+  if (exitCode !== 0) {
+    return { mode: 'never-ran', problem: `the run exited ${exitCode} with no failing test (${report.wrapperEvents || 0} driver-level event(s)), so something failed outside the tests and nothing about the mutant was measured` };
+  }
   return { mode: 'passed', rc: 0 };
 }
 
@@ -228,7 +241,12 @@ const DRIVER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lib', 's
  * itself under test.
  */
 function childEnv(reportPath, suitePath) {
-  const env = { ...process.env, MUTATION_SUITE_REPORT: reportPath, MUTATION_SUITE_FILE: suitePath };
+  const env = {
+    ...process.env,
+    MUTATION_SUITE_REPORT: reportPath,
+    MUTATION_SUITE_FILE: suitePath,
+    MUTATION_DRIVER_FILE: DRIVER,
+  };
   delete env.NODE_TEST_CONTEXT;
   delete env.NODE_TEST_ISOLATION;
   return env;

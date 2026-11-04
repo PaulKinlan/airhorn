@@ -216,6 +216,16 @@ test('classifyRun decides from execution evidence only: the driver record and th
   // counts missing entirely is also not a measurement
   assert.equal(classifyRun({ report: { driver: { importFailed: false } }, exitCode: 0 }).mode, 'never-ran');
 
+  // airhorn-a6ch: the driver's own file-level event is separated by data.file (the driver path),
+  // so a suite that strips the driver's handlers and then crashes cannot be scored as a caught
+  // mutant; and a run that exits non-zero with no failing test measured nothing.
+  const stripped = classifyRun({ report: { driver: { importFailed: false }, realTests: 1, realPassed: 1, realFailed: 0, wrapperEvents: 1, fileLevelFailed: true }, exitCode: 1 });
+  assert.equal(stripped.mode, 'never-ran', 'a run that died outside its tests is not a caught mutant');
+  assert.match(stripped.problem, /exited 1 with no failing test/);
+  const noTests = classifyRun({ report: { driver: { importFailed: false }, realTests: 0, realFailed: 0, wrapperEvents: 1, fileLevelFailed: true }, exitCode: 1 });
+  assert.equal(noTests.mode, 'never-ran');
+  assert.match(noTests.problem, /registered no tests/);
+
   // a declared script suite is judged by its exit code: its top-level throw IS the failure
   assert.deepEqual(classifyRun({ report: null, exitCode: 1, suiteMode: 'script' }), { mode: 'caught', rc: 1 });
   assert.deepEqual(classifyRun({ report: null, exitCode: 0, suiteMode: 'script' }), { mode: 'passed', rc: 0 });
@@ -238,6 +248,9 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     write('b-indirect-registration.mjs', "import './register.mjs';\nimport './setup.mjs';\n");
     write('c-decoy.mjs', "// from \"node:test\" - a DECOY comment: it must not change the classification\nimport './indirect.mjs';\nimport test from 'node:test';\ntest('x', () => {});\n");
     write('d-passes.mjs', "import test from 'node:test';\ntest('green', () => {});\n");
+    // airhorn-a6ch: the suite strips the driver's crash handlers, then crashes asynchronously -
+    // the wrapper event must be attributed to the DRIVER, not counted as a failing test.
+    write('g-strip-handlers.mjs', "import test from 'node:test';\ntest('one', () => {});\nprocess.removeAllListeners('uncaughtException');\nprocess.removeAllListeners('unhandledRejection');\nsetImmediate(() => { throw new Error('strip boom'); });\n");
     // airhorn-so88: an async throw AFTER a clean import (the reviewer's repro shape)
     write('f-async-crash.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetImmediate(() => { throw new Error('async boot failure'); });\n");
     // airhorn-lnme: node names the file-level event with the path AS PASSED, so a
@@ -265,6 +278,10 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     const d = runWorld(['--suite', 'd-passes.mjs']);
     assert.equal(d.status, 2, `a passing suite must be fix-does-not-close, not unmeasured: ${d.stdout}${d.stderr}`);
     assert.match(d.stdout, /verdict: fix-does-not-close/);
+
+    const stripped = runWorld(['--suite', 'g-strip-handlers.mjs']);
+    assert.equal(stripped.status, 3, `a suite that strips the handlers then crashes must be never-ran, got ${stripped.status}: ${stripped.stdout}${stripped.stderr}`);
+    assert.match(stripped.stderr + stripped.stdout, /exited 1 with no failing test|registered no tests|crashed/i);
 
     const asyncCrash = runWorld(['--suite', 'f-async-crash.mjs']);
     assert.equal(asyncCrash.status, 3, `an async crash after the import must be never-ran, got ${asyncCrash.status}: ${asyncCrash.stdout}${asyncCrash.stderr}`);

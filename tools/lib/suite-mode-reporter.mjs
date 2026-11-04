@@ -27,13 +27,28 @@ export default async function* suiteModeReporter(source) {
   let realTests = 0;
   let realPassed = 0;
   let realFailed = 0;
+  let fileLevelFailed = false;
   const failing = [];
   let n = 0;
+
+  // The DRIVER's own file-level event is the wrapper node emits when the driver file fails as a
+  // whole (an async crash after the suite loaded). It is identified by `data.file` pointing at the
+  // driver - an absolute path this tool chose - so nothing the suite's TEXT says can impersonate it,
+  // and it stays separable even if the suite strips the driver's uncaughtException handlers
+  // (airhorn-a6ch). Note nesting does NOT separate them: measured on node 24, real tests and the
+  // wrapper both report nesting 0.
+  const driverFile = process.env.MUTATION_DRIVER_FILE || null;
+  let wrapperEvents = 0;
 
   for await (const event of source) {
     if (event.type !== 'test:pass' && event.type !== 'test:fail') continue;
     const data = event.data || {};
     const name = typeof data.name === 'string' ? data.name : '<unnamed>';
+    if (driverFile && data.file === driverFile) {
+      wrapperEvents += 1;
+      if (event.type === 'test:fail') fileLevelFailed = true;
+      continue;
+    }
     realTests += 1;
     if (event.type === 'test:fail') {
       realFailed += 1;
@@ -56,7 +71,7 @@ export default async function* suiteModeReporter(source) {
       driver = null;
     }
   }
-  const report = { driver, realTests, realPassed, realFailed, failing: failing.slice(0, 10) };
+  const report = { driver, realTests, realPassed, realFailed, fileLevelFailed, wrapperEvents, failing: failing.slice(0, 10) };
   if (target) {
     try {
       fs.writeFileSync(target, JSON.stringify(report));
