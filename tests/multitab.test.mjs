@@ -640,8 +640,13 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       // badge move. This look is live - there is nothing to acknowledge yet.
       await A2.clickHorn();
       await waitUntil(async () => (await A2.hornState()).playing === false, 6000);
-      const aCount = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
-      assert(aCount > 0, 'a foreground blast did not advance the shared badge count');
+      // Same race as the count above (airhorn-wzcw): wait for the write rather than read once.
+      let aCount = 0;
+      const advanced = await waitUntil(async () => {
+        aCount = Number(await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`));
+        return aCount > 0;
+      }, 6000);
+      assert(advanced, `a foreground blast did not advance the shared badge count (still ${aCount})`);
       // The user switches to tab B: B is now the tab being looked at, so B
       // acknowledges the count ("activity since you last looked"). The badge
       // is one per origin, so the acknowledgement must clear it for A2 too -
@@ -683,8 +688,14 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       // in B starts the shared count from one again.
       await B.clickHorn();
       await waitUntil(async () => (await B.hornState()).playing === false, 6000);
-      const afterBlast = await B.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
-      assert(afterBlast === 1,
+      // Read the count by WAITING for it, not once after the blast's audio finished: the write is
+      // asynchronous, so a loaded host read the acknowledged 0 here (airhorn-wzcw).
+      let afterBlast = 0;
+      const restarted = await waitUntil(async () => {
+        afterBlast = Number(await B.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`));
+        return afterBlast === 1;
+      }, 6000);
+      assert(restarted && afterBlast === 1,
         `after an acknowledgement a fresh blast did not restart the shared count at 1 (got ${afterBlast}) (airhorn-7x7m)`);
       console.log('  switching back to the app cleared the shared count for every tab, a fresh tab boots owing nothing, and a fresh blast restarts the count at 1.');
     }
@@ -696,8 +707,12 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       // the blocked tab to (not) disturb.
       await B.clickHorn();
       await waitUntil(async () => (await B.hornState()).playing === false, 6000);
-      const gCount = await B.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
-      assert(gCount > 0, 'a foreground blast did not advance the shared badge count');
+      let gCount = 0;
+      const gAdvanced = await waitUntil(async () => {
+        gCount = Number(await B.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`));
+        return gCount > 0;
+      }, 6000);
+      assert(gAdvanced, `a foreground blast did not advance the shared badge count (still ${gCount})`);
       // The airhorn-danq repro: a tab whose localStorage access THROWS
       // (blocked cookies/site data, some embedded webviews). The app must
       // still boot, must not touch the badge whose count it cannot know, and
