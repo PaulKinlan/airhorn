@@ -52,9 +52,16 @@
  *                                           import crash, an asynchronous boot failure,
  *                                           a stripped handler, a script whose top-level
  *                                           assertion fails, a hung run.
- *     control passes, mutant fails       -> caught
+ *     control passes, mutant fails inside a test -> caught
  *     control passes, mutant passes      -> passed (fix-does-not-close)
  *     mutant hangs                       -> never-ran (refused, named)
+ *
+ * AND the mutant failure must be a TEST's: (i) a test STARTED, and (ii) an assertion INSIDE
+ * it failed. Both facts come from the runner's report (see tools/lib/mutation-reporter.mjs),
+ * which the suite cannot write to. A run that failed at load, threw outside a test, or
+ * asserted at a script's top level is refused with that named - it is not a caught mutant
+ * however non-zero its exit code is. A file that registers no test at all is refused too,
+ * because a clean exit from a suite with no tests measured nothing.
  *
  * A "caught" is then re-checked: the source is restored and the suite is run once more,
  * and if it does not pass again the tool refuses. A flaky suite that fails on its second
@@ -196,7 +203,7 @@ function describeRun(run) {
  * A suite that does not pass the control run has not measured the mutant: whatever it is
  * doing, the difference between the two runs cannot be attributed to the mutation.
  */
-export function classifyPair({ control, mutant }) {
+export function classifyPair({ control, mutant, controlPoints = null, mutantPoints = null, suiteMode = 'node-test' }) {
   if (!control || !mutant) {
     return { mode: 'never-ran', problem: 'both the control run and the mutant run are needed; a missing measurement is not a result' };
   }
@@ -218,8 +225,26 @@ export function classifyPair({ control, mutant }) {
       problem: `the suite did not finish with the mutant in place (timeout): a hang is not a caught mutant, so nothing was measured`,
     };
   }
+  // A declared script suite is judged by its exit code: the top-level assertion IS the
+  // failure, and there is no runner to report points (its own documented escape).
+  if (suiteMode === 'script') {
+    return mutant.rc !== 0 ? { mode: 'caught', rc: mutant.rc, failing: ['(script exit code)'] } : { mode: 'passed', rc: 0 };
+  }
+  // 'Caught' needs a test that STARTED and a failing assertion INSIDE it. Anything else the
+  // run does - a load crash, a throw outside a test, a top-level script assertion - is a
+  // named refusal, never a caught mutant.
   if (mutant.rc !== 0) {
-    return { mode: 'caught', rc: mutant.rc };
+    const realFailed = mutantPoints ? mutantPoints.realFailed : [];
+    if (realFailed.length === 0) {
+      const observed = mutantPoints
+        ? `${mutantPoints.started} test(s) started, ${mutantPoints.fileLevelFailed.length} file-level failure(s)`
+        : 'no runner report was produced';
+      return {
+        mode: 'never-ran',
+        problem: `the suite failed with NO failing test inside it (${describeRun(mutant)}; ${observed}): a load crash, a throw outside any test, or a top-level script assertion is not a caught mutant. If it is a script suite whose top-level assertion is the check, declare it with --suite-mode script`,
+      };
+    }
+    return { mode: 'caught', rc: mutant.rc, failing: realFailed };
   }
   return { mode: 'passed', rc: 0 };
 }
@@ -303,6 +328,9 @@ function parseArgs(argv) {
  */
 let activeChild = null;
 
+/** The reporter below runs in the RUNNER process, so the suite cannot write to its stream. */
+const REPORTER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lib', 'mutation-reporter.mjs');
+
 export function killActiveChild() {
   if (activeChild) {
     try {
@@ -354,7 +382,46 @@ function spawnNode(argv, cwd, timeoutMs) {
 
 /** Run the suite once. The same invocation is used for the control and the mutant run. */
 export function runSuite({ suite, cwd, suiteMode = 'node-test', timeoutMs = DEFAULT_TIMEOUT_MS }) {
-  return spawnNode(suiteMode === 'script' ? [suite] : ['--test', suite], cwd, timeoutMs);
+  // The report comes from tools/lib/mutation-reporter.mjs, which loads in the RUNNER
+  // process: the suite's own output can only reach that stream as diagnostics, so the suite
+  // cannot inject a passing or failing POINT. That is what makes this trustworthy where a
+  // report FILE the suite writes was not (airhorn-gwcm).
+  return spawnNode(suiteMode === 'script' ? [suite] : ['--test', `--test-reporter=${REPORTER}`, suite], cwd, timeoutMs);
+}
+
+/**
+ * Read the runner's report (captured stdout) for what actually happened.
+ *
+ * The runner accounts for the FILE as well as for tests: a load crash, a throw after the
+ * tests finished, a top-level script assertion and a file with no tests at all all become a
+ * single file-level entry. The reporter marks that entry structurally - its name is the
+ * basename of its OWN file, a comparison of two fields on the same event, so how the suite
+ * was spelled on the command line (airhorn-lnme) and what its source says (airhorn-u1v2)
+ * cannot move it. A describe() block is a container, so it is not an assertion either.
+ */
+export function parseReport(stdout) {
+  const lines = String(stdout || '').split('\n');
+  const points = [];
+  for (const line of lines) {
+    if (!line.startsWith('{"event":')) continue;
+    try {
+      const point = JSON.parse(line);
+      if (point && (point.event === 'pass' || point.event === 'fail')) points.push(point);
+    } catch {
+      // a torn line is not a point
+    }
+  }
+  // A real test is the runner's account of a TEST: not the file-level entry, and not a suite
+  // (a describe() block is a container, not an assertion).
+  const real = points.filter((point) => !point.fileLevel && point.detailsType !== 'suite');
+  return {
+    started: real.length,
+    realFailed: real.filter((point) => point.event === 'fail').map((point) => point.name),
+    fileLevelFailed: points.filter((point) => point.fileLevel && point.event === 'fail'),
+    fileLevelPassed: points.filter((point) => point.fileLevel && point.event === 'pass'),
+    reasons: points.filter((point) => point.event === 'fail' && point.reason).map((point) => point.reason),
+    points,
+  };
 }
 
 function runBuild(build, cwd, timeoutMs) {
@@ -436,12 +503,18 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   console.log(`control: ${args.suite} against the unmutated ${args.file}`);
   const control = await runSuite({ suite: args.suite, ...runArgs });
   if (interrupted) return 143;
-  const preCheck = classifyPair({ control, mutant: control });
-  if (preCheck.mode === 'never-ran' && (control.timedOut || control.rc !== 0)) {
-    console.error(`mutation-check: refusing: ${preCheck.problem}${tail(control.stderr || control.stdout)}`);
+  const controlPoints = parseReport(control.stdout);
+  if (control.timedOut || control.rc !== 0) {
+    console.error(`mutation-check: refusing: the suite does not pass on the UNMUTATED source (${describeRun(control)}): a suite that already fails the code as written cannot show that the mutant was caught, so nothing was measured. Fix the suite (or the code) first - this is the control run${tail(control.stderr || control.stdout)}`);
     return 3;
   }
-  console.log(`control: ${describeRun(control)} - the suite passes the code as written`);
+  // (i) A TEST must have STARTED. A file that registers nothing - or only the runner's
+  // synthetic file-level entry - measured nothing, however cleanly it exits.
+  if (args.suiteMode === 'node-test' && controlPoints.started === 0) {
+    console.error(`mutation-check: refusing: the suite registered no test on the UNMUTATED source (${describeRun(control)}; ${controlPoints.fileLevelFailed.length} file-level failure(s)): a suite with no tests proves nothing about the mutant${controlPoints.fileLevelFailed.length === 0 ? '. If this is a script suite whose top-level assertion is the check, declare it with --suite-mode script' : ''}`);
+    return 3;
+  }
+  console.log(`control: ${describeRun(control)} - the suite passes the code as written (${controlPoints.started} test(s) started)`);
 
   if (args.dryRun) {
     console.log(`mutation-check: --dry-run, so nothing was mutated: the control run passed and ${applied.content.length - original.length >= 0 ? '+' : ''}${applied.content.length - original.length} bytes would change in ${args.file}`);
@@ -449,6 +522,7 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   }
 
   let mutantRc = null;
+  let caughtFailing = [];
   let baselineRc = null;
   let refused = false;
   /**
@@ -509,13 +583,15 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
 
     const mutant = await runSuite({ suite: args.suite, ...runArgs });
     if (interrupted) return 143;
-    const classified = classifyPair({ control, mutant });
+    const mutantPoints = parseReport(mutant.stdout);
+    const classified = classifyPair({ control, mutant, controlPoints, mutantPoints, suiteMode: args.suiteMode });
     if (classified.mode === 'never-ran') {
       console.error(`mutation-check: refusing: ${classified.problem}${tail(mutant.stderr || mutant.stdout)}`);
       refused = true;
       return 3;
     }
     mutantRc = classified.rc;
+    if (classified.failing) caughtFailing = classified.failing;
   } finally {
     // The signal handler has already restored, rebuilt and printed; doing it again here would
     // race it and print a second "restored" line (airhorn-rf0u round 2).
@@ -547,6 +623,9 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   }
   const result = verdictFor({ oldRc: args.suiteOld ? baselineRc : null, newRc: mutantRc });
   console.log(`verdict: ${result.verdict} (${result.why})`);
+  if (mutantRc !== 0 && caughtFailing.length) {
+    console.log(`failed test(s) inside the suite: ${caughtFailing.join(', ')}`);
+  }
   if (!args.suiteOld) {
     console.log('note: --suite-old was not given, so "mutant-caught" cannot say whether the hole was ever real (that is what "hole-proven" is for)');
   }

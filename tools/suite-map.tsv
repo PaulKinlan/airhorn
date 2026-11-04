@@ -119,6 +119,9 @@ tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
 # product code? is the CONTROL run clean?) is covered by its own unit suite, alongside the
 # tools/* gate-smoke row every tool already selects (airhorn-f41e, airhorn-u1v2).
 tools/mutation-check.mjs	tests/mutation-check.test.js
+# The reporter the mutation checker runs is the thing that decides what "a test actually
+# failed" means, so a change to it is gated on the suite that exercises every world.
+tools/lib/mutation-reporter.mjs	tests/mutation-check.test.js
 # tools/lib/** is the shared runtime the tools import (reap.mjs is the profile
 # marker sweep). It is NOT matched by `tools/*`, which does not cross a slash, so
 # a change to it used to select zero suites - a shared helper with no owner.

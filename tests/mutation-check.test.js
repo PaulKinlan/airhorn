@@ -88,9 +88,16 @@ test('a suite that is not on disk is refused by name, before anything runs', () 
 
 /* --- classification is the COMPARISON of two runs, not a reading of one -------- */
 
-test('the run pair: caught needs a passing control and a failing mutant', () => {
-  assert.deepEqual(classifyPair({ control: { rc: 0 }, mutant: { rc: 1 } }), { mode: 'caught', rc: 1 });
+test('caught needs a passing control, a failing mutant, and a TEST that failed inside it', () => {
+  const caught = classifyPair({ control: { rc: 0 }, mutant: { rc: 1 }, mutantPoints: { started: 2, realFailed: ['the answer'], fileLevelFailed: [] } });
+  assert.equal(caught.mode, 'caught');
+  assert.deepEqual(caught.failing, ['the answer']);
   assert.equal(classifyPair({ control: { rc: 0 }, mutant: { rc: 0 } }).mode, 'passed');
+  // (i)+(ii) enforced: no test started, or no failing test inside the run, is a REFUSAL
+  const outsideTest = classifyPair({ control: { rc: 0 }, mutant: { rc: 1 }, mutantPoints: { started: 1, realFailed: [], fileLevelFailed: [{ name: 'x' }] } });
+  assert.equal(outsideTest.mode, 'never-ran');
+  assert.match(outsideTest.problem, /NO failing test inside it/);
+  assert.equal(classifyPair({ control: { rc: 0 }, mutant: { rc: 1 }, mutantPoints: null }).mode, 'never-ran');
 });
 
 test('the run pair: a suite that fails the UNMUTATED source measured nothing', () => {
@@ -322,8 +329,8 @@ test('a forged report file or a hand-picked exit code cannot buy a green (airhor
   const dir = world({ 'forged-zero.test.mjs': forged(0), 'forged-two.test.mjs': forged(2) });
   try {
     const zero = check(dir, ['forged-zero.test.mjs']);
-    assert.equal(zero.status, 2, `a suite that runs nothing does not catch the mutant: ${zero.stdout}${zero.stderr}`);
-    assert.match(zero.stdout, /verdict: fix-does-not-close/);
+    assert.equal(zero.status, 3, `a suite that runs nothing is refused, and a forged report is inert: ${zero.stdout}${zero.stderr}`);
+    assert.doesNotMatch(zero.stdout, /verdict: mutant-caught/);
     const two = check(dir, ['forged-two.test.mjs']);
     assert.equal(two.status, 3, `a suite that fails the unmutated source measured nothing: ${two.stdout}${two.stderr}`);
     assert.doesNotMatch(two.stdout, /verdict: mutant-caught/);
@@ -332,27 +339,60 @@ test('a forged report file or a hand-picked exit code cannot buy a green (airhor
   }
 });
 
-test('a zero-test suite is fix-does-not-close, never a false green (airhorn-3wth)', () => {
+test('a zero-test suite is refused as a measurement, never a verdict (airhorn-3wth)', () => {
   const dir = world({ 'empty.test.mjs': "// nothing registered, nothing asserted\n" });
   try {
     const result = check(dir, ['empty.test.mjs']);
-    assert.equal(result.status, 2, result.stdout + result.stderr);
-    assert.match(result.stdout, /verdict: fix-does-not-close/);
+    assert.equal(result.status, 3, result.stdout + result.stderr);
+    assert.match(result.stderr, /registered no test/);
+    assert.doesNotMatch(result.stdout, /verdict:/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('a script suite is judged the same way, with or without --suite-mode script', () => {
+test('a script suite is refused by DEFAULT and named, and judged by exit code only when declared', () => {
   const dir = world({
     'script.mjs': "import { answer } from './src/subject.js';\nif (answer !== 41) throw new Error(`expected 41, saw ${answer}`);\n",
   });
   try {
-    for (const extra of [[], ['--suite-mode', 'script']]) {
-      const result = check(dir, ['script.mjs'], extra);
-      assert.equal(result.status, 0, `${extra.join(' ') || 'default'}: ${result.stdout}${result.stderr}`);
-      assert.match(result.stdout, /verdict: mutant-caught/);
-    }
+    // Its top-level assertion is not an assertion INSIDE a test, so it is a named refusal.
+    const refused = check(dir, ['script.mjs']);
+    assert.equal(refused.status, 3, `default: ${refused.stdout}${refused.stderr}`);
+    assert.match(refused.stderr, /registered no test|NO failing test inside it/);
+    assert.match(refused.stderr, /--suite-mode script/);
+    // Declared, it is judged by its exit code - the documented escape.
+    const declared = check(dir, ['script.mjs', '--suite-mode', 'script']);
+    assert.equal(declared.status, 0, `declared: ${declared.stdout}${declared.stderr}`);
+    assert.match(declared.stdout, /verdict: mutant-caught/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a mutant that breaks the module graph is a NAMED refusal, not a caught mutant', () => {
+  // The run fails, but nothing inside a test failed: the suite never got that far.
+  const dir = world({
+    'suite.test.mjs': "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from './src/subject.js';\nimport helper from './src/helper.js';\ntest('uses the helper', () => { assert.equal(helper(answer), 41); });\n",
+    'src/helper.js': 'export default function helper(value) { return value; }\n',
+  });
+  try {
+    // The mutation deletes the helper module's export, so the SUITE cannot load at all.
+    const result = spawnSync(process.execPath, [tool, '--file', 'src/helper.js', '--from', 'export default function helper', '--to', 'export default const', '--suite', 'suite.test.mjs'], { cwd: dir, encoding: 'utf8' });
+    assert.equal(result.status, 3, `a load failure is not a catch: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /NO failing test inside it|does not pass on the UNMUTATED source/);
+    assert.doesNotMatch(result.stdout, /verdict: mutant-caught/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a suite with no tests at all is refused up front - a clean exit from nothing measured nothing', () => {
+  const dir = world({ 'empty.test.mjs': '// this file registers no test\n' });
+  try {
+    const result = check(dir, ['empty.test.mjs']);
+    assert.equal(result.status, 3, `zero tests: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /registered no test/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
