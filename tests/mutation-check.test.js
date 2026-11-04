@@ -670,3 +670,41 @@ test('the unattributed refusal is reachable: a record that lost its file attribu
   const ok = classifyRun({ report: readChannel(`${clean}\n`, nonce).records, exitCode: 1, suiteMode: 'node-test' });
   assert.equal(ok.mode, 'caught');
 });
+
+test('a hanging suite is bounded: named refusal, and no process of the run outlives the check (reaper event, 2026-11-04)', () => {
+  // The fleet reaper found a 120-minute-old test-runner process of mine on this VM. The cause was
+  // that there was NO BOUND: suites ran through spawnSync, which blocks, so no timer could fire and
+  // the check could not be interrupted. This pins the bound, the refusal that names it, and that
+  // the killed run leaves nothing behind.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-reaper-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    fs.writeFileSync(path.join(tmp, 'hangs.test.mjs'), "import test from 'node:test';\ntest('never ends', () => new Promise(() => {}));\n");
+    const started = Date.now();
+    const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'hangs.test.mjs', '--timeout-ms', '1200'], { cwd: tmp, encoding: 'utf8', timeout: 30000 });
+    const elapsed = Date.now() - started;
+    assert.equal(result.status, 3, `a hang is a named refusal, not a verdict: ${result.stdout}${result.stderr}`);
+    assert.match(result.stdout + result.stderr, /did not finish within 1200ms/);
+    assert.match(result.stdout + result.stderr, /killed with its process group/);
+    assert.doesNotMatch(result.stdout, /verdict:/, 'a killed run scores nothing');
+    assert.ok(elapsed < 20000, `the bound must actually bound the run (took ${elapsed}ms)`);
+    // Nothing of the run may still be running. Identified by CWD, not by argv: node's per-file child
+    // runs the DRIVER, so the suite's name lives in its environment, never in its command line - an
+    // argv check passes while the process it is looking for is still alive.
+    const sandbox = fs.realpathSync(tmp);
+    const survivors = [];
+    for (const entry of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue;
+      let cwd;
+      try { cwd = fs.realpathSync(`/proc/${entry}/cwd`); } catch { continue; }
+      if (cwd !== sandbox) continue;
+      let args = '';
+      try { args = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8'); } catch { continue; }
+      survivors.push(`${entry} ${args.split('\0').slice(0, 3).join(' ')}`);
+    }
+    assert.deepEqual(survivors, [], `no process of the killed run may outlive the check: ${survivors.join(' | ')}`);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
