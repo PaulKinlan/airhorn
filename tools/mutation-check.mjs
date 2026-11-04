@@ -63,6 +63,20 @@
  *
  *     control passes -> mutant fails -> control passes again (code restored)
  *
+ * BUILD OUTPUT IS PART OF THE PHASE (airhorn-br28). If a suite can observe `--build`
+ * output (dist/), a run that measures stale bytes is not a measurement: so the build runs
+ * for each phase - unmutated, mutant, restored - and a build failure is a refusal, never a
+ * result. The restored build happens on every path, so dist/ can never keep the mutant.
+ *
+ * AN OLD SUITE HAS ITS OWN CONTROL. "--suite-old already fails the mutant" is only
+ * reportable if the OLD suite passes the unmutated source, otherwise a crashed OLD suite
+ * would read as not-reproducible.
+ *
+ * INTERRUPTION (airhorn-rf0u). SIGINT/SIGTERM run the same restore-and-verify as the
+ * finally block and exit non-zero. SIGKILL cannot be handled: if a check is ever killed
+ * hard between the write and the restore, the file is left mutated and the recovery is
+ * `git checkout -- <file>`; `git status` shows it.
+ *
  * That comparison cannot be moved by comments, whitespace, quoting, module specifiers,
  * path spellings, reporter hooks or forged report files, because none of them are read.
  * The price is two extra suite runs per check (one control, one re-check after a catch);
@@ -338,6 +352,38 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
 
   const runArgs = { cwd, suiteMode: args.suiteMode, timeoutMs: args.timeoutMs };
 
+  /**
+   * Build once for the phase that is on disk right now, and say which phase it was for.
+   * A suite can observe build output (dist/), so every run below needs a build made from
+   * the SAME source it is supposed to be measuring (airhorn-br28). Returns false when the
+   * build failed: that is a refusal, never a result.
+   */
+  const buildPhase = (label) => {
+    if (!args.build) return true;
+    console.log(`build (${label}): ${args.build}`);
+    const built = runBuild(args.build, cwd, args.timeoutMs);
+    if (built.status === 0) return true;
+    console.error(`mutation-check: refusing: the build failed for the ${label} phase (rc=${built.status}) - a run whose build output does not match the source it measures proves nothing${tail(built.stderr || built.stdout)}`);
+    return false;
+  };
+
+  // The restored source may still be sitting next to build output from a previous run, so
+  // the control build comes FIRST: the control run must measure the code as written.
+  if (!buildPhase('unmutated')) return 3;
+
+  // An OLD suite needs a control of its own, or "the OLD suite already fails the mutant"
+  // cannot be told apart from "the OLD suite crashes on anything" (rc 1 either way).
+  if (args.suiteOld) {
+    console.log(`old control: ${args.suiteOld} against the unmutated ${args.file}`);
+    const oldControl = runSuite({ suite: args.suiteOld, ...runArgs });
+    const judged = classifyPair({ control: oldControl, mutant: oldControl });
+    if (judged.mode === 'never-ran') {
+      console.error(`mutation-check: refusing: the OLD suite ${args.suiteOld} does not pass the unmutated ${args.file} (${describeRun(oldControl)}), so it cannot be used as a baseline - nothing was measured${tail(oldControl.stderr || oldControl.stdout)}`);
+      return 3;
+    }
+    console.log(`old control: ${describeRun(oldControl)} - the OLD suite passes the code as written`);
+  }
+
   // THE CONTROL RUN. Nothing has been written yet, so this is the code as it stands.
   // Everything downstream is only meaningful if this passes.
   console.log(`control: ${args.suite} against the unmutated ${args.file}`);
@@ -357,6 +403,30 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   let mutantRc = null;
   let baselineRc = null;
   let refused = false;
+  /**
+   * Put the original back and say so. Used by the finally block AND by the signal handlers
+   * below: a SIGTERM between the write and the restore must not leave a mutant on disk
+   * (airhorn-rf0u). SIGKILL cannot be handled - if the file is ever left mutated, the
+   * recovery is `git checkout -- <file>`, which the refusal message below names.
+   */
+  const restoreNow = (why = '') => {
+    try {
+      fs.writeFileSync(absolute, original);
+    } catch (error) {
+      console.error(`mutation-check: could not restore ${args.file}${why ? ` (${why})` : ''}: ${error.message} - recover with \`git checkout -- ${args.file}\``);
+      return false;
+    }
+    const restored = restoreVerified({ original, onDisk: fs.readFileSync(absolute, 'utf8') });
+    console.log(`restored ${args.file}: ${restored ? 'verified' : `NOT VERIFIED${why ? ` (${why})` : ''} - recover with \`git checkout -- ${args.file}\``}`);
+    return restored;
+  };
+  const onSignal = (signal) => {
+    restoreNow(signal);
+    console.error(`mutation-check: interrupted by ${signal} - the mutation was not scored`);
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
   try {
     fs.writeFileSync(absolute, applied.content);
     const check = mutationApplied({ original, onDisk: fs.readFileSync(absolute, 'utf8'), to: args.to });
@@ -367,14 +437,9 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     }
     console.log(`mutant applied to ${args.file} (${applied.content.length - original.length >= 0 ? '+' : ''}${applied.content.length - original.length} bytes), verified on disk`);
 
-    if (args.build) {
-      console.log(`building: ${args.build}`);
-      const built = runBuild(args.build, cwd, args.timeoutMs);
-      if (built.status !== 0) {
-        console.error(`mutation-check: the build failed (rc=${built.status}) - a mutant that does not build proves nothing${tail(built.stderr || built.stdout)}`);
-        refused = true;
-        return 3;
-      }
+    if (!buildPhase('mutant')) {
+      refused = true;
+      return 3;
     }
 
     if (args.suiteOld) {
@@ -396,11 +461,16 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     }
     mutantRc = classified.rc;
   } finally {
-    fs.writeFileSync(absolute, original);
-    const restored = restoreVerified({ original, onDisk: fs.readFileSync(absolute, 'utf8') });
-    console.log(`restored ${args.file}: ${restored ? 'verified' : 'NOT VERIFIED - check the file by hand'}`);
-    if (!restored) refused = true;
+    if (!restoreNow()) refused = true;
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
   }
+
+  // The restore left build output from the mutant behind unless the build runs again, so
+  // the tree must be rebuilt from the restored source before anything else measures it
+  // (airhorn-br28). This happens whether or not the mutant was caught: dist/ must never
+  // keep the mutant bytes for the next invocation.
+  if (!buildPhase('restored')) refused = true;
 
   if (refused) return 3;
 

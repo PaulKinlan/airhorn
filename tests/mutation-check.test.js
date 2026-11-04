@@ -407,6 +407,85 @@ test('a suite that is not deterministic is refused, not called a caught mutant',
   }
 });
 
+test('--build: every phase is built from the source it measures, so the catch is real and no mutant bytes are left in dist/ (airhorn-br28)', () => {
+  // The suite reads dist/, so a run that is not rebuilt for the phase it measures is
+  // measuring stale bytes. Before the fix the re-check ran against the MUTANT build and a
+  // genuine catch was refused as "not deterministic".
+  const files = {
+    'dist/product.js': 'export const answer = 41;\n',
+    'distsuite.test.mjs': [
+      "import test from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "import { answer } from './dist/product.js';",
+      "test('dist says 41', () => { assert.equal(answer, 41); });",
+    ].join('\n'),
+  };
+  const dir = world(files);
+  try {
+    const build = 'cp src/subject.js dist/product.js';
+    const first = check(dir, ['distsuite.test.mjs', '--build', build]);
+    assert.equal(first.status, 0, `a catch against a rebuilt dist is a catch: ${first.stdout}${first.stderr}`);
+    assert.match(first.stdout, /verdict: mutant-caught/);
+    assert.match(first.stdout, /build \(restored\)/, 'the restore is followed by a build from the restored source');
+    assert.equal(fs.readFileSync(path.join(dir, 'dist', 'product.js'), 'utf8'), 'export const answer = 41;\n', 'dist/ holds the restored build, not the mutant');
+    // The decisive part: run it again immediately. Before the fix the leftover mutant build
+    // made the NEXT invocation refuse its own control run.
+    const second = check(dir, ['distsuite.test.mjs', '--build', build]);
+    assert.equal(second.status, 0, `a second check is not poisoned by the first: ${second.stdout}${second.stderr}`);
+    assert.match(second.stdout, /verdict: mutant-caught/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--suite-old gets its own control, so a crashed OLD suite is refused instead of reading as not-reproducible', () => {
+  const dir = world({
+    'suite.test.mjs': NODE_TEST_SUITE,
+    'broken-old.test.mjs': "import './missing-module.mjs';\n",
+  });
+  try {
+    const result = check(dir, ['suite.test.mjs', '--suite-old', 'broken-old.test.mjs']);
+    assert.equal(result.status, 3, `an OLD suite that cannot run is not a baseline: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /OLD suite .* does not pass the unmutated/);
+    assert.doesNotMatch(result.stdout, /verdict: not-reproducible/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an interrupt between the write and the restore puts the file back (airhorn-rf0u)', async () => {
+  const dir = world({
+    'slow.test.mjs': [
+      "import test from 'node:test';",
+      "test('long enough to interrupt', async () => { await new Promise((r) => setTimeout(r, 1200)); });",
+    ].join('\n'),
+  });
+  const subject = path.join(dir, 'src', 'subject.js');
+  const original = fs.readFileSync(subject, 'utf8');
+  const { spawn } = await import('node:child_process');
+  try {
+    const child = spawn(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'slow.test.mjs', '--timeout-ms', '30000'], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Wait for the mutation to be ON DISK (not for a log line: stdout is a pipe and the
+    // write to it can trail the write to the file), then interrupt mid-run.
+    const deadline = Date.now() + 15000;
+    let mutated = false;
+    while (Date.now() < deadline) {
+      if (fs.readFileSync(subject, 'utf8') !== original) {
+        mutated = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.equal(mutated, true, 'the tool put the mutant on disk');
+    child.kill('SIGTERM');
+    const code = await new Promise((resolve) => child.on('close', resolve));
+    assert.notEqual(code, 0, 'an interrupted check does not report success');
+    assert.equal(fs.readFileSync(subject, 'utf8'), original, 'the interrupted run leaves the original, byte for byte');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the tool refuses a mutation that does not apply, and touches nothing', () => {
   const dir = world({ 'suite.test.mjs': NODE_TEST_SUITE });
   try {
