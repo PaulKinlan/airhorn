@@ -259,14 +259,37 @@ const tabInstrumentation = `
       };
     }
     const setItem = Storage.prototype.setItem;
+    const note = (value) => {
+      // Named lock, not "some lock": a write while an unrelated lock is held is
+      // still an unlocked write of THIS counter.
+      window.__badgeWrites.push({ value: String(value), inLock: window.__heldLocks.includes('airhorn:blast-count') });
+    };
     Storage.prototype.setItem = function (key, value) {
-      if (key === 'airhorn:blast-count') {
-        // Named lock, not "some lock": a write while an unrelated lock is held
-        // is still an unlocked write of THIS counter.
-        window.__badgeWrites.push({ value: String(value), inLock: window.__heldLocks.includes('airhorn:blast-count') });
-      }
+      if (key === 'airhorn:blast-count') note(value);
       return setItem.call(this, key, value);
     };
+    // setItem is NOT the only way to write: a named-property assignment on the
+    // storage object goes through the WebIDL named setter and never calls setItem,
+    // so a wrapper on
+    // setItem alone recorded nothing and the guard stayed green while an unlocked
+    // writer clobbered the count (airhorn-srpo, review of airhorn-lg0e). Proxy the
+    // Storage object behind the window getter so BOTH paths are recorded.
+    const realStorage = window.localStorage;
+    const proxied = new Proxy(realStorage, {
+      get(target, key) {
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+      set(target, key, value) {
+        if (key === 'airhorn:blast-count') note(value);
+        return Reflect.set(target, key, value);
+      },
+      deleteProperty(target, key) {
+        if (key === 'airhorn:blast-count') note('<deleted>');
+        return Reflect.deleteProperty(target, key);
+      },
+    });
+    Object.defineProperty(window, 'localStorage', { configurable: true, get: () => proxied });
   } catch {}
 
   // Announcer logger, race-free against the app's own installer.
@@ -931,6 +954,19 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       const fromA2 = JSON.parse(await A2.evaluate(`JSON.stringify(window.__badgeWrites || [])`));
       const fromB = JSON.parse(await B.evaluate(`JSON.stringify(window.__badgeWrites || [])`));
       const records = [...fromA2, ...fromB];
+      // COMPLETENESS (airhorn-srpo): "every write happened inside the lock" is only
+      // as good as the spy's coverage. A wrapper on setItem alone missed the WebIDL
+      // named setter, so an unlocked named-property write clobbered the count and the
+      // guard stayed green. Two defences: the proxy above records that path too, and
+      // this check refuses to trust the record when the value actually stored was not
+      // produced by any write the spy saw - so a NEW bypass fails loudly instead of
+      // passing quietly.
+      const storedNow = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      const lastRecorded = records.length ? Number(records[records.length - 1].value) : null;
+      assert(records.length > 0 && lastRecorded === storedNow,
+        `the stored blast count is ${storedNow} but the last write the spy recorded is ${JSON.stringify(lastRecorded)} ` +
+        `(records: ${JSON.stringify(records)}) - a write happened that the instrument did not observe, so "every write was ` +
+        `inside the lock" is untested on that path (airhorn-srpo)`);
       const writes = JSON.stringify(records);
       assert(records.length > 0,
         `no write of the shared blast count was observed in the tab that blasted (records: ${writes}) - ` +
