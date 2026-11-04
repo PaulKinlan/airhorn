@@ -271,6 +271,12 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
   if (typeof report.realTests !== 'number') {
     return { mode: 'never-ran', problem: `produced no test counts (exit ${exitCode}), so nothing was measured` };
   }
+  // An event the reporter could not attribute to a file could be the driver's own file-level entry
+  // under a spelling it did not recognise. Letting it pass as a real test is how a run with no test
+  // in it becomes a caught mutant, so it is refused by name instead (airhorn-u1v2).
+  if (typeof report.unattributed === 'number' && report.unattributed > 0) {
+    return { mode: 'never-ran', problem: `${report.unattributed} runner event(s) could not be attributed to a file, so nothing about the mutant is attributable (exit ${exitCode})` };
+  }
   // A failure OUTSIDE any test is its own named state, whatever the exit code: the driver saw a
   // crash after the load, or the run ended non-zero with no failing test (airhorn-so88/a6ch).
   if (report.driver.crashedOutsideTest) {

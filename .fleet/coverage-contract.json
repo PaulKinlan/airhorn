@@ -31,7 +31,6 @@
   "tests/reflow-zoom.test.mjs"
  ],
  "src/badge.js": [
-  "tests/badge-count.test.js",
   "tests/modules.test.js",
   "tests/multitab.test.mjs",
   "tests/webmcp-browser.test.mjs"
@@ -129,6 +128,9 @@
  ],
  "tools/lib/endpoint-growth.mjs": [
   "tests/soak-verdict.test.js"
+ ],
+ "tools/lib/suite-mode-reporter.mjs": [
+  "tests/mutation-check.test.js"
  ],
  "tools/lib/**": [
   "tests/test-support.test.js"

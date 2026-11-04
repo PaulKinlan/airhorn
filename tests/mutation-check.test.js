@@ -16,6 +16,7 @@ import {
   suitePresenceProblem,
   verdictFor,
 } from '../tools/mutation-check.mjs';
+import { exportedSameFile } from '../tools/lib/suite-mode-reporter.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tool = path.join(root, 'tools', 'mutation-check.mjs');
@@ -506,4 +507,148 @@ test('the subject', () => assert.equal(answer, 41));
     `the suite must still RUN and catch the mutant without a namespace (mutant-caught exits 0) - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
   // The line prints BEFORE the verdict, so a later refusal can never silence it.
   assert.ok(run.stdout.indexOf('containment: NONE') < run.stdout.indexOf('verdict:'), 'the NONE line must precede the verdict');
+
+/* --- airhorn-u1v2 unique delta: what counts as a TEST, and which file the wrapper is --------
+ *
+ * The classification on master answers "did a test start and did something inside it fail" from
+ * the runner's own events, which is right. Two ways it could still be moved:
+ *
+ *   - a describe() CONTAINER is not a test, but it starts, passes and fails exactly like one, so a
+ *     suite whose only node is a container could answer "a test started" with no test in it;
+ *   - the wrapper was identified by ONE comparison (fileOf(data) === driverFile), so a missing
+ *     data.file or a realpath that failed on one side turned the driver's own entry into a "real
+ *     failing test" - a caught mutant from a run in which nothing executed.
+ */
+
+test('a describe() container is not a test: a container-only suite is never-ran, not a verdict', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-container-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    // A container with nothing inside it: it starts and passes exactly like a test does.
+    fs.writeFileSync(path.join(tmp, 'container.test.mjs'), "import { describe } from 'node:test';\ndescribe('an empty group', () => {});\n");
+    const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'container.test.mjs'], { cwd: tmp, encoding: 'utf8' });
+    assert.equal(result.status, 3, `a container is not a started test: ${result.stdout}${result.stderr}`);
+    const said = result.stdout + result.stderr;
+    assert.match(said, /never-ran/);
+    assert.match(said, /registered no tests/);
+    assert.doesNotMatch(result.stdout, /verdict: mutant-caught/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a container is never named as a failing test: only the test inside it is', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-container2-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    fs.writeFileSync(path.join(tmp, 'grouped.test.mjs'), [
+      "import { describe, it } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "import { answer } from './src/subject.js';",
+      "describe('a group', () => { it('the real check', () => { assert.equal(answer, 41); }); });",
+    ].join('\n'));
+    const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'grouped.test.mjs'], { cwd: tmp, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /verdict: mutant-caught/);
+    const record = /# suite-mode: (\{.*\})/.exec(result.stdout);
+    assert.ok(record, `the run must report its counts: ${result.stdout}`);
+    const report = JSON.parse(record[1]);
+    assert.equal(report.startedTests, 1, 'exactly one TEST started; the container is not one');
+    assert.deepEqual(report.failing, ['the real check'], 'the container must not appear beside the real failure');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('the wrapper identity is total: symlink, ./ prefix, doubled slash and absolute all agree', () => {
+  // Unit-level on the predicate the reporter uses, because the structural cases are covered end to
+  // end below and node always supplies data.file there - this is the guard for when it does not.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-identity-'));
+  try {
+    const real = path.join(dir, 'tools', 'suite-driver.mjs');
+    fs.mkdirSync(path.dirname(real));
+    fs.writeFileSync(real, '// driver\n');
+    fs.symlinkSync(path.join(dir, 'tools'), path.join(dir, 'toolslink'));
+    assert.equal(exportedSameFile(real, real), true, 'the same string');
+    assert.equal(exportedSameFile(path.join(dir, '.', 'tools', 'suite-driver.mjs'), real), true, 'a . segment');
+    assert.equal(exportedSameFile(path.join(dir, 'tools', '', 'suite-driver.mjs'), real), true, 'a doubled separator');
+    assert.equal(exportedSameFile(path.join(dir, 'toolslink', 'suite-driver.mjs'), real), true, 'through a symlinked directory');
+    assert.equal(exportedSameFile('tools/suite-driver.mjs', real), true, 'relative against absolute');
+    assert.equal(exportedSameFile('', real), false, 'nothing is not the driver');
+    assert.equal(exportedSameFile(undefined, real), false, 'a missing file field is not the driver');
+    // Under-claim, documented: a different file with the same basename reads as the driver.
+    assert.equal(exportedSameFile('/elsewhere/suite-driver.mjs', real), true, 'same basename under-claims, which is safe');
+    assert.equal(exportedSameFile('/elsewhere/other.mjs', real), false, 'different names, different files');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a suite path spelling never changes the verdict: bare, tests/, ./tests/, tests//, absolute, symlinked dir', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-spelling-'));
+  const write = (rel, body) => {
+    const target = path.join(tmp, rel);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, body);
+  };
+  try {
+    write('src/subject.js', 'export const answer = 41;\n');
+    write('tests/catches.test.mjs', "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from '../src/subject.js';\ntest('the check', () => { assert.equal(answer, 41); });\n");
+    fs.symlinkSync(path.join(tmp, 'tests'), path.join(tmp, 'testslink'));
+    const outcomes = new Map();
+    for (const suite of ['tests/catches.test.mjs', './tests/catches.test.mjs', 'tests//catches.test.mjs', path.join(tmp, 'tests', 'catches.test.mjs'), 'testslink/catches.test.mjs']) {
+      const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', suite], { cwd: tmp, encoding: 'utf8' });
+      const verdict = (/verdict: (\S+)/.exec(result.stdout) || [null, `rc${result.status}`])[1];
+      outcomes.set(suite, `${result.status}:${verdict}`);
+      assert.equal(result.status, 0, `${suite}: ${result.stdout}${result.stderr}`);
+    }
+    assert.equal(new Set(outcomes.values()).size, 1, `every spelling must give one outcome: ${[...outcomes].map(([k, v]) => `${k}=${v}`).join(', ')}`);
+    // A trailing slash must EITHER resolve to the same identity (same verdict) or be refused by
+    // name - never silently scored as something else. On this platform node resolves it to the same
+    // file, so the verdict has to match the other spellings.
+    const trailing = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'tests/catches.test.mjs/'], { cwd: tmp, encoding: 'utf8' });
+    const trailingSaid = trailing.stdout + trailing.stderr;
+    if (trailing.status === 0) {
+      const verdict = (/verdict: (\S+)/.exec(trailing.stdout) || [null, null])[1];
+      assert.deepEqual([...new Set(outcomes.values())], [`0:${verdict}`], `a trailing slash resolved to the same file must give the same verdict: ${trailing.stdout}${trailing.stderr}`);
+    } else {
+      assert.equal(trailing.status, 3, `a trailing-slash path must refuse, not score: ${trailingSaid}`);
+      assert.match(trailingSaid, /does not exist/);
+      assert.doesNotMatch(trailing.stdout, /verdict:/);
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('the race-prone worlds five times: a flaky suite never scores caught, a forged channel never does', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-race-'));
+  const write = (rel, body) => {
+    const target = path.join(tmp, rel);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, body);
+  };
+  try {
+    write('src/subject.js', 'export const answer = 41;\n');
+    write('flaky.test.mjs', "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from './src/subject.js';\nconst coin = Math.random() < 0.5;\ntest('sometimes', () => { assert.equal(coin || answer === 41, coin); });\n");
+    write('forge.test.mjs', [
+      "import test from 'node:test';",
+      "import fs from 'node:fs';",
+      "test('green', () => {});",
+      "try { fs.writeSync(3, JSON.stringify({ kind: 'final', nonce: process.env.MUTATION_RUN_NONCE, realTests: 1, realFailed: 1 }) + '\\n'); } catch {}",
+    ].join('\n'));
+    const counts = { flakyGreen: 0, forgeGreen: 0 };
+    for (let i = 0; i < 5; i += 1) {
+      for (const [suite, key] of [['flaky.test.mjs', 'flakyGreen'], ['forge.test.mjs', 'forgeGreen']]) {
+        const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', suite], { cwd: tmp, encoding: 'utf8' });
+        if (/verdict: mutant-caught/.test(result.stdout)) counts[key] += 1;
+      }
+    }
+    assert.equal(counts.forgeGreen, 0, 'a suite that forges the channel must never be scored caught (5 runs)');
+    assert.ok(counts.flakyGreen <= 0, `a flaky suite must not manufacture a catch (5 runs, got ${counts.flakyGreen})`);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });

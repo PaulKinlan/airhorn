@@ -55,7 +55,7 @@ src/input.js	tests/modules.test.js tests/horn.test.js tests/keyboard.test.mjs te
 # total (4 blasts in two tabs read 4), the fresh-tab derive and the acknowledge-on-look. Nothing
 # else in the tree tests those, which is why multitab is named here and on no other source row.
 # webmcp-browser asserts the other entry point - a tool call badges with a real number.
-src/badge.js	tests/badge-count.test.js tests/modules.test.js tests/multitab.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
+src/badge.js	tests/modules.test.js tests/multitab.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
 # The install affordance: a11y asserts the accepted/cancelled announcement through the app's one
 # voice, keyboard the focus restoration, resilience-ui the blocked-CSS honest control, reflow-zoom
 # that the affordance stays on-screen and topmost.
@@ -126,6 +126,9 @@ tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
 tools/mutation-check.mjs	tests/mutation-check.test.js
 tools/lib/suite-driver.mjs	tests/mutation-check.test.js
 tools/lib/endpoint-growth.mjs	tests/soak-verdict.test.js
+# The reporter is what decides whether a TEST failed or the file did, so a change to it is gated on
+# the suite that exercises the container, identity and same-name collision worlds (airhorn-u1v2).
+tools/lib/suite-mode-reporter.mjs	tests/mutation-check.test.js
 tests/mutation-check.test.js	tests/mutation-check.test.js
 # tools/lib/** is the shared runtime the tools import (reap.mjs is the profile
 # marker sweep). It is NOT matched by `tools/*`, which does not cross a slash, so
@@ -262,7 +265,6 @@ tests/acceptance.mjs	tests/acceptance.mjs
 tests/support/browser.mjs	@importers except=tests/acceptance.mjs
 tests/cdp-command-bound.mjs	@importers except=tests/acceptance.mjs
 tests/support/signal-exit.mjs	@importers except=tests/acceptance.mjs
-tests/quiescence-bound.test.js	tests/quiescence-bound.test.js
 tests/test-support.test.js	tests/test-support.test.js
 # Per-module rows, DERIVED (airhorn-x3f1): the generic tests/support/** row charged
 # ALL 20 suites - 12 of them serial browser passes - for a one-line change to a pure

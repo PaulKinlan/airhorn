@@ -22,6 +22,24 @@
  * be moved by any of them.
  */
 import fs from 'node:fs';
+import path from 'node:path';
+
+/**
+ * Do two spellings name the same file? Four ways, all from the event's own fields - equal strings,
+ * equal basenames, the same realpath, or the same resolved path - so neither the caller's spelling
+ * of the suite nor the OS's normalisation of the path can move the answer (airhorn-u1v2).
+ *
+ * A real test whose file shares the driver's BASENAME answers yes, which under-claims, and
+ * under-claiming is the safe direction for this tool.
+ */
+export function exportedSameFile(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || !a || !b) return false;
+  if (a === b) return true;
+  try { if (path.basename(a) === path.basename(b)) return true; } catch { /* not a path */ }
+  try { if (path.resolve(a) === path.resolve(b)) return true; } catch { /* not a path */ }
+  try { if (fs.realpathSync(a) === fs.realpathSync(b)) return true; } catch { /* one side is gone */ }
+  return false;
+}
 
 export default async function* suiteModeReporter(source) {
   let realTests = 0;
@@ -49,12 +67,43 @@ export default async function* suiteModeReporter(source) {
     if (typeof data.file !== 'string') return null;
     try { return fs.realpathSync(data.file); } catch { return data.file; }
   };
-  let wrapperEvents = 0;
+  let wrapperEventsCount = 0;
   // "caught" may only be claimed when a test actually STARTED inside the suite and failed
   // (airhorn-so88). A start is the runner's own evidence that execution reached a test, so it
   // cannot be forged by text, and it is distinct from a failure the runner reports for its own
   // synthetic file-level event.
   let startedTests = 0;
+  // airhorn-u1v2 (unique delta): an event the reporter cannot ATTRIBUTE to a file is not allowed
+  // to become a real test by default. The old comparison was one expression - fileOf(data) ===
+  // driverFile - so a missing data.file or a realpath that failed on one side only turned the
+  // driver's own file-level event into a "real failing test": a false caught mutant from a run
+  // where no test executed. Attribution is now total, and an event that cannot be attributed is
+  // COUNTED and reported, never silently scored.
+  let unattributed = 0;
+  /**
+   * Is this event the DRIVER's own file-level entry?
+   *
+   * Four ways, all from the event's own fields, so neither the caller's spelling of the suite nor
+   * the OS's normalisation of the path can move it: equal strings; equal basenames; the two
+   * canonicalise (realpath) to the same file; or the two resolve to the same path. In the other
+   * direction - a real test whose name happens to equal the driver's basename - the answer is
+   * "wrapper", which under-claims, and under-claiming is the safe direction for this tool.
+   */
+  const sameFile = exportedSameFile;
+  const isDriverEvent = (data) => Boolean(driverFile) && sameFile(data.file, driverFile);
+  /**
+   * A describe() block is a CONTAINER, not a test: it starts, passes and fails without any
+   * assertion, and a suite whose only node is a container used to answer "a test started" with no
+   * test in it (airhorn-u1v2).
+   *
+   * It cannot be recognised AT THE START: measured on node 24, `test:start` carries no
+   * `details.type`, while `test:complete` / `test:pass` / `test:fail` carry `type: 'suite'` for a
+   * container and `'test'` for a test, and `test:complete` arrives BEFORE the `test:start` of the
+   * same entry. So containers are collected by key and subtracted from the started set at the end.
+   */
+  const keyOf = (data) => `${typeof data.file === 'string' ? data.file : ''}|${typeof data.name === 'string' ? data.name : ''}|${data.nesting ?? ''}`;
+  const containers = new Set();
+  const starts = [];
 
   // The driver's record arrives as stdout lines from the driver FILE's process (airhorn-y3d6,
   // second round - there is no record file any more). The honest sequence is a grammar:
@@ -80,19 +129,28 @@ export default async function* suiteModeReporter(source) {
       }
       continue;
     }
+    const data = event.data || {};
+    const isTestEvent = event.type === 'test:start' || event.type === 'test:pass' || event.type === 'test:fail';
+    const attributed = typeof data.file === 'string' && data.file.length > 0;
+    // Only TEST events are attributable-or-not; a diagnostic, a stdout chunk or the driver's own
+    // record line has no file and is not a measurement of anything.
+    if (isTestEvent && !attributed) unattributed += 1;
+    if (data.details && data.details.type === 'suite') containers.add(keyOf(data));
     if (event.type === 'test:start') {
-      const data = event.data || {};
-      if (!(driverFile && fileOf(data) === driverFile)) startedTests += 1;
+      if (attributed && !isDriverEvent(data)) starts.push(keyOf(data));
       continue;
     }
     if (event.type !== 'test:pass' && event.type !== 'test:fail') continue;
-    const data = event.data || {};
     const name = typeof data.name === 'string' ? data.name : '<unnamed>';
-    if (driverFile && fileOf(data) === driverFile) {
-      wrapperEvents += 1;
+    if (isDriverEvent(data)) {
+      wrapperEventsCount += 1;
       if (event.type === 'test:fail') fileLevelFailed = true;
       continue;
     }
+    // A container is not a test that failed, so it is never counted as one and never named as a
+    // failing test (airhorn-u1v2: 'group' appeared beside the real failure 'inside').
+    if (data.details && data.details.type === 'suite') continue;
+    if (!attributed) continue;
     realTests += 1;
     if (event.type === 'test:fail') {
       realFailed += 1;
@@ -104,14 +162,12 @@ export default async function* suiteModeReporter(source) {
     }
   }
 
-  // The driver's record says whether the suite LOADED at all. It is written before any test runs,
-  // and it is the only thing that decides "never ran" - no name or path comparison anywhere.
-  // It arrives BY FILE, because the driver runs in the runner's grandchild where the parent's pipe
-  // (fd 3) is closed. That file IS writable by the suite, which shares the driver's process, so it
-  // is not trusted on its own: this reporter - the process the suite does not share - merges it into
-  // the ONE nonce-tagged record it sends the parent over the pipe, and the parent decides from that
-  // (airhorn-gwcm). The residual trust is a suite lying about its OWN load result; measured that the
-  // lie cannot reach a false "caught".
+  // The driver's record says whether the suite LOADED at all, and it is the only thing that decides
+  // "never ran" - no name or path comparison anywhere. There is NO record file any more (airhorn-
+  // y3d6, second round): it arrives as stdout lines, which the suite can ADD to but cannot UNWRITE,
+  // so a forgery breaks the grammar above and is refused by the parent rather than believed. The
+  // counts that decide "caught" are unaffected either way - they are read from the runner's events
+  // in THIS process, which the suite does not share.
 
   let driver = null;
   if (driverLines.length === 1 && typeof driverLines[0].importFailed === 'boolean' && !driverLines[0].crashedOutsideTest) {
@@ -123,7 +179,10 @@ export default async function* suiteModeReporter(source) {
   } else if (driverLines.length > 0) {
     driver = { tampered: true, lines: driverLines.length };     // any other sequence: forged or broken
   }
-  const report = { driver, startedTests, realTests, realPassed, realFailed, fileLevelFailed, wrapperEvents, failing: failing.slice(0, 10) };
+  // A start only counts if the entry was a TEST: everything the runner later reported as a suite
+  // container is subtracted here, because the start event itself carries no type.
+  startedTests = starts.filter((key) => !containers.has(key)).length;
+  const report = { driver, startedTests, realTests, realPassed, realFailed, fileLevelFailed, wrapperEvents: wrapperEventsCount, unattributed, failing: failing.slice(0, 10) };
   const channelFd = Number(process.env.MUTATION_SUITE_CHANNEL);
   if (Number.isInteger(channelFd)) {
     try {
