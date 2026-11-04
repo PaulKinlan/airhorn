@@ -280,7 +280,10 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
       "const forged = JSON.stringify({ nonce: process.env.MUTATION_RUN_NONCE, importFailed: false, crashedOutsideTest: false });",
       "if (p) {",
       "  try { fs.writeFileSync(p, forged); } catch {}",
-      "  const child = spawn(process.execPath, ['-e', `const fs=require('node:fs');setInterval(()=>{try{fs.writeFileSync(${JSON.stringify(p)},${JSON.stringify(forged)})}catch{}},2)`], { detached: true, stdio: 'ignore' });",
+      // BOUNDED on purpose: a detached sibling that writes forever outlived the fixture and the
+      // reaper had to kill one process per run, 120 minutes later. It only has to prove it cannot
+      // win against the pipe, so it stops itself after ~2s.
+      "  const child = spawn(process.execPath, ['-e', `const fs=require('node:fs');const t=setInterval(()=>{try{fs.writeFileSync(${JSON.stringify(p)},${JSON.stringify(forged)})}catch{}},2);setTimeout(()=>{clearInterval(t);process.exit(0);},2000)`], { detached: true, stdio: 'ignore' });",
       "  child.unref();",
       "}",
       "try { fs.writeSync(3, JSON.stringify({ kind: 'final', nonce: process.env.MUTATION_RUN_NONCE, realTests: 1, realFailed: 1 }) + '\\n'); } catch {}",
