@@ -370,20 +370,66 @@ test('a script suite is refused by DEFAULT and named, and judged by exit code on
   }
 });
 
-test('a mutant that breaks the module graph is a NAMED refusal, not a caught mutant', () => {
-  // The run fails, but nothing inside a test failed: the suite never got that far.
-  const dir = world({
-    'suite.test.mjs': "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from './src/subject.js';\nimport helper from './src/helper.js';\ntest('uses the helper', () => { assert.equal(helper(answer), 41); });\n",
-    'src/helper.js': 'export default function helper(value) { return value; }\n',
-  });
-  try {
-    // The mutation deletes the helper module's export, so the SUITE cannot load at all.
-    const result = spawnSync(process.execPath, [tool, '--file', 'src/helper.js', '--from', 'export default function helper', '--to', 'export default const', '--suite', 'suite.test.mjs'], { cwd: dir, encoding: 'utf8' });
-    assert.equal(result.status, 3, `a load failure is not a catch: ${result.stdout}${result.stderr}`);
-    assert.match(result.stderr, /NO failing test inside it|does not pass on the UNMUTATED source/);
-    assert.doesNotMatch(result.stdout, /verdict: mutant-caught/);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+test('a mutant that breaks the module graph is a NAMED refusal, not a caught mutant - at every path spelling', () => {
+  // The run fails, but nothing inside a test failed: the suite never got that far. The
+  // round-4 reviewer broke the earlier fix with a DIRECTORY-QUALIFIED path, because node
+  // names the file-level entry with the path AS PASSED - so every spelling is checked here.
+  const spellings = ['suite.test.mjs', 'tests/suite.test.mjs', 'tests//suite.test.mjs', './tests/suite.test.mjs'];
+  for (const spelling of spellings) {
+    const dir = world({
+      'suite.test.mjs': "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from './src/subject.js';\nimport helper from './src/helper.js';\ntest('uses the helper', () => { assert.equal(helper(answer), 41); });\n",
+      'tests/suite.test.mjs': "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from '../src/subject.js';\nimport helper from '../src/helper.js';\ntest('uses the helper', () => { assert.equal(helper(answer), 41); });\n",
+      'src/helper.js': 'export default function helper(value) { return value; }\n',
+    });
+    try {
+      const result = spawnSync(process.execPath, [tool, '--file', 'src/helper.js', '--from', 'export default function helper', '--to', 'export default const', '--suite', spelling], { cwd: dir, encoding: 'utf8' });
+      assert.equal(result.status, 3, `${spelling}: a load failure is not a catch: ${result.stdout}${result.stderr}`);
+      assert.match(result.stderr, /NO failing test inside it/);
+      assert.doesNotMatch(result.stdout, /verdict: mutant-caught/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('the run pair is invariant to the suite path spelling: caught, zero-test and load-crash all agree', () => {
+  // airhorn-lnme, round 4: the reporter identified the file-level entry by basename, so any
+  // directory-qualified SPARING counted it as a real test. The same three worlds are driven
+  // through every spelling and must give the same verdict.
+  const spellings = ['suite.test.mjs', 'tests/suite.test.mjs', './tests//suite.test.mjs'];
+  const worlds = {
+    caught: {
+      'suite.test.mjs': "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from './src/subject.js';\ntest('the answer is the documented value', () => { assert.equal(answer, 41); });\n",
+      'tests/suite.test.mjs': "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from '../src/subject.js';\ntest('the answer is the documented value', () => { assert.equal(answer, 41); });\n",
+    },
+    empty: { 'suite.test.mjs': '// registers nothing\n', 'tests/suite.test.mjs': '// registers nothing\n' },
+    crash: {
+      'suite.test.mjs': "import './missing.mjs';\nimport test from 'node:test';\ntest('never reached', () => {});\n",
+      'tests/suite.test.mjs': "import './missing.mjs';\nimport test from 'node:test';\ntest('never reached', () => {});\n",
+    },
+  };
+  const seen = {};
+  for (const [name, files] of Object.entries(worlds)) {
+    seen[name] = new Set();
+    for (const spelling of spellings) {
+      const dir = world(files);
+      try {
+        const result = check(dir, [spelling]);
+        const verdict = (result.stdout.match(/verdict: (\S+)/) || [null, `rc${result.status}`])[1];
+        seen[name].add(verdict);
+        if (name === 'caught') {
+          assert.equal(result.status, 0, `${spelling}: a real failing test is a catch: ${result.stdout}${result.stderr}`);
+        } else {
+          assert.equal(result.status, 3, `${spelling}: nothing ran, so nothing is caught: ${result.stdout}${result.stderr}`);
+          assert.match(result.stderr, name === 'empty' ? /registered no test/ : /does not pass on the UNMUTATED source/);
+        }
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+  for (const [name, verdicts] of Object.entries(seen)) {
+    assert.equal(verdicts.size, 1, `${name}: every spelling must give one outcome, got ${[...verdicts].join(' / ')}`);
   }
 });
 
