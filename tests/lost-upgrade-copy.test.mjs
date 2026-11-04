@@ -1,47 +1,92 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { assertLostUpgradeNotice, lostUpgradeVerdicts, LOST_UPGRADE_COPY } from './support/lost-upgrade-copy.mjs';
 import { guardedCallProblem } from '../tools/guarded-call.mjs';
 
+const here = path.dirname(fileURLToPath(import.meta.url));
+const enforcer = path.join(here, 'support', 'lost-upgrade-copy.mjs');
 const notice = 'The app could not update - you are still on the previous version.';
+const bad = 'a notice that says nothing useful';
 const SPEC = { callee: 'assertLostUpgradeNotice', from: './support/lost-upgrade-copy.mjs' };
+
+// Run `body` in its own node process with the enforcer imported as `assertLostUpgradeNotice`,
+// so the exit backstop can be observed without killing this test process.
+function runInChild(body) {
+  const script = `
+    import { assertLostUpgradeNotice } from ${JSON.stringify(enforcer)};
+    ${body}
+  `;
+  return spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8' });
+}
 
 test('the actual lost-upgrade notice passes the enforcer', () => {
   assert.doesNotThrow(() => assertLostUpgradeNotice(notice));
   assert.deepEqual(LOST_UPGRADE_COPY, ['The app could not update', 'previous version']);
 });
 
-test('a non-enforcing announcement fails with the missing copy named (airhorn-rrme)', () => {
-  // Previously a suite could merely mention the copy in a comment and gate-map stayed green.
-  // This checks the shipped enforcer's actual throw, not a token in the browser suite's source.
-  for (const [message, missing] of [
-    ['The app could not update', 'previous version'],
-    ['You are still on the previous version.', 'The app could not update'],
-    ['', 'The app could not update'],
-  ]) {
-    assert.throws(() => assertLostUpgradeNotice(message),
-      (error) => error instanceof Error && error.message.includes(`missing "${missing}"`),
-      `a notice missing ${missing} must throw rather than merely mention it`);
-  }
-});
-
 test('the enforcer records that it ran and what it decided (airhorn-6829)', () => {
   const before = lostUpgradeVerdicts().length;
   assertLostUpgradeNotice(notice);
-  assert.throws(() => assertLostUpgradeNotice('nothing to see here'));
   const verdicts = lostUpgradeVerdicts().slice(before);
-  assert.deepEqual(verdicts.map((v) => [v.ran, v.ok]),
-    [[true, true], [true, false]],
-    'a call that passes and a call that throws must both be recorded as having run');
-  assert.equal(verdicts[1].missing, 'The app could not update');
+  assert.deepEqual(verdicts, [{ ran: true, ok: true }],
+    'a passing call must be recorded as having run - the caller cannot fake this');
 });
 
-// The fixtures below are the answer to review findings airhorn-rrme and airhorn-nqje. Two rounds of
-// text pins were satisfied by text: a commented-out call, a block-commented call, and a stringified
-// call all counted. The pin is now a question about the syntax tree, so the hostile worlds below are
-// exactly the worlds a text rule cannot separate from the real thing.
+test('a non-enforcing announcement fails the PROCESS, naming the missing copy (airhorn-rrme)', () => {
+  const res = runInChild(`assertLostUpgradeNotice(${JSON.stringify(bad)});`);
+  assert.equal(res.status, 1, `a bad notice must end the process non-zero (got ${res.status}): ${res.stderr}`);
+  assert.match(res.stderr, /the lost-upgrade notice is missing "The app could not update"/,
+    'the failure must name the missing copy');
+});
 
-test('the shipped delegation shape is GREEN (and so is a harness-wrapped bare statement)', () => {
+// The four worlds below are the answer to review findings airhorn-nqje and airhorn-f96y. The first
+// two failed text pins; the last two failed shape rules. They are all refused by the same mechanism
+// now - a scheduled non-zero exit that a caught throw cannot cancel - so no calling shape can honour
+// a failure the suite swallowed.
+
+test('airhorn-f96y: a caller that CATCHES the throw is still failed - try/catch', () => {
+  const res = runInChild(`
+    try { assertLostUpgradeNotice(${JSON.stringify(bad)}); } catch {}
+    setTimeout(() => console.log('the suite carried on'), 50);
+  `);
+  assert.equal(res.status, 1, `try/catch must not be able to swallow the failure (got ${res.status})`);
+  assert.match(res.stderr, /missing "The app could not update"/);
+  assert.doesNotMatch(res.stdout, /the suite carried on/,
+    'the failure must land before the caller continues');
+});
+
+test('airhorn-f96y: a WRAPPER that catches for the caller is still failed - the reviewer repro', () => {
+  // The exact shape the reviewer used: discardFailure(callback) catches the callback's exception.
+  const res = runInChild(`
+    function discardFailure(callback) { try { callback(); } catch {} }
+    discardFailure(() => { assertLostUpgradeNotice(${JSON.stringify(bad)}); });
+  `);
+  assert.equal(res.status, 1, `a wrapper must not be able to swallow the failure (got ${res.status})`);
+  assert.match(res.stderr, /missing "The app could not update"/);
+});
+
+test('airhorn-f96y: a promise .catch() handler is still failed, and a stubbed process.exit does not help', () => {
+  const res = runInChild(`
+    process.exit = () => {};            // a caller that tries to neutralise the backstop
+    Promise.resolve().then(() => assertLostUpgradeNotice(${JSON.stringify(bad)})).catch(() => {});
+  `);
+  assert.equal(res.status, 1, `stubbing process.exit must not swallow the failure (got ${res.status})`);
+  assert.match(res.stderr, /missing "The app could not update"/);
+});
+
+test('the shipped shape is GREEN and unchanged: a correct notice exits 0', () => {
+  const res = runInChild(`assertLostUpgradeNotice(${JSON.stringify(notice)});`);
+  assert.equal(res.status, 0, `a correct notice must not fail the process: ${res.stderr}`);
+  assert.equal(res.stderr, '');
+});
+
+// The static pin: presence, resolution and reachability. Swallowing is not its job any more - the
+// enforcer closes that by construction (above) - which is why a wrapper is GREEN here and still fails
+// at runtime.
+test('the pin is GREEN for the shipped delegation shape and for a wrapping call', () => {
   const shipped = [
     "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
     '',
@@ -49,83 +94,42 @@ test('the shipped delegation shape is GREEN (and so is a harness-wrapped bare st
     '  const lost = await readLost();',
     '  await shot("lost-upgrade-announced");',
     '  assertLostUpgradeNotice(lost.text);',
-    '  if (/new version is ready/i.test(lost.text)) throw new Error("nope");',
     '}',
+    'testBootWatchdog().catch((err) => { console.error(err); process.exit(1); });',
   ].join('\n');
   assert.equal(guardedCallProblem(shipped, SPEC), null);
 
-  const insideHarness = [
+  const wrapped = [
     "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
-    "test('lost upgrade', async () => {",
-    '  assertLostUpgradeNotice("The app could not update - previous version.");',
+    'function discardFailure(callback) { try { callback(); } catch {} }',
+    "test('lost upgrade', () => {",
+    '  discardFailure(() => { assertLostUpgradeNotice(lost.text); });',
     '});',
   ].join('\n');
-  assert.equal(guardedCallProblem(insideHarness, SPEC), null,
-    'a test() callback is not a swallow: the harness is what reports the failure');
+  assert.equal(guardedCallProblem(wrapped, SPEC), null,
+    'a wrapper cannot swallow the enforcer (see the child-process proofs above), so it is not a pin failure');
 });
 
-test('hostile world (i): the call DELETED is RED', () => {
-  const source = [
-    "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
-    'async function testBootWatchdog() {',
-    '  const lost = await readLost();',
-    '}',
-  ].join('\n');
-  assert.match(guardedCallProblem(source, SPEC) ?? '', /never calls assertLostUpgradeNotice/);
-});
-
-test('hostile world (ii): the call COMMENTED OUT is RED (a comment is not in the tree)', () => {
-  for (const source of [
-    [
-      "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
-      'async function testBootWatchdog() {',
-      '  // assertLostUpgradeNotice(lost.text);',
-      '}',
-    ].join('\n'),
-    [
-      "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
-      'async function testBootWatchdog() {',
-      '  /*',
-      '   * assertLostUpgradeNotice(lost.text);',
-      '   */',
-      '}',
-    ].join('\n'),
-    [
-      "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
-      'async function testBootWatchdog() {',
-      "  const note = 'assertLostUpgradeNotice(lost.text);';",
-      '}',
-    ].join('\n'),
+test('the pin is RED when the call is deleted, commented out or stringified', () => {
+  for (const body of [
+    '',
+    '  // assertLostUpgradeNotice(lost.text);',
+    '  /* assertLostUpgradeNotice(lost.text); */',
+    "  const note = 'assertLostUpgradeNotice(lost.text);';",
   ]) {
+    const source = [
+      "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
+      'async function testBootWatchdog() {',
+      '  const lost = await readLost();',
+      body,
+      '}',
+    ].join('\n');
     assert.match(guardedCallProblem(source, SPEC) ?? '', /never calls assertLostUpgradeNotice/,
-      `a commented-out or stringified call must not satisfy the pin: ${JSON.stringify(source)}`);
+      `a call that is not in the tree must be RED: ${JSON.stringify(body)}`);
   }
 });
 
-test('hostile world (iii): the throw SWALLOWED is RED - try/catch, .catch(), .finally()', () => {
-  const head = "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';\nasync function run() {\n";
-  for (const [label, body, expected] of [
-    ['try/catch that discards', '  try { assertLostUpgradeNotice(lost.text); } catch {}', /try\/catch/],
-    ['try/catch with a named binding', '  try { assertLostUpgradeNotice(lost.text); } catch (e) { void e; }', /try\/catch/],
-    ['try/catch/finally', '  try { assertLostUpgradeNotice(lost.text); } catch (e) { void e; } finally { report(); }', /try\/catch/],
-    ['promise .catch arrow with a block', '  work().catch(() => { assertLostUpgradeNotice(lost.text); });', /\.catch\(\)/],
-    ['promise .catch arrow with an expression', '  work().catch(() => assertLostUpgradeNotice(lost.text));', /\.catch\(\)/],
-    ['promise .finally', '  work().finally(() => { assertLostUpgradeNotice(lost.text); });', /\.finally\(\)/],
-  ]) {
-    const problem = guardedCallProblem(`${head}${body}\n}`, SPEC);
-    assert.match(problem ?? '', expected, `${label} must be RED, got ${JSON.stringify(problem)}`);
-  }
-
-  // try/finally is the shipped shape (the browser is closed in a finally): it cannot
-  // discard the throw, so it must stay GREEN or the pin reds the real file.
-  const tryFinally = `${head}  try { assertLostUpgradeNotice(lost.text); } finally { await browser.close(); }\n}`;
-  assert.equal(guardedCallProblem(tryFinally, SPEC), null,
-    'try/finally propagates the throw and the shipped case is wrapped in one');
-});
-
-test('hostile world (iv): the call REPLACED by something that returns is RED', () => {
-  // A local lookalike shadows the import: it can return instead of throwing, and a call-shaped pin
-  // cannot tell the difference. The pin resolves the callee to the shipped binding, so this is RED.
+test('the pin is RED when the call is replaced by a local lookalike', () => {
   const lookalike = [
     "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
     'function assertLostUpgradeNotice(text) { return text; }',
@@ -133,9 +137,9 @@ test('hostile world (iv): the call REPLACED by something that returns is RED', (
     '  assertLostUpgradeNotice(lost.text);',
     '}',
   ].join('\n');
-  assert.match(guardedCallProblem(lookalike, SPEC) ?? '', /declares its own assertLostUpgradeNotice/);
+  assert.match(guardedCallProblem(lookalike, SPEC) ?? '', /declares its own assertLostUpgradeNotice/,
+    'a local replacement can return instead of enforcing');
 
-  // The same shape via a variable, and a replacement that is simply a different callee.
   const viaVariable = [
     "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
     'const assertLostUpgradeNotice = (text) => text;',
@@ -154,18 +158,20 @@ test('hostile world (iv): the call REPLACED by something that returns is RED', (
   assert.match(guardedCallProblem(noImport, SPEC) ?? '', /must import assertLostUpgradeNotice/);
 });
 
-test('a conditional, looped or returned call is RED - each can discard the failure', () => {
+test('the pin is RED when the call may never run', () => {
   const head = "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';\nasync function run() {\n";
   for (const [label, body] of [
     ['if (false) { ... }', '  if (false) { assertLostUpgradeNotice(lost.text); }'],
     ['a ternary', '  const ok = lost ? assertLostUpgradeNotice(lost.text) : true;'],
     ['&& short-circuit', '  lost && assertLostUpgradeNotice(lost.text);'],
     ['a for loop', '  for (const one of list) assertLostUpgradeNotice(one.text);'],
-    ['a return', '  return assertLostUpgradeNotice(lost.text);'],
-    ['an await', '  await assertLostUpgradeNotice(lost.text);'],
-    ['a bare call in a .map() callback', '  list.map((one) => assertLostUpgradeNotice(one.text));'],
+    ['a discarded result', '  void assertLostUpgradeNotice(lost.text);'],
   ]) {
     const problem = guardedCallProblem(`${head}${body}\n}`, SPEC);
     assert.ok(problem, `${label} must be RED, got GREEN`);
   }
+  // A try/catch around the call does NOT make it unreachable, and the enforcer survives it.
+  const inTry = `${head}  try { assertLostUpgradeNotice(lost.text); } catch (err) { throw err; }\n}`;
+  assert.equal(guardedCallProblem(inTry, SPEC), null,
+    'a rethrowing catch is reachable and cannot discard the scheduled exit');
 });

@@ -231,17 +231,22 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
   assert.ok(pageRow.includes('tests/resilience-ui.test.mjs'),
     `index.html must select resilience-ui, got ${JSON.stringify(pageRow)}`);
   // (b) index.html authors the copy; the selected suite delegates its live
-  // observation to a pure enforcer whose throw is proven by its own unit test.
-  // Do not scan the suite's prose for copy: a comment/non-enforcing action used
-  // to pass that check (airhorn-rrme). Pin the guarded call site instead, as a
-  // question about the SYNTAX TREE (tools/guarded-call.mjs): text pins were
-  // happy with a commented-out call, a block-commented call, a stringified call
-  // and a swallowed call (airhorn-nqje), and each of those is absent or
-  // structurally unguarded once parsed. The pin refuses a deleted, commented,
-  // stringified, shadowed, conditional or try/catch-wrapped call, and requires
-  // the callee to be the binding imported from the tested support module. Its
-  // residual is named in the ADR: a caller ABOVE the guarded function can still
-  // catch the failure - closing that needs a browser-mutant run the gate does not buy.
+  // observation to an enforcer whose failure is proven by its own browser-free
+  // unit test. Do not scan the suite's prose for copy: a comment/non-enforcing
+  // action used to pass that check (airhorn-rrme), and so did a commented-out
+  // call, a stringified call and a swallowed call (airhorn-nqje).
+  //
+  // The pin asks the SYNTAX TREE (tools/guarded-call.mjs) whether the call is
+  // there, whether it resolves to the tested import, and whether it can actually
+  // run. It deliberately does NOT police swallowing shapes (try/catch, a wrapper,
+  // a .catch()): an earlier revision did, and the next shape was found within
+  // minutes of review (airhorn-f96y), because "can this throw reach the harness"
+  // depends on the whole calling graph. That class is closed at the ENFORCER
+  // instead: a missing copy schedules a non-zero exit that a caught throw cannot
+  // cancel, and tests/lost-upgrade-copy.test.mjs proves it in child processes for
+  // try/catch, a catch-all wrapper and a promise .catch() - including a caller that
+  // stubs process.exit. So a wrapped call here is GREEN because it is harmless, and
+  // the enforcement is measured rather than inferred from a call expression.
   const page = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
   const suite = fs.readFileSync(path.join(root, 'tests', 'resilience-ui.test.mjs'), 'utf8');
   for (const copy of ['The app could not update', 'previous version']) {

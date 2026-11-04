@@ -1,31 +1,34 @@
 /*
- * tools/guarded-call.mjs - "the guarded suite really calls the shipped enforcer,
- * and its throw cannot be discarded" as a QUESTION ABOUT THE SYNTAX TREE, not
- * about the file's text (airhorn-6829, airhorn-nqje, ADR airhorn-rv1k).
+ * tools/guarded-call.mjs - "the guarded suite really calls the shipped enforcer"
+ * as a question about the SYNTAX TREE, not about the file's text (airhorn-6829,
+ * airhorn-nqje, ADR airhorn-rv1k).
  *
  * Why not a text scan: three rounds of text rules were defeated by text. A
  * `// call` comment satisfied `suite.includes('call(')`; so did the same call in
- * a block comment, and inside a string literal. Then a substring pin over
- * comment-stripped source moved the boundary and not the problem: `try { call }
- * catch {}` is still text that contains the call. Any rule over characters can
- * be satisfied by characters, so this module asks the parser instead.
+ * a block comment, and inside a string literal. A parser throws comments and
+ * string bodies away for free - a commented, stringified or deleted call is
+ * simply absent from the tree - and it preserves structure, which is what this
+ * pin is for:
  *
- * A parser throws comments and string bodies away for free - a commented,
- * stringified or deleted call is simply absent from the tree - and it preserves
- * STRUCTURE, which is what "honoured" actually means:
+ *   - the callee must resolve to the binding imported from the tested support
+ *     module, so a local lookalike that returns instead of throwing is refused;
+ *   - the call must be a statement that always runs: not an operand whose result
+ *     is discarded, not inside a branch, loop or short-circuit.
  *
- *   - the callee must resolve to the shipped enforcer (the import binding from
- *     the support module), so a local lookalike that returns instead of
- *     throwing is refused, not honoured;
- *   - the call must be a bare statement in a function body, so nothing may sit
- *     between it and the failure: no try/catch, no .catch()/.finally() handler,
- *     no if/loop/ternary, no return, no await.
+ * What this pin deliberately does NOT try to police any more is SWALLOWING - a
+ * try/catch, a wrapper function, a `.catch(() => {})`. An earlier revision
+ * refused those shapes and a review found the obvious next one within minutes
+ * (airhorn-f96y): the class is open-ended, because "can this throw reach the
+ * harness" depends on the whole calling graph. It is closed instead at the
+ * enforcer: a missing copy schedules a non-zero exit that a caught throw cannot
+ * cancel, so wrapping the call cannot honour the failure (see
+ * tests/support/lost-upgrade-copy.mjs and the child-process proofs in
+ * tests/lost-upgrade-copy.test.mjs). That is why wrapping is ALLOWED here now -
+ * it is harmless - and why this file is 130 lines instead of 220.
  *
- * What this deliberately does NOT claim: it is structure, not execution. A
- * caller ABOVE the guarded function could still catch its failure (see the
- * residual in ADR airhorn-rv1k) - closing that needs a browser-mutant run,
- * which the gate does not buy. Inside the suite, though, every shape that can
- * swallow the throw is a shape this refuses.
+ * Reachability beyond the checks above (a function that is never invoked, dead
+ * code behind a stub) is not decidable here and is a review question, named in
+ * the ADR consequences.
  *
  * Cost note: this lives in tools/ on purpose. `tools/*` maps to gate-smoke and
  * gate-map, both browser-free; a module under tests/support/** would be selected
@@ -34,16 +37,19 @@
 
 import { parseAst } from 'vite';
 
-const STATEMENT_CONTAINERS = new Set([
-  'Program',
-  'BlockStatement',
-  'FunctionDeclaration',
-  'FunctionExpression',
-  'ArrowFunctionExpression',
-  'StaticBlock',
+// Statements/paths that can leave the call unexecuted.
+const MAY_NOT_RUN = new Set([
+  'IfStatement',
+  'ConditionalExpression',
+  'LogicalExpression',
+  'SwitchStatement',
+  'SwitchCase',
+  'ForStatement',
+  'ForInStatement',
+  'ForOfStatement',
+  'WhileStatement',
+  'DoWhileStatement',
 ]);
-
-const CATCHING_HANDLER = /^(catch|finally)$/;
 
 function isNode(value) {
   return Boolean(value) && typeof value === 'object' && typeof value.type === 'string';
@@ -89,64 +95,16 @@ function declaredNames(node) {
   return names;
 }
 
-function handlerName(node) {
-  // `.catch(handler)` / `.finally(handler)` wraps a throw away; `test(name, cb)` does not.
-  if (node.type !== 'CallExpression') return null;
-  const { callee } = node;
-  if (!callee || callee.type !== 'MemberExpression') return null;
-  const prop = callee.property && (callee.property.name ?? callee.property.value);
-  return typeof prop === 'string' && CATCHING_HANDLER.test(prop) ? prop : null;
-}
-
-function calleeLabel(node) {
-  const callee = node.callee;
-  if (!callee) return 'a call';
-  if (callee.type === 'Identifier') return `${callee.name}(...)`;
-  const prop = callee.property && (callee.property.name ?? callee.property.value);
-  return prop ? `.${prop}(...)` : 'a call';
-}
-
-/**
- * Why a call site cannot honour the enforcer's throw, if the call is wrapped in
- * something that discards it. Returns null for a bare statement call.
- */
-function wrappedReason(ancestors) {
-  for (const node of ancestors) {
-    // try/finally cannot discard a throw - the failure still leaves the frame - so
-    // it is allowed (the shipped case is inside one). try/catch CAN, and a catch
-    // that happens to rethrow today is still a catch that can be edited to swallow,
-    // so any catch clause makes the call site RED.
-    if (node.type === 'TryStatement' && node.handler) {
-      return 'the call is inside try/catch - a discarded throw does not honour the enforcer';
-    }
-    const handler = handlerName(node);
-    if (handler) {
-      return `the call is inside a .${handler}() handler - the enforcer's throw is discarded there`;
-    }
-  }
+/** Why a call site may never run, or null when it is an unconditional statement. */
+function unexecutedReason(ancestors) {
   const parent = ancestors[ancestors.length - 1];
   if (!parent || parent.type !== 'ExpressionStatement') {
-    return `the call is nested inside ${parent ? parent.type : 'nothing'}, not a statement of its own - a nested call can be wrapped, awaited or discarded`;
-  }
-  const grand = ancestors[ancestors.length - 2];
-  if (!grand || grand.type !== 'BlockStatement') {
-    return `the call is not inside a block statement (its container is ${grand ? grand.type : 'nothing'}) - write it as a plain statement`;
+    return `the call is an operand inside ${parent ? parent.type : 'nothing'}, not a statement of its own - its result would be discarded`;
   }
   for (const node of ancestors) {
-    if (STATEMENT_CONTAINERS.has(node.type)) continue;
-    if (node.type === 'ExpressionStatement') continue;
-    // A try/finally with no catch clause cannot discard the throw (try WITH a catch
-    // was refused above), and the shipped case is wrapped in one to close the browser.
-    if (node.type === 'TryStatement' && !node.handler) continue;
-    if (node.type === 'CallExpression') {
-      // A harness wrapper (`test('name', () => { ... })`) is not a swallow: it is
-      // the thing that REPORTS the throw. A method call (`list.map(cb)`,
-      // `p.then(cb)`) is, because a callback handed to a method can be skipped,
-      // dropped, retried or caught.
-      if (node.callee && node.callee.type === 'Identifier') continue;
-      return `${calleeLabel(node)} receives the guarded call as a callback - it must be a statement of a function body, not an argument`;
+    if (MAY_NOT_RUN.has(node.type)) {
+      return `the call is inside ${node.type}, so it may never run`;
     }
-    return `the call is inside ${node.type} - only a conditional, looped or returned call sits there, and each of those can discard the failure`;
   }
   return null;
 }
@@ -172,6 +130,8 @@ export function guardedCallProblem(source, spec, filename = 'suite') {
     }
   });
 
+  const where = `${filename}`;
+
   // (1) The callee must be the import binding from the shipped module.
   let localName = null;
   for (const declaration of imports) {
@@ -182,17 +142,16 @@ export function guardedCallProblem(source, spec, filename = 'suite') {
       }
     }
   }
-  const where = `${filename}`;
   if (!localName) {
-    return `${where} must import ${callee} from '${from}' - the shipped enforcer is the only thing whose throw is proven by tests/lost-upgrade-copy.test.mjs`;
+    return `${where} must import ${callee} from '${from}' - the shipped enforcer is the only thing whose behaviour is proven by tests/lost-upgrade-copy.test.mjs`;
   }
 
-  // (2) No local declaration may shadow that import: a lookalike that returns
-  // instead of throwing would satisfy a call-shaped pin and enforce nothing.
+  // (2) Nothing may shadow that import: a local replacement can return instead of
+  // enforcing, and a call-shaped pin could not tell the difference.
   const shadow = bindings.find((entry) => entry.name === localName
     && !(entry.node.type === 'ImportSpecifier' && entry.node.imported && entry.node.imported.name === callee));
   if (shadow) {
-    return `${where} declares its own ${localName} (${shadow.node.type}) alongside the import - a local replacement can return instead of throwing, so the call would not honour the tested enforcer`;
+    return `${where} declares its own ${localName} (${shadow.node.type}) alongside the import - a local replacement can return instead of enforcing, so the call would not reach the tested enforcer`;
   }
 
   // (3) A commented-out, stringified or deleted call is not in the tree at all.
@@ -201,10 +160,10 @@ export function guardedCallProblem(source, spec, filename = 'suite') {
     return `${where} never calls ${localName} in code - a deleted, commented-out or stringified call is not delegation`;
   }
 
-  // (4) Every call site must be a bare statement: nothing between it and the
-  // failure that could discard the throw.
+  // (4) Every call must actually run. Swallow shapes are not policed here: the
+  // enforcer's failure survives a catch (see the header).
   for (const site of sites) {
-    const reason = wrappedReason(site.ancestors);
+    const reason = unexecutedReason(site.ancestors);
     if (reason) return `${where}: ${reason}`;
   }
   return null;
