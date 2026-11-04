@@ -83,12 +83,13 @@ export default async function* suiteModeReporter(source) {
 
   // The driver's record says whether the suite LOADED at all. It is written before any test runs,
   // and it is the only thing that decides "never ran" - no name or path comparison anywhere.
-  // The driver runs in THIS process, so its record is read from memory and from the channel it
-  // announced on (airhorn-gwcm): there is no file for the suite to rewrite.
-  // The driver ran in the runner's grandchild, so its record arrives by file; it is merged into the
-  // ONE record this reporter sends the parent over the pipe, and only after its nonce matches. This
-  // reporter is the process the suite does NOT share, which is what makes the parent's decision
-  // unforgeable by a sibling the suite spawns (airhorn-gwcm).
+  // It arrives BY FILE, because the driver runs in the runner's grandchild where the parent's pipe
+  // (fd 3) is closed. That file IS writable by the suite, which shares the driver's process, so it
+  // is not trusted on its own: this reporter - the process the suite does not share - merges it into
+  // the ONE nonce-tagged record it sends the parent over the pipe, and the parent decides from that
+  // (airhorn-gwcm). The residual trust is a suite lying about its OWN load result; measured that the
+  // lie cannot reach a false "caught".
+
   let driver = null;
   try {
     driver = JSON.parse(fs.readFileSync(process.env.MUTATION_DRIVER_REPORT, 'utf8'));
