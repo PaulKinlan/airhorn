@@ -115,6 +115,9 @@
  "tools/derive-coverage-contract.mjs": [
   "tests/derive-coverage-contract.test.js"
  ],
+ "tools/mutation-check.mjs": [
+  "tests/mutation-check.test.js"
+ ],
  "tools/lib/**": [
   "tests/test-support.test.js"
  ],
