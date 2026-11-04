@@ -889,7 +889,15 @@ async function main() {
 
     const cycleSamples = samples.filter((point) => point.label === 'baseline' || point.label.startsWith('cycle-'));
     const heapSeries = cycleSamples.map((point) => point.heapUsed);
-    const heapGrowth = median(heapSeries.slice(-2)) - median(heapSeries.slice(0, 2));
+    // The windowed median self-cancels when the two windows overlap
+    // (airhorn-c8vo, the nxuv.32 shape): --cycles <= 19 yields TWO cycle-phase
+    // samples, slice(0,2) and slice(-2) are the same pair, and growth read 0 no
+    // matter what the heap did (a measured +10MB leak passed). Too few samples
+    // -> measure the TRUE endpoints of the cycle phase (baseline vs the
+    // quiesced after-cycles sample); enough -> the windowed median as before.
+    const heapGrowth = heapSeries.length >= 4
+      ? median(heapSeries.slice(-2)) - median(heapSeries.slice(0, 2))
+      : afterCycles.heapUsed - baseline.heapUsed;
     const heapMonotonic = growsMonotonically(heapSeries, 256 * 1024);
 
     const heapCheck = check(
