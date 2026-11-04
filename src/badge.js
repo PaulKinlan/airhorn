@@ -29,7 +29,7 @@ export class BlastBadge {
     // the badge here - clearing it would wipe a badge another tab just set
     // (airhorn-danq). Blasts still badge via the per-tab fallback in blast().
     if (shared !== null) {
-      if (shared > 0) navigator.setAppBadge?.(shared);
+      if (shared > 0) navigator.setAppBadge?.(Math.min(shared, 99));
       else navigator.clearAppBadge?.();
     }
 
@@ -51,7 +51,7 @@ export class BlastBadge {
   blast() {
     if (!('setAppBadge' in navigator)) return;
     this.#bumpSharedBadgeCount().then((n) => {
-      if (n !== null) navigator.setAppBadge(n);
+      if (n !== null) navigator.setAppBadge(Math.min(n, 99));
     });
   }
 
@@ -170,7 +170,15 @@ export class BlastBadge {
       const now = this.#readSharedBadgeCount();
       const fresh = this.#readSharedBadgeCount();
       const base = Math.max(now === null ? 0 : now, fresh === null ? 0 : fresh);
-      const next = (base % 99) + 1;
+      // The STORED count is an unbounded monotonic integer; only the DISPLAY is
+      // capped at 99 (airhorn-17qn round 2). A wrapping store made the merge
+      // ambiguous exactly at the boundary - entry 99 plus a concurrent bump that
+      // wrapped to 1 reads 1 as LOWER than 99, and a modulo-aware compare cannot
+      // tell '1 after wrap' from 'a stale 1' (measured: two blasts, count 99 -> 1,
+      // one blast lost). With no wrap there is nothing to disambiguate: integers
+      // compare plainly, a stale writer's merge is always safe, and the badge
+      // still shows two digits.
+      const next = base + 1;
       try {
         window.localStorage.setItem(BADGE_COUNT_KEY, String(next));
       } catch {
