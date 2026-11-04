@@ -31,6 +31,7 @@
   "tests/reflow-zoom.test.mjs"
  ],
  "src/badge.js": [
+  "tests/badge-count.test.js",
   "tests/modules.test.js",
   "tests/multitab.test.mjs",
   "tests/webmcp-browser.test.mjs"

@@ -976,15 +976,35 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
         `${unlocked.length} of ${records.length} write(s) of the shared blast count happened OUTSIDE the origin lock ` +
         `(${JSON.stringify(unlocked)}) - an unlocked read-modify-write is what lets interleaved tabs lose a blast (airhorn-rqz1, airhorn-lg0e)`);
 
-      // THE BOUNDARY, measured rather than asserted away (airhorn-lg0e, second finding). The guard
-      // used to imply that no blast can be lost; the truth is narrower - serialization holds for
-      // writers that TAKE the origin lock. So perform the unlocked stale write the reviewer
-      // performed and pin BOTH facts:
-      //   * the spy records it as an unlocked write (so the assertion above is live against a real
-      //     write, not only against a mutant), and
-      //   * it CLOBBERS the queued result (2 -> 1), which is the app's actual contract. If someone
-      //     later makes the counter monotonic or versioned, this assertion fails and the contract
-      //     is re-stated deliberately instead of drifting.
+      // THE BOUNDARY, measured rather than asserted away (airhorn-lg0e; revised for
+      // airhorn-f5ut, whose monotonic merge this tail used to fail ON). Two facts,
+      // both observable, neither racy:
+      //   1. A RAW write (outside the app's API) still takes effect: the app does
+      //      not and cannot defend storage written behind its back (lg0e's boundary).
+      //   2. The app's own contract after such a clobber (f5ut): the next bump BUILDS
+      //      ON whatever is stored - the locked path re-reads inside the origin lock
+      //      (rqz1); the no-locks fallback merges off the freshest same-turn read,
+      //      pinned browser-free in tests/badge-count.test.js. It never re-publishes
+      //      a total captured before the clobber.
+      // The OLD tail asserted the clobber was FINAL (2 -> 1). Under full-gate load a
+      // variably-late app bump (3 writes quiet, 4 under load) landed after the raw
+      // write and merged 1 -> 2 - the product working as f5ut designed - and the
+      // union gate failed on correct behaviour. So quiesce FIRST, observably: no
+      // bump pending on the origin lock AND the stored count stable across two
+      // reads, so no late write can race the raw write.
+      const quiesced = await waitUntil(async () => {
+        const q = JSON.parse(await A2.evaluate(`navigator.locks.query().then((q) => JSON.stringify({
+          pending: q.pending.map((l) => l.name),
+        }))`));
+        if (q.pending.includes('airhorn:blast-count')) return null;
+        const first = await A2.evaluate(`window.localStorage.getItem('airhorn:blast-count')`);
+        await new Promise((r) => setTimeout(r, 150));
+        const second = await A2.evaluate(`window.localStorage.getItem('airhorn:blast-count')`);
+        return first === second && first !== null ? first : null;
+      }, 5000);
+      assert(quiesced !== null && Number(quiesced) === before + 2,
+        `the bumps never quiesced at ${before + 2} (last stable read: ${JSON.stringify(quiesced)}) - ` +
+        `a late count write is still in flight and the boundary measurement would race it (airhorn-f5ut)`);
       await B.evaluate(`(window.localStorage.setItem('airhorn:blast-count', '1'), true)`);
       const afterUnlocked = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count'))`);
       const lateRecords = JSON.parse(await B.evaluate(`JSON.stringify(window.__badgeWrites || [])`));
@@ -993,12 +1013,25 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
         `the unlocked write performed by this test was NOT recorded as an unlocked write (records: ${JSON.stringify(lateRecords)}) - ` +
         `the guard cannot tell a locked increment from an unlocked one, so its "inside the lock" claim is untested (airhorn-lg0e)`);
       assert(afterUnlocked === 1,
-        `an unlocked stale write of 1 left the shared count at ${afterUnlocked} after the queued bumps had settled at ${before + 2}. ` +
-        `The app serializes writers that TAKE the origin lock; it does not and cannot defend the counter against a writer that does not, ` +
-        `so that writer clobbers it (measured here). A monotonic/versioned counter would be a PRODUCT change - airhorn-lg0e is the test-side finding.`);
+        `a raw write outside the app's API did NOT take effect (count reads ${afterUnlocked}, expected 1) - ` +
+        `the boundary moved: the app now claims storage it does not own (airhorn-lg0e)`);
+      // The f5ut half: an app bump after the raw clobber BUILDS ON the stored value
+      // (1 -> 2); it must not re-publish a total captured before the clobber (which
+      // would read 3). In this browser the bump takes the origin lock, so this pins
+      // the rqz1 re-read inside the lock; the no-locks merge is pinned browser-free
+      // by tests/badge-count.test.js, which goes RED when the merge is reverted.
+      await B.evaluate(`window.__airhorn.start()`);
+      const merged = await waitUntil(async () => {
+        const n = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+        return n === 2 ? n : null;
+      }, 5000);
+      const mergedNow = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      assert(merged === 2,
+        `an app bump after a raw clobber to 1 left the count at ${mergedNow} - ` +
+        `the bump re-published a stale captured total instead of building on what is stored (airhorn-f5ut)`);
       console.log(`  simultaneous bumps that take the origin lock serialized: ${before} -> ${after}, neither lost ` +
-        `(every one of ${records.length} count write(s) observed inside the lock); an unlocked stale write then took it to ${afterUnlocked}, ` +
-        `which is outside the lock's contract (airhorn-lg0e).`);
+        `(every one of ${records.length} count write(s) observed inside the lock); a raw write outside the app's API then took it to ` +
+        `${afterUnlocked} (the lg0e boundary, still true), and the next app bump built on it: ${mergedNow} (airhorn-f5ut).`);
 
       await A2.evaluate(`window.__airhorn.stop({ immediate: true })`);
       await B.evaluate(`window.__airhorn.stop({ immediate: true })`);
