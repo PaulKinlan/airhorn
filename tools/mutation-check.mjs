@@ -509,7 +509,7 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     if (args.build) {
       console.log(`building: ${args.build}`);
       // run() is async: an un-awaited call puts a PROMISE where an exit code belongs, and a Promise
-      // is truthy, so the build could never fail. Every call site is awaited.
+      // is truthy, so the build could never fail. Every call site is awaited (rev-u1v2r7).
       const build = await run('bash', ['-lc', args.build], cwd, { timeoutMs: args.timeoutMs });
       if (build.timedOut) {
         console.error(`mutation-check: refusing: the build did not finish within ${args.timeoutMs}ms and was killed - an unbuilt mutant proves nothing`);

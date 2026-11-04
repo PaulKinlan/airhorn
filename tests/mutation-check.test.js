@@ -708,3 +708,33 @@ test('a hanging suite is bounded: named refusal, and no process of the run outli
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('--build: success proceeds, failure refuses, a hanging build is a named refusal (rev-u1v2r7)', () => {
+  // run() is asynchronous, so an un-awaited call puts a Promise where an exit code belongs - and a
+  // Promise is truthy, so the build could never fail and a mutant that does not build would have
+  // been scored. The old code did exactly that.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-build-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    fs.writeFileSync(path.join(tmp, 'catches.test.mjs'), "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from './src/subject.js';\ntest('the check', () => { assert.equal(answer, 41); });\n");
+    const runIt = (...extra) => spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'catches.test.mjs', ...extra], { cwd: tmp, encoding: 'utf8', timeout: 40000 });
+
+    const ok = runIt('--build', 'true');
+    assert.equal(ok.status, 0, `a successful build must let the run proceed: ${ok.stdout}${ok.stderr}`);
+    assert.match(ok.stdout, /building: true/);
+    assert.match(ok.stdout, /verdict: mutant-caught/);
+
+    const bad = runIt('--build', 'node -e "process.exit(7)"');
+    assert.equal(bad.status, 3, `a failed build must refuse: ${bad.stdout}${bad.stderr}`);
+    assert.match(bad.stdout + bad.stderr, /the build failed \(rc=7\)/);
+    assert.doesNotMatch(bad.stdout, /verdict:/, 'a mutant that does not build proves nothing');
+
+    const hang = runIt('--build', 'sleep 30', '--timeout-ms', '1200');
+    assert.equal(hang.status, 3, hang.stdout + hang.stderr);
+    assert.match(hang.stdout + hang.stderr, /the build did not finish within 1200ms/);
+    assert.doesNotMatch(hang.stdout, /verdict:/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
