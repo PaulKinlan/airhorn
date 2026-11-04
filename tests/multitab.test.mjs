@@ -919,8 +919,6 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
         `two blasts in two tabs produced a shared count of ${after}, expected ${before + 2} - ` +
         `the two bumps, which both queued on the origin lock, were not serialized: one clobbered the other and a blast was lost (airhorn-rqz1). ` +
         `(A separate, unlocked writer is not covered here - airhorn-lg0e)`);
-      await A2.evaluate(`window.__airhorn.stop({ immediate: true })`);
-      await B.evaluate(`window.__airhorn.stop({ immediate: true })`);
       // The claim this sequence makes is that a blast's increment is a LOCKED
       // read-modify-write, because that is what makes interleaved tabs add up
       // instead of clobbering (airhorn-rqz1). "A request was queued" is not that
@@ -941,8 +939,33 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       assert(unlocked.length === 0,
         `${unlocked.length} of ${records.length} write(s) of the shared blast count happened OUTSIDE the origin lock ` +
         `(${JSON.stringify(unlocked)}) - an unlocked read-modify-write is what lets interleaved tabs lose a blast (airhorn-rqz1, airhorn-lg0e)`);
+
+      // THE BOUNDARY, measured rather than asserted away (airhorn-lg0e, second finding). The guard
+      // used to imply that no blast can be lost; the truth is narrower - serialization holds for
+      // writers that TAKE the origin lock. So perform the unlocked stale write the reviewer
+      // performed and pin BOTH facts:
+      //   * the spy records it as an unlocked write (so the assertion above is live against a real
+      //     write, not only against a mutant), and
+      //   * it CLOBBERS the queued result (2 -> 1), which is the app's actual contract. If someone
+      //     later makes the counter monotonic or versioned, this assertion fails and the contract
+      //     is re-stated deliberately instead of drifting.
+      await B.evaluate(`(window.localStorage.setItem('airhorn:blast-count', '1'), true)`);
+      const afterUnlocked = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count'))`);
+      const lateRecords = JSON.parse(await B.evaluate(`JSON.stringify(window.__badgeWrites || [])`));
+      const late = lateRecords.filter((r) => !r.inLock);
+      assert(late.length >= 1,
+        `the unlocked write performed by this test was NOT recorded as an unlocked write (records: ${JSON.stringify(lateRecords)}) - ` +
+        `the guard cannot tell a locked increment from an unlocked one, so its "inside the lock" claim is untested (airhorn-lg0e)`);
+      assert(afterUnlocked === 1,
+        `an unlocked stale write of 1 left the shared count at ${afterUnlocked} after the queued bumps had settled at ${before + 2}. ` +
+        `The app serializes writers that TAKE the origin lock; it does not and cannot defend the counter against a writer that does not, ` +
+        `so that writer clobbers it (measured here). A monotonic/versioned counter would be a PRODUCT change - airhorn-lg0e is the test-side finding.`);
       console.log(`  simultaneous bumps that take the origin lock serialized: ${before} -> ${after}, neither lost ` +
-        `(every one of ${records.length} count write(s) observed inside the lock - airhorn-lg0e).`);
+        `(every one of ${records.length} count write(s) observed inside the lock); an unlocked stale write then took it to ${afterUnlocked}, ` +
+        `which is outside the lock's contract (airhorn-lg0e).`);
+
+      await A2.evaluate(`window.__airhorn.stop({ immediate: true })`);
+      await B.evaluate(`window.__airhorn.stop({ immediate: true })`);
     } else {
       console.log('  navigator.locks unavailable in this browser; nothing to assert.');
     }
