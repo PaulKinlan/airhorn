@@ -11,6 +11,7 @@ import {
   mutationTargetProblem,
   restoreVerified,
   classifyPair,
+  classifyRecheck,
   suitePresenceProblem,
   verdictFor,
 } from '../tools/mutation-check.mjs';
@@ -107,6 +108,15 @@ test('the run pair: a hang on either side is never a caught mutant', () => {
 
 test('the run pair refuses to classify when a side is missing', () => {
   assert.equal(classifyPair({ control: { rc: 0 }, mutant: null }).mode, 'never-ran');
+});
+
+test('a catch must be reproducible: the restored source has to pass again', () => {
+  assert.equal(classifyRecheck({ recheck: { rc: 0 } }).mode, 'reproduced');
+  const flaky = classifyRecheck({ recheck: { rc: 1 } });
+  assert.equal(flaky.mode, 'never-ran');
+  assert.match(flaky.problem, /not deterministic/);
+  assert.equal(classifyRecheck({ recheck: { rc: 1, timedOut: true } }).mode, 'never-ran');
+  assert.equal(classifyRecheck({ recheck: null }).mode, 'never-ran');
 });
 
 /* --- the triad --------------------------------------------------------------- */
@@ -368,6 +378,30 @@ test('--dry-run runs the control and mutates NOTHING (airhorn-lpgh)', () => {
     assert.match(result.stdout, /--dry-run, so nothing was mutated/);
     assert.doesNotMatch(result.stdout, /mutant applied/);
     assert.equal(fs.readFileSync(path.join(dir, 'src', 'subject.js'), 'utf8'), before, 'the file was never touched');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a suite that is not deterministic is refused, not called a caught mutant', () => {
+  // Fails on its SECOND run: control passes, the mutant run fails (a false catch), and the
+  // re-check - which runs against the restored source - fails again. Nothing was measured.
+  const dir = world({
+    'flaky.test.mjs': [
+      "import fs from 'node:fs';",
+      "import test from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "const counter = new URL('./runs.txt', import.meta.url);",
+      "const seen = fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0;",
+      "fs.writeFileSync(counter, String(seen + 1));",
+      "test('only passes the first time', () => { assert.equal(seen, 0, `run ${seen + 1} fails`); });",
+    ].join('\n'),
+  });
+  try {
+    const result = check(dir, ['flaky.test.mjs']);
+    assert.equal(result.status, 3, `a flaky suite cannot prove a catch: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /not deterministic/);
+    assert.doesNotMatch(result.stdout, /verdict: mutant-caught/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -56,10 +56,18 @@
  *     control passes, mutant passes      -> passed (fix-does-not-close)
  *     mutant hangs                       -> never-ran (refused, named)
  *
+ * A "caught" is then re-checked: the source is restored and the suite is run once more,
+ * and if it does not pass again the tool refuses. A flaky suite that fails on its second
+ * run would otherwise manufacture a caught mutant - and a false catch is exactly the
+ * direction that hides a hole. So a green here is three observations, not one:
+ *
+ *     control passes -> mutant fails -> control passes again (code restored)
+ *
  * That comparison cannot be moved by comments, whitespace, quoting, module specifiers,
  * path spellings, reporter hooks or forged report files, because none of them are read.
- * The price is one extra suite run per check; correctness of the verdict is the whole
- * point of the tool, and the control run is what makes a green mean something.
+ * The price is two extra suite runs per check (one control, one re-check after a catch);
+ * correctness of the verdict is the whole point of the tool, and the control run is what
+ * makes a green mean something.
  *
  * A script suite (a file that asserts at top level and calls process.exit) needs no
  * special treatment for classification — the control/mutant pair judges it the same way.
@@ -200,6 +208,27 @@ export function classifyPair({ control, mutant }) {
     return { mode: 'caught', rc: mutant.rc };
   }
   return { mode: 'passed', rc: 0 };
+}
+
+/**
+ * The re-check after a catch. A suite that fails on the mutant must pass the unmutated
+ * source AGAIN once the mutant is removed: otherwise it is non-deterministic, and its
+ * failure cannot be attributed to the mutation.
+ */
+export function classifyRecheck({ recheck }) {
+  if (!recheck) {
+    return { mode: 'never-ran', problem: 'the re-check run is missing; a caught mutant needs the restored source to pass again' };
+  }
+  if (recheck.timedOut) {
+    return { mode: 'never-ran', problem: 'the re-check with the mutant removed did not finish (timeout): the suite is not deterministic, so the caught mutant cannot be attributed to the mutation' };
+  }
+  if (recheck.rc !== 0) {
+    return {
+      mode: 'never-ran',
+      problem: `the suite is not deterministic: it passed the unmutated source, then failed it again once the mutant was removed (${describeRun(recheck)}). A suite that fails on its own cannot prove a caught mutant, so nothing was measured`,
+    };
+  }
+  return { mode: 'reproduced' };
 }
 
 /**
@@ -374,6 +403,19 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   }
 
   if (refused) return 3;
+
+  // A catch is only claimed if the restored source still passes: control -> mutant fails ->
+  // control passes again. A flaky suite would otherwise manufacture a caught mutant.
+  if (mutantRc !== 0) {
+    console.log(`re-check: ${args.suite} against the restored ${args.file}`);
+    const recheck = runSuite({ suite: args.suite, ...runArgs });
+    const verdictOnSuite = classifyRecheck({ recheck });
+    if (verdictOnSuite.mode === 'never-ran') {
+      console.error(`mutation-check: refusing: ${verdictOnSuite.problem}${tail(recheck.stderr || recheck.stdout)}`);
+      return 3;
+    }
+    console.log(`re-check: ${describeRun(recheck)} - the suite passes the restored source again`);
+  }
   const result = verdictFor({ oldRc: args.suiteOld ? baselineRc : null, newRc: mutantRc });
   console.log(`verdict: ${result.verdict} (${result.why})`);
   if (!args.suiteOld) {
