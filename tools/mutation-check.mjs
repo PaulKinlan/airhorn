@@ -33,6 +33,7 @@
 
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -171,15 +172,71 @@ function parseArgs(argv) {
   return args;
 }
 
-function run(command, shellArgs, cwd, { captureStderr = false, env = process.env } = {}) {
+function run(command, shellArgs, cwd, { captureStderr = false, env = process.env, reportPipe = false } = {}) {
   const result = spawnSync(command, shellArgs, {
     cwd,
     env,
-    stdio: captureStderr ? ['ignore', 'inherit', 'pipe'] : 'inherit',
+    // fd 3 is a PIPE, not a path (airhorn-gwcm): the suite is handed a channel it can only write
+    // to, never a filename it or a sibling it spawns can poll and rewrite after the reporter's
+    // final write. The parent is the only reader.
+    stdio: reportPipe ? ['ignore', 'inherit', 'pipe', 'pipe'] : captureStderr ? ['ignore', 'inherit', 'pipe'] : 'inherit',
     encoding: 'utf8',
   });
   if (captureStderr && result.stderr) process.stderr.write(result.stderr);
-  return { rc: result.status === null ? 1 : result.status, stderr: result.stderr || '' };
+  return {
+    rc: result.status === null ? 1 : result.status,
+    stderr: result.stderr || '',
+    channel: reportPipe ? (result.output && result.output[3]) || '' : '',
+  };
+}
+
+/**
+ * Read the report CHANNEL (airhorn-gwcm).
+ *
+ * The channel is the child's fd 3: every record is one JSON line. Nothing about the verdict may
+ * rest on a file whose path we hand to the suite - the suite can poll and rewrite that, and so can
+ * any process it spawns, which is exactly how a green suite scored "mutant-caught" 2 runs in 3.
+ * A record is trusted only when: it is well formed, it carries this run's nonce, its kind is known,
+ * and no kind appears twice. Anything else is a NAME for the parent to report, never a verdict.
+ */
+export function readChannel(text, nonce) {
+  const problems = [];
+  const records = { driver: [], final: [] };
+  const lines = String(text || '').split('\n').filter((line) => line.trim() !== '');
+  if (lines.length === 0) return { records: null, problem: 'no report: the run wrote nothing to the report channel' };
+  for (const line of lines) {
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      problems.push(`malformed record ${JSON.stringify(line.slice(0, 80))}`);
+      continue;
+    }
+    if (!parsed || typeof parsed !== 'object') { problems.push('record was not an object'); continue; }
+    if (parsed.nonce !== nonce) { problems.push('record did not carry this run\'s nonce'); continue; }
+    if (parsed.kind === 'driver' || parsed.kind === 'final') records[parsed.kind].push(parsed);
+    else problems.push(`unknown record kind ${JSON.stringify(parsed.kind)}`);
+  }
+  if (records.driver.length > 1) problems.push(`${records.driver.length} driver records (a run writes one)`);
+  if (records.final.length > 1) problems.push(`${records.final.length} final records (a run writes one)`);
+  if (records.final.length === 0 && problems.length === 0) problems.push('no final record: the reporter never finished');
+  if (problems.length > 0) {
+    return { records: null, problem: `report channel not trustworthy: ${problems.join('; ')}` };
+  }
+  const final = records.final[0];
+  return {
+    records: {
+      driver: records.driver[0] ? records.driver[0].driver : final.driver,
+      startedTests: final.startedTests,
+      realTests: final.realTests,
+      realPassed: final.realPassed,
+      realFailed: final.realFailed,
+      fileLevelFailed: final.fileLevelFailed,
+      wrapperEvents: final.wrapperEvents,
+      failing: final.failing,
+    },
+    problem: null,
+  };
 }
 
 /** Run a suite and say both what it exited with and whether it ran at all. */
@@ -246,10 +303,14 @@ const DRIVER = path.join(path.dirname(SELF), 'lib', 'suite-driver.mjs');
  * producing no report - which would read as never-ran for every case when the mutation checker is
  * itself under test.
  */
-function childEnv(reportPath, suitePath) {
+function childEnv(suitePath, nonce, driverReportPath) {
   const env = {
     ...process.env,
-    MUTATION_SUITE_REPORT: reportPath,
+    // A channel the child can only write to (fd 3) plus this run's nonce - NOT a path. The suite
+    // gets no filename to poll or rewrite, and a sibling it spawns inherits neither (airhorn-gwcm).
+    MUTATION_SUITE_CHANNEL: '3',
+    MUTATION_RUN_NONCE: nonce,
+    MUTATION_DRIVER_REPORT: driverReportPath,
     MUTATION_SUITE_FILE: suitePath,
     MUTATION_DRIVER_FILE: DRIVER,
   };
@@ -267,21 +328,20 @@ function runSuite(suite, cwd, label, suiteMode) {
     if (classified.problem) return { problem: `${label} [${classified.mode}] ${classified.problem}` };
     return { rc: classified.rc };
   }
-  const reportPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-report-')), 'report.json');
+  const nonce = randomUUID();
+  const driverReportPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-driver-')), 'driver.json');
   // Run under the test runner with the reporting hook: the runner tells us whether any test
   // executed, instead of us guessing the suite's kind from its text (airhorn-u1v2).
   // The runner is pointed at the driver, not at the suite: the driver records whether the suite
   // LOADED, which is the only spelling-proof evidence that any test could have run (airhorn-lnme).
   const ran = run(process.execPath, ['--test', '--test-reporter', REPORTER, DRIVER], cwd, {
     captureStderr: true,
-    env: childEnv(reportPath, path.resolve(cwd, suite)),
+    reportPipe: true,
+    env: childEnv(path.resolve(cwd, suite), nonce, driverReportPath),
   });
-  let report = null;
-  try {
-    report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
-  } catch {
-    report = null;
-  }
+  const channel = readChannel(ran.channel, nonce);
+  const report = channel.records;
+  if (channel.problem) return { problem: `${label} [report-not-trustworthy] ${channel.problem}` };
   const classified = classifyRun({ report, exitCode: ran.rc, suiteMode });
   // The state is NAMED in the refusal, not just implied by the exit code (airhorn-so88): a reader
   // must be able to tell "never-ran" from "threw-outside-a-test" without reading prose.

@@ -83,21 +83,26 @@ export default async function* suiteModeReporter(source) {
 
   // The driver's record says whether the suite LOADED at all. It is written before any test runs,
   // and it is the only thing that decides "never ran" - no name or path comparison anywhere.
+  // The driver runs in THIS process, so its record is read from memory and from the channel it
+  // announced on (airhorn-gwcm): there is no file for the suite to rewrite.
+  // The driver ran in the runner's grandchild, so its record arrives by file; it is merged into the
+  // ONE record this reporter sends the parent over the pipe, and only after its nonce matches. This
+  // reporter is the process the suite does NOT share, which is what makes the parent's decision
+  // unforgeable by a sibling the suite spawns (airhorn-gwcm).
   let driver = null;
-  const target = process.env.MUTATION_SUITE_REPORT;
-  if (target) {
-    try {
-      driver = JSON.parse(fs.readFileSync(target, 'utf8'));
-    } catch {
-      driver = null;
-    }
+  try {
+    driver = JSON.parse(fs.readFileSync(process.env.MUTATION_DRIVER_REPORT, 'utf8'));
+    if (driver && driver.nonce !== process.env.MUTATION_RUN_NONCE) driver = { nonceMismatch: true };
+  } catch {
+    driver = null;
   }
   const report = { driver, startedTests, realTests, realPassed, realFailed, fileLevelFailed, wrapperEvents, failing: failing.slice(0, 10) };
-  if (target) {
+  const channelFd = Number(process.env.MUTATION_SUITE_CHANNEL);
+  if (Number.isInteger(channelFd)) {
     try {
-      fs.writeFileSync(target, JSON.stringify(report));
+      fs.writeSync(channelFd, `${JSON.stringify({ kind: 'final', nonce: process.env.MUTATION_RUN_NONCE || null, ...report })}\n`);
     } catch {
-      /* the caller treats a missing report as "not measured" */
+      /* the parent reports a missing record as a named refusal, never as a verdict */
     }
   }
   console.log(`# suite-mode: ${JSON.stringify(report)}`);

@@ -18,23 +18,35 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const suite = process.env.MUTATION_SUITE_FILE;
-const reportPath = process.env.MUTATION_SUITE_REPORT;
+// The report CHANNEL is fd 3, a pipe the parent is the only reader of - never a path (airhorn-
+// gwcm). A path handed to this process is a path the suite (or a sibling it spawns) can poll and
+// rewrite after the final write, which is how a green suite once scored "mutant-caught".
+// This runs in the test-runner's GRANDCHILD, which does not inherit the parent's pipe (measured:
+// fd 3 is closed there, writeSync throws EINVAL), so the driver's own record travels by file. That
+// file IS writable by the suite - the driver and the suite share this process - so it is not
+// trusted on its own: the reporter (which runs in the runner process, not here) merges it into the
+// single record it sends the parent over the pipe, and the parent decides from THAT. A crash that
+// kills this process also prevents the reporter's final record, which the parent refuses by name
+// (airhorn-gwcm).
+const nonce = process.env.MUTATION_RUN_NONCE || null;
+const driverReportPath = process.env.MUTATION_DRIVER_REPORT || null;
 
 const read = () => {
-  if (!reportPath) return null;
+  if (!driverReportPath) return null;
   try {
-    return JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    return JSON.parse(fs.readFileSync(driverReportPath, 'utf8'));
   } catch {
     return null;
   }
 };
 
 const record = (value) => {
-  if (!reportPath) return;
+  globalThis.__mutationDriverRecord = value;
+  if (!driverReportPath) return;
   try {
-    fs.writeFileSync(reportPath, JSON.stringify(value));
+    fs.writeFileSync(driverReportPath, JSON.stringify({ nonce, ...value }), { mode: 0o600 });
   } catch {
-    /* the caller treats a missing record as "not measured" */
+    /* the parent reports a missing record as a named refusal, never as a verdict */
   }
 };
 

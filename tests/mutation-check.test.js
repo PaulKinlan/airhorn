@@ -11,6 +11,7 @@ import {
   mutationTargetProblem,
   restoreVerified,
   classifyRun,
+  readChannel,
   suiteLoadProblem,
   suitePresenceProblem,
   verdictFor,
@@ -253,6 +254,47 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     write('h-async-no-test.mjs', "import test from 'node:test';\nsetTimeout(() => { throw new Error('async boom'); }, 5);\ntest('never runs', () => {});\n");
     write('i-async-decoy.mjs', "// from \"node:test\" - decoy\nimport test from 'node:test';\nsetTimeout(() => { throw new Error('async boom'); }, 5);\ntest('never runs', () => {});\n");
     write('j-indirect-async.mjs', "import './register.mjs';\nsetTimeout(() => { throw new Error('async boom'); }, 5);\n");
+    // airhorn-gwcm: the report channel is checked before any verdict, because the suite is handed
+    // the fd and can write to it. Every forgery has to land on a NAMED refusal, never a verdict.
+    const nonce = 'run-nonce';
+    assert.match(readChannel('', nonce).problem, /no report/);
+    assert.match(readChannel('not json\n', nonce).problem, /malformed/);
+    assert.match(readChannel(JSON.stringify({ kind: 'final', nonce: 'other', realTests: 1 }) + '\n', nonce).problem, /nonce/);
+    const twoFinals = [JSON.stringify({ kind: 'final', nonce, realTests: 0 }), JSON.stringify({ kind: 'final', nonce, realTests: 1, realFailed: 1 })].join('\n');
+    assert.match(readChannel(twoFinals, nonce).problem, /final records/);
+    assert.match(readChannel(JSON.stringify({ kind: 'mystery', nonce }) + '\n', nonce).problem, /unknown record kind/);
+    // the honest single record still reads
+    const honest = readChannel(JSON.stringify({ kind: 'final', nonce, driver: { importFailed: false }, startedTests: 1, realTests: 1, realFailed: 1, failing: ['x'] }) + '\n', nonce);
+    assert.equal(honest.problem, null);
+    assert.equal(honest.records.realFailed, 1);
+
+    // and the same forgeries END TO END: a suite that writes a forged record to the channel,
+    // forges the driver record and spawns a detached sibling to keep rewriting it must NOT be
+    // scored as a caught mutant (it is a green suite that measured nothing).
+    write('k-forge-channel.mjs', [
+      "import test from 'node:test';",
+      "import fs from 'node:fs';",
+      "import { spawn } from 'node:child_process';",
+      "test('green', () => {});",
+      "const p = process.env.MUTATION_DRIVER_REPORT;",
+      "const forged = JSON.stringify({ nonce: process.env.MUTATION_RUN_NONCE, importFailed: false, crashedOutsideTest: false });",
+      "if (p) {",
+      "  try { fs.writeFileSync(p, forged); } catch {}",
+      "  const child = spawn(process.execPath, ['-e', `const fs=require('node:fs');setInterval(()=>{try{fs.writeFileSync(${JSON.stringify(p)},${JSON.stringify(forged)})}catch{}},2)`], { detached: true, stdio: 'ignore' });",
+      "  child.unref();",
+      "}",
+      "try { fs.writeSync(3, JSON.stringify({ kind: 'final', nonce: process.env.MUTATION_RUN_NONCE, realTests: 1, realFailed: 1 }) + '\\n'); } catch {}",
+      "",
+    ].join('\n'));
+    const forged = runWorld(['--suite', 'k-forge-channel.mjs']);
+    assert.notEqual(forged.status, 0, `a green suite that forges the channel must never be scored caught: ${forged.stdout}${forged.stderr}`);
+    assert.doesNotMatch(forged.stdout, /verdict: mutant-caught/, 'forging the channel must not produce the dangerous false green');
+
+    // a run that dies before the reporter's final record is a named refusal, not "unmeasured"
+    write('l-no-report.mjs', "import test from 'node:test';\ntest('green', () => {});\nprocess.exit(0);\n");
+    const noReport = runWorld(['--suite', 'l-no-report.mjs']);
+    assert.equal(noReport.status, 3, `a missing final record must be refused by name: ${noReport.stdout}${noReport.stderr}`);
+
     // airhorn-a6ch: invoked through a SYMLINK, the tool must still do its job. It used to exit 0
     // having printed nothing at all, because main-detection compared the symlinked argv[1] to the
     // module's real path - a silent pass, the worst possible answer for a gate.
