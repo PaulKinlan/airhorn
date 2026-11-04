@@ -230,6 +230,45 @@ const tabInstrumentation = `
       };
     }
   }
+  // Write spy + lock spy (airhorn-lg0e). The guard in sequence I used to claim
+  // "no blast can be lost" while only proving a lock request was QUEUED, which
+  // says nothing about where the storage write happens. These two wrappers make
+  // that observable: every setItem of the shared count records whether it ran
+  // inside a navigator.locks.request callback for that lock. A bump that writes
+  // outside the lock is exactly the read-modify-write the guard exists to stop,
+  // so the assertion can go red for it (and does - see the mutant in the bead).
+  window.__badgeWrites = [];
+  window.__heldLocks = [];
+  try {
+    const request = navigator.locks && navigator.locks.request;
+    if (request) {
+      navigator.locks.request = function (name, ...rest) {
+        const cb = rest[rest.length - 1];
+        if (typeof cb !== 'function') return request.call(this, name, ...rest);
+        const wrapped = (...args) => {
+          window.__heldLocks.push(name);
+          try {
+            return cb(...args);
+          } finally {
+            const at = window.__heldLocks.lastIndexOf(name);
+            if (at >= 0) window.__heldLocks.splice(at, 1);
+          }
+        };
+        rest[rest.length - 1] = wrapped;
+        return request.call(this, name, ...rest);
+      };
+    }
+    const setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (key === 'airhorn:blast-count') {
+        // Named lock, not "some lock": a write while an unrelated lock is held
+        // is still an unlocked write of THIS counter.
+        window.__badgeWrites.push({ value: String(value), inLock: window.__heldLocks.includes('airhorn:blast-count') });
+      }
+      return setItem.call(this, key, value);
+    };
+  } catch {}
+
   // Announcer logger, race-free against the app's own installer.
   window.__annLog = [];
   try {
@@ -882,8 +921,28 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
         `(A separate, unlocked writer is not covered here - airhorn-lg0e)`);
       await A2.evaluate(`window.__airhorn.stop({ immediate: true })`);
       await B.evaluate(`window.__airhorn.stop({ immediate: true })`);
+      // The claim this sequence makes is that a blast's increment is a LOCKED
+      // read-modify-write, because that is what makes interleaved tabs add up
+      // instead of clobbering (airhorn-rqz1). "A request was queued" is not that
+      // claim: it says nothing about where the write happened (airhorn-lg0e).
+      // Every write of the shared count must therefore be observed INSIDE a
+      // navigator.locks.request callback for the same lock - recorded at the
+      // moment of the write, so no sleep decides it.
+      // Both tabs blasted: a bump writes in whichever page pressed, so both
+      // pages' records count (a write is either inside the lock or it is not).
+      const fromA2 = JSON.parse(await A2.evaluate(`JSON.stringify(window.__badgeWrites || [])`));
+      const fromB = JSON.parse(await B.evaluate(`JSON.stringify(window.__badgeWrites || [])`));
+      const records = [...fromA2, ...fromB];
+      const writes = JSON.stringify(records);
+      assert(records.length > 0,
+        `no write of the shared blast count was observed in the tab that blasted (records: ${writes}) - ` +
+        `the guard cannot claim a locked increment if it never saw the write (airhorn-lg0e)`);
+      const unlocked = records.filter((r) => !r.inLock);
+      assert(unlocked.length === 0,
+        `${unlocked.length} of ${records.length} write(s) of the shared blast count happened OUTSIDE the origin lock ` +
+        `(${JSON.stringify(unlocked)}) - an unlocked read-modify-write is what lets interleaved tabs lose a blast (airhorn-rqz1, airhorn-lg0e)`);
       console.log(`  simultaneous bumps that take the origin lock serialized: ${before} -> ${after}, neither lost ` +
-        `(an unlocked writer is outside the lock's contract - airhorn-lg0e).`);
+        `(every one of ${records.length} count write(s) observed inside the lock - airhorn-lg0e).`);
     } else {
       console.log('  navigator.locks unavailable in this browser; nothing to assert.');
     }
