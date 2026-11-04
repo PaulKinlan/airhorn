@@ -463,9 +463,17 @@ test('every script-tier suite is gated by a tests/support change (airhorn-dco)',
   const supportChange = 'tests/support/report-hook.mjs';
   assert.ok(fs.existsSync(path.join(root, supportChange)), `selector input ${supportChange} is missing from the tree`);
   const selected = listFor(supportChange).sort();
-  const scriptTier = fs.readdirSync(path.join(root, 'tests'))
-    .filter((f) => /\.test\.mjs$/.test(f) && f !== 'acceptance.mjs')
-    .map((f) => `tests/${f}`).sort();
+  // The script tier is the DECLARED one (gate.conf SUITE_TIERS, airhorn-z4cn), not
+  // the .mjs extension: eight .test.mjs suites are declared node-test now, and the
+  // hook is injected only under the script runner. Deriving by extension drifted the
+  // moment tiers were declared (airhorn-x3f1).
+  const gateConf = fs.readFileSync(path.join(root, 'tools', 'gate.conf'), 'utf8');
+  const scriptTier = gateConf.split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.endsWith('=script'))
+    .map((line) => line.slice(0, -'=script'.length))
+    .filter((f) => f !== 'tests/acceptance.mjs')
+    .sort();
   assert.ok(scriptTier.length >= 6, `expected the script-tier suites to be present, got ${JSON.stringify(scriptTier)}`);
   // EXACT set, not subset (airhorn-cae): over-naming matters as much as
   // under-naming - tests/acceptance.mjs in this row would put a full

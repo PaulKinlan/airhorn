@@ -257,5 +257,20 @@ tests/support/browser.mjs	@importers except=tests/acceptance.mjs
 tests/cdp-command-bound.mjs	@importers except=tests/acceptance.mjs
 tests/support/signal-exit.mjs	@importers except=tests/acceptance.mjs
 tests/test-support.test.js	tests/test-support.test.js
-tests/support/**	tests/a11y.test.mjs tests/docs-recipe.test.mjs tests/health.test.mjs tests/keyboard.test.mjs tests/lost-upgrade-copy.test.mjs tests/multitab.test.mjs tests/nav-guard.test.mjs tests/press-guard.test.mjs tests/reflow-zoom.test.mjs tests/resilience-ui.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs tests/sw-redirect.test.mjs tests/tool-bound-kill.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp.test.mjs
+# Per-module rows, DERIVED (airhorn-x3f1): the generic tests/support/** row charged
+# ALL 20 suites - 12 of them serial browser passes - for a one-line change to a pure
+# helper like poll.mjs, which only 7 suites import. Each module now names @importers,
+# so a helper's change runs exactly its importers and a NEW support module with no
+# row fails the reverse check loudly instead of silently inheriting 20 suites.
+# report-hook.mjs is the one exception: it is RUNNER-INJECTED (node --import) into
+# every script-tier suite, no file imports it, so @importers would see nothing.
+# Its row lists the script tier explicitly - and tests/gate-map.test.js's airhorn-dco
+# pin derives that exact set from the tree per run, so drift fails loudly there.
+tests/support/report-hook.mjs	tests/a11y.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/reflow-zoom.test.mjs tests/resilience-ui.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/webmcp.test.mjs
+tests/support/poll.mjs	@importers
+tests/support/quiescence.mjs	@importers
+tests/support/lost-upgrade-copy.mjs	@importers
+tests/support/nav-guard.mjs	@importers
+tests/support/press-guard.mjs	@importers
+tests/support/axe.min.js	@importers
 tests/press-guard.test.mjs	tests/press-guard.test.mjs
