@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertLostUpgradeNotice, LOST_UPGRADE_COPY } from './support/lost-upgrade-copy.mjs';
-import { liveCode, stripComments } from './support/strip-comments.mjs';
+import { assertLostUpgradeNotice, lostUpgradeVerdicts, LOST_UPGRADE_COPY } from './support/lost-upgrade-copy.mjs';
+import { guardedCallProblem } from '../tools/guarded-call.mjs';
 
 const notice = 'The app could not update - you are still on the previous version.';
-const call = 'assertLostUpgradeNotice(lost.text)';
+const SPEC = { callee: 'assertLostUpgradeNotice', from: './support/lost-upgrade-copy.mjs' };
 
 test('the actual lost-upgrade notice passes the enforcer', () => {
   assert.doesNotThrow(() => assertLostUpgradeNotice(notice));
@@ -25,72 +25,147 @@ test('a non-enforcing announcement fails with the missing copy named (airhorn-rr
   }
 });
 
-// The fixtures below are the answer to the review finding airhorn-nqje: gate-map used to pin the
-// suite's DELEGATION with `suite.includes('assertLostUpgradeNotice(lost.text);')`, which a commented-out
-// call satisfied. The pin now searches liveCode(suite), so the four shapes below are the four ways text
-// can look like a call without being one.
-
-test('a line-commented call does not survive liveCode (airhorn-nqje)', () => {
-  const source = `// ${call};\nconst unrelated = 1;`;
-  assert.equal(liveCode(source).includes(call), false,
-    'a // comment must not be able to satisfy the delegation pin');
-  assert.equal(stripComments(source).includes(call), false);
+test('the enforcer records that it ran and what it decided (airhorn-6829)', () => {
+  const before = lostUpgradeVerdicts().length;
+  assertLostUpgradeNotice(notice);
+  assert.throws(() => assertLostUpgradeNotice('nothing to see here'));
+  const verdicts = lostUpgradeVerdicts().slice(before);
+  assert.deepEqual(verdicts.map((v) => [v.ran, v.ok]),
+    [[true, true], [true, false]],
+    'a call that passes and a call that throws must both be recorded as having run');
+  assert.equal(verdicts[1].missing, 'The app could not update');
 });
 
-test('a block-commented call does not survive liveCode, one line or many (airhorn-nqje)', () => {
+// The fixtures below are the answer to review findings airhorn-rrme and airhorn-nqje. Two rounds of
+// text pins were satisfied by text: a commented-out call, a block-commented call, and a stringified
+// call all counted. The pin is now a question about the syntax tree, so the hostile worlds below are
+// exactly the worlds a text rule cannot separate from the real thing.
+
+test('the shipped delegation shape is GREEN (and so is a harness-wrapped bare statement)', () => {
+  const shipped = [
+    "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
+    '',
+    'async function testBootWatchdog() {',
+    '  const lost = await readLost();',
+    '  await shot("lost-upgrade-announced");',
+    '  assertLostUpgradeNotice(lost.text);',
+    '  if (/new version is ready/i.test(lost.text)) throw new Error("nope");',
+    '}',
+  ].join('\n');
+  assert.equal(guardedCallProblem(shipped, SPEC), null);
+
+  const insideHarness = [
+    "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
+    "test('lost upgrade', async () => {",
+    '  assertLostUpgradeNotice("The app could not update - previous version.");',
+    '});',
+  ].join('\n');
+  assert.equal(guardedCallProblem(insideHarness, SPEC), null,
+    'a test() callback is not a swallow: the harness is what reports the failure');
+});
+
+test('hostile world (i): the call DELETED is RED', () => {
+  const source = [
+    "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
+    'async function testBootWatchdog() {',
+    '  const lost = await readLost();',
+    '}',
+  ].join('\n');
+  assert.match(guardedCallProblem(source, SPEC) ?? '', /never calls assertLostUpgradeNotice/);
+});
+
+test('hostile world (ii): the call COMMENTED OUT is RED (a comment is not in the tree)', () => {
   for (const source of [
-    `/* ${call}; */\nconst unrelated = 1;`,
-    `/*\n * ${call};\n */\nconst unrelated = 1;`,
-    `const a = 1; /* ${call}; */ const b = 2;`,
+    [
+      "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
+      'async function testBootWatchdog() {',
+      '  // assertLostUpgradeNotice(lost.text);',
+      '}',
+    ].join('\n'),
+    [
+      "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
+      'async function testBootWatchdog() {',
+      '  /*',
+      '   * assertLostUpgradeNotice(lost.text);',
+      '   */',
+      '}',
+    ].join('\n'),
+    [
+      "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
+      'async function testBootWatchdog() {',
+      "  const note = 'assertLostUpgradeNotice(lost.text);';",
+      '}',
+    ].join('\n'),
   ]) {
-    assert.equal(liveCode(source).includes(call), false,
-      `a /* */ comment must not be able to satisfy the delegation pin: ${JSON.stringify(source)}`);
-    assert.equal(stripComments(source).includes(call), false);
+    assert.match(guardedCallProblem(source, SPEC) ?? '', /never calls assertLostUpgradeNotice/,
+      `a commented-out or stringified call must not satisfy the pin: ${JSON.stringify(source)}`);
   }
 });
 
-test('a call inside a string literal is not code (airhorn-nqje)', () => {
-  // Two facts, and the second is why the scanner has to be quote-aware rather than a regex sweep:
-  // the literal's own contents are not executable, and a "//" or "/*" INSIDE a literal is not a
-  // comment start, so the live call after it must still be found.
-  const hidden = `const lookalike = '${call};';`;
-  assert.equal(liveCode(hidden).includes(call), false,
-    'a string literal must not be able to satisfy the delegation pin');
-  assert.equal(stripComments(hidden).includes(call), true,
-    'stripComments leaves strings alone by design - only liveCode may be used for a pin');
-
-  const afterString = `const url = 'https://example.test/a/*not-a-comment*/'; ${call};`;
-  assert.equal(liveCode(afterString).includes(call), true,
-    'a // or /* inside a string literal must not swallow the rest of the line');
-  assert.ok(stripComments(afterString).includes("'https://example.test/a/*not-a-comment*/'"),
-    'stripComments must not damage a literal that contains comment-looking text');
-
-  const template = `const msg = \`${call};\`;`;
-  assert.equal(liveCode(template).includes(call), false,
-    'a template literal must not be able to satisfy the delegation pin either');
-});
-
-test('real code survives liveCode: the call, and division and regexes around it (airhorn-nqje)', () => {
-  assert.equal(liveCode(`  ${call};`).trim(), `${call};`,
-    'an uncommented call is exactly what the delegation pin looks for');
-  // A "/" after an expression is division, after an operator a regex: neither may blank real code.
-  for (const source of [
-    `const ratio = a / b; ${call};`,
-    `const re = /["'\\/]/; ${call};`,
-    `if (!re.test(text)) throw new Error('x'); ${call};`,
+test('hostile world (iii): the throw SWALLOWED is RED - try/catch, .catch(), .finally()', () => {
+  const head = "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';\nasync function run() {\n";
+  for (const [label, body, expected] of [
+    ['try/catch that discards', '  try { assertLostUpgradeNotice(lost.text); } catch {}', /try\/catch/],
+    ['try/catch with a named binding', '  try { assertLostUpgradeNotice(lost.text); } catch (e) { void e; }', /try\/catch/],
+    ['try/catch/finally', '  try { assertLostUpgradeNotice(lost.text); } catch (e) { void e; } finally { report(); }', /try\/catch/],
+    ['promise .catch arrow with a block', '  work().catch(() => { assertLostUpgradeNotice(lost.text); });', /\.catch\(\)/],
+    ['promise .catch arrow with an expression', '  work().catch(() => assertLostUpgradeNotice(lost.text));', /\.catch\(\)/],
+    ['promise .finally', '  work().finally(() => { assertLostUpgradeNotice(lost.text); });', /\.finally\(\)/],
   ]) {
-    assert.equal(liveCode(source).includes(call), true,
-      `liveCode must not treat code around a slash as a comment: ${JSON.stringify(source)}`);
+    const problem = guardedCallProblem(`${head}${body}\n}`, SPEC);
+    assert.match(problem ?? '', expected, `${label} must be RED, got ${JSON.stringify(problem)}`);
   }
+
+  // try/finally is the shipped shape (the browser is closed in a finally): it cannot
+  // discard the throw, so it must stay GREEN or the pin reds the real file.
+  const tryFinally = `${head}  try { assertLostUpgradeNotice(lost.text); } finally { await browser.close(); }\n}`;
+  assert.equal(guardedCallProblem(tryFinally, SPEC), null,
+    'try/finally propagates the throw and the shipped case is wrapped in one');
 });
 
-test('liveCode keeps every byte offset and line break, so a hit quotes the real file', () => {
-  const source = `// a\n/* b */\nconst s = 'c';\n  ${call};\n`;
-  const live = liveCode(source);
-  assert.equal(live.length, source.length, 'offsets must map onto the original file');
-  assert.equal(live.split('\n').length, source.split('\n').length, 'line numbers must map too');
-  const index = live.indexOf(call);
-  assert.ok(index > 0);
-  assert.equal(source.slice(index, index + call.length), call,
-    'an index into liveCode is an index into the source');
+test('hostile world (iv): the call REPLACED by something that returns is RED', () => {
+  // A local lookalike shadows the import: it can return instead of throwing, and a call-shaped pin
+  // cannot tell the difference. The pin resolves the callee to the shipped binding, so this is RED.
+  const lookalike = [
+    "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
+    'function assertLostUpgradeNotice(text) { return text; }',
+    'async function run() {',
+    '  assertLostUpgradeNotice(lost.text);',
+    '}',
+  ].join('\n');
+  assert.match(guardedCallProblem(lookalike, SPEC) ?? '', /declares its own assertLostUpgradeNotice/);
+
+  // The same shape via a variable, and a replacement that is simply a different callee.
+  const viaVariable = [
+    "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';",
+    'const assertLostUpgradeNotice = (text) => text;',
+    'async function run() {',
+    '  assertLostUpgradeNotice(lost.text);',
+    '}',
+  ].join('\n');
+  assert.match(guardedCallProblem(viaVariable, SPEC) ?? '', /declares its own assertLostUpgradeNotice/);
+
+  const noImport = [
+    'function assertLostUpgradeNotice(text) { return text; }',
+    'async function run() {',
+    '  assertLostUpgradeNotice(lost.text);',
+    '}',
+  ].join('\n');
+  assert.match(guardedCallProblem(noImport, SPEC) ?? '', /must import assertLostUpgradeNotice/);
+});
+
+test('a conditional, looped or returned call is RED - each can discard the failure', () => {
+  const head = "import { assertLostUpgradeNotice } from './support/lost-upgrade-copy.mjs';\nasync function run() {\n";
+  for (const [label, body] of [
+    ['if (false) { ... }', '  if (false) { assertLostUpgradeNotice(lost.text); }'],
+    ['a ternary', '  const ok = lost ? assertLostUpgradeNotice(lost.text) : true;'],
+    ['&& short-circuit', '  lost && assertLostUpgradeNotice(lost.text);'],
+    ['a for loop', '  for (const one of list) assertLostUpgradeNotice(one.text);'],
+    ['a return', '  return assertLostUpgradeNotice(lost.text);'],
+    ['an await', '  await assertLostUpgradeNotice(lost.text);'],
+    ['a bare call in a .map() callback', '  list.map((one) => assertLostUpgradeNotice(one.text));'],
+  ]) {
+    const problem = guardedCallProblem(`${head}${body}\n}`, SPEC);
+    assert.ok(problem, `${label} must be RED, got GREEN`);
+  }
 });

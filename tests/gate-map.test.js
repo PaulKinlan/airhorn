@@ -35,7 +35,7 @@ import esbuild from 'esbuild';
 import { makeRenderModel } from '../tools/render-model.mjs';
 import { READ_STATE } from '../tools/resilience-audit.mjs';
 import { main as deriveContractMain, deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites, isPendingSuite, importersOf } from '../tools/derive-coverage-contract.mjs';
-import { liveCode, stripComments } from './support/strip-comments.mjs';
+import { assertGuardedCall } from '../tools/guarded-call.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const gate = path.join(root, 'tools', 'fast-gate.sh');
@@ -233,20 +233,22 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
   // (b) index.html authors the copy; the selected suite delegates its live
   // observation to a pure enforcer whose throw is proven by its own unit test.
   // Do not scan the suite's prose for copy: a comment/non-enforcing action used
-  // to pass that check (airhorn-rrme). Pin the one guarded call site instead -
-  // in the suite's LIVE CODE, because a bare substring check was green on a
-  // commented-out or stringified call (airhorn-nqje). Comment and literal
-  // stripping is pinned by tests/lost-upgrade-copy.test.mjs; its residual (a
-  // swallow: try{}/catch{}, if (false) {}) is a review question, not a text rule.
+  // to pass that check (airhorn-rrme). Pin the guarded call site instead, as a
+  // question about the SYNTAX TREE (tools/guarded-call.mjs): text pins were
+  // happy with a commented-out call, a block-commented call, a stringified call
+  // and a swallowed call (airhorn-nqje), and each of those is absent or
+  // structurally unguarded once parsed. The pin refuses a deleted, commented,
+  // stringified, shadowed, conditional or try/catch-wrapped call, and requires
+  // the callee to be the binding imported from the tested support module. Its
+  // residual is named in the ADR: a caller ABOVE the guarded function can still
+  // catch the failure - closing that needs a browser-mutant run the gate does not buy.
   const page = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
   const suite = fs.readFileSync(path.join(root, 'tests', 'resilience-ui.test.mjs'), 'utf8');
   for (const copy of ['The app could not update', 'previous version']) {
     assert.ok(page.includes(copy), `index.html must author the lost-upgrade copy "${copy}"`);
   }
-  assert.ok(liveCode(suite).includes('assertLostUpgradeNotice(lost.text)'),
-    'resilience-ui must delegate the live lost-upgrade notice to the tested enforcer, in code and not in a comment');
-  assert.ok(stripComments(suite).includes('from \'./support/lost-upgrade-copy.mjs\''),
-    'resilience-ui must import the enforcer from tests/support/lost-upgrade-copy.mjs');
+  assertGuardedCall(suite, { callee: 'assertLostUpgradeNotice', from: './support/lost-upgrade-copy.mjs' },
+    'tests/resilience-ui.test.mjs');
   // The worker's own failure story is still the failover suite's job, and the
   // suite still has a row owner (the worker). No page module carries worker code
   // since the split (airhorn-1l04): the registration handler is inline in

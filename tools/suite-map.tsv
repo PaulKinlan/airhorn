@@ -101,6 +101,12 @@ deno.lock	tests/health.test.mjs
 # tools/* is covered by a REAL smoke suite: the gate's own selection contract
 # plus syntax checks of the scripts it names (airhorn-1ye).
 tools/*	tests/gate-smoke.test.js tests/gate-map.test.js
+# tools/guarded-call.mjs turns "the suite really calls the tested enforcer, and
+# nothing can swallow its throw" into a question about the syntax tree
+# (airhorn-6829). Its hostile worlds - deleted, commented, stringified, shadowed,
+# conditional, try/catch and .catch() - are pinned by its own browser-free unit
+# suite, on top of the tools/* row above. Selected: no browser suites.
+tools/guarded-call.mjs	tests/lost-upgrade-copy.test.mjs
 # The audio-parity measurement rules (pitch verdict, band, candidate distance) are proven
 # browser-free by their own suite, so a change to the decision selects it as well
 # (airhorn-nxuv.3): the tool needs Chrome, the RULE does not.

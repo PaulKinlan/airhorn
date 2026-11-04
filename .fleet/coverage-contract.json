@@ -103,6 +103,9 @@
   "tests/gate-smoke.test.js",
   "tests/gate-map.test.js"
  ],
+ "tools/guarded-call.mjs": [
+  "tests/lost-upgrade-copy.test.mjs"
+ ],
  "tools/audio-parity.mjs": [
   "tests/audio-parity-verdict.test.js"
  ],
