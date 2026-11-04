@@ -131,6 +131,7 @@ const instrumentation = `
           });
           const result = start(...startArgs);
           const timer = setInterval(() => {
+            if (window.__probe.stalled) return; // MUTANT: no sample after the stop
             analyser.getFloatTimeDomainData(data);
             let peak = 0;
             for (let i = 0; i < data.length; i += 1) {
@@ -138,7 +139,9 @@ const instrumentation = `
               if (abs > peak) peak = abs;
             }
             window.__probe.level = peak;
-            window.__probe.levelAt = Date.now();
+            // Sub-millisecond and monotonic: Date.now()'s whole milliseconds let a sample
+            // taken BEFORE the stop share the stop's timestamp and pass as fresh (airhorn-wzta).
+            window.__probe.levelAt = performance.now();
             if (peak > window.__probe.peak) window.__probe.peak = peak;
             window.__probe.samples += 1;
             // Did the analyser HEAR anything? Headless Chrome with no audio device
@@ -699,10 +702,14 @@ async function run() {
       // a stale 0.28 and failed a green product. Requiring a post-stop sample also
       // closes the vacuous direction, where a probe that stops sampling keeps an old
       // low level and passes on it.
-      const stopFinishedAt = Date.now();
+      const stopFinishedAt = performance.now();
+      window.__probe.stalled = true;
+      window.__probe.levelAt = stopFinishedAt; // MUTANT: the fixture's last sample was the pre-stop one
       const freshSample = await window.__waitFor(() => {
-        if (window.__probe.levelAt < stopFinishedAt) return null;
-        return { level: window.__probe.level, waitedMs: window.__probe.levelAt - stopFinishedAt };
+        // STRICTLY after: a sample stamped in the same instant is not evidence about
+        // what happened after the stop (airhorn-wzta).
+        if (!(window.__probe.levelAt > stopFinishedAt)) return null;
+        return { level: window.__probe.level, waitedMs: Math.round(window.__probe.levelAt - stopFinishedAt) };
       }, 'an analyser sample taken after stop_horn finished');
       return {
         before,
