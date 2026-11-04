@@ -43,7 +43,7 @@ const mimeTypes = {
 //  - a spy on the app badge API.
 const instrumentation = `
   (() => {
-    window.__probe = { starts: 0, peak: 0, level: 0, samples: 0, ctxState: null, active: 0, maxActive: 0, contexts: 0, oscStarts: 0, oscActive: 0, maxOscActive: 0 };
+    window.__probe = { starts: 0, peak: 0, level: 0, levelAt: 0, samples: 0, loudSamples: 0, ctxState: null, active: 0, maxActive: 0, contexts: 0, oscStarts: 0, oscActive: 0, maxOscActive: 0 };
     window.__badge = { calls: [], cleared: 0 };
 
     // Wait for a page STATE, never for the clock (airhorn-sesh). The UI claims
@@ -138,8 +138,13 @@ const instrumentation = `
               if (abs > peak) peak = abs;
             }
             window.__probe.level = peak;
+            window.__probe.levelAt = Date.now();
             if (peak > window.__probe.peak) window.__probe.peak = peak;
             window.__probe.samples += 1;
+            // Did the analyser HEAR anything? Headless Chrome with no audio device
+            // reports silence while a blast is running, so the post-stop level can
+            // only be asserted where this counter proves the instrument works.
+            if (peak > 0.01) window.__probe.loudSamples += 1;
             window.__probe.ctxState = ctx.state;
           }, 20);
           setTimeout(() => clearInterval(timer), 20000);
@@ -664,7 +669,7 @@ async function run() {
     // more audio nodes than it can clean up, or leak an AudioContext.
     const flood = await evaluate(`(async () => {
       const horn = document.querySelector('.horn');
-      const before = { starts: window.__probe.starts, contexts: window.__probe.contexts, pressed: horn.getAttribute('aria-pressed') };
+      const before = { starts: window.__probe.starts, contexts: window.__probe.contexts, pressed: horn.getAttribute('aria-pressed'), loudSamples: window.__probe.loudSamples };
       window.__probe.maxActive = window.__probe.active;
       let rejected = 0;
       const results = await Promise.all(Array.from({ length: 40 }, () =>
@@ -680,6 +685,7 @@ async function run() {
         level: window.__probe.level,
         pressed: horn.getAttribute('aria-pressed'),
         contexts: window.__probe.contexts,
+        loudSamples: window.__probe.loudSamples - before.loudSamples,
         state: await window.__call('get_horn_state'),
       };
       const stopped = await window.__call('stop_horn');
@@ -687,6 +693,17 @@ async function run() {
         () => horn.getAttribute('aria-pressed') === 'false' && !horn.classList.contains('horning'),
         'the flood teardown to clear the pressed state',
       );
+      // The sample that proves silence must be taken AFTER the stop finished
+      // (airhorn-0wqq). The probe overwrites __probe.level every 20 ms, so the value
+      // left by the flood is the flood's tail, not silence: under host load this read
+      // a stale 0.28 and failed a green product. Requiring a post-stop sample also
+      // closes the vacuous direction, where a probe that stops sampling keeps an old
+      // low level and passes on it.
+      const stopFinishedAt = Date.now();
+      const freshSample = await window.__waitFor(() => {
+        if (window.__probe.levelAt < stopFinishedAt) return null;
+        return { level: window.__probe.level, waitedMs: window.__probe.levelAt - stopFinishedAt };
+      }, 'an analyser sample taken after stop_horn finished');
       return {
         before,
         rejected,
@@ -698,7 +715,8 @@ async function run() {
         stopped,
         after: {
           active: window.__probe.active,
-          level: window.__probe.level,
+          level: freshSample.level,
+          sampledAfterStopMs: freshSample.waitedMs,
           pressed: horn.getAttribute('aria-pressed'),
           contexts: window.__probe.contexts,
           started: window.__probe.starts - before.starts,
@@ -722,7 +740,18 @@ async function run() {
     }
     if (flood.stopped.playing !== false) throw new Error('stop_horn after a flood must silence the horn');
     if (flood.after.active !== 0) throw new Error(`stop_horn left ${flood.after.active} source(s) sounding`);
-    if (flood.after.level > 0.01) throw new Error(`audio is still audible after the flood (level ${flood.after.level})`);
+    // Asserted on a sample taken after the stop, and only where the flood itself
+    // produced an audible sample (the positive control). The two modes this must not
+    // have: reading a stale peak from before the stop (the gate did - level 0.28 on a
+    // green product), and passing vacuously on a deaf instrument. The silence claim is
+    // carried by the objective checks either way: no active source, pressed cleared, and
+    // get_horn_state reporting not playing.
+    if (flood.during.loudSamples > 0 && flood.after.level > 0.01) {
+      throw new Error(`audio is still audible ${flood.after.sampledAfterStopMs} ms after the flood (level ${flood.after.level}; ${flood.during.loudSamples} audible sample(s) during it)`);
+    }
+    if (flood.during.loudSamples === 0) {
+      console.log(`  note: the analyser heard no audio during the flood in this environment (level ${flood.after.level} after stop), so the post-stop LEVEL is recorded, not asserted`);
+    }
     if (flood.after.pressed !== 'false') throw new Error('the flood left the button pressed');
     if (flood.after.state.playing !== false || flood.after.state.loop !== false) {
       throw new Error(`the horn did not settle after the flood: ${JSON.stringify(flood.after.state)}`);
