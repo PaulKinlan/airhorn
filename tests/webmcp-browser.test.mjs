@@ -131,7 +131,6 @@ const instrumentation = `
           });
           const result = start(...startArgs);
           const timer = setInterval(() => {
-            if (window.__probe.stalled) return; // MUTANT: no sample after the stop
             analyser.getFloatTimeDomainData(data);
             let peak = 0;
             for (let i = 0; i < data.length; i += 1) {
@@ -702,15 +701,15 @@ async function run() {
       // a stale 0.28 and failed a green product. Requiring a post-stop sample also
       // closes the vacuous direction, where a probe that stops sampling keeps an old
       // low level and passes on it.
+      // Bounded: a probe that never samples again would otherwise hold the gate for the
+      // suite's whole wait budget to say one thing - that it has no evidence.
       const stopFinishedAt = performance.now();
-      window.__probe.stalled = true;
-      window.__probe.levelAt = stopFinishedAt; // MUTANT: the fixture's last sample was the pre-stop one
       const freshSample = await window.__waitFor(() => {
-        // STRICTLY after: a sample stamped in the same instant is not evidence about
-        // what happened after the stop (airhorn-wzta).
+        // STRICTLY after: a stamp equal to the stop instant is not evidence about what
+        // happened after it (airhorn-wzta).
         if (!(window.__probe.levelAt > stopFinishedAt)) return null;
         return { level: window.__probe.level, waitedMs: Math.round(window.__probe.levelAt - stopFinishedAt) };
-      }, 'an analyser sample taken after stop_horn finished');
+      }, 'an analyser sample taken after stop_horn finished', 5000);
       return {
         before,
         rejected,
