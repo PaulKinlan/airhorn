@@ -97,7 +97,7 @@ state, `get_horn_state` does not. Nothing here claims `untrustedContentHint` or 
   5000 ms (`DEFAULT_START_TIMEOUT_MS`) the call is abandoned *and* the horn is
   stopped, so a stuck audio graph cannot leave a delayed blast or wedge the tool.
 - Returns `{ playing: true, loop }` only when this call actually started the horn.
-  Otherwise it returns a [refusal](#refusals).
+  Otherwise it returns a [refusal](#results-refusals-and-rejections).
 
 ### `stop_horn`
 
