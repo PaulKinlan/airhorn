@@ -155,8 +155,22 @@ export class BlastBadge {
       // The re-read happens INSIDE the origin lock: interleaved tabs
       // serialize here instead of each writing pre-blast count + 1, which
       // clobbered the first writer's blast (airhorn-rqz1).
+      //
+      // MONOTONIC in the unlocked fallback too (airhorn-f5ut): localStorage
+      // get/set is NOT one transaction - another tab's commit can land between
+      // the entry read and this write, and writing the stale total then
+      // REDUCES the shared count (measured: 9 -> 6). So the bump is computed
+      // off the FRESHEST same-turn read, absorbing anything committed since
+      // entry: a concurrent bump is built on, never overwritten. Stated
+      // plainly: there is no compare-and-set in the Storage API, so the one
+      // window that remains is a commit landing between this read and the
+      // write below - one storage transaction wide, unclosable without a lock
+      // primitive. Every supported browser has Web Locks and never takes this
+      // path; the fallback is monotonic-best-effort, by name.
       const now = this.#readSharedBadgeCount();
-      const next = ((now === null ? 0 : now) % 99) + 1;
+      const fresh = this.#readSharedBadgeCount();
+      const base = Math.max(now === null ? 0 : now, fresh === null ? 0 : fresh);
+      const next = (base % 99) + 1;
       try {
         window.localStorage.setItem(BADGE_COUNT_KEY, String(next));
       } catch {
