@@ -209,6 +209,13 @@ test('classifyRun decides from execution evidence only: the driver record and th
   // no driver record at all is not a measurement either
   assert.equal(classifyRun({ report: { realTests: 2, realFailed: 1 }, exitCode: 1 }).mode, 'never-ran');
 
+  // airhorn-so88: a failure AFTER a clean import is not a test failing - no test ran
+  const crashed = classifyRun({ report: { driver: { importFailed: false, crashedOutsideTest: true, reason: 'uncaught exception after the suite loaded: Error: async boom' }, realTests: 1, realFailed: 1 }, exitCode: 0 });
+  assert.equal(crashed.mode, 'never-ran', 'a crash outside any test must not be scored as a caught mutant');
+  assert.match(crashed.problem, /after the suite loaded/);
+  // counts missing entirely is also not a measurement
+  assert.equal(classifyRun({ report: { driver: { importFailed: false } }, exitCode: 0 }).mode, 'never-ran');
+
   // a declared script suite is judged by its exit code: its top-level throw IS the failure
   assert.deepEqual(classifyRun({ report: null, exitCode: 1, suiteMode: 'script' }), { mode: 'caught', rc: 1 });
   assert.deepEqual(classifyRun({ report: null, exitCode: 0, suiteMode: 'script' }), { mode: 'passed', rc: 0 });
@@ -231,6 +238,8 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     write('b-indirect-registration.mjs', "import './register.mjs';\nimport './setup.mjs';\n");
     write('c-decoy.mjs', "// from \"node:test\" - a DECOY comment: it must not change the classification\nimport './indirect.mjs';\nimport test from 'node:test';\ntest('x', () => {});\n");
     write('d-passes.mjs', "import test from 'node:test';\ntest('green', () => {});\n");
+    // airhorn-so88: an async throw AFTER a clean import (the reviewer's repro shape)
+    write('f-async-crash.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetImmediate(() => { throw new Error('async boot failure'); });\n");
     // airhorn-lnme: node names the file-level event with the path AS PASSED, so a
     // directory-qualified suite path used to read as a failed test. Same worlds, one level down.
     fs.mkdirSync(path.join(tmp, 'sub'));
@@ -256,6 +265,10 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     const d = runWorld(['--suite', 'd-passes.mjs']);
     assert.equal(d.status, 2, `a passing suite must be fix-does-not-close, not unmeasured: ${d.stdout}${d.stderr}`);
     assert.match(d.stdout, /verdict: fix-does-not-close/);
+
+    const asyncCrash = runWorld(['--suite', 'f-async-crash.mjs']);
+    assert.equal(asyncCrash.status, 3, `an async crash after the import must be never-ran, got ${asyncCrash.status}: ${asyncCrash.stdout}${asyncCrash.stderr}`);
+    assert.match(asyncCrash.stderr + asyncCrash.stdout, /after the suite loaded/);
 
     // directory-qualified paths (the tool's own documented usage) must classify identically
     const subCrash = runWorld(['--suite', 'sub/setup-throw.mjs']);
