@@ -208,25 +208,26 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
   if (report.driver.importFailed) {
     return { mode: 'never-ran', problem: `threw while loading (${report.driver.reason || 'no reason reported'}), so NO test ever ran and this is not a caught mutant (exit ${exitCode}, ${report.realTests} test event(s) seen). If this is a script suite whose top-level assertion failed, say so with --suite-mode script` };
   }
-  if (typeof report.realTests === 'number' && report.realTests === 0) {
+  if (typeof report.realTests !== 'number') {
+    return { mode: 'never-ran', problem: `produced no test counts (exit ${exitCode}), so nothing was measured` };
+  }
+  // A failure OUTSIDE any test is its own named state, whatever the exit code: the driver saw a
+  // crash after the load, or the run ended non-zero with no failing test (airhorn-so88/a6ch).
+  if (report.driver.crashedOutsideTest) {
+    return { mode: 'threw-outside-a-test', problem: `${report.driver.reason || 'the suite failed outside any test after it loaded'}, so NO test asserted anything about the mutant (exit ${exitCode})` };
+  }
+  if (report.realTests === 0) {
     return { mode: 'never-ran', problem: `registered no tests (${report.wrapperEvents || 0} driver-level event(s) seen${report.fileLevelFailed ? ', the driver file failed as a whole' : ''}), so nothing was measured - a suite with no tests proves nothing about the mutant` };
   }
-  if (report.driver.crashedOutsideTest) {
-    return { mode: 'never-ran', problem: `${report.driver.reason || 'the suite failed outside any test after it loaded'}, so NO test ever ran and this is not a caught mutant (exit ${exitCode})` };
+  if (report.realFailed > 0) {
+    // The rule: 'caught' is claimable ONLY when a test STARTED and something inside it failed.
+    if (typeof report.startedTests === 'number' && report.startedTests === 0) {
+      return { mode: 'threw-outside-a-test', problem: `reported ${report.realFailed} failing event(s) but no test ever STARTED in the suite, so nothing asserted anything about the mutant (exit ${exitCode})` };
+    }
+    return { mode: 'caught', rc: 1, failing: report.failing };
   }
-  if (report.driver.importFailed) {
-    return { mode: 'never-ran', problem: `threw while loading (${report.driver.reason || 'no reason reported'}), so NO test ever ran and this is not a caught mutant (exit ${exitCode}, ${report.realTests} test event(s) seen). If this is a script suite whose top-level assertion failed, say so with --suite-mode script` };
-  }
-  if (typeof report.realFailed !== 'number') {
-    return { mode: 'never-ran', problem: `the run produced no test counts (exit ${exitCode}), so nothing was measured` };
-  }
-  if (report.realFailed > 0) return { mode: 'caught', rc: 1, failing: report.failing };
-  // Tests ran and none failed, but the RUN did not end cleanly: something failed outside the
-  // tests (a suite that strips the driver's handlers and then crashes asynchronously is the
-  // concrete case, airhorn-a6ch). A clean pass exits 0; anything else is not a measurement of
-  // "the suite accepts this mutant".
   if (exitCode !== 0) {
-    return { mode: 'never-ran', problem: `the run exited ${exitCode} with no failing test (${report.wrapperEvents || 0} driver-level event(s)), so something failed outside the tests and nothing about the mutant was measured` };
+    return { mode: 'threw-outside-a-test', problem: `the run exited ${exitCode} with no failing test (${report.wrapperEvents || 0} driver-level event(s)), so something failed outside the tests and nothing about the mutant was measured` };
   }
   return { mode: 'passed', rc: 0 };
 }
@@ -258,7 +259,7 @@ function runSuite(suite, cwd, label, suiteMode) {
   if (suiteMode === 'script') {
     const ran = run(process.execPath, [suite], cwd, { captureStderr: true });
     const classified = classifyRun({ report: null, exitCode: ran.rc, suiteMode });
-    if (classified.problem) return { problem: `${label} ${classified.problem}` };
+    if (classified.problem) return { problem: `${label} [${classified.mode}] ${classified.problem}` };
     return { rc: classified.rc };
   }
   const reportPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-report-')), 'report.json');
@@ -277,7 +278,9 @@ function runSuite(suite, cwd, label, suiteMode) {
     report = null;
   }
   const classified = classifyRun({ report, exitCode: ran.rc, suiteMode });
-  if (classified.problem) return { problem: `${label} ${classified.problem}` };
+  // The state is NAMED in the refusal, not just implied by the exit code (airhorn-so88): a reader
+  // must be able to tell "never-ran" from "threw-outside-a-test" without reading prose.
+  if (classified.problem) return { problem: `${label} [${classified.mode}] ${classified.problem}` };
   return { rc: classified.rc };
 }
 

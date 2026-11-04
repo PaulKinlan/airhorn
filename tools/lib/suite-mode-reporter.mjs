@@ -39,8 +39,18 @@ export default async function* suiteModeReporter(source) {
   // wrapper both report nesting 0.
   const driverFile = process.env.MUTATION_DRIVER_FILE || null;
   let wrapperEvents = 0;
+  // "caught" may only be claimed when a test actually STARTED inside the suite and failed
+  // (airhorn-so88). A start is the runner's own evidence that execution reached a test, so it
+  // cannot be forged by text, and it is distinct from a failure the runner reports for its own
+  // synthetic file-level event.
+  let startedTests = 0;
 
   for await (const event of source) {
+    if (event.type === 'test:start') {
+      const data = event.data || {};
+      if (!(driverFile && data.file === driverFile)) startedTests += 1;
+      continue;
+    }
     if (event.type !== 'test:pass' && event.type !== 'test:fail') continue;
     const data = event.data || {};
     const name = typeof data.name === 'string' ? data.name : '<unnamed>';
@@ -71,7 +81,7 @@ export default async function* suiteModeReporter(source) {
       driver = null;
     }
   }
-  const report = { driver, realTests, realPassed, realFailed, fileLevelFailed, wrapperEvents, failing: failing.slice(0, 10) };
+  const report = { driver, startedTests, realTests, realPassed, realFailed, fileLevelFailed, wrapperEvents, failing: failing.slice(0, 10) };
   if (target) {
     try {
       fs.writeFileSync(target, JSON.stringify(report));

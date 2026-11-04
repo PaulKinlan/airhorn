@@ -211,7 +211,7 @@ test('classifyRun decides from execution evidence only: the driver record and th
 
   // airhorn-so88: a failure AFTER a clean import is not a test failing - no test ran
   const crashed = classifyRun({ report: { driver: { importFailed: false, crashedOutsideTest: true, reason: 'uncaught exception after the suite loaded: Error: async boom' }, realTests: 1, realFailed: 1 }, exitCode: 0 });
-  assert.equal(crashed.mode, 'never-ran', 'a crash outside any test must not be scored as a caught mutant');
+  assert.equal(crashed.mode, 'threw-outside-a-test', 'a crash outside any test is its own named state, never a caught mutant');
   assert.match(crashed.problem, /after the suite loaded/);
   // counts missing entirely is also not a measurement
   assert.equal(classifyRun({ report: { driver: { importFailed: false } }, exitCode: 0 }).mode, 'never-ran');
@@ -220,7 +220,7 @@ test('classifyRun decides from execution evidence only: the driver record and th
   // so a suite that strips the driver's handlers and then crashes cannot be scored as a caught
   // mutant; and a run that exits non-zero with no failing test measured nothing.
   const stripped = classifyRun({ report: { driver: { importFailed: false }, realTests: 1, realPassed: 1, realFailed: 0, wrapperEvents: 1, fileLevelFailed: true }, exitCode: 1 });
-  assert.equal(stripped.mode, 'never-ran', 'a run that died outside its tests is not a caught mutant');
+  assert.equal(stripped.mode, 'threw-outside-a-test', 'a run that died outside its tests is a named state, never a caught mutant');
   assert.match(stripped.problem, /exited 1 with no failing test/);
   const noTests = classifyRun({ report: { driver: { importFailed: false }, realTests: 0, realFailed: 0, wrapperEvents: 1, fileLevelFailed: true }, exitCode: 1 });
   assert.equal(noTests.mode, 'never-ran');
@@ -248,6 +248,11 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     write('b-indirect-registration.mjs', "import './register.mjs';\nimport './setup.mjs';\n");
     write('c-decoy.mjs', "// from \"node:test\" - a DECOY comment: it must not change the classification\nimport './indirect.mjs';\nimport test from 'node:test';\ntest('x', () => {});\n");
     write('d-passes.mjs', "import test from 'node:test';\ntest('green', () => {});\n");
+    // airhorn-so88 worlds: async failure after the import registers a test that never runs,
+    // plus the decoy comment and the INDIRECT-registration variant
+    write('h-async-no-test.mjs', "import test from 'node:test';\nsetTimeout(() => { throw new Error('async boom'); }, 5);\ntest('never runs', () => {});\n");
+    write('i-async-decoy.mjs', "// from \"node:test\" - decoy\nimport test from 'node:test';\nsetTimeout(() => { throw new Error('async boom'); }, 5);\ntest('never runs', () => {});\n");
+    write('j-indirect-async.mjs', "import './register.mjs';\nsetTimeout(() => { throw new Error('async boom'); }, 5);\n");
     // airhorn-a6ch: the suite strips the driver's crash handlers, then crashes asynchronously -
     // the wrapper event must be attributed to the DRIVER, not counted as a failing test.
     write('g-strip-handlers.mjs', "import test from 'node:test';\ntest('one', () => {});\nprocess.removeAllListeners('uncaughtException');\nprocess.removeAllListeners('unhandledRejection');\nsetImmediate(() => { throw new Error('strip boom'); });\n");
@@ -282,6 +287,17 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     const stripped = runWorld(['--suite', 'g-strip-handlers.mjs']);
     assert.equal(stripped.status, 3, `a suite that strips the handlers then crashes must be never-ran, got ${stripped.status}: ${stripped.stdout}${stripped.stderr}`);
     assert.match(stripped.stderr + stripped.stdout, /exited 1 with no failing test|registered no tests|crashed/i);
+
+    for (const world of ['h-async-no-test.mjs', 'i-async-decoy.mjs', 'j-indirect-async.mjs']) {
+      const r = runWorld(['--suite', world]);
+      assert.equal(r.status, 3, `${world} must be a named refusal, got ${r.status}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr + r.stdout, /\[(never-ran|threw-outside-a-test)\]/, `${world} must NAME its state`);
+      assert.doesNotMatch(r.stdout, /verdict: mutant-caught/, `${world} must never be scored as caught`);
+    }
+    // the decoy must not change the state
+    const plainAsync = runWorld(['--suite', 'h-async-no-test.mjs']);
+    const decoyAsync = runWorld(['--suite', 'i-async-decoy.mjs']);
+    assert.equal(decoyAsync.status, plainAsync.status, 'a comment must not move the state');
 
     const asyncCrash = runWorld(['--suite', 'f-async-crash.mjs']);
     assert.equal(asyncCrash.status, 3, `an async crash after the import must be never-ran, got ${asyncCrash.status}: ${asyncCrash.stdout}${asyncCrash.stderr}`);
