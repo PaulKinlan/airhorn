@@ -184,38 +184,36 @@ function run(command, shellArgs, cwd, { captureStderr = false, env = process.env
 
 /** Run a suite and say both what it exited with and whether it ran at all. */
 /**
- * Classify a run by WHAT EXECUTED, never by what the source looks like (airhorn-u1v2).
+ * Classify a run by EXECUTION EVIDENCE ONLY (airhorn-lnme, review of airhorn-u1v2).
  *
- * `report` is tools/lib/suite-mode-reporter.mjs's JSON for this run, or null when the runner wrote
- * nothing. Note what is NOT here: no regex over imports, no module-specifier scanning, no comment
- * reading - a reviewer showed that a single `// from "node:test"` comment flipped the old
- * classification, so anything source-shaped is out.
+ * `report.driver.importFailed` is written by tools/lib/suite-driver.mjs from inside the run: it is
+ * true only when importing the suite threw, which is the one thing a comment, a path spelling or an
+ * import style cannot fake and cannot hide. Everything else is the runner's own counts.
  *
- *   report === null                       -> never-ran: the runner produced no report at all
- *   realTests === 0 && fileLevelFailed    -> never-ran: the file failed as a whole, so no test ran
- *                                              (direct import crash, indirect import crash, missing
- *                                              dependency, syntax error, or a script suite whose
- *                                              top-level assert threw - see --suite-mode)
- *   realFailed > 0                        -> caught: real tests executed and failed
- *   realTests > 0 && realFailed === 0     -> passed: the suite does not catch this mutant
+ *   no report / no driver record -> never-ran: nothing was measured
+ *   driver.importFailed          -> never-ran, named (the suite threw while loading)
+ *   realFailed > 0               -> caught: the suite executed tests and they failed
+ *   otherwise                    -> passed: the suite does not catch this mutant
+ *
+ * A declared script suite (--suite-mode script) is judged by its exit code, because for a script
+ * the top-level assertion IS the failure and there is no runner to report anything.
  */
 export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
-  if (!report) {
-    return { mode: 'never-ran', problem: `the test runner produced no report (exit ${exitCode}), so nothing was measured - a suite that never ran proves nothing about the mutant` };
+  if (suiteMode === 'script') {
+    return exitCode === 0 ? { mode: 'passed', rc: 0 } : { mode: 'caught', rc: exitCode };
   }
-  if (report.realTests === 0) {
-    if (suiteMode === 'script') {
-      // The caller declared a script suite, where a top-level throw IS the failure: its
-      // verdict is the exit code and there is no "never-ran" to detect.
-      return exitCode === 0 ? { mode: 'passed', rc: 0 } : { mode: 'caught', rc: exitCode };
-    }
-    return { mode: 'never-ran', problem: `the suite executed no tests and failed as a file (exit ${exitCode})${report.fileLevelFailed ? '' : ' without reporting a file-level failure'}, so nothing was measured - a suite that never ran proves nothing about the mutant. If this is a script suite (assertions at top level, no node:test), pass --suite-mode script` };
+  if (!report || !report.driver) {
+    return { mode: 'never-ran', problem: `produced no record of the suite loading (exit ${exitCode}), so nothing was measured - a suite that never ran proves nothing about the mutant` };
+  }
+  if (report.driver.importFailed) {
+    return { mode: 'never-ran', problem: `threw while loading (${report.driver.reason || 'no reason reported'}), so NO test ever ran and this is not a caught mutant (exit ${exitCode}, ${report.realTests} test event(s) seen). If this is a script suite whose top-level assertion failed, say so with --suite-mode script` };
   }
   if (report.realFailed > 0) return { mode: 'caught', rc: 1, failing: report.failing };
   return { mode: 'passed', rc: 0 };
 }
 
 const REPORTER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lib', 'suite-mode-reporter.mjs');
+const DRIVER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lib', 'suite-driver.mjs');
 
 /**
  * The suite must run as its own test-runner invocation. A parent `node --test` exports
@@ -233,10 +231,18 @@ function childEnv(reportPath, suitePath) {
 function runSuite(suite, cwd, label, suiteMode) {
   const presence = suitePresenceProblem(suite, cwd);
   if (presence) return { problem: presence };
+  if (suiteMode === 'script') {
+    const ran = run(process.execPath, [suite], cwd, { captureStderr: true });
+    const classified = classifyRun({ report: null, exitCode: ran.rc, suiteMode });
+    if (classified.problem) return { problem: `${label} ${classified.problem}` };
+    return { rc: classified.rc };
+  }
   const reportPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-report-')), 'report.json');
   // Run under the test runner with the reporting hook: the runner tells us whether any test
   // executed, instead of us guessing the suite's kind from its text (airhorn-u1v2).
-  const ran = run(process.execPath, ['--test', '--test-reporter', REPORTER, suite], cwd, {
+  // The runner is pointed at the driver, not at the suite: the driver records whether the suite
+  // LOADED, which is the only spelling-proof evidence that any test could have run (airhorn-lnme).
+  const ran = run(process.execPath, ['--test', '--test-reporter', REPORTER, DRIVER], cwd, {
     captureStderr: true,
     env: childEnv(reportPath, path.resolve(cwd, suite)),
   });
