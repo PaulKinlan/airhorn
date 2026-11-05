@@ -1,0 +1,9 @@
+{
+  // Cloudflare Pages configuration for airhorn (airhorn-9dal, fleet-fpr18).
+  // The site is a plain Vite build: `npm run build` writes dist/, and dist/ is the whole site
+  // (index.html + one hashed JS bundle + sw.js + manifest + images + sounds + .well-known).
+  // Nothing else is needed to publish it: no Pages Functions, no bindings, no runtime.
+  "name": "airhorner",
+  "pages_build_output_dir": "dist",
+  "compatibility_date": "2026-11-05"
+}

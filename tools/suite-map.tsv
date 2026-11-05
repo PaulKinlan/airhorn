@@ -277,3 +277,11 @@ tests/support/nav-guard.mjs	@importers
 tests/support/press-guard.mjs	@importers
 tests/support/axe.min.js	@importers
 tests/press-guard.test.mjs	tests/press-guard.test.mjs
+
+# Cloudflare Pages hosting (airhorn-9dal, fleet-fpr18). The site is a static Vite build, so the
+# hosting config and its deploy workflow are pinned by one browser-free suite: it asserts the config
+# is minimal and points at dist/, that the workflow carries the two secrets by name, and it RUNS the
+# workflow's credential guard to prove the no-secret path fails by name before anything is built.
+wrangler.jsonc	tests/pages-config.test.js
+.github/workflows/deploy-pages.yml	tests/pages-config.test.js
+tests/pages-config.test.js	tests/pages-config.test.js
