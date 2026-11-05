@@ -593,6 +593,32 @@ const INSTALL_TOOL = path.join(import.meta.dirname, '..', 'tools', 'install-http
 const httpsProofProfiles = () => fs.readdirSync(os.tmpdir())
   .filter((name) => /^chrome-https-proof-(?:tmp-)?[A-Za-z0-9]{6}$/.test(name));
 
+test('install-https-proof asserts the Install button, not just the prompt (airhorn-nxuv.10)', async () => {
+  // The assertion-honesty sweep's claim was that the HTTP contrast asserted only
+  // '!installPrompt.fired', so a button ENABLED over insecure HTTP landed green. The
+  // assertions now live in an exported function; without a test of its own a future edit
+  // could drop the button half and nothing would notice. Semantics come from
+  // src/install.js: disabled=true and no 'available' class until beforeinstallprompt fires.
+  const { assertInstallEvidence } = await import(`${pathToFileURL(INSTALL_TOOL).href}?nxuv10=${Date.now()}`);
+  const button = (over = {}) => ({ disabled: false, hasAvailableClass: true, visibility: 'visible', pointerEvents: 'auto', ...over });
+  const httpEv = (over = {}) => ({ installPrompt: { fired: false }, installButton: button({ disabled: true, hasAvailableClass: false, ...over }) });
+  const httpsEv = (over = {}) => ({ installPrompt: { fired: true }, installButton: button(over) });
+
+  assert.doesNotThrow(() => assertInstallEvidence(httpEv(), httpsEv()), 'the honest pair must pass');
+  assert.throws(() => assertInstallEvidence(httpEv({ disabled: false }), httpsEv()),
+    /USABLE over insecure HTTP/, 'an enabled Install button over HTTP is the defect the sweep named');
+  assert.throws(() => assertInstallEvidence(httpEv({ disabled: false, hasAvailableClass: true }), httpsEv()),
+    /USABLE over insecure HTTP/, 'and the available class makes it worse, not better');
+  assert.throws(() => assertInstallEvidence(httpEv({ disabled: null }), httpsEv()),
+    /unmeasurable over HTTP/, 'an unmeasurable button cannot prove the contrast');
+  assert.throws(() => assertInstallEvidence(httpEv(), httpsEv({ visibility: 'hidden' })),
+    /not clickable\/visible/, 'an enabled but invisible button is not an affordance');
+  assert.throws(() => assertInstallEvidence(httpEv(), httpsEv({ pointerEvents: 'none' })),
+    /not clickable\/visible/, 'nor is an unclickable one');
+  assert.throws(() => assertInstallEvidence({ installPrompt: { fired: true }, installButton: httpEv().installButton }, httpsEv()),
+    /the contrast is invalid/, 'if the prompt fired over HTTP the contrast measured nothing');
+});
+
 test('an unreadable /proc/stat is UNKNOWN, and UNKNOWN refuses the launch (airhorn-w1wh review)', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-stat-'));
   const stat = path.join(dir, 'stat');
