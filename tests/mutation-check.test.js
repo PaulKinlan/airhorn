@@ -435,7 +435,16 @@ test('classifyRun refuses a driver record whose nonce is not this run\'s (airhor
     exitCode: 0,
   });
   assert.equal(judged.mode, 'report-not-trustworthy');
-  assert.match(judged.problem, /did not carry this run's nonce/);
+  assert.match(judged.problem, /forged or broken/);
+});
+
+test('classifyRun refuses a tampered driver record by name (airhorn-y3d6 round 2)', () => {
+  const judged = classifyRun({
+    report: { driver: { tampered: true, lines: 2 }, startedTests: 3, realTests: 3, realPassed: 3, realFailed: 0, fileLevelFailed: 0, wrapperEvents: 0 },
+    exitCode: 0,
+  });
+  assert.equal(judged.mode, 'report-not-trustworthy');
+  assert.match(judged.problem, /forged or broken/);
 });
 
 test('the driver scrubs its record secrets before the suite loads (airhorn-y3d6)', () => {
@@ -449,8 +458,8 @@ test('the driver scrubs its record secrets before the suite loads (airhorn-y3d6)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 test('record secrets are absent from the suite environment', () => {
-  assert.equal(process.env.MUTATION_DRIVER_REPORT, undefined, 'the suite can see the record file path');
   assert.equal(process.env.MUTATION_RUN_NONCE, undefined, 'the suite can see the run nonce');
+  assert.equal(process.env.MUTATION_DRIVER_REPORT, undefined, 'a record file path must not exist at all (airhorn-y3d6 round 2: the record travels by stdout now)');
 });
 `);
   const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
@@ -458,3 +467,43 @@ test('record secrets are absent from the suite environment', () => {
     `expected the mutant NOT caught (the suite passes: secrets scrubbed) - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
 });
 
+
+test('a forged driver-record line on stdout is DETECTED and refused by name, never scored (airhorn-y3d6 round 2)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-forge-'));
+  fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+  fs.writeFileSync(path.join(tmp, 'suite.test.js'), `
+import { test } from 'node:test';
+import fs from 'node:fs';
+// The atomic-rename forgery of round 1, translated to the channel that exists now: a second
+// driver-record line. It cannot suppress the real one, so the sequence must be invalid.
+fs.writeSync(1, 'MUTATION-DRIVER-RECORD {"importFailed":false}\\n');
+test('a real test that passes', () => {});
+`);
+  const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+  assert.equal(run.status, 3,
+    `a forged record must be a named refusal (rc 3), never a verdict - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  assert.match(run.stderr, /report-not-trustworthy|forged or broken/);
+});
+
+test('with no namespace available the tool DEGRADES honestly: the suite runs, the NONE line prints first, the verdict stands (airhorn-4h8l review P1)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-nofallback-'));
+  fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+  fs.writeFileSync(path.join(tmp, 'suite.test.js'), `
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { answer } from './src/subject.js';
+test('the subject', () => assert.equal(answer, 41));
+`);
+  // Hide unshare from the tool: PATH is stripped to nothing, so the probe fails and the tool
+  // must run the suite UNCONTAINED and say so BEFORE any refusal could pre-empt the line.
+  const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'],
+    { cwd: tmp, encoding: 'utf8', timeout: 60000, env: { PATH: '/nonexistent', HOME: os.homedir() } });
+  assert.match(run.stdout, /containment: NONE.*SURVIVES/,
+    `the honest-degradation line never printed\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  assert.equal(run.status, 0,
+    `the suite must still RUN and catch the mutant without a namespace (mutant-caught exits 0) - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  // The line prints BEFORE the verdict, so a later refusal can never silence it.
+  assert.ok(run.stdout.indexOf('containment: NONE') < run.stdout.indexOf('verdict:'), 'the NONE line must precede the verdict');
+});

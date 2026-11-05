@@ -262,8 +262,8 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
   if (!report || !report.driver) {
     return { mode: 'never-ran', problem: `produced no record of the suite loading (exit ${exitCode}), so nothing was measured - a suite that never ran proves nothing about the mutant` };
   }
-  if (report.driver.nonceMismatch) {
-    return { mode: 'report-not-trustworthy', problem: `the driver record did not carry this run's nonce - the record file was rewritten or replaced by something that was not this run's driver, so nothing it says is evidence either way (exit ${exitCode}) (airhorn-y3d6)` };
+  if (report.driver.tampered || report.driver.nonceMismatch) {
+    return { mode: 'report-not-trustworthy', problem: `the driver record sequence was invalid (${report.driver.lines || 0} record line(s), or a nonce that was not this run's) - a record was forged or broken, so nothing it says is evidence either way (exit ${exitCode}) (airhorn-y3d6)` };
   }
   if (report.driver.importFailed) {
     return { mode: 'never-ran', problem: `threw while loading (${report.driver.reason || 'no reason reported'}), so NO test ever ran and this is not a caught mutant (exit ${exitCode}, ${report.realTests} test event(s) seen). If this is a script suite whose top-level assertion failed, say so with --suite-mode script` };
@@ -306,14 +306,13 @@ const DRIVER = path.join(path.dirname(SELF), 'lib', 'suite-driver.mjs');
  * producing no report - which would read as never-ran for every case when the mutation checker is
  * itself under test.
  */
-function childEnv(suitePath, nonce, driverReportPath) {
+function childEnv(suitePath, nonce) {
   const env = {
     ...process.env,
     // A channel the child can only write to (fd 3) plus this run's nonce - NOT a path. The suite
     // gets no filename to poll or rewrite, and a sibling it spawns inherits neither (airhorn-gwcm).
     MUTATION_SUITE_CHANNEL: '3',
     MUTATION_RUN_NONCE: nonce,
-    MUTATION_DRIVER_REPORT: driverReportPath,
     MUTATION_SUITE_FILE: suitePath,
     MUTATION_DRIVER_FILE: DRIVER,
   };
@@ -356,23 +355,24 @@ function runSuite(suite, cwd, label, suiteMode) {
   if (presence) return { problem: presence };
   if (suiteMode === 'script') {
     const contained = containmentPrefix();
-    const ran = run(contained.length ? contained[0] : process.execPath, [...contained.slice(1), process.execPath, suite], cwd, { captureStderr: true });
+    const ran = run(contained.length ? contained[0] : process.execPath,
+      contained.length ? [...contained.slice(1), process.execPath, suite] : [suite], cwd, { captureStderr: true });
     const classified = classifyRun({ report: null, exitCode: ran.rc, suiteMode });
     if (classified.problem) return { problem: `${label} [${classified.mode}] ${classified.problem}` };
     return { rc: classified.rc };
   }
   const nonce = randomUUID();
-  const driverReportPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-driver-')), 'driver.json');
   // Run under the test runner with the reporting hook: the runner tells us whether any test
   // executed, instead of us guessing the suite's kind from its text (airhorn-u1v2).
   // The runner is pointed at the driver, not at the suite: the driver records whether the suite
   // LOADED, which is the only spelling-proof evidence that any test could have run (airhorn-lnme).
   const contained = containmentPrefix();
+  const nodeArgs = ['--test', '--test-reporter', REPORTER, DRIVER];
   const ran = run(contained.length ? contained[0] : process.execPath,
-    [...contained.slice(1), process.execPath, '--test', '--test-reporter', REPORTER, DRIVER], cwd, {
+    contained.length ? [...contained.slice(1), process.execPath, ...nodeArgs] : nodeArgs, cwd, {
     captureStderr: true,
     reportPipe: true,
-    env: childEnv(path.resolve(cwd, suite), nonce, driverReportPath),
+    env: childEnv(path.resolve(cwd, suite), nonce),
   });
   const channel = readChannel(ran.channel, nonce);
   const report = channel.records;
@@ -422,6 +422,10 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
       return 3;
     }
     console.log(`mutant applied to ${args.file} (${applied.content.length - original.length >= 0 ? '+' : ''}${applied.content.length - original.length} bytes), verified on disk`);
+    // BEFORE any suite runs, so a refusal further down can never pre-empt the truth about
+    // what this host guarantees (airhorn-4h8l review: the line used to print only at the
+    // verdict, so a broken degradation path refused first and said nothing).
+    console.log(containmentGuaranteeLine());
 
     if (args.build) {
       console.log(`building: ${args.build}`);
@@ -457,7 +461,6 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     if (!restored) mutantRc = 3;
   }
 
-  console.log(containmentGuaranteeLine());
   const result = verdictFor({ oldRc: args.suiteOld ? baselineRc : null, newRc: mutantRc === 3 ? null : mutantRc });
   console.log(`verdict: ${result.verdict} (${result.why})`);
   if (!args.suiteOld) {
