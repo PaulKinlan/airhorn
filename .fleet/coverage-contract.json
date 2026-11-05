@@ -224,6 +224,7 @@
  ],
  "tests/support/quiescence.mjs": [
   "tests/a11y.test.mjs",
+  "tests/quiescence-bound.test.js",
   "tests/sw-offline.test.mjs"
  ],
  "tests/support/lost-upgrade-copy.mjs": [

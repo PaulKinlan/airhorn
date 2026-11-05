@@ -257,6 +257,7 @@ tests/acceptance.mjs	tests/acceptance.mjs
 tests/support/browser.mjs	@importers except=tests/acceptance.mjs
 tests/cdp-command-bound.mjs	@importers except=tests/acceptance.mjs
 tests/support/signal-exit.mjs	@importers except=tests/acceptance.mjs
+tests/quiescence-bound.test.js	tests/quiescence-bound.test.js
 tests/test-support.test.js	tests/test-support.test.js
 # Per-module rows, DERIVED (airhorn-x3f1): the generic tests/support/** row charged
 # ALL 20 suites - 12 of them serial browser passes - for a one-line change to a pure
