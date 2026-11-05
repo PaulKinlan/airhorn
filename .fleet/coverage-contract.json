@@ -156,6 +156,9 @@
   "tests/gate-smoke.test.js",
   "tests/gate-map.test.js"
  ],
+ "tools/idle-cost.mjs": [
+  "tests/idle-cost-verdict.test.js"
+ ],
  "README.md": [
   "tests/docs-recipe.test.mjs"
  ],
