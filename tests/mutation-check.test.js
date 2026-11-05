@@ -341,7 +341,10 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
 
     const stripped = runWorld(['--suite', 'g-strip-handlers.mjs']);
     assert.equal(stripped.status, 3, `a suite that strips the handlers then crashes must be never-ran, got ${stripped.status}: ${stripped.stdout}${stripped.stderr}`);
-    assert.match(stripped.stderr + stripped.stdout, /exited 1 with no failing test|registered no tests|crashed/i);
+    // Named either way: post-airhorn-p0dg the strip itself is reported at strip time, so this
+    // world refuses as report-not-trustworthy (the strip is named) rather than only via the
+    // crash's exit code.
+    assert.match(stripped.stderr + stripped.stdout, /report-not-trustworthy|exited 1 with no failing test|registered no tests|crashed/i);
 
     for (const world of ['h-async-no-test.mjs', 'i-async-decoy.mjs', 'j-indirect-async.mjs']) {
       const r = runWorld(['--suite', world]);
@@ -506,4 +509,52 @@ test('the subject', () => assert.equal(answer, 41));
     `the suite must still RUN and catch the mutant without a namespace (mutant-caught exits 0) - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
   // The line prints BEFORE the verdict, so a later refusal can never silence it.
   assert.ok(run.stdout.indexOf('containment: NONE') < run.stdout.indexOf('verdict:'), 'the NONE line must precede the verdict');
+});
+
+test('SUPPRESSION: a suite that strips the driver crash handlers, swallows with exit(0) and crashes is refused by name (airhorn-p0dg)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-p0dg-'));
+  fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+  // The reviewer's exact attack B: strip, swallow-and-exit-0, then crash outside any test.
+  // Pre-fix this scored rc 2 'fix-does-not-close' (measured); the watcher reports the strip
+  // at strip time - stdout cannot be unwritten and the exit(0) cannot pre-empt it.
+  fs.writeFileSync(path.join(tmp, 'suite.test.js'), `
+import { test } from 'node:test';
+process.removeAllListeners('uncaughtException');
+process.removeAllListeners('unhandledRejection');
+process.on('uncaughtException', () => process.exit(0));
+test('passes', () => {});
+setTimeout(() => { throw new Error('the mutant crash, suppressed'); }, 50);
+`);
+  const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+  assert.equal(run.status, 3,
+    `a suppressed crash must be a named refusal (rc 3), never fix-does-not-close - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  assert.match(run.stderr, /report-not-trustworthy/);
+});
+
+test('a crash outside any test WITHOUT the strip is still named threw-outside-a-test (no suppression to detect)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-p0dg-honest-'));
+  fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+  fs.writeFileSync(path.join(tmp, 'suite.test.js'), `
+import { test } from 'node:test';
+test('passes', () => {});
+setTimeout(() => { throw new Error('honest crash outside a test'); }, 50);
+`);
+  const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+  assert.equal(run.status, 3);
+  assert.match(run.stderr, /threw-outside-a-test/);
+});
+
+test('the tool prints its trust boundary (the watcher-first evasion) once per invocation', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-p0dg-line-'));
+  fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+  fs.writeFileSync(path.join(tmp, 'suite.test.js'), `
+import { test } from 'node:test';
+test('passes', () => {});
+`);
+  const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+  assert.match(run.stdout, /trust: driver records are grammar-checked/);
+  assert.match(run.stdout, /removeListener watcher FIRST/);
 });

@@ -426,6 +426,10 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     // what this host guarantees (airhorn-4h8l review: the line used to print only at the
     // verdict, so a broken degradation path refused first and said nothing).
     console.log(containmentGuaranteeLine());
+    // The trust boundary, printed and not just commented (airhorn-p0dg): what the record
+    // channel CANNOT see. A tool that states its own limit is honest; one that implies
+    // closure is not.
+    console.log('trust: driver records are grammar-checked, so forged or stripped crash evidence is refused by name; a suite that removes the driver\'s removeListener watcher FIRST can still suppress an out-of-test crash undetected - closing that needs the suite run in a child the driver owns');
 
     if (args.build) {
       console.log(`building: ${args.build}`);

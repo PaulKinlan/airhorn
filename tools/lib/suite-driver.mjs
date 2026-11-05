@@ -33,9 +33,12 @@ const suite = process.env.MUTATION_SUITE_FILE;
 // forgery is DETECTED, not prevented. The honest sequence is a grammar the reporter validates:
 //   IMPORT            (one line: { importFailed } - the only line when the import decides it)
 //   IMPORT, CRASH     (a clean import followed by a crash outside any test, airhorn-so88)
-// Any other sequence - a forged line before, between or after - is tampering, and the parent
-// refuses by name. A forgery cannot SUPPRESS the real line (the suite shares the stdout but
-// cannot unwrite it), so a forged record always makes the sequence invalid.
+// Any other sequence - a forged line before, between or after, or a strip-report line from
+// the suppression watch below - is tampering, and the parent refuses by name. A forgery cannot
+// SUPPRESS the real line (the suite shares the stdout but cannot unwrite it), so a forged
+// record always makes the sequence invalid. SUPPRESSION (removing the crash handlers so the
+// CRASH line is never written, airhorn-p0dg) is a different move the grammar alone cannot see:
+// the watcher below reports the removal the moment it happens.
 const DRIVER_RECORD_PREFIX = 'MUTATION-DRIVER-RECORD ';
 
 const record = (value) => {
@@ -54,14 +57,43 @@ const record = (value) => {
  * mutant. These handlers are installed before the import so they are first in line, and they turn
  * the failure into a record instead of a verdict.
  */
+let crashHandled = false;
 const markCrash = (kind) => (error) => {
+  crashHandled = true; // once() self-removes after firing - that removal is legitimate, not a strip
   const detail = error && error.stack ? error.stack.split('\n')[0] : String(error);
   // The grammar's CRASH line: valid only AFTER a clean-import line, which the reporter checks.
   record({ crashedOutsideTest: true, reason: `${kind} after the suite loaded: ${detail}` });
   process.exit(0);
 };
-process.once('uncaughtException', markCrash('uncaught exception'));
-process.once('unhandledRejection', markCrash('unhandled rejection'));
+const onUncaught = markCrash('uncaught exception');
+const onRejection = markCrash('unhandled rejection');
+process.once('uncaughtException', onUncaught);
+process.once('unhandledRejection', onRejection);
+
+// SUPPRESSION detection (airhorn-p0dg): a suite can strip these two handlers, install a
+// swallow that exits 0, and then crash - the CRASH line is never written, the sequence stays
+// a valid single IMPORT, and a named refusal became 'fix-does-not-close' (measured: rc 2).
+// The fix observes the REMOVAL, not the crash: 'removeListener' fires synchronously DURING
+// the strip, before the suite's swallow can exit(0), and stdout cannot be unwritten - so the
+// strip itself becomes a line the grammar refuses. Residual, stated plainly: a suite that
+// first removes THIS watcher (removeAllListeners('removeListener'), or removeAllListeners()
+// entirely - in-process, same uid, nothing can be made unremovable) strips silently; the
+// defence then is that a real crash with no handlers at all kills the process and the runner
+// reports a file-level failure, which the parent refuses as threw-outside-a-test. Only a
+// strip-and-swallow in exactly that order evades - the tool cannot print what it cannot see,
+// so the limit lives here, named.
+process.on('removeListener', (name, fn) => {
+  if ((name === 'uncaughtException' && fn === onUncaught) || (name === 'unhandledRejection' && fn === onRejection)) {
+    // once() self-removes BEFORE the handler body runs, so a legit crash fires this event with
+    // crashHandled still false. Defer to a microtask: on a real crash the handler body runs in
+    // the same tick and process.exit(0) prevents the microtask, so only a genuine strip - after
+    // which the process keeps running - ever reports.
+    queueMicrotask(() => {
+      if (crashHandled) return;
+      record({ handlersStripped: true, reason: "the suite removed the driver's crash handlers - a crash outside any test would now be invisible (suppression, not a measurement)" });
+    });
+  }
+});
 
 // Scrub the driver machinery's variables BEFORE the suite loads (airhorn-y3d6): the suite
 // shares this process and inherits this environment. Stated plainly: /proc/<pid>/environ shows
