@@ -82,6 +82,26 @@ test('a page with NO observable progress is named as not progressing, not as slo
   );
 });
 
+test('the a11y call site shape has no flat wall-clock pin (airhorn-ixk1)', async () => {
+  // a11y passes a quiet expression and the short STATE bound, and deliberately no `timeoutMs`
+  // (airhorn-ixk1): with a 15 s pin, a quiet page costing 5 s per CDP round-trip failed while its
+  // own probe showed zero pending work. Here the sampler is slow enough that a flat small pin
+  // would fail it, and the wait must still reach quiescence on the sample criterion alone.
+  const a11yShape = (ceiling) => ({
+    quietExpression: `!document.querySelector('.horn.horning')`,
+    stateTimeoutMs: 4000,
+    ...(ceiling ? { timeoutMs: ceiling } : {}),
+  });
+  const settled = await waitForQuiescence(sender(200, () => quiet), a11yShape(null));
+  assert.equal(settled.samples, 4, 'four quiet samples decide it');
+  assert.ok(settled.waitedMs >= 700, `the sampler really was slow (${settled.waitedMs}ms)`);
+  // the same shape WITH a flat pin smaller than the sampling cost is what the bead removed
+  await assert.rejects(
+    () => waitForQuiescence(sender(200, () => quiet), a11yShape(400)),
+    /absolute ceiling/,
+  );
+});
+
 test('the drained-but-not-quiet path keeps its short, specific failure', async () => {
   const drainedFalse = () => sender(5, () => ({ ...quiet, quietCondition: false }));
   await assert.rejects(
