@@ -112,39 +112,50 @@ const gitOut = (...args) => {
   return r.status === 0 ? r.stdout.trim() : null;
 };
 
-test('the deploy workflow triggers on the repository default branch, not on a branch that does not exist', () => {
+test('the deploy workflow cannot fire automatically: dispatch only, preview by default', () => {
   const yaml = read('.github', 'workflows', 'deploy-pages.yml');
-  const triggers = yaml.split('\n').find((l) => /^\s+branches:\s*\[/.test(l));
-  assert.ok(triggers, 'the workflow must declare the branch(es) it deploys from');
-  const branches = triggers.slice(triggers.indexOf('[') + 1, triggers.lastIndexOf(']'))
-    .split(',').map((b) => b.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean).map((b) => b.replace(/\s+#.*$/, ''));
-  assert.equal(branches.length, 1, `a deploy triggers on exactly one branch, found ${JSON.stringify(branches)}`);
+  // airhorn-9dal production-safety: with both secrets present a push trigger would publish to PRODUCTION on
+  // every merge, and Paul has not authorised switching the production origin. Auto-deploy must stay OFF.
+  assert.equal(/^on:\s*$/m.test(yaml), true, 'the workflow needs an `on:` block');
+  assert.doesNotMatch(yaml, /^\s{2}push:/m,
+    'the workflow must have NO push trigger - a merge would deploy to production without an approval gate');
+  assert.doesNotMatch(yaml, /^\s{2}pull_request:/m, 'a pull_request trigger would deploy unreviewed code too');
+  assert.match(yaml, /^\s{2}workflow_dispatch:/m, 'the deploy must be started by hand');
+  assert.match(yaml, /AUTO-DEPLOY-ON-MERGE IS DELIBERATELY OFF/,
+    'the workflow must say in words that auto-deploy is deliberately off, so nobody "fixes" it back on');
 
-  const remoteHead = gitOut('symbolic-ref', '--short', 'refs/remotes/origin/HEAD');   // e.g. origin/master
-  const defaultBranch = remoteHead ? remoteHead.replace(/^origin\//, '') : null;
-  if (defaultBranch) {
-    assert.equal(branches[0], defaultBranch,
-      `the workflow triggers on '${branches[0]}' but the repository's default branch is '${defaultBranch}' - a merge there would never deploy`);
+  // Dispatching is target=preview by default, and a preview must deploy to a branch that is NOT the
+  // production branch - otherwise the default manual run would publish to production.
+  const targetBlock = /inputs:\s*\n(?:.*\n)*?\s+target:\s*\n(?:\s+.*\n)+?\s+default:\s*(\w+)/.exec(yaml);
+  assert.ok(targetBlock, 'the dispatch inputs must declare a `target` with a default');
+  assert.equal(targetBlock[1], 'preview', 'the default dispatch target must be preview, not production');
+  assert.match(yaml, /options:\s*\[preview, production\]/, 'the target must offer preview and production explicitly');
+  assert.match(yaml, /branch=preview-\$\{GITHUB_SHA::7\}/,
+    'a preview run must deploy to a preview-<sha> branch, not to the production branch');
+  assert.match(yaml, /branch=master/, 'a production run must deploy to the production branch');
+  assert.match(yaml, /--branch "\$\{\{ steps\.target\.outputs\.branch \}\}"/,
+    'the deploy must use the chosen branch, so target=preview cannot publish to production');
+  assert.doesNotMatch(yaml, /--branch "\$\{\{ github\.ref_name \}\}"/,
+    'the dispatch branch must not be the deploy branch: workflow_dispatch from master would publish to production');
+
+  // airhorn-nm7r, kept for the day someone re-adds a push trigger: if one exists it must name a branch this
+  // clone actually has (the first version named `main` while origin/HEAD is master, so it could never fire).
+  const remoteHead = (() => {
+    const r = spawnSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd: root, encoding: 'utf8' });
+    return r.status === 0 ? r.stdout.trim().replace(/^origin\//, '') : null;
+  })();
+  const pushBranches = /^\s{4}branches:\s*\[([^\]]*)\]/m.exec(yaml);
+  if (pushBranches) {
+    const names = pushBranches[1].split(',').map((b) => b.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+    if (remoteHead) assert.ok(names.includes(remoteHead), `a push trigger on ${JSON.stringify(names)} would never fire; the default branch is '${remoteHead}'`);
   }
-
-  const remotes = (gitOut('for-each-ref', '--format=%(refname:short)', 'refs/remotes/origin') || '').split('\n')
-    .map((b) => b.replace(/^origin\//, '').trim()).filter(Boolean);
-  assert.ok(remotes.includes(branches[0]),
-    `the workflow triggers on '${branches[0]}', which is not a branch in this repository (remote branches: ${remotes.slice(0, 8).join(', ')}...)`);
-  assert.equal(remotes.includes(branches[0]), true);
-  assert.equal(branches[0] === 'main' && !remotes.includes('main'), false, 'main is not a branch of this repo, so it cannot be the trigger');
-
-  // The comments must not tell an operator to configure a different production branch: with Pages, deploying
-  // from a branch that is not the project's production branch is a PREVIEW deploy that reports success while
-  // the real domain keeps serving the old build.
+  // The documented Pages production branch must be the branch a production run deploys to.
   const productionMentions = [...yaml.matchAll(/--production-branch\s+([A-Za-z0-9._/-]+)/g)].map((m) => m[1]);
+  assert.ok(productionMentions.length > 0, 'the workflow must document project creation with the production branch');
   for (const observed of productionMentions) {
-    assert.equal(observed, branches[0],
-      `a documented production branch '${observed}' disagrees with the trigger branch '${branches[0]}'`);
+    assert.equal(observed, 'master', `the Pages production branch must be master (deploys go there for target=production), found '${observed}'`);
+    assert.notEqual(observed, 'preview', 'a production branch called preview would make the two deploy paths indistinguishable');
   }
-  assert.ok(productionMentions.length > 0, 'the workflow must document the project creation with the production branch');
-  const deployBranch = /pages deploy[^\n]*--branch\s+("?\$\{\{\s*github\.ref_name\s*\}\}"?)/.exec(yaml);
-  assert.ok(deployBranch, 'the deploy must pass the triggering ref explicitly, so a preview/production mix-up is visible in the command');
 });
 
 // Run the guard exactly as the YAML writes it: extract its `run: |` block, run it under bash with the
