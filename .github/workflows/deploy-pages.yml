@@ -13,7 +13,7 @@ name: Deploy to Cloudflare Pages
 
 on:
   push:
-    branches: [main]
+    branches: [master]          # origin/HEAD -> origin/master; a merge to main would never fire this
   workflow_dispatch:
 
 permissions:
@@ -61,6 +61,15 @@ jobs:
         run: npx --yes wrangler@3 pages deploy --project-name airhorner --branch "${{ github.ref_name }}"
 
       # The first run needs the Pages project to exist; creating it is account-owner work, not a lane's:
-      #   CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... npx wrangler pages project create airhorner --production-branch main
+      #   CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... npx wrangler pages project create airhorner --production-branch master
+      # `--production-branch` must be master, the branch this workflow deploys from: with any other value the
+      # deploy below is a PREVIEW deployment, and airhorner.pages.dev / the custom domain would keep serving the
+      # previous build while every step reports success (airhorn-nm7r).
       # The manual equivalent of this whole workflow, from a checkout with the same two variables set:
-      #   npm ci && npm run build && npx wrangler pages deploy --project-name airhorner --branch main
+      #   npm ci && npm run build && npx wrangler pages deploy --project-name airhorner --branch master
+      #
+      # dist/.well-known/assetlinks.json (the TWA asset-links) SURVIVES the upload: wrangler's uploader has
+      # HIDDEN_FILES_TO_INCLUDE = new Set([".well-known"]) and skips every other dotfile (src/sites.ts in
+      # wrangler-dist/cli.js of 3.114.17, verified at source level at this tip). That is UPLOADER behaviour,
+      # NOT a deployed result - the end-to-end fact is unverified until the first real deploy, which needs the
+      # account owner's credentials. Verify it then: curl -I https://airhorner.pages.dev/.well-known/assetlinks.json

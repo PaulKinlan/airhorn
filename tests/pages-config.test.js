@@ -101,6 +101,52 @@ test('the deploy workflow names both Cloudflare secrets and never embeds a crede
   assert.ok(deployAt > guardAt, 'the guard must run before the deploy step, not after it');
 });
 
+// airhorn-nm7r: the first version of this workflow triggered on `main` while origin/HEAD is `master`, so the
+// deploy could never fire - and the same mistake was copied into the comments (`--production-branch main`).
+// Exit codes and roster rows were all green; the trigger was the deliverable. This pins the branch against the
+// REPOSITORY rather than against a constant: the trigger must name a branch this clone actually has, and must not
+// name one it does not. In CI there is no refs/remotes/origin/HEAD, so the equality check is skipped there and the
+// membership check still applies.
+const gitOut = (...args) => {
+  const r = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : null;
+};
+
+test('the deploy workflow triggers on the repository default branch, not on a branch that does not exist', () => {
+  const yaml = read('.github', 'workflows', 'deploy-pages.yml');
+  const triggers = yaml.split('\n').find((l) => /^\s+branches:\s*\[/.test(l));
+  assert.ok(triggers, 'the workflow must declare the branch(es) it deploys from');
+  const branches = triggers.slice(triggers.indexOf('[') + 1, triggers.lastIndexOf(']'))
+    .split(',').map((b) => b.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean).map((b) => b.replace(/\s+#.*$/, ''));
+  assert.equal(branches.length, 1, `a deploy triggers on exactly one branch, found ${JSON.stringify(branches)}`);
+
+  const remoteHead = gitOut('symbolic-ref', '--short', 'refs/remotes/origin/HEAD');   // e.g. origin/master
+  const defaultBranch = remoteHead ? remoteHead.replace(/^origin\//, '') : null;
+  if (defaultBranch) {
+    assert.equal(branches[0], defaultBranch,
+      `the workflow triggers on '${branches[0]}' but the repository's default branch is '${defaultBranch}' - a merge there would never deploy`);
+  }
+
+  const remotes = (gitOut('for-each-ref', '--format=%(refname:short)', 'refs/remotes/origin') || '').split('\n')
+    .map((b) => b.replace(/^origin\//, '').trim()).filter(Boolean);
+  assert.ok(remotes.includes(branches[0]),
+    `the workflow triggers on '${branches[0]}', which is not a branch in this repository (remote branches: ${remotes.slice(0, 8).join(', ')}...)`);
+  assert.equal(remotes.includes(branches[0]), true);
+  assert.equal(branches[0] === 'main' && !remotes.includes('main'), false, 'main is not a branch of this repo, so it cannot be the trigger');
+
+  // The comments must not tell an operator to configure a different production branch: with Pages, deploying
+  // from a branch that is not the project's production branch is a PREVIEW deploy that reports success while
+  // the real domain keeps serving the old build.
+  const productionMentions = [...yaml.matchAll(/--production-branch\s+([A-Za-z0-9._/-]+)/g)].map((m) => m[1]);
+  for (const observed of productionMentions) {
+    assert.equal(observed, branches[0],
+      `a documented production branch '${observed}' disagrees with the trigger branch '${branches[0]}'`);
+  }
+  assert.ok(productionMentions.length > 0, 'the workflow must document the project creation with the production branch');
+  const deployBranch = /pages deploy[^\n]*--branch\s+("?\$\{\{\s*github\.ref_name\s*\}\}"?)/.exec(yaml);
+  assert.ok(deployBranch, 'the deploy must pass the triggering ref explicitly, so a preview/production mix-up is visible in the command');
+});
+
 // Run the guard exactly as the YAML writes it: extract its `run: |` block, run it under bash with the
 // two variables controlled, and read the exit code. This is the "no secret" path the reviewer and CI
 // depend on, so it is executed here rather than described.
