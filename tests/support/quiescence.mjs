@@ -140,7 +140,14 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *
  * @param {(method: string, params?: object) => Promise<any>} send CDP send()
  * @param {object} [options]
- * @param {number} [options.timeoutMs] bound on the whole wait
+ * @param {number} [options.timeoutMs] ABSOLUTE CEILING on the whole wait, a
+ *   backstop rather than the criterion (airhorn-ypfn). A wall clock cannot tell
+ *   "still working" from "starved": on a loaded host a single Runtime.evaluate
+ *   round-trip can take seconds, so a fixed 20 s bound failed a page that was
+ *   ALREADY quiet and printed "work is still pending" next to a probe showing
+ *   zero pending. The criterion is `stableSamples` consecutive quiet samples;
+ *   the ceiling only stops an unwinnable wait, and it is generous enough for a
+ *   starved host to still reach quiescence.
  * @param {number} [options.stableSamples] consecutive quiet samples required
  * @param {number} [options.pollMs] gap between samples
  * @param {string} [options.quietExpression] extra in-page boolean expression
@@ -154,7 +161,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @returns {Promise<{waitedMs: number, samples: number, pending: object}>}
  */
 export async function waitForQuiescence(send, {
-  timeoutMs = 20000,
+  timeoutMs = 120000,
   stableSamples = 4,
   pollMs = 50,
   quietExpression = 'true',
@@ -165,6 +172,12 @@ export async function waitForQuiescence(send, {
   let samples = 0;
   let last = null;
   let drainedAt = null;
+  // Observable progress, so the ceiling can say WHICH situation it hit instead of
+  // guessing (airhorn-ypfn). Two samples with an identical signature are two
+  // round-trips in which nothing the page reports changed.
+  let lastSignature = null;
+  let noProgressSamples = 0;
+  let sawQuietSample = false;
 
   while (Date.now() - started < timeoutMs) {
     const result = await send('Runtime.evaluate', {
@@ -190,6 +203,12 @@ export async function waitForQuiescence(send, {
 
     last = result.result.value;
     samples += 1;
+    const signature = JSON.stringify([
+      last.pendingTimers, last.pendingIntervals, last.pendingFetches,
+      last.scheduled, last.completed, last.quietCondition,
+    ]);
+    if (signature === lastSignature) noProgressSamples += 1;
+    else { lastSignature = signature; noProgressSamples = 0; }
 
     if (last.probe !== 'present') {
       throw new Error(
@@ -233,6 +252,7 @@ export async function waitForQuiescence(send, {
       drainedAt = null;
     }
 
+    if (quiet) sawQuietSample = true;
     stable = quiet ? stable + 1 : 0;
     if (stable >= stableSamples) {
       return { waitedMs: Date.now() - started, samples, pending: last };
@@ -241,9 +261,22 @@ export async function waitForQuiescence(send, {
     await sleep(pollMs);
   }
 
+  // The ceiling is a backstop, so the message must not invent a cause. Three
+  // distinguishable situations, named rather than merged into "still pending":
+  const probe = JSON.stringify(last);
+  const pending = last && last.pendingTimers === 0 && last.pendingIntervals === 0 && last.pendingFetches === 0;
+  const why = pending
+    ? sawQuietSample
+      ? `the page WAS quiet but the sampler only completed ${samples} round-trip(s) (${noProgressSamples} with no change) ` +
+        `before the ceiling - a starved host, not a busy page; raise timeoutMs or lower stableSamples/pollMs`
+      : `the page's work had drained but the quiet condition never held, and the state grace period did not fire`
+    : noProgressSamples >= stableSamples
+      ? `nothing the page reports changed across ${noProgressSamples + 1} consecutive samples, so this is a page that is not progressing rather than a host that is merely slow`
+      : `the page kept changing across ${samples} samples, so it is still doing work, not merely starved`;
   throw new Error(
-    `Page never went quiet within ${timeoutMs}ms ` +
-    `(${JSON.stringify(last)}): work is still pending, so "no errors yet" cannot be asserted.`,
+    `Page never reached quiescence within the ${timeoutMs}ms absolute ceiling ` +
+    `(${probe}, ${samples} samples, ${noProgressSamples} consecutive with no change): ${why}. ` +
+    `Quiescence needs ${stableSamples} consecutive quiet samples; the ceiling is a backstop, not the criterion (airhorn-ypfn).`,
   );
 }
 
