@@ -122,6 +122,9 @@
  "tools/mutation-check.mjs": [
   "tests/mutation-check.test.js"
  ],
+ "tools/lib/suite-driver.mjs": [
+  "tests/mutation-check.test.js"
+ ],
  "tools/lib/**": [
   "tests/test-support.test.js"
  ],

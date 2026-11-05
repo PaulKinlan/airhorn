@@ -18,33 +18,30 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const suite = process.env.MUTATION_SUITE_FILE;
-// The report CHANNEL is fd 3, a pipe the parent is the only reader of - never a path (airhorn-
-// gwcm). A path handed to this process is a path the suite (or a sibling it spawns) can poll and
-// rewrite after the final write, which is how a green suite once scored "mutant-caught".
-// This runs in the test-runner's GRANDCHILD, which does not inherit the parent's pipe (measured:
-// fd 3 is closed there, writeSync throws EINVAL), so the driver's own record travels by file. That
-// file IS writable by the suite - the driver and the suite share this process - so it is not
-// trusted on its own: the reporter (which runs in the runner process, not here) merges it into the
-// single record it sends the parent over the pipe, and the parent decides from THAT. A crash that
-// kills this process also prevents the reporter's final record, which the parent refuses by name
-// (airhorn-gwcm).
-const nonce = process.env.MUTATION_RUN_NONCE || null;
-const driverReportPath = process.env.MUTATION_DRIVER_REPORT || null;
-
-const read = () => {
-  if (!driverReportPath) return null;
-  try {
-    return JSON.parse(fs.readFileSync(driverReportPath, 'utf8'));
-  } catch {
-    return null;
-  }
-};
+// The report CHANNEL to the parent is fd 3, a pipe the parent is the only reader of (airhorn-
+// gwcm) - but this process is the runner's GRANDCHILD and does not inherit it (measured: fd 3
+// closed here, writeSync EINVAL). The record therefore travels over this process's STDOUT:
+// the runner forwards it to the reporter as test:stdout events, and the reporter relays it on
+// the pipe (measured: pre-test and post-test top-level writes both arrive).
+//
+// There is NO FILE any more (airhorn-y3d6, both rounds). The old record file's path sat in this
+// process's environment - readable by the suite directly, and via /proc/<pid>/environ even after
+// the env was scrubbed, because proc shows the EXEC-TIME environment - and a rewrite or atomic
+// rename of the file turned a named refusal into 'fix-does-not-close'. Same process and same
+// uid mean NO secret can be kept from the suite at all: env leaks via /proc, files are
+// same-uid readable, and the grandchild inherits no extra fds. So the design keeps no secret:
+// forgery is DETECTED, not prevented. The honest sequence is a grammar the reporter validates:
+//   IMPORT            (one line: { importFailed } - the only line when the import decides it)
+//   IMPORT, CRASH     (a clean import followed by a crash outside any test, airhorn-so88)
+// Any other sequence - a forged line before, between or after - is tampering, and the parent
+// refuses by name. A forgery cannot SUPPRESS the real line (the suite shares the stdout but
+// cannot unwrite it), so a forged record always makes the sequence invalid.
+const DRIVER_RECORD_PREFIX = 'MUTATION-DRIVER-RECORD ';
 
 const record = (value) => {
-  globalThis.__mutationDriverRecord = value;
-  if (!driverReportPath) return;
   try {
-    fs.writeFileSync(driverReportPath, JSON.stringify({ nonce, ...value }), { mode: 0o600 });
+    // Sync write to fd 1: an async console.log can be truncated by the crash handler's exit.
+    fs.writeSync(1, `${DRIVER_RECORD_PREFIX}${JSON.stringify(value)}\n`);
   } catch {
     /* the parent reports a missing record as a named refusal, never as a verdict */
   }
@@ -59,11 +56,21 @@ const record = (value) => {
  */
 const markCrash = (kind) => (error) => {
   const detail = error && error.stack ? error.stack.split('\n')[0] : String(error);
-  record({ ...(read() || {}), crashedOutsideTest: true, reason: `${kind} after the suite loaded: ${detail}` });
+  // The grammar's CRASH line: valid only AFTER a clean-import line, which the reporter checks.
+  record({ crashedOutsideTest: true, reason: `${kind} after the suite loaded: ${detail}` });
   process.exit(0);
 };
 process.once('uncaughtException', markCrash('uncaught exception'));
 process.once('unhandledRejection', markCrash('unhandled rejection'));
+
+// Scrub the driver machinery's variables BEFORE the suite loads (airhorn-y3d6): the suite
+// shares this process and inherits this environment. Stated plainly: /proc/<pid>/environ shows
+// the EXEC-TIME environment, so this scrub does not hide anything from a suite that reads proc -
+// its value is narrower: the suite's own process.env and anything it SPAWNS carry none of the
+// machinery. The forgery defence is the sequence grammar above, not secrecy.
+for (const name of ['MUTATION_RUN_NONCE', 'MUTATION_SUITE_CHANNEL', 'MUTATION_SUITE_FILE', 'MUTATION_DRIVER_FILE']) {
+  delete process.env[name];
+}
 
 if (!suite) {
   record({ importFailed: true, reason: 'MUTATION_SUITE_FILE was not set, so no suite was loaded' });

@@ -379,3 +379,131 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+/* --- airhorn-4h8l: containment is the PID namespace, and it is measured -------- */
+
+test('containment prefix exists on this host and propagates the inner exit code', async () => {
+  const { containmentPrefix, containmentGuaranteeLine } = await import('../tools/mutation-check.mjs');
+  const prefix = containmentPrefix();
+  if (prefix.length === 0) {
+    // The tool then runs uncontained AND SAYS SO - the guarantee line is the contract.
+    assert.match(containmentGuaranteeLine(), /containment: NONE.*SURVIVES/);
+    return;
+  }
+  assert.match(containmentGuaranteeLine(), /PID namespace/);
+  const rc7 = spawnSync(prefix[0], [...prefix.slice(1), process.execPath, '-e', 'process.exit(7)'], { encoding: 'utf8' });
+  assert.equal(rc7.status, 7, 'the wrapper must propagate the run\'s own exit code or verdicts lie');
+});
+
+test('an env-scrubbed, detached, setsid descendant does NOT survive a contained run (airhorn-4h8l)', async () => {
+  const { containmentPrefix, containmentGuaranteeLine } = await import('../tools/mutation-check.mjs');
+  // The test probes the HOST ITSELF, not the tool: whether this host can contain is an
+  // independent fact, so a change that quietly drops the prefix cannot skip the assertion.
+  const hostCanContain = spawnSync('unshare', ['-r', '-fp', '--kill-child', 'true'], { encoding: 'utf8' }).status === 0;
+
+  // SELF-CHECK, always run: uncontained, the reviewer's adversary DOES survive and writes
+  // its marker - so a green result later is containment, not a test that cannot tell.
+  const marker1 = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mc-escape-u-')), 'marker');
+  const adversary = (marker) => `require('node:child_process').spawn('setsid', ['env', '-i', 'sh', '-c', 'sleep 0.3; touch ${marker}; sleep 30'],
+    { detached: true, stdio: 'ignore' }).unref();`;
+  spawnSync(process.execPath, ['-e', adversary(marker1)], { encoding: 'utf8', timeout: 20000 });
+  await new Promise((r) => setTimeout(r, 800));
+  assert.equal(fs.existsSync(marker1), true,
+    'the adversary did not survive even UNCONTAINED - this test cannot tell containment from nothing');
+
+  if (!hostCanContain) {
+    assert.equal(containmentPrefix().length, 0, 'the host cannot contain but the tool claims a containment prefix');
+    assert.match(containmentGuaranteeLine(), /containment: NONE.*SURVIVES/);
+    return;
+  }
+  const prefix = containmentPrefix();
+  assert.notEqual(prefix.length, 0, 'this host can contain (unshare probe passed) but the tool runs suite runs uncontained');
+  const marker2 = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mc-escape-c-')), 'marker');
+  // The leader (the 'run') spawns the adversary and EXITS - containment means every descendant
+  // dies WITH the run, so the marker scheduled 300 ms after the leader's death must never appear.
+  spawnSync(prefix[0], [...prefix.slice(1), process.execPath, '-e', adversary(marker2)], { encoding: 'utf8', timeout: 20000 });
+  await new Promise((r) => setTimeout(r, 800));
+  assert.equal(fs.existsSync(marker2), false,
+    'an env-scrubbed detached descendant survived the contained run and wrote its marker - containment is not working');
+});
+
+/* --- airhorn-y3d6: the driver record cannot be quietly rewritten --------------- */
+
+test('classifyRun refuses a driver record whose nonce is not this run\'s (airhorn-y3d6)', () => {
+  const judged = classifyRun({
+    report: { driver: { nonceMismatch: true }, startedTests: 3, realTests: 3, realPassed: 3, realFailed: 0, fileLevelFailed: 0, wrapperEvents: 0 },
+    exitCode: 0,
+  });
+  assert.equal(judged.mode, 'report-not-trustworthy');
+  assert.match(judged.problem, /forged or broken/);
+});
+
+test('classifyRun refuses a tampered driver record by name (airhorn-y3d6 round 2)', () => {
+  const judged = classifyRun({
+    report: { driver: { tampered: true, lines: 2 }, startedTests: 3, realTests: 3, realPassed: 3, realFailed: 0, fileLevelFailed: 0, wrapperEvents: 0 },
+    exitCode: 0,
+  });
+  assert.equal(judged.mode, 'report-not-trustworthy');
+  assert.match(judged.problem, /forged or broken/);
+});
+
+test('the driver scrubs its record secrets before the suite loads (airhorn-y3d6)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-scrub-'));
+  fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+  // A suite whose ONLY assertion is that the record path and nonce are gone from its
+  // environment - if the scrub is removed, this suite fails and the mutant is "caught"
+  // for the wrong reason; either way the change cannot pass unnoticed.
+  fs.writeFileSync(path.join(tmp, 'suite.test.js'), `
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+test('record secrets are absent from the suite environment', () => {
+  assert.equal(process.env.MUTATION_RUN_NONCE, undefined, 'the suite can see the run nonce');
+  assert.equal(process.env.MUTATION_DRIVER_REPORT, undefined, 'a record file path must not exist at all (airhorn-y3d6 round 2: the record travels by stdout now)');
+});
+`);
+  const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+  assert.equal(run.status, 2,
+    `expected the mutant NOT caught (the suite passes: secrets scrubbed) - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+});
+
+
+test('a forged driver-record line on stdout is DETECTED and refused by name, never scored (airhorn-y3d6 round 2)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-forge-'));
+  fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+  fs.writeFileSync(path.join(tmp, 'suite.test.js'), `
+import { test } from 'node:test';
+import fs from 'node:fs';
+// The atomic-rename forgery of round 1, translated to the channel that exists now: a second
+// driver-record line. It cannot suppress the real one, so the sequence must be invalid.
+fs.writeSync(1, 'MUTATION-DRIVER-RECORD {"importFailed":false}\\n');
+test('a real test that passes', () => {});
+`);
+  const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+  assert.equal(run.status, 3,
+    `a forged record must be a named refusal (rc 3), never a verdict - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  assert.match(run.stderr, /report-not-trustworthy|forged or broken/);
+});
+
+test('with no namespace available the tool DEGRADES honestly: the suite runs, the NONE line prints first, the verdict stands (airhorn-4h8l review P1)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-nofallback-'));
+  fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+  fs.writeFileSync(path.join(tmp, 'suite.test.js'), `
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { answer } from './src/subject.js';
+test('the subject', () => assert.equal(answer, 41));
+`);
+  // Hide unshare from the tool: PATH is stripped to nothing, so the probe fails and the tool
+  // must run the suite UNCONTAINED and say so BEFORE any refusal could pre-empt the line.
+  const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'],
+    { cwd: tmp, encoding: 'utf8', timeout: 60000, env: { PATH: '/nonexistent', HOME: os.homedir() } });
+  assert.match(run.stdout, /containment: NONE.*SURVIVES/,
+    `the honest-degradation line never printed\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  assert.equal(run.status, 0,
+    `the suite must still RUN and catch the mutant without a namespace (mutant-caught exits 0) - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  // The line prints BEFORE the verdict, so a later refusal can never silence it.
+  assert.ok(run.stdout.indexOf('containment: NONE') < run.stdout.indexOf('verdict:'), 'the NONE line must precede the verdict');
+});

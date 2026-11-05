@@ -124,6 +124,7 @@ tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
 # own behaviour (does the --from apply? did the write land? is the target product code?) is
 # covered by its own unit suite, which also needs the self-row below (airhorn-f41e).
 tools/mutation-check.mjs	tests/mutation-check.test.js
+tools/lib/suite-driver.mjs	tests/mutation-check.test.js
 tests/mutation-check.test.js	tests/mutation-check.test.js
 # tools/lib/** is the shared runtime the tools import (reap.mjs is the profile
 # marker sweep). It is NOT matched by `tools/*`, which does not cross a slash, so

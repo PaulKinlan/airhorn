@@ -262,6 +262,9 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
   if (!report || !report.driver) {
     return { mode: 'never-ran', problem: `produced no record of the suite loading (exit ${exitCode}), so nothing was measured - a suite that never ran proves nothing about the mutant` };
   }
+  if (report.driver.tampered || report.driver.nonceMismatch) {
+    return { mode: 'report-not-trustworthy', problem: `the driver record sequence was invalid (${report.driver.lines || 0} record line(s), or a nonce that was not this run's) - a record was forged or broken, so nothing it says is evidence either way (exit ${exitCode}) (airhorn-y3d6)` };
+  }
   if (report.driver.importFailed) {
     return { mode: 'never-ran', problem: `threw while loading (${report.driver.reason || 'no reason reported'}), so NO test ever ran and this is not a caught mutant (exit ${exitCode}, ${report.realTests} test event(s) seen). If this is a script suite whose top-level assertion failed, say so with --suite-mode script` };
   }
@@ -303,14 +306,13 @@ const DRIVER = path.join(path.dirname(SELF), 'lib', 'suite-driver.mjs');
  * producing no report - which would read as never-ran for every case when the mutation checker is
  * itself under test.
  */
-function childEnv(suitePath, nonce, driverReportPath) {
+function childEnv(suitePath, nonce) {
   const env = {
     ...process.env,
     // A channel the child can only write to (fd 3) plus this run's nonce - NOT a path. The suite
     // gets no filename to poll or rewrite, and a sibling it spawns inherits neither (airhorn-gwcm).
     MUTATION_SUITE_CHANNEL: '3',
     MUTATION_RUN_NONCE: nonce,
-    MUTATION_DRIVER_REPORT: driverReportPath,
     MUTATION_SUITE_FILE: suitePath,
     MUTATION_DRIVER_FILE: DRIVER,
   };
@@ -319,25 +321,58 @@ function childEnv(suitePath, nonce, driverReportPath) {
   return env;
 }
 
+/**
+ * Containment for a suite run (airhorn-4h8l): a suite's detached descendants must not outlive
+ * the verdict. The previous mechanism keyed a sweep on the run's nonce in /proc/PID/environ -
+ * a child spawned with a scrubbed environment was invisible to it (measured: {env:{}} child
+ * survived, the tool exited 2 with the child still running). Environment can be scrubbed,
+ * names can change, and a double-fork breaks ancestry - so the identifier cannot live with the
+ * child AT ALL. Measured on this fleet's hosts: cgroup2 delegation is NOT writable by an
+ * unprivileged lane, but a user+PID namespace is: `unshare -r -fp --kill-child` makes the
+ * runner the init of a fresh PID namespace, and every descendant - env-scrubbed, renamed,
+ * setsid'd, double-forked - dies with it (measured: the marker was never written). (c), an
+ * inherited-FD heartbeat, asks the untrusted side to cooperate, so it was never a candidate.
+ * If the namespace is unavailable the run still happens, UNCONTAINED, and the tool says so in
+ * its own output - the guarantee is printed, never implied.
+ */
+let containmentProbe = null;
+export function containmentPrefix() {
+  if (containmentProbe === null) {
+    const probe = spawnSync('unshare', ['-r', '-fp', '--kill-child', 'true'], { encoding: 'utf8' });
+    containmentProbe = probe.status === 0 ? ['unshare', '-r', '-fp', '--kill-child'] : [];
+  }
+  return containmentProbe;
+}
+
+export function containmentGuaranteeLine() {
+  return containmentPrefix().length
+    ? 'containment: suite runs execute inside a PID namespace (unshare -r -fp --kill-child) - every descendant dies with the run, whatever its environment, name or forking (airhorn-4h8l)'
+    : 'containment: NONE - PID namespaces are unavailable here, so a detached child of a suite run SURVIVES the verdict; the verdict is still honest about the mutant, but the host is not cleaned (airhorn-4h8l)';
+}
+
 function runSuite(suite, cwd, label, suiteMode) {
   const presence = suitePresenceProblem(suite, cwd);
   if (presence) return { problem: presence };
   if (suiteMode === 'script') {
-    const ran = run(process.execPath, [suite], cwd, { captureStderr: true });
+    const contained = containmentPrefix();
+    const ran = run(contained.length ? contained[0] : process.execPath,
+      contained.length ? [...contained.slice(1), process.execPath, suite] : [suite], cwd, { captureStderr: true });
     const classified = classifyRun({ report: null, exitCode: ran.rc, suiteMode });
     if (classified.problem) return { problem: `${label} [${classified.mode}] ${classified.problem}` };
     return { rc: classified.rc };
   }
   const nonce = randomUUID();
-  const driverReportPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-driver-')), 'driver.json');
   // Run under the test runner with the reporting hook: the runner tells us whether any test
   // executed, instead of us guessing the suite's kind from its text (airhorn-u1v2).
   // The runner is pointed at the driver, not at the suite: the driver records whether the suite
   // LOADED, which is the only spelling-proof evidence that any test could have run (airhorn-lnme).
-  const ran = run(process.execPath, ['--test', '--test-reporter', REPORTER, DRIVER], cwd, {
+  const contained = containmentPrefix();
+  const nodeArgs = ['--test', '--test-reporter', REPORTER, DRIVER];
+  const ran = run(contained.length ? contained[0] : process.execPath,
+    contained.length ? [...contained.slice(1), process.execPath, ...nodeArgs] : nodeArgs, cwd, {
     captureStderr: true,
     reportPipe: true,
-    env: childEnv(path.resolve(cwd, suite), nonce, driverReportPath),
+    env: childEnv(path.resolve(cwd, suite), nonce),
   });
   const channel = readChannel(ran.channel, nonce);
   const report = channel.records;
@@ -387,6 +422,10 @@ export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
       return 3;
     }
     console.log(`mutant applied to ${args.file} (${applied.content.length - original.length >= 0 ? '+' : ''}${applied.content.length - original.length} bytes), verified on disk`);
+    // BEFORE any suite runs, so a refusal further down can never pre-empt the truth about
+    // what this host guarantees (airhorn-4h8l review: the line used to print only at the
+    // verdict, so a broken degradation path refused first and said nothing).
+    console.log(containmentGuaranteeLine());
 
     if (args.build) {
       console.log(`building: ${args.build}`);

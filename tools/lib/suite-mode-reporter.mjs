@@ -56,7 +56,30 @@ export default async function* suiteModeReporter(source) {
   // synthetic file-level event.
   let startedTests = 0;
 
+  // The driver's record arrives as stdout lines from the driver FILE's process (airhorn-y3d6,
+  // second round - there is no record file any more). The honest sequence is a grammar:
+  //   IMPORT          one line { importFailed: ... }
+  //   IMPORT, CRASH   a clean import followed by { crashedOutsideTest: true } (airhorn-so88)
+  // A forged line from the suite cannot suppress the real one (stdout cannot be unwritten), so
+  // a forgery always makes the sequence invalid - DETECTED, then refused by the parent.
+  const driverLines = [];
+  const DRIVER_RECORD_PREFIX = 'MUTATION-DRIVER-RECORD ';
+
   for await (const event of source) {
+    if (event.type === 'test:stdout') {
+      const data = event.data || {};
+      const message = typeof data.message === 'string' ? data.message : '';
+      for (const line of message.split('\n')) {
+        if (line.startsWith(DRIVER_RECORD_PREFIX)) {
+          try {
+            driverLines.push(JSON.parse(line.slice(DRIVER_RECORD_PREFIX.length)));
+          } catch {
+            driverLines.push({ malformed: true });
+          }
+        }
+      }
+      continue;
+    }
     if (event.type === 'test:start') {
       const data = event.data || {};
       if (!(driverFile && fileOf(data) === driverFile)) startedTests += 1;
@@ -91,11 +114,14 @@ export default async function* suiteModeReporter(source) {
   // lie cannot reach a false "caught".
 
   let driver = null;
-  try {
-    driver = JSON.parse(fs.readFileSync(process.env.MUTATION_DRIVER_REPORT, 'utf8'));
-    if (driver && driver.nonce !== process.env.MUTATION_RUN_NONCE) driver = { nonceMismatch: true };
-  } catch {
-    driver = null;
+  if (driverLines.length === 1 && typeof driverLines[0].importFailed === 'boolean' && !driverLines[0].crashedOutsideTest) {
+    driver = driverLines[0];                                    // IMPORT
+  } else if (driverLines.length === 2
+      && typeof driverLines[0].importFailed === 'boolean' && driverLines[0].importFailed === false
+      && driverLines[1].crashedOutsideTest === true) {
+    driver = { ...driverLines[0], ...driverLines[1] };          // IMPORT, CRASH
+  } else if (driverLines.length > 0) {
+    driver = { tampered: true, lines: driverLines.length };     // any other sequence: forged or broken
   }
   const report = { driver, startedTests, realTests, realPassed, realFailed, fileLevelFailed, wrapperEvents, failing: failing.slice(0, 10) };
   const channelFd = Number(process.env.MUTATION_SUITE_CHANNEL);
