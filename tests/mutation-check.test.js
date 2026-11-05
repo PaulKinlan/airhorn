@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { exportedSameFile } from '../tools/lib/suite-mode-reporter.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,7 +17,6 @@ import {
   suitePresenceProblem,
   verdictFor,
 } from '../tools/mutation-check.mjs';
-import { exportedSameFile } from '../tools/lib/suite-mode-reporter.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tool = path.join(root, 'tools', 'mutation-check.mjs');
@@ -507,18 +507,7 @@ test('the subject', () => assert.equal(answer, 41));
     `the suite must still RUN and catch the mutant without a namespace (mutant-caught exits 0) - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
   // The line prints BEFORE the verdict, so a later refusal can never silence it.
   assert.ok(run.stdout.indexOf('containment: NONE') < run.stdout.indexOf('verdict:'), 'the NONE line must precede the verdict');
-
-/* --- airhorn-u1v2 unique delta: what counts as a TEST, and which file the wrapper is --------
- *
- * The classification on master answers "did a test start and did something inside it fail" from
- * the runner's own events, which is right. Two ways it could still be moved:
- *
- *   - a describe() CONTAINER is not a test, but it starts, passes and fails exactly like one, so a
- *     suite whose only node is a container could answer "a test started" with no test in it;
- *   - the wrapper was identified by ONE comparison (fileOf(data) === driverFile), so a missing
- *     data.file or a realpath that failed on one side turned the driver's own entry into a "real
- *     failing test" - a caught mutant from a run in which nothing executed.
- */
+});
 
 test('a describe() container is not a test: a container-only suite is never-ran, not a verdict', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-container-'));
