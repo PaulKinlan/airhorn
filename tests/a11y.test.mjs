@@ -793,11 +793,17 @@ async function run() {
       // page's own state to finish rather than for a constant.
       quietExpression: `!document.querySelector('.horn.horning')`,
       // That state clears on the audio source's 'ended' event, which cannot fire
-      // when a machine's headless audio never progresses. Pending work is still
-      // observable, so bound the overall wait and the state-only wait separately:
-      // a stuck pipeline then fails in seconds, naming the cause, instead of
-      // wedging for 20s and reporting that unspecified work is still pending.
-      timeoutMs: 15000,
+      // when a machine's headless audio never progresses. So the STATE-only wait
+      // keeps its short bound: nothing is pending, so the state will not arrive and
+      // the failure should name the stuck pipeline rather than wait out a clock.
+      //
+      // There is deliberately NO flat `timeoutMs` here (airhorn-ixk1). A wall-clock
+      // pin cannot tell "still working" from "this host is starved", and 15 s was
+      // measured failing a page that was already QUIET: at 5 s and 6.7 s per CDP
+      // round-trip the wait threw "...within the 15000ms absolute ceiling" while its
+      // own probe showed zero pending work and the quiet condition true. Quiescence
+      // is decided by waitForQuiescence's observable-progress criterion; the elapsed
+      // time is only its generous backstop, which fails by name (airhorn-ypfn).
       stateTimeoutMs: 4000,
     });
     console.log(
