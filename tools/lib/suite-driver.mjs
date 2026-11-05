@@ -65,6 +65,19 @@ const markCrash = (kind) => (error) => {
 process.once('uncaughtException', markCrash('uncaught exception'));
 process.once('unhandledRejection', markCrash('unhandled rejection'));
 
+// Scrub the driver's secrets BEFORE the suite loads (airhorn-y3d6): the suite shares this
+// process and inherits this environment, so while MUTATION_DRIVER_REPORT and MUTATION_RUN_NONCE
+// are readable here the suite can learn the record's path and forge or rewrite it - the measured
+// hole was a named refusal becoming 'fix-does-not-close'. The reporter runs in the RUNNER's
+// process and keeps its own copy of the environment, so deleting here does not starve it. The
+// residual, stated plainly: the file still lives under the system temp dir, and a suite that
+// scans for it can find and rewrite it without the env hint - the reporter's nonce check and the
+// parent's nonceMismatch refusal are what catch THAT, and closing it fully needs the driver out
+// of the suite's process, a bigger reshape than this fix.
+for (const name of ['MUTATION_DRIVER_REPORT', 'MUTATION_RUN_NONCE', 'MUTATION_SUITE_CHANNEL', 'MUTATION_SUITE_FILE', 'MUTATION_DRIVER_FILE']) {
+  delete process.env[name];
+}
+
 if (!suite) {
   record({ importFailed: true, reason: 'MUTATION_SUITE_FILE was not set, so no suite was loaded' });
 } else {
