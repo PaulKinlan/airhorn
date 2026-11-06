@@ -115,8 +115,8 @@ tools/audio-parity.mjs	tests/audio-parity-verdict.test.js
 # bound: their handler is behaviour, so a change to either runs the guard that
 # kills them mid-run and checks the tree is empty afterwards (airhorn-aaxm,
 # airhorn-cyga). ~0.5 s for both tools.
-tools/cache-growth.mjs	tests/tool-bound-kill.test.mjs
-tools/soak.mjs	tests/tool-bound-kill.test.mjs
+tools/cache-growth.mjs	tests/soak-verdict.test.js tests/tool-bound-kill.test.mjs
+tools/soak.mjs	tests/soak-verdict.test.js tests/tool-bound-kill.test.mjs
 # tools/derive-coverage-contract.mjs is covered by its own unit suite as well
 # as the tools/* gate-smoke check (airhorn-1qw6).
 tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
@@ -125,6 +125,7 @@ tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
 # covered by its own unit suite, which also needs the self-row below (airhorn-f41e).
 tools/mutation-check.mjs	tests/mutation-check.test.js
 tools/lib/suite-driver.mjs	tests/mutation-check.test.js
+tools/lib/endpoint-growth.mjs	tests/soak-verdict.test.js
 tests/mutation-check.test.js	tests/mutation-check.test.js
 # tools/lib/** is the shared runtime the tools import (reap.mjs is the profile
 # marker sweep). It is NOT matched by `tools/*`, which does not cross a slash, so
@@ -173,6 +174,7 @@ tests/sw-failover.test.mjs	tests/sw-failover.test.mjs
 tests/webmcp.test.mjs	tests/webmcp.test.mjs
 tests/gate-smoke.test.js	tests/gate-smoke.test.js
 tests/badge-count.test.js	tests/badge-count.test.js
+tests/soak-verdict.test.js	tests/soak-verdict.test.js
 tests/preload-priority.test.js	tests/preload-priority.test.js
 # The fast half's own self-row: a change to it must run it (airhorn-gkqu).
 tests/gate-map.test.js	tests/gate-map.test.js

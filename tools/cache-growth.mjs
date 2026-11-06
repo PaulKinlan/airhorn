@@ -48,6 +48,7 @@
  */
 
 import { execSync } from 'node:child_process';
+import { growthFromSeries } from './lib/endpoint-growth.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -156,6 +157,20 @@ function makeEvidenceDir(explicit) {
 /* --------------------------------- checks --------------------------------- */
 
 const checks = [];
+// The growth measures, exported so the pin drives the SAME code the run wires
+// (airhorn-01vq): nothing else in this file may compute a drift.
+export const storedBytesDrift = (bytesSeries) =>
+  growthFromSeries(bytesSeries, bytesSeries[0], bytesSeries[bytesSeries.length - 1]);
+
+// A null estimate is NOT a zero: unmeasured says so (airhorn-yobt).
+export const usageDrift = (usageSeries) => {
+  const measured = usageSeries.every((value) => value !== null);
+  return {
+    measured,
+    growth: measured ? growthFromSeries(usageSeries, usageSeries[0], usageSeries[usageSeries.length - 1]) : null,
+  };
+};
+
 function check(name, pass, detail) {
   checks.push({ name, pass: Boolean(pass), detail });
   console.log(`  ${pass ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
@@ -681,9 +696,7 @@ async function main() {
     // --versions 2 records two measurements, slice(0,2) and slice(-2) are the
     // same pair, and drift read 0 by construction. Under 4 records the
     // endpoints are the honest measure - a real delta, never a silent zero.
-    const byteGrowth = bytesSeries.length >= 4
-      ? (median(bytesSeries.slice(-2)) - median(bytesSeries.slice(0, 2)))
-      : bytesSeries[bytesSeries.length - 1] - bytesSeries[0];
+    const byteGrowth = storedBytesDrift(bytesSeries);
     const bytesCheck = check(
       'stored bytes stay flat across deploys (one version, not one per deploy)',
       Math.abs(byteGrowth) < 8 * 1024 && !growsMonotonically(bytesSeries, 4 * 1024),
@@ -721,11 +734,7 @@ async function main() {
     // folded into the series flatters the growth figure with a measurement
     // nobody made. Unmeasured is named, never averaged in.
     const usageSeries = records.map((record) => record.usage ?? null);
-    const usageMeasured = usageSeries.every((value) => value !== null);
-    const usageGrowth = !usageMeasured ? null
-      : usageSeries.length >= 4
-        ? median(usageSeries.slice(-2)) - median(usageSeries.slice(0, 2))
-        : usageSeries[usageSeries.length - 1] - usageSeries[0];
+    const { measured: usageMeasured, growth: usageGrowth } = usageDrift(usageSeries);
     const usageCheck = check(
       'the origin\'s storage estimate stays bounded',
       usageMeasured && usageGrowth < 512 * 1024 && !growsMonotonically(usageSeries, 64 * 1024),

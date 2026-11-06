@@ -55,6 +55,7 @@
  */
 
 import { execSync } from 'node:child_process';
+import { growthFromSeries } from './lib/endpoint-growth.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -403,6 +404,24 @@ const instrumentation = (mutantScript) => `
  * synth never engages when decoding works). null WITH creations on the counter
  * is a broken measurement and fails as such.
  */
+// The two growth measures, exported so the pin drives the SAME code main() wires
+// (airhorn-01vq): a browser-free test cannot see main(), so the call sites are these
+// functions and nothing else may compute growth in this file.
+export const cycleHeapGrowth = (heapSeries, baselineBytes, afterCyclesBytes) =>
+  growthFromSeries(heapSeries, baselineBytes, afterCyclesBytes);
+
+export const offlineHeapGrowth = (offlineHeap) =>
+  offlineHeap.length ? growthFromSeries(offlineHeap, offlineHeap[0], offlineHeap[offlineHeap.length - 1]) : 0;
+
+// The line that once crashed AFTER the verdict printed (a ReferenceError on an
+// out-of-scope liveSourcesMax, pre-existing since fa14fb5, airhorn-nxuv.32): it is a
+// pure function now, so the pin proves the post-verdict path cannot throw.
+export const audioSummaryLine = (samples, afterCycles, contextMin, contextMax) =>
+  `  audio: contexts ${contextMin}..${contextMax}, live sources max ${Math.max(...samples.map((point) => point.liveSources))}, ` +
+  `created ${afterCycles.sourcesCreated}, ended ${afterCycles.sourcesEnded}`;
+
+export const exitCodeForSummary = (summary) => (summary.pass ? 0 : 1);
+
 export const audioNodesReleased = (samples, afterCycles) => {
   const liveSourcesMax = Math.max(...samples.map((point) => point.liveSources));
   const liveOscillatorsMax = Math.max(...samples.map((point) => point.liveOscillators));
@@ -895,9 +914,7 @@ async function main() {
     // matter what the heap did (a measured +10MB leak passed). Too few samples
     // -> measure the TRUE endpoints of the cycle phase (baseline vs the
     // quiesced after-cycles sample); enough -> the windowed median as before.
-    const heapGrowth = heapSeries.length >= 4
-      ? median(heapSeries.slice(-2)) - median(heapSeries.slice(0, 2))
-      : afterCycles.heapUsed - baseline.heapUsed;
+    const heapGrowth = cycleHeapGrowth(heapSeries, baseline.heapUsed, afterCycles.heapUsed);
     const heapMonotonic = growsMonotonically(heapSeries, 256 * 1024);
 
     const heapCheck = check(
@@ -1086,11 +1103,7 @@ async function main() {
     // two samples, so growth read 0 no matter what the heap did - a zero that
     // meant 'we did not look'. Fewer than 4 samples -> the endpoints are the
     // honest measure; a real delta, never a structural zero.
-    const offlineGrowth = offlineHeap.length
-      ? (offlineHeap.length >= 4
-          ? median(offlineHeap.slice(-2)) - median(offlineHeap.slice(0, 2))
-          : offlineHeap[offlineHeap.length - 1] - offlineHeap[0])
-      : 0;
+    const offlineGrowth = offlineHeapGrowth(offlineHeap);
     const offlineHeapCheck = offlineHeap.length < 2 ? null : check(
       'heap after repeated reloads stays bounded',
       offlineGrowth < heapBudget && !growsMonotonically(offlineHeap, 256 * 1024),
@@ -1161,8 +1174,7 @@ async function main() {
     // liveSourcesMax lived inside audioNodesReleased() - out of scope here, so the
     // summary crashed with a ReferenceError AFTER the verdict printed (pre-existing
     // since fa14fb5; found by the nxuv.32 GREEN run, which read PASS and exited 1).
-    console.log(`  audio: contexts ${contextMin}..${contextMax}, live sources max ${Math.max(...samples.map((point) => point.liveSources))}, ` +
-      `created ${afterCycles.sourcesCreated}, ended ${afterCycles.sourcesEnded}`);
+    console.log(audioSummaryLine(samples, afterCycles, contextMin, contextMax));
     console.log(`  renderer: listeners delta ${listenerDelta}, nodes delta ${nodeDelta}, ` +
       `documents ${finalSample.documents}`);
     console.log(`  evidence: ${evidenceDir}`);
@@ -1176,7 +1188,7 @@ async function main() {
     void [cycleCheck, heapCheck, liveCheck, contextCheck, listenerCheck, domCheck, drainCheck,
       updateCheck, offlineCheck, offlineHeapCheck, errorCheck, finalDrainCheck];
 
-    return summary.pass ? 0 : 1;
+    return exitCodeForSummary(summary);
   } finally {
     try { if (ws) ws.close(); } catch {}
     await new Promise((resolve) => server.close(resolve));
