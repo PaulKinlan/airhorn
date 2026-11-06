@@ -125,6 +125,9 @@ tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
 # covered by its own unit suite, which also needs the self-row below (airhorn-f41e).
 tools/mutation-check.mjs	tests/mutation-check.test.js
 tools/lib/suite-driver.mjs	tests/mutation-check.test.js
+# The reporter decides whether a TEST failed or the file did, so a change to it is gated on the
+# suite that exercises the container, same-name collision and spelling worlds (airhorn-u1v2).
+tools/lib/suite-mode-reporter.mjs	tests/mutation-check.test.js
 tools/lib/endpoint-growth.mjs	tests/soak-verdict.test.js
 tests/mutation-check.test.js	tests/mutation-check.test.js
 # tools/lib/** is the shared runtime the tools import (reap.mjs is the profile

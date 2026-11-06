@@ -127,6 +127,9 @@
  "tools/lib/suite-driver.mjs": [
   "tests/mutation-check.test.js"
  ],
+ "tools/lib/suite-mode-reporter.mjs": [
+  "tests/mutation-check.test.js"
+ ],
  "tools/lib/endpoint-growth.mjs": [
   "tests/soak-verdict.test.js"
  ],

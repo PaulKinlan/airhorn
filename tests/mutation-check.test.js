@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { exportedSameFile } from '../tools/lib/suite-mode-reporter.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -506,4 +507,277 @@ test('the subject', () => assert.equal(answer, 41));
     `the suite must still RUN and catch the mutant without a namespace (mutant-caught exits 0) - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
   // The line prints BEFORE the verdict, so a later refusal can never silence it.
   assert.ok(run.stdout.indexOf('containment: NONE') < run.stdout.indexOf('verdict:'), 'the NONE line must precede the verdict');
+});
+
+test('a describe() container is not a test: a container-only suite is never-ran, not a verdict', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-container-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    // A container with nothing inside it: it starts and passes exactly like a test does.
+    fs.writeFileSync(path.join(tmp, 'container.test.mjs'), "import { describe } from 'node:test';\ndescribe('an empty group', () => {});\n");
+    const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'container.test.mjs'], { cwd: tmp, encoding: 'utf8' });
+    assert.equal(result.status, 3, `a container is not a started test: ${result.stdout}${result.stderr}`);
+    const said = result.stdout + result.stderr;
+    assert.match(said, /never-ran/);
+    assert.match(said, /registered no tests/);
+    assert.doesNotMatch(result.stdout, /verdict: mutant-caught/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a container is never named as a failing test: only the test inside it is', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-container2-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    fs.writeFileSync(path.join(tmp, 'grouped.test.mjs'), [
+      "import { describe, it } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "import { answer } from './src/subject.js';",
+      "describe('a group', () => { it('the real check', () => { assert.equal(answer, 41); }); });",
+    ].join('\n'));
+    const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'grouped.test.mjs'], { cwd: tmp, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /verdict: mutant-caught/);
+    const record = /# suite-mode: (\{.*\})/.exec(result.stdout);
+    assert.ok(record, `the run must report its counts: ${result.stdout}`);
+    const report = JSON.parse(record[1]);
+    assert.equal(report.startedTests, 1, 'exactly one TEST started; the container is not one');
+    assert.deepEqual(report.failing, ['the real check'], 'the container must not appear beside the real failure');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('the wrapper identity is total: symlink, ./ prefix, doubled slash and absolute all agree', () => {
+  // Unit-level on the predicate the reporter uses, because the structural cases are covered end to
+  // end below and node always supplies data.file there - this is the guard for when it does not.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-identity-'));
+  try {
+    const real = path.join(dir, 'tools', 'suite-driver.mjs');
+    fs.mkdirSync(path.dirname(real));
+    fs.writeFileSync(real, '// driver\n');
+    fs.symlinkSync(path.join(dir, 'tools'), path.join(dir, 'toolslink'));
+    assert.equal(exportedSameFile(real, real), true, 'the same string');
+    assert.equal(exportedSameFile(path.join(dir, '.', 'tools', 'suite-driver.mjs'), real), true, 'a . segment');
+    assert.equal(exportedSameFile(path.join(dir, 'tools', '', 'suite-driver.mjs'), real), true, 'a doubled separator');
+    assert.equal(exportedSameFile(path.join(dir, 'toolslink', 'suite-driver.mjs'), real), true, 'through a symlinked directory');
+    assert.equal(exportedSameFile('tools/suite-driver.mjs', real), true, 'relative against absolute');
+    assert.equal(exportedSameFile('', real), false, 'nothing is not the driver');
+    assert.equal(exportedSameFile(undefined, real), false, 'a missing file field is not the driver');
+    // Under-claim, documented: a different file with the same basename reads as the driver.
+    assert.equal(exportedSameFile('/elsewhere/suite-driver.mjs', real), true, 'same basename under-claims, which is safe');
+    assert.equal(exportedSameFile('/elsewhere/other.mjs', real), false, 'different names, different files');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a suite path spelling never changes the verdict: bare, tests/, ./tests/, tests//, absolute, symlinked dir', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-spelling-'));
+  const write = (rel, body) => {
+    const target = path.join(tmp, rel);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, body);
+  };
+  try {
+    write('src/subject.js', 'export const answer = 41;\n');
+    write('tests/catches.test.mjs', "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from '../src/subject.js';\ntest('the check', () => { assert.equal(answer, 41); });\n");
+    fs.symlinkSync(path.join(tmp, 'tests'), path.join(tmp, 'testslink'));
+    const outcomes = new Map();
+    for (const suite of ['tests/catches.test.mjs', './tests/catches.test.mjs', 'tests//catches.test.mjs', path.join(tmp, 'tests', 'catches.test.mjs'), 'testslink/catches.test.mjs']) {
+      const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', suite], { cwd: tmp, encoding: 'utf8' });
+      const verdict = (/verdict: (\S+)/.exec(result.stdout) || [null, `rc${result.status}`])[1];
+      outcomes.set(suite, `${result.status}:${verdict}`);
+      assert.equal(result.status, 0, `${suite}: ${result.stdout}${result.stderr}`);
+    }
+    assert.equal(new Set(outcomes.values()).size, 1, `every spelling must give one outcome: ${[...outcomes].map(([k, v]) => `${k}=${v}`).join(', ')}`);
+    // A trailing slash must EITHER resolve to the same identity (same verdict) or be refused by
+    // name - never silently scored as something else. On this platform node resolves it to the same
+    // file, so the verdict has to match the other spellings.
+    const trailing = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'tests/catches.test.mjs/'], { cwd: tmp, encoding: 'utf8' });
+    const trailingSaid = trailing.stdout + trailing.stderr;
+    if (trailing.status === 0) {
+      const verdict = (/verdict: (\S+)/.exec(trailing.stdout) || [null, null])[1];
+      assert.deepEqual([...new Set(outcomes.values())], [`0:${verdict}`], `a trailing slash resolved to the same file must give the same verdict: ${trailing.stdout}${trailing.stderr}`);
+    } else {
+      assert.equal(trailing.status, 3, `a trailing-slash path must refuse, not score: ${trailingSaid}`);
+      assert.match(trailingSaid, /does not exist/);
+      assert.doesNotMatch(trailing.stdout, /verdict:/);
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('five runs of the same world agree, and a forged channel record never wins (airhorn-4a3p)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-race-'));
+  const write = (rel, body) => {
+    const target = path.join(tmp, rel);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, body);
+  };
+  try {
+    write('src/subject.js', 'export const answer = 41;\n');
+    write('catches.test.mjs', "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from './src/subject.js';\ntest('the check', () => { assert.equal(answer, 41); });\n");
+    write('forge.test.mjs', [
+      "import test from 'node:test';",
+      "import fs from 'node:fs';",
+      "test('green', () => {});",
+      "try { fs.writeSync(3, JSON.stringify({ kind: 'final', nonce: process.env.MUTATION_RUN_NONCE, realTests: 1, realFailed: 1 }) + '\\n'); } catch {}",
+    ].join('\n'));
+    const verdicts = new Set();
+    let forged = 0;
+    for (let i = 0; i < 5; i += 1) {
+      const cat = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'catches.test.mjs'], { cwd: tmp, encoding: 'utf8' });
+      verdicts.add(`${cat.status}:${(/verdict: (\S+)/.exec(cat.stdout) || [null, 'none'])[1]}`);
+      const fake = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'forge.test.mjs'], { cwd: tmp, encoding: 'utf8' });
+      if (/verdict: mutant-caught/.test(fake.stdout)) forged += 1;
+    }
+    assert.deepEqual([...verdicts], ['0:mutant-caught'], `five runs of one deterministic world must agree: ${[...verdicts].join(', ')}`);
+    assert.equal(forged, 0, 'a suite that writes its own channel record must never be scored caught (5 runs)');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('the unattributed refusal is reachable: a record that lost its file attribution is never a verdict (airhorn-4a3p)', () => {
+  // The reviewer's finding was that classifyRun HAD the refusal but readChannel dropped the field,
+  // so the guard could never fire. This pins the path from the wire to the decision.
+  const nonce = 'n0nce';
+  const line = JSON.stringify({ kind: 'final', nonce, driver: { nonce, importFailed: false }, startedTests: 1, realTests: 1, realPassed: 0, realFailed: 1, fileLevelFailed: false, wrapperEvents: 0, unattributed: 2, failing: [] });
+  const channel = readChannel(`${line}\n`, nonce);
+  assert.equal(channel.problem, null);
+  assert.equal(channel.records.unattributed, 2, 'readChannel must carry the field classifyRun refuses on');
+  const classified = classifyRun({ report: channel.records, exitCode: 1, suiteMode: 'node-test' });
+  assert.equal(classified.mode, 'never-ran');
+  assert.match(classified.problem, /could not be attributed/);
+  // And a record with no unattributable events still decides normally.
+  const clean = JSON.stringify({ kind: 'final', nonce, driver: { nonce, importFailed: false }, startedTests: 1, realTests: 1, realPassed: 0, realFailed: 1, fileLevelFailed: false, wrapperEvents: 0, unattributed: 0, failing: ['the check'] });
+  const ok = classifyRun({ report: readChannel(`${clean}\n`, nonce).records, exitCode: 1, suiteMode: 'node-test' });
+  assert.equal(ok.mode, 'caught');
+});
+
+test('a hanging suite is bounded: named refusal, and no process of the run outlives the check (reaper event, 2026-11-04)', () => {
+  // The fleet reaper found a 120-minute-old test-runner process of mine on this VM. The cause was
+  // that there was NO BOUND: suites ran through spawnSync, which blocks, so no timer could fire and
+  // the check could not be interrupted. This pins the bound, the refusal that names it, and that
+  // the killed run leaves nothing behind.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-reaper-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    fs.writeFileSync(path.join(tmp, 'hangs.test.mjs'), "import test from 'node:test';\ntest('never ends', () => new Promise(() => {}));\n");
+    const started = Date.now();
+    const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'hangs.test.mjs', '--timeout-ms', '1200'], { cwd: tmp, encoding: 'utf8', timeout: 30000 });
+    const elapsed = Date.now() - started;
+    assert.equal(result.status, 3, `a hang is a named refusal, not a verdict: ${result.stdout}${result.stderr}`);
+    assert.match(result.stdout + result.stderr, /did not finish within 1200ms/);
+    assert.match(result.stdout + result.stderr, /killed with its process group/);
+    assert.doesNotMatch(result.stdout, /verdict:/, 'a killed run scores nothing');
+    assert.ok(elapsed < 20000, `the bound must actually bound the run (took ${elapsed}ms)`);
+    // Nothing of the run may still be running. Identified by CWD, not by argv: node's per-file child
+    // runs the DRIVER, so the suite's name lives in its environment, never in its command line - an
+    // argv check passes while the process it is looking for is still alive.
+    const sandbox = fs.realpathSync(tmp);
+    const survivors = [];
+    for (const entry of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue;
+      let cwd;
+      try { cwd = fs.realpathSync(`/proc/${entry}/cwd`); } catch { continue; }
+      if (cwd !== sandbox) continue;
+      let args = '';
+      try { args = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8'); } catch { continue; }
+      survivors.push(`${entry} ${args.split('\0').slice(0, 3).join(' ')}`);
+    }
+    assert.deepEqual(survivors, [], `no process of the killed run may outlive the check: ${survivors.join(' | ')}`);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('--build: success proceeds, failure refuses, a hanging build is a named refusal (rev-u1v2r7)', () => {
+  // run() is asynchronous, so an un-awaited call puts a Promise where an exit code belongs - and a
+  // Promise is truthy, so the build could never fail and a mutant that does not build would have
+  // been scored. The old code did exactly that.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-build-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    fs.writeFileSync(path.join(tmp, 'catches.test.mjs'), "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from './src/subject.js';\ntest('the check', () => { assert.equal(answer, 41); });\n");
+    const runIt = (...extra) => spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'catches.test.mjs', ...extra], { cwd: tmp, encoding: 'utf8', timeout: 40000 });
+
+    const ok = runIt('--build', 'true');
+    assert.equal(ok.status, 0, `a successful build must let the run proceed: ${ok.stdout}${ok.stderr}`);
+    assert.match(ok.stdout, /building: true/);
+    assert.match(ok.stdout, /verdict: mutant-caught/);
+
+    const bad = runIt('--build', 'node -e "process.exit(7)"');
+    assert.equal(bad.status, 3, `a failed build must refuse: ${bad.stdout}${bad.stderr}`);
+    assert.match(bad.stdout + bad.stderr, /the build failed \(rc=7\)/);
+    assert.doesNotMatch(bad.stdout, /verdict:/, 'a mutant that does not build proves nothing');
+
+    const hang = runIt('--build', 'sleep 30', '--timeout-ms', '1200');
+    assert.equal(hang.status, 3, hang.stdout + hang.stderr);
+    assert.match(hang.stdout + hang.stderr, /the build did not finish within 1200ms/);
+    assert.doesNotMatch(hang.stdout, /verdict:/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a container and a test with the SAME name do not cancel out: the real start survives (airhorn-glhj)', () => {
+  // The reviewer's repro: keyOf(file, name, nesting) is not unique - a top-level describe('group')
+  // and a top-level test('group') share all three - so keyed subtraction erased the REAL test's
+  // start, startedTests fell to 0, and a genuinely caught mutant was refused as
+  // threw-outside-a-test. Containers are now subtracted by testId.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-collide-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    fs.writeFileSync(path.join(tmp, 'collision.test.mjs'), [
+      "import { describe, test } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "import { answer } from './src/subject.js';",
+      "describe('group', () => {});",
+      "test('group', () => assert.equal(answer, 41));",
+    ].join('\n'));
+    const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'collision.test.mjs'], { cwd: tmp, encoding: 'utf8', timeout: 40000 });
+    assert.equal(result.status, 0, `a caught mutant must not be refused because a container shares its name: ${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /verdict: mutant-caught/);
+    const record = /# suite-mode: (\{.*\})/.exec(result.stdout);
+    assert.ok(record, result.stdout);
+    const report = JSON.parse(record[1]);
+    assert.equal(report.startedTests, 1, 'the REAL test started exactly once');
+    assert.deepEqual(report.failing, ['group']);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('excluding containers does not over-subtract: a describe holding two tests counts two starts', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-nested-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    fs.writeFileSync(path.join(tmp, 'nested.test.mjs'), [
+      "import { describe, it } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "import { answer } from './src/subject.js';",
+      "describe('outer', () => {",
+      "  it('one', () => assert.equal(answer, 41));",
+      "  it('two', () => assert.equal(answer, 41));",
+      "});",
+    ].join('\n'));
+    const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'nested.test.mjs'], { cwd: tmp, encoding: 'utf8', timeout: 40000 });
+    const record = /# suite-mode: (\{.*\})/.exec(result.stdout);
+    assert.ok(record, result.stdout + result.stderr);
+    const report = JSON.parse(record[1]);
+    assert.equal(report.startedTests, 2, 'the two tests inside the describe started; the describe itself is not a test');
+    assert.equal(report.realTests, 2);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
