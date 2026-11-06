@@ -153,8 +153,13 @@ const union = (ours, theirs, base = null) => {
     if (kindOf(existing.key) !== kindOf(row.key)) {
       die(`both sides define ${pattern} differently - ${kindOf(existing.key) === 'exemption' ? 'an "!" exemption' : kindOf(existing.key) === 'pending' ? 'a "~" pending row' : 'an ordinary row'} on one side, ${kindOf(row.key) === 'exemption' ? 'an "!" exemption' : kindOf(row.key) === 'pending' ? 'a "~" pending row' : 'an ordinary row'} on the other. That is a disagreement to settle by hand, not a union`);
     }
-    for (const token of row.tokens) if (!existing.tokens.includes(token)) existing.tokens.push(token);
-    if (!report.unioned.includes(pattern)) report.unioned.push(pattern);
+    let added = false;
+    for (const token of row.tokens) {
+      if (existing.tokens.includes(token)) continue;
+      existing.tokens.push(token);
+      added = true;
+    }
+    if (added && !report.unioned.includes(pattern)) report.unioned.push(pattern);
   }
   // A union merge takes both sides of a conflicting hunk, so a row one branch DELETED and the other kept is
   // resurrected. On an additive coverage map that is over-approximation - extra suites run, nothing can

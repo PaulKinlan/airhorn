@@ -244,8 +244,10 @@ test('a union reports what it unioned and what it resurrected, so the result is 
 
     const result = run(['--driver', base, ours, theirs]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stderr, /unioned suites for tools\/shared\.mjs/,
+    assert.match(result.stderr, /unioned suites for [^\n]*tools\/shared\.mjs/,
       'the row both sides widened must be named');
+    assert.doesNotMatch(result.stderr, /unioned suites for [^\n]*tools\/a\.mjs/,
+      'a row neither side changed is not reported as unioned - the report must be signal, not noise');
     assert.match(result.stderr, /RESURRECTED[^\n]*tools\/deleted\.mjs/,
       'a row deleted on one side and kept by the other must be reported as resurrected');
 
