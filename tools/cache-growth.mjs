@@ -815,6 +815,13 @@ async function main() {
   }
 }
 
+// Only a direct `node tools/cache-growth.mjs` runs the measurement: importing the module
+// (the soak-verdict pin imports it for the pure exports) must not launch Chrome, run a
+// 10-deploy measurement, or call process.exit - at import time that exit code OVERRIDES the
+// importing test file's own result (airhorn-fc98, airhorn-u5qj: three failing assertions,
+// exit 0). soak.mjs has carried the same guard; mirror it.
+const invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedAsScript) {
 main().then((code) => {
   // Hard exit on the success path too (airhorn-s1wy): a peer that swallows the
   // ws close-frame also swallows teardown's ws.close(), so the half-open socket
@@ -833,3 +840,4 @@ main().then((code) => {
   // and a gentle exitCode would hang the process (airhorn-nbh9).
   process.exit(1);
 });
+}

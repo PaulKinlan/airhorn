@@ -13,6 +13,13 @@
 // edit to either tool, so such a revert lands in front of a reviewer with the pin green
 // but the export unused - that is the named limit of a pin that cannot drive main().
 
+// IMPORT-SAFETY PIN (airhorn-fc98, airhorn-u5qj): this file imports tools/cache-growth.mjs.
+// Before the invokedAsScript guard, that import ran the full 10-deploy Chrome measurement
+// (~26-28s) and then process.exit()'d, which (a) put a Chrome ridealong in the fast gate's
+// unit layer and (b) overrode this file's own exit code under direct invocation - failing
+// assertions exited 0. This file existing and passing IS the pin: without the guard it
+// cannot run at all without a prior build and a Chrome. Measured after the guard: import
+// 84ms; a failing file importing the tool exits 1 under both `node --test` and `node`.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
