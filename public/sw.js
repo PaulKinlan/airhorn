@@ -45,6 +45,20 @@ const precachePaths = new Set(
     .map(url => new URL(url, self.location.origin).pathname)
 );
 
+// Two spellings of ONE document, not two documents (airhorn-15fw): a static-asset
+// host is entitled to canonicalise `/index.html` to `/` with a redirect - Cloudflare
+// Pages does exactly that (308 locally, documented as HTML handling) - and when it
+// does, `putVerified()`'s redirect refusal (airhorn-fdp6/98mt) would correctly refuse
+// to store the alias and the whole install would fail, leaving the app with no worker.
+// The refusal is NOT relaxed: a redirected response is still never stored under the key
+// it was requested as. What this map adds is the other half of the fact - when the
+// redirect lands on the canonical spelling of the same document AND that spelling is
+// itself precached, the alias is satisfied by the canonical copy, reads for the alias
+// resolve to it, and nothing extra is stored.
+const documentAliases = new Map([
+  [`/index.html`, `/`],
+]);
+
 function requestFor(pathname) {
   return new Request(new URL(pathname, self.location.origin));
 }
@@ -79,12 +93,27 @@ async function evict(cache, meta, request) {
 // from a build that kept no record - is dropped so nothing keeps serving it,
 // and the caller goes to the network instead.
 async function verifiedFromCache(cache, meta, request) {
-  const cached = await cache.match(request, { ignoreSearch: true });
-  if (!cached) return null;
+  let cached = await cache.match(request, { ignoreSearch: true });
+  // An alias spelling is satisfied by the canonical document it names, so an
+  // offline navigation to /index.html serves the stored `/` (airhorn-15fw). The
+  // bytes are still only ever read from the entry whose key they were fetched as.
+  let heldBy = request;
+  if (!cached) {
+    const canonical = documentAliases.get(new URL(request.url).pathname);
+    if (!canonical) return null;
+    heldBy = requestFor(canonical);
+    cached = await cache.match(heldBy, { ignoreSearch: true });
+    if (!cached) return null;
+  }
 
-  const recordHolder = await meta.match(request, { ignoreSearch: true });
+  const recordHolder = await meta.match(heldBy, { ignoreSearch: true });
+  // Every failure branch evicts the entry it actually READ (heldBy), not the
+  // spelling that asked for it: on the alias path those differ, and evicting the
+  // alias would leave an unvouched canonical entry in the cache until some later
+  // direct read happened to drop it (airhorn-c1sx). Nothing unvouched is ever
+  // served either way - this is about not leaving it behind.
   if (!recordHolder) {
-    await evict(cache, meta, request);
+    await evict(cache, meta, heldBy);
     return null;
   }
 
@@ -92,13 +121,13 @@ async function verifiedFromCache(cache, meta, request) {
   try {
     expected = await recordHolder.json();
   } catch {
-    await evict(cache, meta, request);
+    await evict(cache, meta, heldBy);
     return null;
   }
 
   const body = await cached.clone().arrayBuffer();
   if (body.byteLength !== expected.length || (await digest(body)) !== expected.sha256) {
-    await evict(cache, meta, request);
+    await evict(cache, meta, heldBy);
     return null;
   }
   return cached;
@@ -124,9 +153,18 @@ async function putVerified(cache, url) {
   const response = await fetch(requestFor(pathname));
   if (!response.ok) throw new Error(`precache fetch failed for ${pathname}: HTTP ${response.status}`);
   if (redirectedAwayFrom(response, pathname)) {
+    // The ONE redirect that is not a poison: the origin canonicalised this spelling
+    // to the other spelling of the same document, which is precached itself. Nothing
+    // is stored under this key - the canonical entry is what reads resolve to.
+    const canonical = documentAliases.get(pathname);
+    const finalPathname = new URL(response.url).pathname;
+    if (canonical && finalPathname === canonical && precachePaths.has(canonical)) {
+      return { alias: pathname, canonical };
+    }
     throw new Error(`precache refuses a redirected response for ${pathname} (final URL ${response.url}): the bytes would be stored and recorded as ${pathname}`);
   }
   await cache.put(requestFor(pathname), response);
+  return { stored: pathname };
 }
 
 // Bounded concurrency (airhorn-86mz): the redirect fix's per-URL
@@ -155,8 +193,10 @@ async function precache() {
   const cache = await caches.open(cacheName);
   const meta = await caches.open(metaCacheName);
   const validUrls = precacheUrls.filter(url => typeof url === 'string' && url.length > 0);
-  await mapPooled(validUrls, PRECACHE_CONCURRENCY, (url) => putVerified(cache, url));
-  const storedUrls = [...validUrls];
+  const written = await mapPooled(validUrls, PRECACHE_CONCURRENCY, (url) => putVerified(cache, url));
+  // An aliased spelling wrote nothing of its own; its reads are answered by the
+  // canonical entry, so only the copies that were actually stored get a record.
+  const storedUrls = written.filter((result) => result.stored).map((result) => result.stored);
 
   // Dynamic fallback: ensure any hashed /assets/ in index.html are precached
   try {

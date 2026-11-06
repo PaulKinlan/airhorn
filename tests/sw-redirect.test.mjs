@@ -227,3 +227,125 @@ test('a same-URL SERVE still stores and records, so the guard is not refusing ev
   const record = await meta.entries.get(MP3).json();
   assert.equal(record.length, 'good bytes'.length, 'the record describes the stored bytes');
 });
+
+// airhorn-15fw. Cloudflare Pages canonicalises `/index.html` to `/` with a redirect (measured 308 with
+// wrangler 3.114.17 `pages dev`, and documented HTML handling), so the redirect refusal above - correctly -
+// refused the alias and the whole install failed: on Pages the app had no worker at all. The fix keeps the
+// refusal and adds the other half of the fact: `/` and `/index.html` are two spellings of ONE document, so
+// when the redirect lands on the canonical spelling that is itself precached, the alias is satisfied by the
+// canonical copy. These tests run the shipped worker against a Pages-shaped origin and check both halves.
+const SHELL_HTML = '<!doctype html><title>airhorner</title><p>the shell</p>';
+
+// A worker whose origin behaves like Cloudflare Pages: /index.html answers with a redirect to / carrying the
+// same document. `offline()` flips it to a dead network so a navigation can only be served from the cache.
+function pagesShapedWorker() {
+  let offline = false;
+  const worker = loadWorker({
+    fetchImpl: async (request) => {
+      if (offline) throw new Error('offline');
+      const pathname = new URL(request.url ?? request, ORIGIN).pathname;
+      if (pathname === '/index.html') return redirectedResponse(`${ORIGIN}/`, SHELL_HTML);
+      return sameUrlResponse(`${ORIGIN}${pathname}`, pathname === '/' ? SHELL_HTML : `body of ${pathname}`);
+    },
+  });
+  return { worker, goOffline: () => { offline = true; } };
+}
+
+// A navigation request cannot be built by Node's Request constructor (`mode: 'navigate'` is browser-only),
+// so this dispatches the shape a real navigate event carries - which is all the worker reads: url, method, mode.
+function navigate(worker, pathname) {
+  const request = { url: ORIGIN + pathname, mode: 'navigate', method: 'GET' };
+  let pending;
+  for (const listener of worker.listeners.fetch) listener({ request, respondWith: (promise) => { pending = promise; } });
+  assert.ok(pending, `the fetch handler called respondWith for a navigation to ${pathname}`);
+  return pending;
+}
+
+test('a canonicalised document alias installs: nothing stored under the alias, reads served by the canonical copy', async () => {
+  const { worker, goOffline } = pagesShapedWorker();
+
+  // (1) The install SUCCEEDS - the refusal is not weakened, it just does not apply to the canonical alias.
+  await runInstall(worker);
+
+  const content = worker.caches.get('airhorner-__BUILD_HASH__');
+  const meta = worker.caches.get('horn-integrity-__BUILD_HASH__');
+  assert.equal(content.entries.has('/'), true, 'the canonical document is stored');
+  assert.equal(content.entries.has('/index.html'), false,
+    'the alias wrote nothing of its own - a redirected body is still never stored under the requested key');
+  assert.equal(meta.entries.has('/index.html'), false, 'and no integrity record vouches for the alias spelling');
+  assert.equal(meta.entries.has('/'), true, 'the canonical copy carries its record');
+
+  // (4a) Offline navigation to the ALIAS spelling is served from the canonical entry.
+  goOffline();
+  const aliased = await navigate(worker, '/index.html');
+  const aliasBody = await aliased.text();
+  assert.equal(aliasBody, SHELL_HTML, 'an offline navigation to /index.html must be served the stored shell');
+  assert.doesNotMatch(aliasBody, /needs a connection/, 'it must not fall through to the offline page while the shell is stored');
+});
+
+test('a canonicalised document alias still serves the plain / navigation offline', async () => {
+  // A separate worker on purpose: the fake cache hands back the SAME Response object on every match (the real
+  // Cache API returns a fresh one), so reading two spellings in one instance would be testing the stub's body
+  // reuse rather than the worker. Each instance below is a clean install, exactly like a fresh browser.
+  const { worker, goOffline } = pagesShapedWorker();
+  await runInstall(worker);
+  goOffline();
+  const response = await navigate(worker, '/');
+  const body = await response.text();
+  assert.equal(body, SHELL_HTML, 'an offline navigation to / must be served the stored shell');
+});
+
+test('the alias is only the canonical document: a redirect anywhere else still fails the install', async () => {
+  // The alias rule must not become a general "any redirect that ends at a precached path is fine".
+  const worker = loadWorker({
+    fetchImpl: async (request) => {
+      const pathname = new URL(request.url ?? request, ORIGIN).pathname;
+      if (pathname === MP3) return redirectedResponse(`${ORIGIN}/styles/main.css`, 'css, not audio');
+      if (pathname === '/index.html') return sameUrlResponse(`${ORIGIN}/index.html`, SHELL_HTML);
+      return sameUrlResponse(`${ORIGIN}${pathname}`, 'body');
+    },
+  });
+
+  await assert.rejects(runInstall(worker), /precache refuses a redirected response for \/sounds\/airhorn\.mp3/,
+    'an audio file redirecting to a precached stylesheet is still refused');
+  const content = worker.instances.find((c) => c.name === 'airhorner-__BUILD_HASH__');
+  assert.equal(content.writes.includes(MP3), false, 'and it is still not stored under the requested key');
+});
+
+// airhorn-c1sx (review finding on the alias fix). The failure branches must evict the entry the read actually
+// touched. On the alias path that entry is the canonical one, so evicting the alias spelling instead would leave
+// an unvouched canonical copy sitting in the cache until some later direct read happened to drop it. Nothing
+// unvouched is ever served either way - this pins the cleanup, so the leftover cannot come back.
+test('an alias read that finds the canonical copy unvouched evicts the canonical entry it read', async () => {
+  const { worker, goOffline } = pagesShapedWorker();
+  await runInstall(worker);
+  const content = worker.caches.get('airhorner-__BUILD_HASH__');
+  const meta = worker.caches.get('horn-integrity-__BUILD_HASH__');
+  assert.equal(content.entries.has('/'), true, 'the canonical copy is stored by the install');
+
+  // Strip the vouching record, then go offline: the only way to answer a navigation is unvouched bytes.
+  meta.entries.delete('/');
+  goOffline();
+
+  const response = await navigate(worker, '/index.html');
+  const body = await response.text();
+  assert.doesNotMatch(body, /the shell/, 'unvouched bytes must never be served');
+  assert.match(body, /needs a connection/, 'with nothing vouched left, the offline page is the honest answer');
+  assert.equal(content.entries.has('/'), false,
+    'the read that discovered the unvouched canonical copy must drop it (not leave it for a later direct read)');
+  assert.equal(content.entries.has('/index.html'), false, 'and nothing is stored under the alias spelling');
+});
+
+test('an alias read with an unparseable record evicts the canonical entry too', async () => {
+  const { worker, goOffline } = pagesShapedWorker();
+  await runInstall(worker);
+  const content = worker.caches.get('airhorner-__BUILD_HASH__');
+  const meta = worker.caches.get('horn-integrity-__BUILD_HASH__');
+
+  meta.entries.set('/', new Response('not json at all', { status: 200 }));
+  goOffline();
+
+  const response = await navigate(worker, '/index.html');
+  await response.text();
+  assert.equal(content.entries.has('/'), false, 'a record that cannot be parsed evicts the entry it describes');
+});
