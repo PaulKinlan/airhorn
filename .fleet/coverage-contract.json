@@ -111,9 +111,11 @@
   "tests/audio-parity-verdict.test.js"
  ],
  "tools/cache-growth.mjs": [
+  "tests/soak-verdict.test.js",
   "tests/tool-bound-kill.test.mjs"
  ],
  "tools/soak.mjs": [
+  "tests/soak-verdict.test.js",
   "tests/tool-bound-kill.test.mjs"
  ],
  "tools/derive-coverage-contract.mjs": [
@@ -124,6 +126,9 @@
  ],
  "tools/lib/suite-driver.mjs": [
   "tests/mutation-check.test.js"
+ ],
+ "tools/lib/endpoint-growth.mjs": [
+  "tests/soak-verdict.test.js"
  ],
  "tools/lib/**": [
   "tests/test-support.test.js"
