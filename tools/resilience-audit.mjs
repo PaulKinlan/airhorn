@@ -290,9 +290,16 @@ async function closeBrowser(browser) {
 
 /* ----------------------------------------------------- page instrumentation */
 
-const PROBE = `
+// Mutation seam (airhorn-nxuv.9, re-applied - see wrapStart below): under test mode the
+// wrapped start() is replaced by one that throws, so the proof can show the counters track
+// PLAYBACK, not intent. Honoured only with RESILIENCE_TEST_MODE=1, like the stub seam.
+const START_THROWS_SEAM = process.env.RESILIENCE_TEST_MODE === '1'
+  && process.env.RESILIENCE_START_THROWS === '1';
+
+// Exported so the pin test drives the SAME instrument the audit injects (no second copy).
+export const PROBE = `
 (() => {
-  window.__probe = { bufferStarts: 0, oscStarts: 0 };
+  window.__probe = { bufferStarts: 0, oscStarts: 0, startThrows: 0, lastStartError: null };
   window.__errors = [];
   window.__marker = Math.random().toString(36).slice(2) + Date.now();
   window.addEventListener('error', (e) => window.__errors.push('error: ' + (e.message || String(e))));
@@ -301,12 +308,35 @@ const PROBE = `
   });
   const AC = window.AudioContext || window.webkitAudioContext;
   if (AC) {
+    // A start() counts only when playback actually STARTED: call it FIRST and increment
+    // after it returns without throwing (airhorn-nxuv.9; re-applied - 18c0ad7 carried this
+    // and a later merge took the other side of the PROBE section, restoring
+    // increment-before-call). The old order recorded intent: a start() that threw still
+    // read as a buffer started - absence looked like success. A throw is counted as a
+    // THROW, with the message kept, so a failed start is an explicit outcome in the
+    // record, not a zero that looks healthy. (The app swallows start() throws, so without
+    // this the failure would be invisible everywhere.)
+    const wrapStart = (node, field) => {
+      const start = ${START_THROWS_SEAM
+        ? '() => { throw new Error("start() forced to throw (mutation seam airhorn-nxuv.9)"); }'
+        : 'node.start.bind(node)'};
+      node.start = (...x) => {
+        try {
+          const r = start(...x);
+          window.__probe[field]++;
+          return r;
+        } catch (e) {
+          window.__probe.startThrows++;
+          window.__probe.lastStartError = String((e && e.message) || e);
+          throw e;
+        }
+      };
+    };
     if (AC.prototype.createBufferSource) {
       const orig = AC.prototype.createBufferSource;
       AC.prototype.createBufferSource = function (...a) {
         const node = orig.apply(this, a);
-        const start = node.start.bind(node);
-        node.start = (...x) => { window.__probe.bufferStarts++; return start(...x); };
+        wrapStart(node, 'bufferStarts');
         return node;
       };
     }
@@ -314,8 +344,7 @@ const PROBE = `
       const orig = AC.prototype.createOscillator;
       AC.prototype.createOscillator = function (...a) {
         const node = orig.apply(this, a);
-        const start = node.start.bind(node);
-        node.start = (...x) => { window.__probe.oscStarts++; return start(...x); };
+        wrapStart(node, 'oscStarts');
         return node;
       };
     }
@@ -628,13 +657,15 @@ async function pressHorn(cdp, sessionId) {
   }, sessionId);
   await sleep(150);
   const after = await evaluate(cdp, sessionId, 'window.__probe ? (window.__probe.bufferStarts + window.__probe.oscStarts) : -1');
+  const throws = await evaluate(cdp, sessionId, 'window.__probe ? (window.__probe.startThrows || 0) : -1');
+  const lastError = await evaluate(cdp, sessionId, 'window.__probe ? window.__probe.lastStartError : null');
   const started = before >= 0 && after > before;
   return {
     dispatched: true,
     ariaPressedWhileHeld: mid.horn.ariaPressed,
     responded: mid.horn.ariaPressed === 'true',
     sounded: started,
-    audioStarts: { before, after },
+    audioStarts: { before, after, startThrows: throws, lastStartError: lastError },
   };
 }
 
@@ -782,10 +813,8 @@ async function runAudit() {
   }
   // Every OTHER seam env var set without the test mode must SAY it was dropped
   // (airhorn-t00l): a silent ignore produces a GREEN, honest-looking audit that
-  // can be misrecorded as RED evidence. RESILIENCE_START_THROWS named a seam the
-  // pre-rework lineage carried; the current file has no such seam, and a var
-  // that names nothing must warn exactly the same way - a proof recipe that
-  // sets it expects an effect that never comes.
+  // can be misrecorded as RED evidence. RESILIENCE_START_THROWS names a real seam
+  // again (airhorn-nxuv.9 re-applied); the warning remains for the no-test-mode case.
   for (const seamVar of ['RESILIENCE_START_THROWS', 'RESILIENCE_UPDATE_REJECT', 'RESILIENCE_CACHE_MISS']) {
     if (process.env[seamVar] && !testMode) {
       console.warn(`${seamVar} is honoured only with RESILIENCE_TEST_MODE=1 - ignoring it and running the real scenarios.`);
