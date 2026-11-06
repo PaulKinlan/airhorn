@@ -164,6 +164,9 @@
   "tests/gate-smoke.test.js",
   "tests/gate-map.test.js"
  ],
+ ".beads/config.yaml": [
+  "tests/beads-config.test.js"
+ ],
  "README.md": [
   "tests/docs-recipe.test.mjs"
  ],
