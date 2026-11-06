@@ -1,0 +1,30 @@
+# Merge policy for the repo's hottest file (airhorn-tp3g).
+#
+# tools/suite-map.tsv is the map the fast gate reads: a changed path -> the suites that cover it. It is a SET
+# that the gate unions at run time, so two branches adding rows for different files are both right and only
+# the TEXT merge fails. This attribute hands the file to a union driver instead.
+#
+# A .gitattributes entry alone does NOT configure a driver - git will not run a driver that comes from the
+# repository itself - so each clone opts in ONCE, and without that config the ordinary text merge runs and
+# conflicts loudly (the safe failure, never a silent no-op):
+#
+#   git config merge.suite-map-union.driver "node tools/merge-suite-map.mjs --driver %O %A %B"
+#   git config merge.suite-map-union.name "union tools/suite-map.tsv by key"
+#
+# The manual path needs no configuration at all and always works mid-conflict:
+#
+#   git show :2:tools/suite-map.tsv > /tmp/ours.tsv
+#   git show :3:tools/suite-map.tsv > /tmp/theirs.tsv
+#   node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv --write tools/suite-map.tsv
+#   node tools/derive-coverage-contract.mjs          # the contract is DERIVED: never merge it, regenerate it
+#   git add tools/suite-map.tsv .fleet/coverage-contract.json
+#
+# The second line is not optional: the map and .fleet/coverage-contract.json move together, which is why the
+# 20:14Z collision aborted on both files. A union without the regenerate step resolves the conflict and then
+# fails tests/gate-map.test.js on a stale contract - loudly, which is the point, but do it in one go.
+#
+# Either way a disagreement (an "!" exemption on one side and a real row on the other, a truncated row, a
+# malformed line) FAILS LOUDLY rather than being resolved by preference. tests/suite-map-merge.test.js pins
+# this file, the driver's union, and the loud failures.
+
+tools/suite-map.tsv merge=suite-map-union

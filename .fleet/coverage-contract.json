@@ -104,6 +104,17 @@
   "tests/gate-smoke.test.js",
   "tests/gate-map.test.js"
  ],
+ "tools/suite-map.tsv": [
+  "tests/gate-smoke.test.js",
+  "tests/gate-map.test.js",
+  "tests/suite-map-merge.test.js"
+ ],
+ "tools/merge-suite-map.mjs": [
+  "tests/suite-map-merge.test.js"
+ ],
+ ".gitattributes": [
+  "tests/suite-map-merge.test.js"
+ ],
  "tools/guarded-call.mjs": [
   "tests/lost-upgrade-copy.test.mjs"
  ],
