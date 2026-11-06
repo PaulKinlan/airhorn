@@ -137,7 +137,8 @@ const normalise = (rows) => rows.map((row) => {
 // Union two variants BY KEY. Comments come from ours first, then any comment line theirs has that ours does
 // not, so a comment block from the other branch is neither lost nor duplicated. Keyed rows are sorted by key,
 // which makes the rows independent of merge order.
-const union = (ours, theirs) => {
+const union = (ours, theirs, base = null) => {
+  const report = { unioned: [], resurrected: [], duplicateRows: [] };
   const byKey = new Map();
   const kindOf = (key) => (key.startsWith('!') ? 'exemption' : key.startsWith('~') ? 'pending' : 'mapped');
   const patternOf = (key) => key.replace(/^[!~]/, '');
@@ -153,11 +154,39 @@ const union = (ours, theirs) => {
       die(`both sides define ${pattern} differently - ${kindOf(existing.key) === 'exemption' ? 'an "!" exemption' : kindOf(existing.key) === 'pending' ? 'a "~" pending row' : 'an ordinary row'} on one side, ${kindOf(row.key) === 'exemption' ? 'an "!" exemption' : kindOf(row.key) === 'pending' ? 'a "~" pending row' : 'an ordinary row'} on the other. That is a disagreement to settle by hand, not a union`);
     }
     for (const token of row.tokens) if (!existing.tokens.includes(token)) existing.tokens.push(token);
+    if (!report.unioned.includes(pattern)) report.unioned.push(pattern);
+  }
+  // A union merge takes both sides of a conflicting hunk, so a row one branch DELETED and the other kept is
+  // resurrected. On an additive coverage map that is over-approximation - extra suites run, nothing can
+  // false-green - and it is reported here rather than left implicit (the hazard named in airhorn-tp3g).
+  if (base) {
+    const basePatterns = new Set(base.filter((row) => row.kind === 'row').map((row) => row.key.replace(/^[!~]/, '')));
+    const oursPatterns = new Set(ours.filter((row) => row.kind === 'row').map((row) => row.key.replace(/^[!~]/, '')));
+    const theirsPatterns = new Set(theirs.filter((row) => row.kind === 'row').map((row) => row.key.replace(/^[!~]/, '')));
+    for (const pattern of basePatterns) {
+      const deletedByUs = !oursPatterns.has(pattern);
+      const deletedByThem = !theirsPatterns.has(pattern);
+      if (deletedByUs !== deletedByThem) report.resurrected.push(pattern);
+    }
   }
   const oursComments = ours.filter((row) => row.kind === 'raw');
   const theirsOnlyComments = theirs.filter((row) => row.kind === 'raw' && !oursComments.some((mine) => mine.line === row.line));
   const keys = [...byKey.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  return [...oursComments, ...theirsOnlyComments, ...keys.map((key) => byKey.get(key))];
+  const rows = [...oursComments, ...theirsOnlyComments, ...keys.map((key) => byKey.get(key))];
+  return { rows, report };
+};
+
+// The union is only reviewable if it says what it did: a silently broadened row is the failure mode this tool
+// exists to make impossible, so every unioned and every resurrected pattern is printed.
+const printReport = (report, label) => {
+  const say = (list, what) => {
+    if (list.length > 0) process.stderr.write(`merge-suite-map: ${label}: ${what} ${list.join(', ')}\n`);
+  };
+  say(report.unioned, 'unioned suites for');
+  say(report.resurrected, 'RESURRECTED (deleted on one side, kept by the union - over-approximation, extra suites will run):');
+  if (report.unioned.length === 0 && report.resurrected.length === 0) {
+    process.stderr.write(`merge-suite-map: ${label}: no shared patterns - a straight union of both sides\n`);
+  }
 };
 
 const readMap = (file) => {
@@ -175,7 +204,8 @@ if (mode === '--driver') {
   if (!ours || !theirs) die('--driver needs <base> <ours> <theirs> (the git %O %A %B arguments)');
   // The union is OURS + THEIRS: the map's rows are additive, so a 3-way base contributes nothing that is not
   // already in one of the two sides - and using base instead of ours would silently drop this branch's rows.
-  const rows = union(parse(readMap(ours), ours), parse(readMap(theirs), theirs));
+  const { rows, report } = union(parse(readMap(ours), ours), parse(readMap(theirs), theirs), base ? parse(readMap(base), base) : null);
+  printReport(report, 'driver');
   fs.writeFileSync(ours, render(rows));
   process.stdout.write(`merge-suite-map: merged by key into ${ours} (${rows.filter((row) => row.kind === 'row').length} rows)\n`);
   process.exit(0);
@@ -187,7 +217,9 @@ if (mode === '--union') {
   const write = writeAt === -1 ? null : rest[writeAt + 1];
   const [oursFile, theirsFile] = values;
   if (!oursFile || !theirsFile) die('--union needs <ours-file> <theirs-file> (optionally --write <file>)');
-  const out = render(union(parse(readMap(oursFile), oursFile), parse(readMap(theirsFile), theirsFile)));
+  const { rows, report } = union(parse(readMap(oursFile), oursFile), parse(readMap(theirsFile), theirsFile));
+  printReport(report, 'union');
+  const out = render(rows);
   if (write) fs.writeFileSync(write, out);
   else process.stdout.write(out);
   process.exit(0);

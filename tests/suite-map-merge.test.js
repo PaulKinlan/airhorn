@@ -231,3 +231,28 @@ test('.gitattributes points the map at the driver and the tool names the one-tim
   assert.match(tool, /--union \/tmp\/ours\.tsv \/tmp\/theirs\.tsv --write tools\/suite-map\.tsv/,
     'and the no-config manual path');
 });
+
+test('a union reports what it unioned and what it resurrected, so the result is reviewable', () => {
+  // airhorn-tp3g names the hazard: a union driver takes both sides of a conflicting hunk, so a row one branch
+  // deleted and the other kept comes back. On a coverage map that is over-approximation (extra suites run,
+  // nothing false-greens), and it must be SAID, not discovered later.
+  const dir = tmpdir();
+  try {
+    const base = write(dir, 'base.tsv', 'tools/a.mjs\ttests/a.test.js\ntools/shared.mjs\ttests/x.test.js\ntools/deleted.mjs\ttests/gone.test.js\n');
+    const ours = write(dir, 'ours.tsv', 'tools/a.mjs\ttests/a.test.js\ntools/shared.mjs\ttests/x.test.js\n');
+    const theirs = write(dir, 'theirs.tsv', 'tools/a.mjs\ttests/a.test.js\ntools/shared.mjs\ttests/y.test.js\ntools/deleted.mjs\ttests/gone.test.js\n');
+
+    const result = run(['--driver', base, ours, theirs]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /unioned suites for tools\/shared\.mjs/,
+      'the row both sides widened must be named');
+    assert.match(result.stderr, /RESURRECTED[^\n]*tools\/deleted\.mjs/,
+      'a row deleted on one side and kept by the other must be reported as resurrected');
+
+    const merged = fs.readFileSync(ours, 'utf8');
+    assert.match(merged, /^tools\/shared\.mjs\ttests\/x\.test\.js tests\/y\.test\.js$/m, 'both sides suites are unioned');
+    assert.match(merged, /^tools\/deleted\.mjs\ttests\/gone\.test\.js$/m, 'and the resurrected row is present, as reported');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
