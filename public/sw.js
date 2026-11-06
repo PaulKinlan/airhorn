@@ -107,8 +107,13 @@ async function verifiedFromCache(cache, meta, request) {
   }
 
   const recordHolder = await meta.match(heldBy, { ignoreSearch: true });
+  // Every failure branch evicts the entry it actually READ (heldBy), not the
+  // spelling that asked for it: on the alias path those differ, and evicting the
+  // alias would leave an unvouched canonical entry in the cache until some later
+  // direct read happened to drop it (airhorn-c1sx). Nothing unvouched is ever
+  // served either way - this is about not leaving it behind.
   if (!recordHolder) {
-    await evict(cache, meta, request);
+    await evict(cache, meta, heldBy);
     return null;
   }
 
@@ -116,7 +121,7 @@ async function verifiedFromCache(cache, meta, request) {
   try {
     expected = await recordHolder.json();
   } catch {
-    await evict(cache, meta, request);
+    await evict(cache, meta, heldBy);
     return null;
   }
 

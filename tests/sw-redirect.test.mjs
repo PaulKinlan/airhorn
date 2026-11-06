@@ -311,3 +311,41 @@ test('the alias is only the canonical document: a redirect anywhere else still f
   const content = worker.instances.find((c) => c.name === 'airhorner-__BUILD_HASH__');
   assert.equal(content.writes.includes(MP3), false, 'and it is still not stored under the requested key');
 });
+
+// airhorn-c1sx (review finding on the alias fix). The failure branches must evict the entry the read actually
+// touched. On the alias path that entry is the canonical one, so evicting the alias spelling instead would leave
+// an unvouched canonical copy sitting in the cache until some later direct read happened to drop it. Nothing
+// unvouched is ever served either way - this pins the cleanup, so the leftover cannot come back.
+test('an alias read that finds the canonical copy unvouched evicts the canonical entry it read', async () => {
+  const { worker, goOffline } = pagesShapedWorker();
+  await runInstall(worker);
+  const content = worker.caches.get('airhorner-__BUILD_HASH__');
+  const meta = worker.caches.get('horn-integrity-__BUILD_HASH__');
+  assert.equal(content.entries.has('/'), true, 'the canonical copy is stored by the install');
+
+  // Strip the vouching record, then go offline: the only way to answer a navigation is unvouched bytes.
+  meta.entries.delete('/');
+  goOffline();
+
+  const response = await navigate(worker, '/index.html');
+  const body = await response.text();
+  assert.doesNotMatch(body, /the shell/, 'unvouched bytes must never be served');
+  assert.match(body, /needs a connection/, 'with nothing vouched left, the offline page is the honest answer');
+  assert.equal(content.entries.has('/'), false,
+    'the read that discovered the unvouched canonical copy must drop it (not leave it for a later direct read)');
+  assert.equal(content.entries.has('/index.html'), false, 'and nothing is stored under the alias spelling');
+});
+
+test('an alias read with an unparseable record evicts the canonical entry too', async () => {
+  const { worker, goOffline } = pagesShapedWorker();
+  await runInstall(worker);
+  const content = worker.caches.get('airhorner-__BUILD_HASH__');
+  const meta = worker.caches.get('horn-integrity-__BUILD_HASH__');
+
+  meta.entries.set('/', new Response('not json at all', { status: 200 }));
+  goOffline();
+
+  const response = await navigate(worker, '/index.html');
+  await response.text();
+  assert.equal(content.entries.has('/'), false, 'a record that cannot be parsed evicts the entry it describes');
+});
