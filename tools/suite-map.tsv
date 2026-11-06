@@ -101,6 +101,10 @@ deno.lock	tests/health.test.mjs
 # tools/* is covered by a REAL smoke suite: the gate's own selection contract
 # plus syntax checks of the scripts it names (airhorn-1ye).
 tools/*	tests/gate-smoke.test.js tests/gate-map.test.js
+tools/suite-map.tsv	tests/gate-smoke.test.js tests/gate-map.test.js tests/suite-map-merge.test.js
+tools/merge-suite-map.mjs	tests/suite-map-merge.test.js
+.gitattributes	tests/suite-map-merge.test.js
+tests/suite-map-merge.test.js	tests/suite-map-merge.test.js
 # tools/guarded-call.mjs turns "the suite really calls the tested enforcer, and
 # nothing can swallow its throw" into a question about the syntax tree
 # (airhorn-6829). Its hostile worlds - deleted, commented, stringified, shadowed,
