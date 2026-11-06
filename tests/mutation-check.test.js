@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { exportedSameFile } from '../tools/lib/suite-mode-reporter.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -778,6 +778,41 @@ test('excluding containers does not over-subtract: a describe holding two tests 
     assert.equal(report.startedTests, 2, 'the two tests inside the describe started; the describe itself is not a test');
     assert.equal(report.realTests, 2);
   } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a signal during the mutant window RESTORES the file instead of leaving the mutant on disk (airhorn-rf0u)', async () => {
+  // Reproduced before the fix: SIGTERM between the mutant write and the finally left the product
+  // file holding the mutant (`answer = 42`) and printed only "no verdict was scored" - the finally
+  // never runs, because process.exit() in a signal handler terminates without unwinding.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-sig-'));
+  const subject = path.join(tmp, 'src', 'subject.js');
+  const originalText = 'export const answer = 41;\n';
+  let child = null;
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(subject, originalText);
+    fs.writeFileSync(path.join(tmp, 'slow.test.mjs'), "import test from 'node:test';\ntest('slow', () => new Promise((r) => setTimeout(r, 8000)));\n");
+    child = spawn(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'slow.test.mjs'], { cwd: tmp, stdio: ['ignore', 'pipe', 'pipe'] });
+    let said = '';
+    child.stdout.on('data', (chunk) => { said += String(chunk); });
+    child.stderr.on('data', (chunk) => { said += String(chunk); });
+    const exited = new Promise((resolve) => child.on('close', (code) => resolve(code)));
+    // Wait (bounded) until the mutant is actually on disk, then interrupt inside that window.
+    const deadline = Date.now() + 15000;
+    while (!fs.readFileSync(subject, 'utf8').includes('answer = 42') && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(fs.readFileSync(subject, 'utf8').includes('answer = 42'), 'the run must reach the mutated state for this test to mean anything');
+    child.kill('SIGTERM');
+    const code = await Promise.race([exited, new Promise((r) => setTimeout(() => r('timeout'), 15000))]);
+    assert.notEqual(code, 'timeout', 'the tool must exit after the signal, not hang');
+    assert.equal(fs.readFileSync(subject, 'utf8'), originalText, 'the signal path must restore the file, not just report');
+    assert.match(said, /restored and verified/, `the interrupted run must say what it did to the file: ${said}`);
+    assert.doesNotMatch(said, /verdict:/, 'an interrupted run scores no verdict');
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });

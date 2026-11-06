@@ -17,7 +17,11 @@
  *   3. after writing, the file is re-read and must differ from the original AND contain
  *      `--to` - the compare-and-discard guard: a mutant that did not land is an error,
  *      never a result;
- *   4. the original is restored in a finally block and the restore is verified;
+ *   4. the original is restored in a finally block and the restore is verified. A SIGINT or
+ *      SIGTERM landing between the mutant write and that restore cannot run the finally, so the
+ *      signal path restores and verifies the file itself before exiting non-zero (airhorn-rf0u).
+ *      SIGKILL cannot be handled by any process: if the tool is killed that hard while the file is
+ *      mutated, the mutant stays on disk and the recovery is `git checkout -- <the --file path>`;
  *   5. the verdict is the triad, not a boolean:
  *        hole-proven        OLD suite passes the mutant, NEW suite fails it
  *        not-reproducible   OLD suite already fails the mutant (the guard is elsewhere)
@@ -181,6 +185,18 @@ function parseArgs(argv) {
 export const DEFAULT_TIMEOUT_MS = 120000;
 /** The child in flight, so a signal or a bound can reach it. */
 let activeChild = null;
+/**
+ * How to put the product file back, while it currently holds mutated bytes.
+ *
+ * A signal handler cannot unwind the try/finally in main(): `process.exit()` inside a handler
+ * terminates without running finally blocks, so a SIGINT/SIGTERM landing between the mutant write
+ * and the restore used to leave the mutant ON DISK with only "no verdict was scored" printed
+ * (airhorn-rf0u, reproduced: `answer = 42` survived a SIGTERM). main() publishes this closure for
+ * exactly the window in which the file is mutated, and the signal path calls it before exiting.
+ * SIGKILL cannot be handled at all - that residual is documented in the header, with the recovery
+ * command, rather than pretended away.
+ */
+let crashRestore = null;
 
 /**
  * Kill the run in flight AND the processes it started.
@@ -494,6 +510,16 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   let baselineRc = null;
   try {
     fs.writeFileSync(absolute, applied.content);
+    // Published BEFORE anything can be interrupted: from here until the finally, the product file
+    // holds the mutant, so a signal must restore rather than merely report (airhorn-rf0u).
+    crashRestore = () => {
+      try {
+        fs.writeFileSync(absolute, original);
+        return restoreVerified({ original, onDisk: fs.readFileSync(absolute, 'utf8') });
+      } catch {
+        return false;
+      }
+    };
     const check = mutationApplied({ original, onDisk: fs.readFileSync(absolute, 'utf8'), to: args.to });
     if (!check.applied) {
       console.error(`mutation-check: refusing: ${check.reason}`);
@@ -543,6 +569,7 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     mutantRc = judged.rc;
   } finally {
     fs.writeFileSync(absolute, original);
+    crashRestore = null; // the file is the original again: a signal from here on has nothing to undo
     const restored = restoreVerified({ original, onDisk: fs.readFileSync(absolute, 'utf8') });
     console.log(`restored ${args.file}: ${restored ? 'verified' : 'NOT VERIFIED - check the file by hand'}`);
     if (!restored) mutantRc = 3;
@@ -569,7 +596,14 @@ if (invokedDirectly()) {
   // A fleet SIGTERM (the reaper) must not leave the run's process group behind either.
   const onSignal = (signal) => {
     killRunTree('SIGKILL');
-    console.error(`mutation-check: interrupted by ${signal} - the run was killed with its process group and no verdict was scored`);
+    const restored = crashRestore ? crashRestore() : null;
+    if (restored === true) {
+      console.error(`mutation-check: interrupted by ${signal} - the run was killed with its process group, the mutated file was restored and verified, and no verdict was scored`);
+    } else if (restored === false) {
+      console.error(`mutation-check: interrupted by ${signal} - the run was killed, but the mutated file could NOT be restored; recover it with: git checkout -- <the --file path> (no verdict was scored)`);
+    } else {
+      console.error(`mutation-check: interrupted by ${signal} - the run was killed with its process group and no verdict was scored (the product file was already restored)`);
+    }
     process.exit(signal === 'SIGINT' ? 130 : 143);
   };
   process.on('SIGINT', () => onSignal('SIGINT'));
