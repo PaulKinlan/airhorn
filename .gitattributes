@@ -16,7 +16,12 @@
 #   git show :2:tools/suite-map.tsv > /tmp/ours.tsv
 #   git show :3:tools/suite-map.tsv > /tmp/theirs.tsv
 #   node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv --write tools/suite-map.tsv
-#   git add tools/suite-map.tsv
+#   node tools/derive-coverage-contract.mjs          # the contract is DERIVED: never merge it, regenerate it
+#   git add tools/suite-map.tsv .fleet/coverage-contract.json
+#
+# The second line is not optional: the map and .fleet/coverage-contract.json move together, which is why the
+# 20:14Z collision aborted on both files. A union without the regenerate step resolves the conflict and then
+# fails tests/gate-map.test.js on a stale contract - loudly, which is the point, but do it in one go.
 #
 # Either way a disagreement (an "!" exemption on one side and a real row on the other, a truncated row, a
 # malformed line) FAILS LOUDLY rather than being resolved by preference. tests/suite-map-merge.test.js pins

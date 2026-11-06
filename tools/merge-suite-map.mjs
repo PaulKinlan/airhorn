@@ -33,7 +33,8 @@
  *   git show :2:tools/suite-map.tsv > /tmp/ours.tsv     # our side of the conflict
  *   git show :3:tools/suite-map.tsv > /tmp/theirs.tsv   # their side
  *   node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv --write tools/suite-map.tsv
- *   git add tools/suite-map.tsv
+ *   node tools/derive-coverage-contract.mjs      # the contract is derived: regenerate, never merge
+ *   git add tools/suite-map.tsv .fleet/coverage-contract.json
  *
  * OR let git call it (opt-in, once per clone). A .gitattributes entry alone does NOT configure a driver -
  * git cannot read a driver from the repository, for good reason - so without this `git config` the ordinary

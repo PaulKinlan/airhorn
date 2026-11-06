@@ -230,6 +230,12 @@ test('.gitattributes points the map at the driver and the tool names the one-tim
   assert.match(tool, /git config merge\.suite-map-union\.driver/, 'the tool documents the same config');
   assert.match(tool, /--union \/tmp\/ours\.tsv \/tmp\/theirs\.tsv --write tools\/suite-map\.tsv/,
     'and the no-config manual path');
+  // The contract is derived from the map, so a resolved map with a stale contract fails gate-map. The recipe has
+  // to carry both steps or a lane does half the job and meets the same abort it was avoiding.
+  assert.match(attributes, /node tools\/derive-coverage-contract\.mjs/,
+    'the map recipe must regenerate the derived coverage contract');
+  assert.match(tool, /derive-coverage-contract\.mjs/,
+    'and the tool must say so too');
 });
 
 test('a union reports what it unioned and what it resurrected, so the result is reviewable', () => {
