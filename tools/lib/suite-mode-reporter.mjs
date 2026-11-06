@@ -99,11 +99,20 @@ export default async function* suiteModeReporter(source) {
    * It cannot be recognised AT THE START: measured on node 24, `test:start` carries no
    * `details.type`, while `test:complete` / `test:pass` / `test:fail` carry `type: 'suite'` for a
    * container and `'test'` for a test, and `test:complete` arrives BEFORE the `test:start` of the
-   * same entry. So containers are collected by key and subtracted from the started set at the end.
+   * same entry. So containers are collected first and subtracted from the started set at the end.
+   *
+   * They are subtracted by testId, NOT by (file, name, nesting): those three are not unique - a
+   * top-level describe('group') and a top-level test('group') have the same file, the same name and
+   * the same nesting, so a keyed subtraction erased the REAL test's start, startedTests fell to 0,
+   * and a genuinely caught mutant was refused as threw-outside-a-test (airhorn-glhj). testId is
+   * unique per node and present on start as well as on pass/fail/complete.
    */
-  const keyOf = (data) => `${typeof data.file === 'string' ? data.file : ''}|${typeof data.name === 'string' ? data.name : ''}|${data.nesting ?? ''}`;
-  const containers = new Set();
+  // ONE container node reports BOTH test:complete and test:pass with type 'suite' (measured on node
+  // 24), so containers are counted by testId, never by event count.
+  const containerIds = new Set();
+  let containersWithoutId = 0;
   const starts = [];
+  let startsWithoutId = 0;
 
   // The driver's record arrives as stdout lines from the driver FILE's process (airhorn-y3d6,
   // second round - there is no record file any more). The honest sequence is a grammar:
@@ -135,9 +144,15 @@ export default async function* suiteModeReporter(source) {
     // Only TEST events are attributable-or-not; a diagnostic, a stdout chunk or the driver's own
     // record line has no file and is not a measurement of anything.
     if (isTestEvent && !attributed) unattributed += 1;
-    if (data.details && data.details.type === 'suite') containers.add(keyOf(data));
+    if (data.details && data.details.type === 'suite') {
+      if (data.testId) containerIds.add(data.testId);
+      else containersWithoutId += 1;
+    }
     if (event.type === 'test:start') {
-      if (attributed && !isDriverEvent(data)) starts.push(keyOf(data));
+      if (attributed && !isDriverEvent(data)) {
+        starts.push(data.testId ?? null);
+        if (!data.testId) startsWithoutId += 1;
+      }
       continue;
     }
     if (event.type !== 'test:pass' && event.type !== 'test:fail') continue;
@@ -180,8 +195,15 @@ export default async function* suiteModeReporter(source) {
     driver = { tampered: true, lines: driverLines.length };     // any other sequence: forged or broken
   }
   // A start only counts if the entry was a TEST: everything the runner later reported as a suite
-  // container is subtracted here, because the start event itself carries no type.
-  startedTests = starts.filter((key) => !containers.has(key)).length;
+  // container is subtracted here, because the start event itself carries no type. By id where the
+  // events carry one (they do on node 24); by COUNT otherwise, which also cannot collide.
+  // When every event carries a testId the subtraction is exact. If one does not, subtract NOTHING:
+  // the two directions are not equally bad - erasing a real start refuses a genuinely caught mutant
+  // (airhorn-glhj, visible and wrong), while leaving a container in the count only makes "a test
+  // started" slightly easier to satisfy on a runtime that does not identify its own nodes.
+  startedTests = startsWithoutId === 0 && containersWithoutId === 0
+    ? starts.filter((id) => !containerIds.has(id)).length
+    : starts.length;
   const report = { driver, startedTests, realTests, realPassed, realFailed, fileLevelFailed, wrapperEvents: wrapperEventsCount, unattributed, failing: failing.slice(0, 10) };
   const channelFd = Number(process.env.MUTATION_SUITE_CHANNEL);
   if (Number.isInteger(channelFd)) {

@@ -727,3 +727,57 @@ test('--build: success proceeds, failure refuses, a hanging build is a named ref
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('a container and a test with the SAME name do not cancel out: the real start survives (airhorn-glhj)', () => {
+  // The reviewer's repro: keyOf(file, name, nesting) is not unique - a top-level describe('group')
+  // and a top-level test('group') share all three - so keyed subtraction erased the REAL test's
+  // start, startedTests fell to 0, and a genuinely caught mutant was refused as
+  // threw-outside-a-test. Containers are now subtracted by testId.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-collide-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    fs.writeFileSync(path.join(tmp, 'collision.test.mjs'), [
+      "import { describe, test } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "import { answer } from './src/subject.js';",
+      "describe('group', () => {});",
+      "test('group', () => assert.equal(answer, 41));",
+    ].join('\n'));
+    const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'collision.test.mjs'], { cwd: tmp, encoding: 'utf8', timeout: 40000 });
+    assert.equal(result.status, 0, `a caught mutant must not be refused because a container shares its name: ${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /verdict: mutant-caught/);
+    const record = /# suite-mode: (\{.*\})/.exec(result.stdout);
+    assert.ok(record, result.stdout);
+    const report = JSON.parse(record[1]);
+    assert.equal(report.startedTests, 1, 'the REAL test started exactly once');
+    assert.deepEqual(report.failing, ['group']);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('excluding containers does not over-subtract: a describe holding two tests counts two starts', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-nested-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    fs.writeFileSync(path.join(tmp, 'nested.test.mjs'), [
+      "import { describe, it } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "import { answer } from './src/subject.js';",
+      "describe('outer', () => {",
+      "  it('one', () => assert.equal(answer, 41));",
+      "  it('two', () => assert.equal(answer, 41));",
+      "});",
+    ].join('\n'));
+    const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'nested.test.mjs'], { cwd: tmp, encoding: 'utf8', timeout: 40000 });
+    const record = /# suite-mode: (\{.*\})/.exec(result.stdout);
+    assert.ok(record, result.stdout + result.stderr);
+    const report = JSON.parse(record[1]);
+    assert.equal(report.startedTests, 2, 'the two tests inside the describe started; the describe itself is not a test');
+    assert.equal(report.realTests, 2);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
