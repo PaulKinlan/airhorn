@@ -1,0 +1,99 @@
+name: Deploy to Cloudflare Pages
+
+# airhorn-9dal (fleet-fpr18): airhorn is a Tier 3 static site — the whole artifact is `npm run build`'s
+# dist/ directory (25 files, ~332 KB) and it needs no runtime: no Pages Functions, no bindings, no
+# server. This workflow is the ONLY deploy automation in the repo (there was no CI before it); the
+# manual equivalent is the one command in the last step, run by hand, if the workflow is unavailable.
+#
+# It needs two repository secrets, created by the account owner, never by a lane:
+#   CLOUDFLARE_API_TOKEN   — a token with the "Cloudflare Pages: Edit" permission
+#   CLOUDFLARE_ACCOUNT_ID  — the account that owns the `airhorner` Pages project
+# With either one absent the job fails in the guard step below, by name, before anything is built or
+# deployed — it never half-deploys and never reports success.
+#
+# AUTO-DEPLOY-ON-MERGE IS DELIBERATELY OFF (airhorn-9dal, production-safety): this workflow has NO push
+# trigger. With both secrets present it would otherwise publish to PRODUCTION on every merge to master, and
+# Paul has not authorised switching the production origin yet. Do not "fix" this back to `on: push` - the
+# production switch is his decision, and the manual run below is how it happens when he makes it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "preview (default, non-production URL) or production (Paul-authorised only)"
+        type: choice
+        options: [preview, production]
+        default: preview
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the Cloudflare credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          missing=""
+          [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || missing="$missing CLOUDFLARE_API_TOKEN"
+          [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error title=Cloudflare credentials missing::Cannot deploy to Cloudflare Pages:$missing is not set. Add it as a repository secret (Settings → Secrets and variables → Actions). The token needs the 'Cloudflare Pages: Edit' permission; the account id is the account that owns the 'airhorner' Pages project. Nothing was built and nothing was deployed."
+            exit 1
+          fi
+          echo "Cloudflare credentials present (values not printed)."
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build dist/
+        run: npm run build
+
+      - name: Choose the deploy branch
+        id: target
+        run: |
+          if [ "${{ inputs.target }}" = "production" ]; then
+            echo "branch=master" >> "$GITHUB_OUTPUT"
+            echo "::warning title=PRODUCTION DEPLOY::deploying to the production branch - this is only authorised by Paul"
+          else
+            echo "branch=preview-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "preview deployment (default): the production URL is not touched"
+          fi
+
+      - name: Deploy dist/ to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@3 pages deploy --project-name airhorner --branch "${{ steps.target.outputs.branch }}"
+
+      # The first run needs the Pages project to exist; creating it is account-owner work, not a lane's:
+      #   CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... npx wrangler pages project create airhorner --production-branch master
+      # `--production-branch` must be master, the branch this workflow deploys from: with any other value the
+      # deploy below is a PREVIEW deployment, and airhorner.pages.dev / the custom domain would keep serving the
+      # previous build while every step reports success (airhorn-nm7r).
+      # The branch you dispatch with is NOT the deploy branch any more: `target=preview` (the default)
+      # publishes to preview-<sha>, a non-production URL, and only `target=production` publishes to master.
+      # The manual equivalent of a PREVIEW run, from a checkout with the same two variables set:
+      #   npm ci && npm run build && npx wrangler pages deploy --project-name airhorner --branch preview-local
+      # and of a PRODUCTION run (Paul-authorised only):
+      #   npm ci && npm run build && npx wrangler pages deploy --project-name airhorner --branch master
+      #
+      # dist/.well-known/assetlinks.json (the TWA asset-links) SURVIVES the upload: wrangler's uploader has
+      # HIDDEN_FILES_TO_INCLUDE = new Set([".well-known"]) and skips every other dotfile (src/sites.ts in
+      # wrangler-dist/cli.js of 3.114.17, verified at source level at this tip). That is UPLOADER behaviour,
+      # NOT a deployed result - the end-to-end fact is unverified until the first real deploy, which needs the
+      # account owner's credentials. Verify it then: curl -I https://airhorner.pages.dev/.well-known/assetlinks.json

@@ -247,5 +247,11 @@
  ],
  "tests/support/axe.min.js": [
   "tests/a11y.test.mjs"
+ ],
+ "wrangler.jsonc": [
+  "tests/pages-config.test.js"
+ ],
+ ".github/workflows/deploy-pages.yml": [
+  "tests/pages-config.test.js"
  ]
 }
