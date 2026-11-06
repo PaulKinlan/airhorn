@@ -63,10 +63,6 @@ export default async function* suiteModeReporter(source) {
   if (driverFile) {
     try { driverFile = fs.realpathSync(driverFile); } catch {}
   }
-  const fileOf = (data) => {
-    if (typeof data.file !== 'string') return null;
-    try { return fs.realpathSync(data.file); } catch { return data.file; }
-  };
   let wrapperEventsCount = 0;
   // "caught" may only be claimed when a test actually STARTED inside the suite and failed
   // (airhorn-so88). A start is the runner's own evidence that execution reached a test, so it
@@ -74,11 +70,11 @@ export default async function* suiteModeReporter(source) {
   // synthetic file-level event.
   let startedTests = 0;
   // airhorn-u1v2 (unique delta): an event the reporter cannot ATTRIBUTE to a file is not allowed
-  // to become a real test by default. The old comparison was one expression - fileOf(data) ===
-  // driverFile - so a missing data.file or a realpath that failed on one side only turned the
-  // driver's own file-level event into a "real failing test": a false caught mutant from a run
-  // where no test executed. Attribution is now total, and an event that cannot be attributed is
-  // COUNTED and reported, never silently scored.
+  // to become a real test by default. The old attribution was one comparison - the event's
+  // realpath against the driver's - so a missing data.file or a realpath that failed on one side
+  // only turned the driver's own file-level event into a "real failing test": a false caught mutant
+  // from a run where no test executed. Attribution is now total (exportedSameFile, four ways), and
+  // an event that cannot be attributed is COUNTED and reported, never silently scored.
   let unattributed = 0;
   /**
    * Is this event the DRIVER's own file-level entry?
