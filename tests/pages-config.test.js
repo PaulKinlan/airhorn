@@ -117,9 +117,25 @@ test('the deploy workflow cannot fire automatically: dispatch only, preview by d
   // airhorn-9dal production-safety: with both secrets present a push trigger would publish to PRODUCTION on
   // every merge, and Paul has not authorised switching the production origin. Auto-deploy must stay OFF.
   assert.equal(/^on:\s*$/m.test(yaml), true, 'the workflow needs an `on:` block');
-  assert.doesNotMatch(yaml, /^\s{2}push:/m,
-    'the workflow must have NO push trigger - a merge would deploy to production without an approval gate');
-  assert.doesNotMatch(yaml, /^\s{2}pull_request:/m, 'a pull_request trigger would deploy unreviewed code too');
+  // A BLACKLIST can only name the triggers someone thought of (airhorn-yvjr: `schedule:` was invisible to the
+  // version of this test that checked push/pull_request only, so an hourly cron would auto-deploy while every
+  // assertion here stayed green). So the `on:` block is read as a WHITELIST: workflow_dispatch is the only
+  // trigger a deploy may have, and anything else fails by name.
+  const lines = yaml.split('\n');
+  const onAt = lines.findIndex((line) => /^on:\s*$/.test(line));
+  assert.ok(onAt > -1, 'the workflow needs an `on:` block');
+  const triggers = [];
+  for (let i = onAt + 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line.trim() !== '' && line.search(/\S/) === 0) break;          // the next top-level key ends `on:`
+    const trigger = /^ {2}([A-Za-z_][A-Za-z0-9_-]*):\s*$/.exec(line);
+    if (trigger) triggers.push(trigger[1]);
+  }
+  assert.deepEqual(triggers, ['workflow_dispatch'],
+    `workflow_dispatch must be the ONLY trigger, or the deploy can fire without a human (found: ${JSON.stringify(triggers)})`);
+  for (const automatic of ['push', 'pull_request', 'pull_request_target', 'schedule', 'workflow_run', 'repository_dispatch', 'release', 'issue_comment']) {
+    assert.equal(triggers.includes(automatic), false, `\`${automatic}\` would start a deploy without a human`);
+  }
   assert.match(yaml, /^\s{2}workflow_dispatch:/m, 'the deploy must be started by hand');
   assert.match(yaml, /AUTO-DEPLOY-ON-MERGE IS DELIBERATELY OFF/,
     'the workflow must say in words that auto-deploy is deliberately off, so nobody "fixes" it back on');
