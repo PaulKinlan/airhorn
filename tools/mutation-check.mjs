@@ -47,27 +47,81 @@ const PRODUCT_PREFIXES_TO_REFUSE = ['tests/', 'test/'];
 /**
  * A mutation target must be product code: a test edit is not a product mutation.
  *
- * The check has to hold for EVERY way of naming the file, not just the relative one
- * (airhorn-29nt): `--file tests/x.test.mjs` was refused, while
- * `--file "$PWD/tests/x.test.mjs"` was not, because the guard compared the prefix of the string
- * it was handed. Three spellings are therefore tested - as given, relative to the working
- * directory, and by the segments of the resolved absolute path - and any of them naming a tests/
- * or test/ directory refuses. The --allow-test-mutation flag still overrides, because the test
- * file really can be the subject of the experiment.
+ * Every way of NAMING the file is checked, and then the file itself is checked by IDENTITY
+ * (airhorn-29nt, airhorn-7rer). Spelling alone was not enough: `tests/x.test.mjs` was refused
+ * while `$PWD/tests/x.test.mjs` was not (a prefix comparison), and once that was fixed a symlink
+ * (`--file link.mjs` -> tests/x.test.mjs) or a hardlink (`--file src/sneaky.js` -> tests/x.test.mjs)
+ * still reached "mutant applied", because path.resolve neither follows links nor knows that two
+ * names are one file.
+ *
+ * So the guard takes three spellings - as given, relative to the working directory, and the
+ * segments of the resolved absolute path - and then compares the target's (device, inode) against
+ * the identity of every file under the working directory's tests/ and test/ trees. Identity is
+ * what makes it total: stat() follows a symlink and returns the SAME inode for a hardlink, so one
+ * comparison covers both. --allow-test-mutation still overrides, because the test file genuinely
+ * can be the subject of the experiment.
+ *
+ * Residual, stated rather than implied: the identity walk covers the tests/ and test/ trees of the
+ * working directory. A target outside it (another checkout), or a hardlink created from outside
+ * those trees, is not identity-checked - it can still be refused by spelling only.
  */
+const TEST_DIR_NAMES = ['tests', 'test'];
+
+/** (device, inode) - the only thing that tells two names for one file apart from two files. */
+function targetIdentity(absolute) {
+  try {
+    const stat = fs.statSync(absolute); // follows symlinks: this is the file, not the link
+    return `${stat.dev}:${stat.ino}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Identities of the files under the working directory's tests/ and test/ trees, bounded. */
+function testTreeIdentities(cwd, { maxEntries = 4000, maxDepth = 3 } = {}) {
+  const found = new Set();
+  let seen = 0;
+  const walk = (dir, depth) => {
+    if (depth > maxDepth || seen > maxEntries) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // no such tree: nothing to compare against
+    }
+    for (const entry of entries) {
+      if (++seen > maxEntries) return;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full, depth + 1);
+      else {
+        const identity = targetIdentity(full);
+        if (identity) found.add(identity);
+      }
+    }
+  };
+  for (const name of TEST_DIR_NAMES) walk(path.join(cwd, name), 0);
+  return found;
+}
+
 export function mutationTargetProblem(relPath, { allowTestMutation = false, cwd = process.cwd() } = {}) {
   if (allowTestMutation) return null;
+  const absolute = path.resolve(cwd, relPath);
   const forms = [
     String(relPath).split(path.sep).join('/').replace(/^\.\//, ''),            // as given
-    path.relative(cwd, path.resolve(cwd, relPath)).split(path.sep).join('/'),  // relative to cwd
+    path.relative(cwd, absolute).split(path.sep).join('/'),                    // relative to cwd
   ];
-  const segments = path.resolve(cwd, relPath).split(path.sep);
+  const segments = absolute.split(path.sep);
   const refused = forms.some((form) => PRODUCT_PREFIXES_TO_REFUSE.some((prefix) => form.startsWith(prefix)))
     // a tests/ or test/ directory ANYWHERE in the resolved path: an absolute path outside the
     // working directory was the spelling that slipped through (airhorn-29nt)
     || segments.some((segment) => PRODUCT_PREFIXES_TO_REFUSE.some((prefix) => `${segment}/` === prefix));
   if (refused) {
     return `${relPath} is a TEST file, so mutating it proves nothing about the product (use --allow-test-mutation only when the test IS the subject)`;
+  }
+  // Spelling cannot see a symlink or a hardlink; identity can (airhorn-7rer).
+  const identity = targetIdentity(absolute);
+  if (identity && testTreeIdentities(cwd).has(identity)) {
+    return `${relPath} resolves to a file in tests/ or test/ (same inode), so mutating it proves nothing about the product (use --allow-test-mutation only when the test IS the subject)`;
   }
   return null;
 }

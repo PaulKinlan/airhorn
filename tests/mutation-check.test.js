@@ -820,7 +820,7 @@ test('a signal during the mutant window RESTORES the file instead of leaving the
   }
 });
 
-test('a TEST file is refused by every spelling of its path, and allowed only with the flag (airhorn-29nt)', () => {
+test('a TEST file is refused by every spelling AND by identity - symlink and hardlink included (airhorn-29nt, airhorn-7rer)', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-target-'));
   const testFile = path.join(tmp, 'tests', 'answer.test.mjs');
   const body = "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from '../src/subject.js';\ntest('x', () => assert.equal(answer, 41));\n";
@@ -844,6 +844,18 @@ test('a TEST file is refused by every spelling of its path, and allowed only wit
     assert.match(relative.stdout + relative.stderr, /is a TEST file/);
     const product = runIt(path.join(tmp, 'src', 'subject.js'), '41', '42');
     assert.match(product.stdout, /mutant applied/, `a product file must not be refused: ${product.stdout}${product.stderr}`);
+
+    // Neither of these NAMES looks like a test file, and path.resolve cannot see that they are one
+    // (airhorn-7rer): a symlink to it, and a hardlink of it under a product-looking name.
+    fs.symlinkSync(path.join('tests', 'answer.test.mjs'), path.join(tmp, 'link.mjs'));
+    fs.linkSync(testFile, path.join(tmp, 'src', 'sneaky.js'));
+    for (const spelling of ['link.mjs', 'src/sneaky.js']) {
+      const linked = runIt(spelling);
+      assert.equal(linked.status, 3, `${spelling} must be refused: ${linked.stdout}${linked.stderr}`);
+      assert.match(linked.stdout + linked.stderr, /is a TEST file|same inode/);
+      assert.doesNotMatch(linked.stdout, /mutant applied/, `${spelling} must be refused before writing`);
+    }
+    assert.equal(fs.readFileSync(testFile, 'utf8'), body, 'the test file is untouched by any refused spelling');
 
     // The flag still overrides: the test file CAN be the subject of the experiment.
     const allowed = runIt(testFile, 'answer, 41', 'answer, 42', '--allow-test-mutation');
