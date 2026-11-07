@@ -155,6 +155,7 @@
   "tests/test-support.test.js"
  ],
  "tools/resilience-audit.mjs": [
+  "tests/resilience-report.test.js",
   "tests/resilience-probe.test.js"
  ],
  "public/sw.js": [
