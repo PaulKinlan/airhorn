@@ -113,6 +113,17 @@ export const afterBlastSilentPass = (b) =>
 // How verdict B's line carries the running-context cost: always present, always
 // honest about what the number is. Exported so the mutation harness asserts the
 // marker through the real code (airhorn-nxuv.15 P2b).
+// Verdict D's pass, pure (airhorn-nxuv.2). "The horn stopped when hidden" is only a
+// measurement if the horn was PLAYING before the hide: beforeHide was captured but never
+// asserted, so a horn that never started (a silent start() failure) stopped in 0 ms and D
+// passed GREEN. The playing-before-hide fact is part of the verdict, and when it is false
+// the verdict fails as itself, named - never silently green.
+export const hiddenStopPass = (hidden, mainThreadCpuPct) =>
+  hidden?.beforeHide?.playing === true
+  && hidden?.stopLatencyMs !== null && hidden?.stopLatencyMs !== undefined
+  && hidden?.afterHide?.pressed === 'false'
+  && mainThreadCpuPct < BUDGET.hidden;
+
 export const describeContextCost = (cost) => (cost.rendererPct === null
   ? 'unmeasured (a renderer process was not comparable across the B and C windows)'
   : `${cost.rendererPct}% of one core (B - C; UNCALIBRATED - reported, not gated)`);
@@ -602,10 +613,9 @@ async function main() {
       },
       {
         what: 'D hidden: a looping horn stops (within 2s), and the hidden page is quiet',
-        pass: report.hiddenStopLatencyMs !== null
-          && report.hidden.afterHide.pressed === 'false'
-          && byName('D').mainThreadCpuPct < BUDGET.hidden,
-        measured: `stopped after ${report.hiddenStopLatencyMs === null ? 'NEVER (>2s)' : report.hiddenStopLatencyMs + 'ms'}, ` +
+        pass: hiddenStopPass(report.hidden, byName('D').mainThreadCpuPct),
+        measured: `playing before hide=${report.hidden?.beforeHide?.playing}, ` +
+          `stopped after ${report.hiddenStopLatencyMs === null ? 'NEVER (>2s)' : report.hiddenStopLatencyMs + 'ms'}, ` +
           `pressed=${report.hidden.afterHide.pressed}, ctx=${report.hidden.afterHide.contextState}, ` +
           `${byName('D').mainThreadCpuPct}% main thread`,
       },

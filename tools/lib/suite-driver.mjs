@@ -60,8 +60,29 @@ const markCrash = (kind) => (error) => {
   record({ crashedOutsideTest: true, reason: `${kind} after the suite loaded: ${detail}` });
   process.exit(0);
 };
-process.once('uncaughtException', markCrash('uncaught exception'));
-process.once('unhandledRejection', markCrash('unhandled rejection'));
+const onUncaught = markCrash('uncaught exception');
+const onRejection = markCrash('unhandled rejection');
+process.once('uncaughtException', onUncaught);
+process.once('unhandledRejection', onRejection);
+
+// SUPPRESSION detection (airhorn-p0dg, corrected after the first fix FAILed review): a suite
+// can strip these two handlers, install a swallow that exits 0, and then crash - the CRASH
+// line is never written and a named refusal became 'fix-does-not-close' (measured: rc 2).
+// The report is SYNCHRONOUS at strip time: stdout cannot be unwritten, and the swallow's
+// exit(0) cannot pre-empt a line already written. The first attempt deferred the write to a
+// microtask to dodge the once() self-removal false positive - and the one-timer attack (strip
+// AND swallow AND throw in ONE timer callback) exits before any microtask runs (measured by
+// the reviewer: still rc 2). The false positive is instead solved in the GRAMMAR: a strip
+// line followed by a CRASH line is the once() artifact - after a REAL strip the driver holds
+// no handler that could write CRASH, so that sequence cannot come from suppression.
+// Residual, stated plainly: a suite that first removes THIS watcher (removeAllListeners
+// ('removeListener') or a full strip) strips silently; nothing in-process is unremovable at
+// the same uid. The tool prints this boundary once per run (airhorn-p0dg).
+process.on('removeListener', (name, fn) => {
+  if ((name === 'uncaughtException' && fn === onUncaught) || (name === 'unhandledRejection' && fn === onRejection)) {
+    record({ handlersStripped: true, reason: "the suite removed the driver's crash handlers - a crash outside any test would now be invisible (suppression, not a measurement)" });
+  }
+});
 
 // Scrub the driver machinery's variables BEFORE the suite loads (airhorn-y3d6): the suite
 // shares this process and inherits this environment. Stated plainly: /proc/<pid>/environ shows
