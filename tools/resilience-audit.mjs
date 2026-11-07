@@ -816,8 +816,15 @@ async function runAudit() {
   // can be misrecorded as RED evidence. RESILIENCE_START_THROWS names a real seam
   // again (airhorn-nxuv.9 re-applied); the warning remains for the no-test-mode case.
   for (const seamVar of ['RESILIENCE_START_THROWS', 'RESILIENCE_UPDATE_REJECT', 'RESILIENCE_CACHE_MISS']) {
-    if (process.env[seamVar] && !testMode) {
-      console.warn(`${seamVar} is honoured only with RESILIENCE_TEST_MODE=1 - ignoring it and running the real scenarios.`);
+    // Warn whenever the var is set but NOT honoured (airhorn-hovu): the old condition
+    // (!testMode) missed the testMode-on wrong-value case - RESILIENCE_START_THROWS=true
+    // with TEST_MODE=1 dropped silently, and a test proving a mutation measured the REAL
+    // behaviour instead. Warn rather than refuse: a mis-set seam under test mode fails its
+    // own test loudly anyway, and refusing would break invocations that set the var for a
+    // sibling tool in the same environment.
+    const value = process.env[seamVar];
+    if (value && (!testMode || value !== '1')) {
+      console.warn(`${seamVar}=${value} is honoured only as exactly '1' with RESILIENCE_TEST_MODE=1 - ignoring it and running the real scenarios.`);
     }
   }
   const useStub = Boolean(stub) && testMode;
@@ -1447,7 +1454,12 @@ export function writeReport(scenarios, outDir = OUT) {
   ];
   fs.writeFileSync(path.join(OUT, 'report.md'), lines.join('\n'));
 
-  console.log(`\n${lines.slice(5, 6 + results.length).join('\n')}\n`);
+  // The console echo of the table: header (line 5), separator (6), then one row per
+  // scenario starting at line 7 - so the end index is 7 + row count. The old 6 + count
+  // printed one row FEWER: the run looked complete while its LAST scenario was missing
+  // from stdout, an invented negative (airhorn-s68m). The pin is the row count and the
+  // last row's identity, in tests/resilience-report.test.js.
+  console.log(`\n${lines.slice(5, 7 + results.length).join('\n')}\n`);
   console.log(`Evidence: ${OUT}`);
   const exitCode = auditExitCode(results);
   console.log(exitCode === 0

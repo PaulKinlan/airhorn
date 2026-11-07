@@ -155,7 +155,8 @@
   "tests/test-support.test.js"
  ],
  "tools/resilience-audit.mjs": [
-  "tests/resilience-probe.test.js"
+  "tests/resilience-probe.test.js",
+  "tests/resilience-report.test.js"
  ],
  "public/sw.js": [
   "tests/sw-offline.test.mjs",
