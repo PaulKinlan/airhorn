@@ -324,4 +324,8 @@ test('the map header itself tells a lane how to resolve a conflict', () => {
   assert.match(header, /derive-coverage-contract\.mjs/, 'and the regenerate step, or the resolution half-fails');
   assert.match(header, /merge\.suite-map-union\.driver/, 'and the one-time driver config');
   assert.match(header, /Do not hand-merge/i, 'and says plainly not to hand-merge it');
+  // airhorn-nn8g: without the `git add` the recipe leaves the index unmerged and `git merge --continue` refuses -
+  // a resolution the lane cannot finish is not a resolution.
+  assert.match(header, /git add tools\/suite-map\.tsv \.fleet\/coverage-contract\.json/,
+    'and ends with the git add that actually stages the resolution, both files');
 });

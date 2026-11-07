@@ -12,6 +12,7 @@
 #   git show :2:tools/suite-map.tsv > /tmp/ours.tsv; git show :3:tools/suite-map.tsv > /tmp/theirs.tsv
 #   node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv --write tools/suite-map.tsv
 #   node tools/derive-coverage-contract.mjs   # the contract is DERIVED: regenerate it, never merge it
+#   git add tools/suite-map.tsv .fleet/coverage-contract.json   # or the merge cannot continue (airhorn-nn8g)
 # `git config merge.suite-map-union.driver "node tools/merge-suite-map.mjs --driver %O %A %B"` makes git do the
 # union for you (.gitattributes has the entry); the tool refuses a disagreement by name instead of choosing.
 # A row that names ONLY ITSELF (`tests/x.test.mjs -> tests/x.test.mjs`) is that reverse check, not a
