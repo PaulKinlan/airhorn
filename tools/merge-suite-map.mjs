@@ -220,6 +220,97 @@ const printReport = (report, label) => {
   }
 };
 
+/* -------------------------------------------------- gate.conf tier-block mode (airhorn-09dr)
+ *
+ * tools/gate.conf's SUITE_TIERS block is the SECOND shared append surface: every new pinned suite adds
+ * a `path=tier` row, and two branches doing it collide textually. The block is mechanically mergeable
+ * because the consumer (fast-gate.sh declared_tier, :136-151) is an exact-match line scan: distinct keys
+ * are ORDER-INSENSITIVE, so union-by-key is safe for appends. The same consumer is FIRST-HIT-WINS on a
+ * duplicate key, so a duplicate path with a DIFFERING tier must fail loudly here - a silent union would
+ * let the parser quietly take the first.
+ *
+ * Only the SUITE_TIERS="..." block is merged or normalised; everything outside it (the runner pin, the
+ * comments that carry the z4cn design) is verbatim from ours. A conflict OUTSIDE the block is left to
+ * git, deliberately: the runner line is a reviewed singleton, not an append surface (airhorn-v6th).
+ */
+const TIER_OPEN = 'SUITE_TIERS="';
+
+// Split a gate.conf into { pre, rows, post }: the text before the block, the tier rows, the text after.
+const splitGateConf = (text, label) => {
+  const lines = text.split('\n');
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  const open = lines.findIndex((line) => line.trim() === TIER_OPEN);
+  if (open === -1) die(`${label}: no SUITE_TIERS=" block - the tier-block mode only merges gate.conf's tier rows`);
+  const close = lines.findIndex((line, i) => i > open && line.trim() === '"');
+  if (close === -1) die(`${label}: the SUITE_TIERS block never closes (no line that is just a quote)`);
+  const rows = lines.slice(open + 1, close).map((line, i) => {
+    const at = `${label}:${open + 2 + i}`;
+    const trimmed = line.trim();
+    if (trimmed === '') return { kind: 'blank', line: '' };
+    if (!trimmed.includes('=')) die(`${at}: a tier row is <path>=<tier> (${trimmed}) - comments do not belong inside the block`);
+    const eq = trimmed.indexOf('=');
+    const key = trimmed.slice(0, eq);
+    const tier = trimmed.slice(eq + 1);
+    if (/\s/.test(key)) die(`${at}: the suite path contains whitespace (${key})`);
+    if (tier === '') die(`${at}: ${key} declares no tier`);
+    return { kind: 'tier', key, tier };
+  });
+  return { pre: lines.slice(0, open + 1), rows, post: lines.slice(close) };
+};
+
+// A duplicate path with a DIFFERING tier is a disagreement and refuses, naming both rows; byte-identical
+// duplicates are a merge artifact and normalise drops the second copy.
+const checkTierDuplicates = (rows, label, baseLine) => {
+  const seen = new Map();
+  rows.forEach((row, i) => {
+    if (row.kind !== 'tier') return;
+    const existing = seen.get(row.key);
+    if (existing && existing.tier !== row.tier) {
+      die(`${label}:${baseLine + i + 1}: ${row.key} is declared with tier '${row.tier}' here but '${existing.tier}' at block row ${existing.index + 1} - one suite cannot be two tiers; settle it by hand`);
+    }
+    if (!existing) seen.set(row.key, { tier: row.tier, index: i });
+  });
+};
+
+const renderGateConf = ({ pre, rows, post }) =>
+  [...pre, ...rows.map((row) => (row.kind === 'blank' ? '' : `${row.key}=${row.tier}`)), ...post, ''].join('\n');
+
+// Canonical form: outside the block untouched; inside, order kept, blank lines kept, identical duplicate
+// rows dropped, no whitespace changes beyond the row's own trim. Today's gate.conf reproduces byte-for-byte
+// (tests/gate-conf-merge.test.js pins that with a checksum).
+const normaliseTiers = (conf, label) => {
+  const seen = new Set();
+  return {
+    ...conf,
+    rows: conf.rows.filter((row) => {
+      if (row.kind !== 'tier') return true;
+      if (seen.has(row.key)) return false;
+      seen.add(row.key);
+      return true;
+    }),
+  };
+};
+
+// Union two gate.confs BY TIER KEY: the block rows from both sides, sorted by path (order-independent);
+// a path on both sides must agree on its tier or this refuses; everything outside the block is ours
+// verbatim. The parse of each side has already refused any same-file duplicate with differing tiers.
+const unionTiers = (oursConf, theirsConf, oursLabel, theirsLabel) => {
+  const byKey = new Map();
+  for (const row of oursConf.rows) {
+    if (row.kind === 'tier' && !byKey.has(row.key)) byKey.set(row.key, row.tier);
+  }
+  for (const row of theirsConf.rows) {
+    if (row.kind !== 'tier') continue;
+    const existing = byKey.get(row.key);
+    if (existing && existing !== row.tier) {
+      die(`${row.key}: tier '${row.tier}' in ${theirsLabel} but '${existing}' in ${oursLabel} - a suite cannot be two tiers; settle it by hand`);
+    }
+    if (!existing) byKey.set(row.key, row.tier);
+  }
+  const rows = [...byKey.keys()].sort().map((key) => ({ kind: 'tier', key, tier: byKey.get(key) }));
+  return { pre: oursConf.pre, rows, post: oursConf.post };
+};
+
 const readMap = (file) => {
   try {
     return fs.readFileSync(file, 'utf8');
@@ -270,4 +361,50 @@ if (mode === '--normalise' || mode === '--check') {
   process.exit(0);
 }
 
-die('nothing to do - pass --normalise [file], --check [file], --union <ours> <theirs> [--write out], or --driver <base> <ours> <theirs>');
+if (mode === '--tiers-driver') {
+  const [base, ours, theirs] = rest.filter((arg) => !arg.startsWith('--'));
+  if (!ours || !theirs) die('--tiers-driver needs <base> <ours> <theirs> (the git %O %A %B arguments)');
+  const oursConf = splitGateConf(readMap(ours), ours);
+  const theirsConf = splitGateConf(readMap(theirs), theirs);
+  checkTierDuplicates(oursConf.rows, ours, 0);
+  checkTierDuplicates(theirsConf.rows, theirs, 0);
+  const merged = unionTiers(oursConf, theirsConf, ours, theirs);
+  fs.writeFileSync(ours, renderGateConf(merged));
+  process.stdout.write(`merge-suite-map: tier block merged by key into ${ours} (${merged.rows.length} tier rows; everything outside SUITE_TIERS is ours verbatim)\n`);
+  process.exit(0);
+}
+
+if (mode === '--tiers-union') {
+  const values = rest.filter((arg) => !arg.startsWith('--'));
+  const writeAt = rest.indexOf('--write');
+  const write = writeAt === -1 ? null : rest[writeAt + 1];
+  const [oursFile, theirsFile] = values;
+  if (!oursFile || !theirsFile) die('--tiers-union needs <ours-file> <theirs-file> (optionally --write <file>)');
+  const oursConf = splitGateConf(readMap(oursFile), oursFile);
+  const theirsConf = splitGateConf(readMap(theirsFile), theirsFile);
+  checkTierDuplicates(oursConf.rows, oursFile, 0);
+  checkTierDuplicates(theirsConf.rows, theirsFile, 0);
+  const out = renderGateConf(unionTiers(oursConf, theirsConf, oursFile, theirsFile));
+  if (write) fs.writeFileSync(write, out);
+  else process.stdout.write(out);
+  process.exit(0);
+}
+
+if (mode === '--tiers-normalise' || mode === '--tiers-check') {
+  const file = rest.find((arg) => !arg.startsWith('--')) ?? 'tools/gate.conf';
+  const text = readMap(file);
+  const conf = splitGateConf(text, file);
+  const open = conf.pre.length;   // tier rows start at 1-based line open+1
+  checkTierDuplicates(conf.rows, file, open);
+  const normalised = renderGateConf(normaliseTiers(conf, file));
+  if (mode === '--tiers-check') {
+    if (normalised !== text) die(`${file}'s tier block is not in canonical form - run: node tools/merge-suite-map.mjs --tiers-normalise ${file}`);
+    process.stdout.write(`merge-suite-map: ${file}'s tier block is canonical\n`);
+    process.exit(0);
+  }
+  fs.writeFileSync(file, normalised);
+  process.stdout.write(`merge-suite-map: normalised the tier block of ${file}\n`);
+  process.exit(0);
+}
+
+die('nothing to do - pass --normalise [file], --check [file], --union <ours> <theirs> [--write out], --driver <base> <ours> <theirs>, or the tier-block forms --tiers-normalise/--tiers-check/--tiers-union/--tiers-driver (airhorn-09dr)');

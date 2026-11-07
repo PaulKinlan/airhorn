@@ -13,6 +13,8 @@
 #   node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv --write tools/suite-map.tsv
 #   node tools/derive-coverage-contract.mjs   # the contract is DERIVED: regenerate it, never merge it
 #   git add tools/suite-map.tsv .fleet/coverage-contract.json   # or the merge cannot continue (airhorn-nn8g)
+# tools/gate.conf's SUITE_TIERS block has the SAME treatment (airhorn-09dr): union with
+#   node tools/merge-suite-map.mjs --tiers-union /tmp/ours.conf /tmp/theirs.conf --write tools/gate.conf
 # `git config merge.suite-map-union.driver "node tools/merge-suite-map.mjs --driver %O %A %B"` makes git do the
 # union for you (.gitattributes has the entry); the tool refuses a disagreement by name instead of choosing.
 # A row that names ONLY ITSELF (`tests/x.test.mjs -> tests/x.test.mjs`) is that reverse check, not a
@@ -113,6 +115,7 @@ tools/suite-map.tsv	tests/gate-smoke.test.js tests/gate-map.test.js tests/suite-
 tools/merge-suite-map.mjs	tests/suite-map-merge.test.js
 .gitattributes	tests/suite-map-merge.test.js
 tests/suite-map-merge.test.js	tests/suite-map-merge.test.js
+tests/gate-conf-merge.test.js	tests/gate-conf-merge.test.js
 # tools/guarded-call.mjs turns "the suite really calls the tested enforcer, and
 # nothing can swallow its throw" into a question about the syntax tree
 # (airhorn-6829). Its hostile worlds - deleted, commented, stringified, shadowed,
