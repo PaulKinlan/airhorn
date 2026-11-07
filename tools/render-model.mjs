@@ -60,7 +60,13 @@ export function makeRenderModel() {
     // opacity allow it - a display:contents region had no verdict at all, so
     // its own text read shown:true from visibility:hidden and opacity:0
     // (airhorn-s52). Descend either way: children may override visibility.
-    if (facts.visibility === 'hidden') return 'own';
+    // 'collapse' takes the SAME 'own' verdict as 'hidden', measured (airhorn-9bki): Chromium
+    // does not paint a collapsed table row's own text (innerText omits it, the row's box is
+    // 0px) but DOES paint a descendant's visibility:visible override (the span had a real
+    // painted rect and innerText carried its text) - so suppress the element's own text and
+    // KEEP WALKING, exactly like hidden. The nxuv27 branch's 'none' (prune the whole subtree)
+    // was the wrong direction: it dropped text Chromium paints.
+    if (facts.visibility === 'hidden' || facts.visibility === 'collapse') return 'own';
     if (!(facts.opacity > 0.05)) return 'own';
     return 'text';
   };
