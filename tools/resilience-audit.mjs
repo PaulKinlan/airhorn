@@ -798,7 +798,13 @@ async function runAudit() {
       'Refusing to report a green audit that measured nothing.');
     process.exit(1);
   }
-  const want = (id) => only.length === 0 || only.includes(id);
+  // The want('<id>') literals below are the SECOND copy of the scenario id set (the first
+  // is KNOWN_SCENARIOS above). Cross-asserted, not derived (airhorn-olju): deriving would
+  // make the two sides one source that can only agree with itself - a typo in it would
+  // validate AND gate the wrong name and nothing would disagree. Keeping the literals
+  // independent and checking the sets agree is what makes each a check on the other.
+  const seenSelectors = new Set();
+  const want = (id) => { seenSelectors.add(id); return only.length === 0 || only.includes(id); };
 
   // Test seam (airhorn-w1wh review, rounds 3 and 4): a scenario error is otherwise
   // unreachable without a working browser, so a spawned run can stage exactly one
@@ -1354,6 +1360,20 @@ async function runAudit() {
     await new Promise((resolve) => server.close(resolve));
   }
 
+  // airhorn-olju: cross-assert the two copies of the scenario id set (see the comment at
+  // want()). Every want('<id>') call above ran regardless of the selection, so seenSelectors
+  // is the complete second copy; a rename on either side throws here, by name, every run.
+  // SCOPE (the union-gate FAIL on 1b4513e): only when the REAL scenario block ran. The stub
+  // seam (RESILIENCE_STUB_SCENARIO under test mode) deliberately replaces the block with one
+  // staged row, so the want() calls never execute and the seen set is empty - asserting there
+  // threw the drift error over the stub's intended outcome and no report was written
+  // (test-support's w1wh stub worlds). The rule's claim is 'the full audit exercises every
+  // known id', so the full audit is exactly the world it asserts.
+  if (!useStub) {
+    const drift = scenarioIdDrift(KNOWN_SCENARIOS, [...seenSelectors]);
+    if (drift) throw new Error(`resilience-audit: ${drift}`);
+  }
+
   /* ------------------------------------------------------------ reporting */
 
   // The exit contract is applied HERE, by the entry point: writeReport() only
@@ -1368,6 +1388,19 @@ async function runAudit() {
  * measured nothing on purpose and stays 0, which is the one case where zero errors
  * means nothing to report rather than a pass.
  */
+/*
+ * airhorn-olju: the two copies of the scenario id set (KNOWN_SCENARIOS and the want('<id>')
+ * call-site literals) must name exactly the same ids. Pure and exported so the pin drives
+ * the real rule; the inline call in runAudit wires it to the live sets.
+ */
+export function scenarioIdDrift(known, seen) {
+  const onlyKnown = known.filter((id) => !seen.includes(id));
+  const onlySeen = seen.filter((id) => !known.includes(id));
+  return (onlyKnown.length || onlySeen.length)
+    ? `scenario-id drift: KNOWN_SCENARIOS and the want() call sites disagree (only in KNOWN_SCENARIOS: ${onlyKnown.join(', ') || 'none'}; only in want(): ${onlySeen.join(', ') || 'none'}) - a selector rename must change BOTH copies (airhorn-olju)`
+    : null;
+}
+
 export function auditExitCode(scenarios) {
   return (scenarios || []).some((row) => row && (row.status === 'ERROR' || row.error)) ? 1 : 0;
 }
