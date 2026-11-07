@@ -44,11 +44,28 @@ import { fileURLToPath } from 'node:url';
 
 const PRODUCT_PREFIXES_TO_REFUSE = ['tests/', 'test/'];
 
-/** A mutation target must be product code: a test edit is not a product mutation. */
-export function mutationTargetProblem(relPath, { allowTestMutation = false } = {}) {
+/**
+ * A mutation target must be product code: a test edit is not a product mutation.
+ *
+ * The check has to hold for EVERY way of naming the file, not just the relative one
+ * (airhorn-29nt): `--file tests/x.test.mjs` was refused, while
+ * `--file "$PWD/tests/x.test.mjs"` was not, because the guard compared the prefix of the string
+ * it was handed. Three spellings are therefore tested - as given, relative to the working
+ * directory, and by the segments of the resolved absolute path - and any of them naming a tests/
+ * or test/ directory refuses. The --allow-test-mutation flag still overrides, because the test
+ * file really can be the subject of the experiment.
+ */
+export function mutationTargetProblem(relPath, { allowTestMutation = false, cwd = process.cwd() } = {}) {
   if (allowTestMutation) return null;
-  const normalised = relPath.split(path.sep).join('/').replace(/^\.\//, '');
-  const refused = PRODUCT_PREFIXES_TO_REFUSE.find((prefix) => normalised.startsWith(prefix));
+  const forms = [
+    String(relPath).split(path.sep).join('/').replace(/^\.\//, ''),            // as given
+    path.relative(cwd, path.resolve(cwd, relPath)).split(path.sep).join('/'),  // relative to cwd
+  ];
+  const segments = path.resolve(cwd, relPath).split(path.sep);
+  const refused = forms.some((form) => PRODUCT_PREFIXES_TO_REFUSE.some((prefix) => form.startsWith(prefix)))
+    // a tests/ or test/ directory ANYWHERE in the resolved path: an absolute path outside the
+    // working directory was the spelling that slipped through (airhorn-29nt)
+    || segments.some((segment) => PRODUCT_PREFIXES_TO_REFUSE.some((prefix) => `${segment}/` === prefix));
   if (refused) {
     return `${relPath} is a TEST file, so mutating it proves nothing about the product (use --allow-test-mutation only when the test IS the subject)`;
   }
@@ -492,7 +509,7 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     console.error('mutation-check: --file, --from and --suite are required (see the header comment)');
     return 3;
   }
-  const targetProblem = mutationTargetProblem(args.file, { allowTestMutation: args.allowTestMutation });
+  const targetProblem = mutationTargetProblem(args.file, { allowTestMutation: args.allowTestMutation, cwd });
   if (targetProblem) {
     console.error(`mutation-check: refusing: ${targetProblem}`);
     return 3;
