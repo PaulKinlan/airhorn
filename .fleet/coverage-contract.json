@@ -178,6 +178,9 @@
   "tests/gate-smoke.test.js",
   "tests/gate-map.test.js"
  ],
+ "tools/idle-cost.mjs": [
+  "tests/idle-cost-verdict.test.js"
+ ],
  ".beads/config.yaml": [
   "tests/beads-config.test.js"
  ],

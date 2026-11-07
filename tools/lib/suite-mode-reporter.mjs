@@ -187,6 +187,15 @@ export default async function* suiteModeReporter(source) {
       && typeof driverLines[0].importFailed === 'boolean' && driverLines[0].importFailed === false
       && driverLines[1].crashedOutsideTest === true) {
     driver = { ...driverLines[0], ...driverLines[1] };          // IMPORT, CRASH
+  } else if (driverLines.length === 3
+      && typeof driverLines[0].importFailed === 'boolean' && driverLines[0].importFailed === false
+      && driverLines[1].handlersStripped === true
+      && driverLines[2].crashedOutsideTest === true) {
+    // IMPORT, STRIP, CRASH (airhorn-p0dg): the strip line is the once() self-removal artifact -
+    // the handler fired, which REMOVES it and trips the driver's own strip watcher a beat before
+    // the CRASH line. After a REAL strip the driver holds no handler that could write CRASH, so
+    // this sequence cannot come from suppression: accept it as a crash.
+    driver = { ...driverLines[0], ...driverLines[2] };
   } else if (driverLines.length > 0) {
     driver = { tampered: true, lines: driverLines.length };     // any other sequence: forged or broken
   }

@@ -188,6 +188,8 @@ tests/sw-failover.test.mjs	tests/sw-failover.test.mjs
 tests/webmcp.test.mjs	tests/webmcp.test.mjs
 tests/gate-smoke.test.js	tests/gate-smoke.test.js
 tests/badge-count.test.js	tests/badge-count.test.js
+tests/idle-cost-verdict.test.js	tests/idle-cost-verdict.test.js
+tools/idle-cost.mjs	tests/idle-cost-verdict.test.js
 tests/beads-config.test.js	tests/beads-config.test.js
 .beads/config.yaml	tests/beads-config.test.js
 tests/soak-verdict.test.js	tests/soak-verdict.test.js
