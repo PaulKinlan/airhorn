@@ -138,47 +138,69 @@ const normalise = (rows) => rows.map((row) => {
 // Union two variants BY KEY. Comments come from ours first, then any comment line theirs has that ours does
 // not, so a comment block from the other branch is neither lost nor duplicated. Keyed rows are sorted by key,
 // which makes the rows independent of merge order.
+//
+// The report is part of the contract, not a nicety (airhorn-gdtr): a union that quietly keeps a suite token one
+// side deleted is doing exactly what a coverage map should do - over-approximate, never false-green - but the lane
+// reviewing the merge has to SEE it. So:
+//   added       a token one side names and the other does not, and BASE does not: a genuine addition
+//   restored    a token present in BASE and on one side only, i.e. the other side deleted it and the union kept it
+//   resurrected a whole row present in BASE and on one side only
+// and "no shared patterns" is printed only when the two sides truly share none.
 const union = (ours, theirs, base = null) => {
-  const report = { unioned: [], resurrected: [], duplicateRows: [] };
-  const byKey = new Map();
+  const report = { added: [], restored: [], resurrected: [], shared: 0 };
   const kindOf = (key) => (key.startsWith('!') ? 'exemption' : key.startsWith('~') ? 'pending' : 'mapped');
   const patternOf = (key) => key.replace(/^[!~]/, '');
-  for (const row of [...ours, ...theirs]) {
-    if (row.kind === 'raw') continue;
-    const pattern = patternOf(row.key);
-    const existing = byKey.get(pattern);
-    if (!existing) {
-      byKey.set(pattern, { kind: 'row', key: row.key, tokens: [...row.tokens] });
+  const rowMap = (rows) => {
+    const map = new Map();
+    for (const row of rows) {
+      if (row.kind === 'raw') continue;
+      const pattern = patternOf(row.key);
+      if (!map.has(pattern)) map.set(pattern, { kind: kindOf(row.key), key: row.key, tokens: [...row.tokens] });
+    }
+    return map;
+  };
+  const oursMap = rowMap(ours);
+  const theirsMap = rowMap(theirs);
+  const baseMap = base ? rowMap(base) : null;
+  const byKey = new Map();
+  for (const pattern of [...new Set([...oursMap.keys(), ...theirsMap.keys()])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+    const mine = oursMap.get(pattern);
+    const other = theirsMap.get(pattern);
+    if (!mine || !other) {
+      const only = mine ?? other;
+      byKey.set(pattern, { kind: 'row', key: only.key, tokens: [...only.tokens] });
       continue;
     }
-    if (kindOf(existing.key) !== kindOf(row.key)) {
-      die(`both sides define ${pattern} differently - ${kindOf(existing.key) === 'exemption' ? 'an "!" exemption' : kindOf(existing.key) === 'pending' ? 'a "~" pending row' : 'an ordinary row'} on one side, ${kindOf(row.key) === 'exemption' ? 'an "!" exemption' : kindOf(row.key) === 'pending' ? 'a "~" pending row' : 'an ordinary row'} on the other. That is a disagreement to settle by hand, not a union`);
+    report.shared += 1;
+    if (mine.kind !== other.kind) {
+      const name = (kind) => (kind === 'exemption' ? 'an "!" exemption' : kind === 'pending' ? 'a "~" pending row' : 'an ordinary row');
+      die(`both sides define ${pattern} differently - ${name(mine.kind)} on one side, ${name(other.kind)} on the other. That is a disagreement to settle by hand, not a union`);
     }
-    let added = false;
-    for (const token of row.tokens) {
-      if (existing.tokens.includes(token)) continue;
-      existing.tokens.push(token);
-      added = true;
-    }
-    if (added && !report.unioned.includes(pattern)) report.unioned.push(pattern);
+    const tokens = [...mine.tokens];
+    for (const token of other.tokens) if (!tokens.includes(token)) tokens.push(token);
+    byKey.set(pattern, { kind: 'row', key: mine.key, tokens });
+    // A token the two sides disagree about is either an addition (fine) or a deletion the union restores
+    // (over-approximation). BASE is what tells them apart, so say the specific thing when we have it.
+    const disagreed = [...new Set([...mine.tokens, ...other.tokens])].filter((token) => !(mine.tokens.includes(token) && other.tokens.includes(token)));
+    if (disagreed.length === 0) continue;
+    const keptByBase = baseMap && baseMap.has(pattern) ? new Set(baseMap.get(pattern).tokens) : new Set();
+    const restored = disagreed.filter((token) => keptByBase.has(token));
+    const added = disagreed.filter((token) => !keptByBase.has(token));
+    if (restored.length > 0) report.restored.push(`${pattern} (${restored.join(' ')})`);
+    if (added.length > 0) report.added.push(`${pattern} (${added.join(' ')})`);
   }
-  // A union merge takes both sides of a conflicting hunk, so a row one branch DELETED and the other kept is
-  // resurrected. On an additive coverage map that is over-approximation - extra suites run, nothing can
-  // false-green - and it is reported here rather than left implicit (the hazard named in airhorn-tp3g).
-  if (base) {
-    const basePatterns = new Set(base.filter((row) => row.kind === 'row').map((row) => row.key.replace(/^[!~]/, '')));
-    const oursPatterns = new Set(ours.filter((row) => row.kind === 'row').map((row) => row.key.replace(/^[!~]/, '')));
-    const theirsPatterns = new Set(theirs.filter((row) => row.kind === 'row').map((row) => row.key.replace(/^[!~]/, '')));
-    for (const pattern of basePatterns) {
-      const deletedByUs = !oursPatterns.has(pattern);
-      const deletedByThem = !theirsPatterns.has(pattern);
+  // A whole row one branch DELETED and the other kept is resurrected by a union. Same direction of safety, same
+  // requirement to say it (the hazard named in airhorn-tp3g).
+  if (baseMap) {
+    for (const pattern of baseMap.keys()) {
+      const deletedByUs = !oursMap.has(pattern);
+      const deletedByThem = !theirsMap.has(pattern);
       if (deletedByUs !== deletedByThem) report.resurrected.push(pattern);
     }
   }
   const oursComments = ours.filter((row) => row.kind === 'raw');
   const theirsOnlyComments = theirs.filter((row) => row.kind === 'raw' && !oursComments.some((mine) => mine.line === row.line));
-  const keys = [...byKey.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  const rows = [...oursComments, ...theirsOnlyComments, ...keys.map((key) => byKey.get(key))];
+  const rows = [...oursComments, ...theirsOnlyComments, ...[...byKey.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).map((key) => byKey.get(key))];
   return { rows, report };
 };
 
@@ -188,10 +210,13 @@ const printReport = (report, label) => {
   const say = (list, what) => {
     if (list.length > 0) process.stderr.write(`merge-suite-map: ${label}: ${what} ${list.join(', ')}\n`);
   };
-  say(report.unioned, 'unioned suites for');
-  say(report.resurrected, 'RESURRECTED (deleted on one side, kept by the union - over-approximation, extra suites will run):');
-  if (report.unioned.length === 0 && report.resurrected.length === 0) {
-    process.stderr.write(`merge-suite-map: ${label}: no shared patterns - a straight union of both sides\n`);
+  say(report.added, 'added suites (named on one side only - the union keeps them):');
+  say(report.restored, 'RESTORED (deleted on one side, kept by the union - over-approximation, extra suites will run):');
+  say(report.resurrected, 'RESURRECTED rows (deleted on one side, kept by the union - over-approximation):');
+  if (report.shared === 0) {
+    process.stderr.write(`merge-suite-map: ${label}: no pattern appears on both sides - a straight union of both sides\n`);
+  } else if (report.added.length === 0 && report.restored.length === 0 && report.resurrected.length === 0) {
+    process.stderr.write(`merge-suite-map: ${label}: ${report.shared} shared pattern(s), all identical - only new rows were added\n`);
   }
 };
 

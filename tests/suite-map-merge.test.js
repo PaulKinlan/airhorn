@@ -250,10 +250,14 @@ test('a union reports what it unioned and what it resurrected, so the result is 
 
     const result = run(['--driver', base, ours, theirs]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stderr, /unioned suites for [^\n]*tools\/shared\.mjs/,
-      'the row both sides widened must be named');
-    assert.doesNotMatch(result.stderr, /unioned suites for [^\n]*tools\/a\.mjs/,
-      'a row neither side changed is not reported as unioned - the report must be signal, not noise');
+    // In this fixture THEIRS removed tests/x.test.js (it is in base) and added tests/y.test.js: the two are
+    // different facts and the report must not blur them (airhorn-gdtr).
+    assert.match(result.stderr, /RESTORED[^\n]*tools\/shared\.mjs \(tests\/x\.test\.js\)/,
+      'the token a side deleted and the union kept must be named as restored');
+    assert.match(result.stderr, /added suites[^\n]*tools\/shared\.mjs \(tests\/y\.test\.js\)/,
+      'the token a side genuinely added must be named as added');
+    assert.doesNotMatch(result.stderr, /added suites[^\n]*tools\/a\.mjs/,
+      'a row both sides left identical is not reported - the report must be signal, not noise');
     assert.match(result.stderr, /RESURRECTED[^\n]*tools\/deleted\.mjs/,
       'a row deleted on one side and kept by the other must be reported as resurrected');
 
@@ -263,4 +267,61 @@ test('a union reports what it unioned and what it resurrected, so the result is 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// airhorn-gdtr (review finding on airhorn-tp3g). A token deleted on one side is RESTORED by the union - the safe
+// direction for a coverage map, but the report claimed "no shared patterns" and named nothing, so the lane
+// reviewing the merge could not see that a suite came back. The report now distinguishes an ADDITION (fine) from
+// a RESTORATION (over-approximation), and it says which token.
+test('a token deleted on one side is reported as RESTORED, whichever side is ours', () => {
+  const dir = tmpdir();
+  try {
+    const base = write(dir, 'base.tsv', 'tools/a.mjs\ttests/1.test.js tests/2.test.js\n');
+    const keeper = write(dir, 'keeper.tsv', 'tools/a.mjs\ttests/1.test.js tests/2.test.js\n');
+
+    for (const oursIsKeeper of [true, false]) {
+      const remover = write(dir, 'remover.tsv', 'tools/a.mjs\ttests/1.test.js\n');
+      const ours = oursIsKeeper ? keeper : remover;
+      const theirs = oursIsKeeper ? remover : keeper;
+      const result = run(['--driver', base, ours, theirs]);
+      assert.equal(result.status, 0, result.stderr);
+
+      assert.equal(fs.readFileSync(ours, 'utf8').trim(), 'tools/a.mjs\ttests/1.test.js tests/2.test.js',
+        `${oursIsKeeper ? 'theirs' : 'ours'} deleted a token; the union keeps it (over-approximation, never a false green)`);
+      assert.match(result.stderr, /RESTORED[^\n]*tools\/a\.mjs \(tests\/2\.test\.js\)/,
+        `the restored token must be NAMED with ours=${oursIsKeeper ? 'keeper' : 'remover'}, got: ${result.stderr}`);
+      assert.doesNotMatch(result.stderr, /no pattern appears on both sides/,
+        'the pattern IS shared - that message was the lie this finding is about');
+      assert.doesNotMatch(result.stderr, /added suites/,
+        'a restoration is not an addition; the two must not be blurred together');
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a token ADDED on one side is reported as added, not as restored', () => {
+  const dir = tmpdir();
+  try {
+    const base = write(dir, 'base.tsv', 'tools/a.mjs\ttests/1.test.js\n');
+    const ours = write(dir, 'ours.tsv', 'tools/a.mjs\ttests/1.test.js\n');
+    const theirs = write(dir, 'theirs.tsv', 'tools/a.mjs\ttests/1.test.js tests/2.test.js\n');
+    const result = run(['--driver', base, ours, theirs]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /added suites[^\n]*tools\/a\.mjs \(tests\/2\.test\.js\)/, result.stderr);
+    assert.doesNotMatch(result.stderr, /RESTORED/, 'an addition must not be reported as a restoration');
+    assert.doesNotMatch(result.stderr, /no pattern appears on both sides/, 'the pattern is shared');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// airhorn-fp5q (merger finding on airhorn-tp3g). The recipe lived in .gitattributes and the tool's header, but a
+// lane that hits `UU tools/suite-map.tsv` opens THE MAP first, and its header said nothing about the tool.
+test('the map header itself tells a lane how to resolve a conflict', () => {
+  const header = fs.readFileSync(MAP, 'utf8').split('\n').slice(0, 45).join('\n');
+  assert.match(header, /merge-suite-map\.mjs --union/, 'the header carries the union command');
+  assert.match(header, /derive-coverage-contract\.mjs/, 'and the regenerate step, or the resolution half-fails');
+  assert.match(header, /merge\.suite-map-union\.driver/, 'and the one-time driver config');
+  assert.match(header, /Do not hand-merge/i, 'and says plainly not to hand-merge it');
 });
