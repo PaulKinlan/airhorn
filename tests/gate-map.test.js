@@ -590,6 +590,13 @@ test('the render model: shown IS visible text; a skipped node contributes nothin
     // is painted and its text belongs in the walk. Only the hidden element's
     // OWN text is dropped.
     { name: 'a hidden element with a visible descendant', tree: el({ visibility: 'hidden' }, 'hidden own text', [el({}, 'kept child text')]), text: 'kept child text' },
+    // MEASURED browser facts (airhorn-9bki, the collapse probe on the bead): a collapsed table
+    // row's own text is NOT painted (innerText omits it, box height 0), but a visibility:visible
+    // descendant inside it IS painted (a real rect; innerText carries its text). So collapse is
+    // 'own', not 'none': own text dropped, subtree walked. The nxuv27 branch's whole-subtree
+    // prune was the wrong direction.
+    { name: 'a collapsed row: own text is not painted', tree: el({ visibility: 'collapse' }, 'collapsed row text'), text: '' },
+    { name: 'a collapsed row with a visibility:visible descendant: the override is painted', tree: el({ visibility: 'collapse' }, 'collapsed own text', [el({}, 'override span text')]), text: 'override span text' },
     { name: 'a region inside a display:none ancestor', tree: el({ boxChain: false }, 'hidden ancestor status'), text: '' },
     { name: 'a visibility:visible region inside a visibility:hidden ancestor', tree: el({}, 'visible override region'), text: 'visible override region' },
     { name: 'an opacity:0 region', tree: el({ boxChain: false, opacity: 0 }, 'echo opacity zero'), text: '' },
