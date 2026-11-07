@@ -257,6 +257,11 @@ README.md	tests/docs-recipe.test.mjs
 # tests/docs-recipe.test.mjs executes, so a change to it must run that suite rather
 # than fall through to the `!*.md` exemption below (a row always beats an exemption).
 docs/runbooks/DEPLOY.md	tests/docs-recipe.test.mjs
+# The webmcp evidence map cites node --test case names; a rename in a suite leaves the doc naming a case that no
+# longer exists (airhorn-5t0y). The drift is doc-vs-suite text, which only a text check can see - see ADR 0001 for
+# why that is a doc pin, not a claim about behaviour.
+docs/webmcp-tools.md	tests/docs-evidence-map.test.mjs
+tests/docs-evidence-map.test.mjs	tests/docs-evidence-map.test.mjs
 # Every other runbook too: the suite also asserts that a fenced recipe does not
 # name a repo path that does not exist, which is what airhorn-alze's move broke in
 # two recipes (airhorn-2jwe, airhorn-fs8s). Static, ~5 ms.

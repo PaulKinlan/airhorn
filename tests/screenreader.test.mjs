@@ -354,9 +354,12 @@ async function run() {
     // The wrap must first prove there IS a voice (airhorn-g0qr.19): the old payload
     // returned `typeof window.__airhornAnnounce === 'function'` AFTER assigning its own
     // wrapper, so it re-read the value it had just written and its result was never even
-    // asserted. With no announcer on the page the wrapper was installed over undefined,
-    // and every announcement assertion below would have passed while recording nothing -
-    // the vacuous-green shape this sweep exists to find.
+    // asserted. With no announcer on the page the wrapper was installed over undefined, and
+    // every announcement assertion below would have passed for an announcement that never
+    // sounded. Not "recording nothing": the old wrapper pushed to __srLog BEFORE calling
+    // the voice it had captured, so the log was populated and the GREEN was still false.
+    // Say it that way round, or a reader concludes the log was empty and that the bug was
+    // only about bookkeeping - the vacuous-green shape this sweep exists to find.
     const announcerBound = await evaluate(`(() => {
       const voice = window.__airhornAnnounce;
       if (typeof voice !== 'function') return false;
