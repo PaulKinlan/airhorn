@@ -7,6 +7,13 @@
 # and once it lands it runs like any other suite. A PLAIN row naming a missing suite is a stale map
 # and fails the gate. Every suite in the tree must be reachable from a row (`~` counts) or exempted
 # with `!`, or the gate fails loudly (reverse check).
+# CONFLICT HERE? Do not hand-merge it (airhorn-tp3g, airhorn-fp5q). The map is a SET the gate unions at run
+# time, so a collision is resolved by key, mechanically:
+#   git show :2:tools/suite-map.tsv > /tmp/ours.tsv; git show :3:tools/suite-map.tsv > /tmp/theirs.tsv
+#   node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv --write tools/suite-map.tsv
+#   node tools/derive-coverage-contract.mjs   # the contract is DERIVED: regenerate it, never merge it
+# `git config merge.suite-map-union.driver "node tools/merge-suite-map.mjs --driver %O %A %B"` makes git do the
+# union for you (.gitattributes has the entry); the tool refuses a disagreement by name instead of choosing.
 # A row that names ONLY ITSELF (`tests/x.test.mjs -> tests/x.test.mjs`) is that reverse check, not a
 # coverage opinion about source: it makes a change to the suite run the suite. It is deliberately NOT
 # restated in .fleet/coverage-contract.json — the oracle skips self-rows, so naming one there reads as
