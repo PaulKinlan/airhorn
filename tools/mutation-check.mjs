@@ -349,6 +349,14 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
   if (report.driver.tampered || report.driver.nonceMismatch) {
     return { mode: 'report-not-trustworthy', problem: `the driver record sequence was invalid (${report.driver.lines || 0} record line(s), or a nonce that was not this run's) - a record was forged or broken, so nothing it says is evidence either way (exit ${exitCode}) (airhorn-y3d6)` };
   }
+  // airhorn-sjgc: the suite removed the driver's crash handlers while it ran, so a crash after the import could
+  // have been swallowed before the runner saw it. That cannot manufacture the dangerous "caught" false green - it
+  // is the SAFE direction - but it is not evidence either, and "report: clean, fix-does-not-close" would read like
+  // the tool had looked and found nothing. It did not look: say so.
+  if (report.driver.suppressed) {
+    const which = (report.driver.listenersRemoved || []).join(' and ');
+    return { mode: 'report-not-trustworthy', problem: `the suite removed the driver's ${which} listener(s) while it ran, so an out-of-test crash after the import could have been swallowed before the runner reported anything - the clean record cannot rule that out, so nothing here is evidence either way (exit ${exitCode}) (airhorn-sjgc)` };
+  }
   if (report.driver.importFailed) {
     return { mode: 'never-ran', problem: `threw while loading (${report.driver.reason || 'no reason reported'}), so NO test ever ran and this is not a caught mutant (exit ${exitCode}, ${report.realTests} test event(s) seen). If this is a script suite whose top-level assertion failed, say so with --suite-mode script` };
   }

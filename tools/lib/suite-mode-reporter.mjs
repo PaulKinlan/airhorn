@@ -181,12 +181,19 @@ export default async function* suiteModeReporter(source) {
   // in THIS process, which the suite does not share.
 
   let driver = null;
-  if (driverLines.length === 1 && typeof driverLines[0].importFailed === 'boolean' && !driverLines[0].crashedOutsideTest) {
+  if (driverLines.length === 1 && typeof driverLines[0].importFailed === 'boolean' && !driverLines[0].crashedOutsideTest && !driverLines[0].listenersRemoved) {
     driver = driverLines[0];                                    // IMPORT
   } else if (driverLines.length === 2
       && typeof driverLines[0].importFailed === 'boolean' && driverLines[0].importFailed === false
       && driverLines[1].crashedOutsideTest === true) {
     driver = { ...driverLines[0], ...driverLines[1] };          // IMPORT, CRASH
+  } else if (driverLines.length === 2
+      && typeof driverLines[0].importFailed === 'boolean' && driverLines[0].importFailed === false
+      && Array.isArray(driverLines[1].listenersRemoved) && driverLines[1].listenersRemoved.length > 0) {
+    // IMPORT, LISTENERS-REMOVED (airhorn-sjgc): the suite took the driver's crash handlers away, so a
+    // crash after the import could have been swallowed. Safe direction, but not evidence - the parent
+    // refuses it by name rather than scoring a verdict.
+    driver = { ...driverLines[0], ...driverLines[1], suppressed: true };
   } else if (driverLines.length > 0) {
     driver = { tampered: true, lines: driverLines.length };     // any other sequence: forged or broken
   }

@@ -54,14 +54,39 @@ const record = (value) => {
  * mutant. These handlers are installed before the import so they are first in line, and they turn
  * the failure into a record instead of a verdict.
  */
+let crashRecorded = false;
 const markCrash = (kind) => (error) => {
+  if (crashRecorded) return;
+  crashRecorded = true;
   const detail = error && error.stack ? error.stack.split('\n')[0] : String(error);
   // The grammar's CRASH line: valid only AFTER a clean-import line, which the reporter checks.
   record({ crashedOutsideTest: true, reason: `${kind} after the suite loaded: ${detail}` });
   process.exit(0);
 };
-process.once('uncaughtException', markCrash('uncaught exception'));
-process.once('unhandledRejection', markCrash('unhandled rejection'));
+// Installed with `on`, not `once`, and kept in a map so their PRESENCE can be re-checked at exit:
+// `process.listeners()` unwraps `once` wrappers on some runtimes and not others, and this check
+// must not depend on that. See the SUPPRESSED note at the bottom of this file (airhorn-sjgc).
+const crashHandlers = new Map();
+for (const [event, kind] of [['uncaughtException', 'uncaught exception'], ['unhandledRejection', 'unhandled rejection']]) {
+  const handler = markCrash(kind);
+  crashHandlers.set(event, handler);
+  process.on(event, handler);
+}
+/*
+ * airhorn-sjgc: the suite shares this process, so it can remove the crash handlers above and install
+ * its own that exits 0 - the crash then never becomes a record, the file stays a valid single-import
+ * line, and the parent would score "clean". That is the safe DIRECTION (it can never reach
+ * mutant-caught) but it is not evidence either, so it is DETECTED rather than trusted: at exit,
+ * check that the handlers are still there and say so if they are not. The reporter accepts
+ * IMPORT + LISTENERS-REMOVED as a named refusal, never as a pass.
+ */
+process.on('exit', () => {
+  if (crashRecorded) return;
+  const removed = [...crashHandlers]
+    .filter(([event, handler]) => !process.listeners(event).includes(handler))
+    .map(([event]) => event);
+  if (removed.length > 0) record({ listenersRemoved: removed });
+});
 
 // Scrub the driver machinery's variables BEFORE the suite loads (airhorn-y3d6): the suite
 // shares this process and inherits this environment. Stated plainly: /proc/<pid>/environ shows

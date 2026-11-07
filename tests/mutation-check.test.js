@@ -341,8 +341,31 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     assert.match(d.stdout, /verdict: fix-does-not-close/);
 
     const stripped = runWorld(['--suite', 'g-strip-handlers.mjs']);
-    assert.equal(stripped.status, 3, `a suite that strips the handlers then crashes must be never-ran, got ${stripped.status}: ${stripped.stdout}${stripped.stderr}`);
-    assert.match(stripped.stderr + stripped.stdout, /exited 1 with no failing test|registered no tests|crashed/i);
+    assert.equal(stripped.status, 3, `a suite that strips the handlers then crashes must be a named refusal, got ${stripped.status}: ${stripped.stdout}${stripped.stderr}`);
+    // airhorn-sjgc made this refusal SPECIFIC: the tool can now see that the driver's crash handlers were taken
+    // away, so it says that instead of inferring from the exit code. The property asserted here is unchanged - a
+    // named refusal, never a verdict - so the pattern grew one alternative rather than being loosened.
+    assert.match(stripped.stderr + stripped.stdout, /exited 1 with no failing test|registered no tests|crashed|removed the driver's/i);
+
+    // airhorn-sjgc: the laundering shape. A suite passes a real test, takes the driver's handlers away, installs
+    // its own that exits 0, and throws. Nothing reaches the runner, so the old answer was "report: clean" ->
+    // fix-does-not-close (rc 2) - safe, but it read as if the tool had looked and found nothing.
+    write('m-swallow-crash.mjs', [
+      "import test from 'node:test';",
+      "test('green', () => {});",
+      "process.removeAllListeners('uncaughtException');",
+      "process.removeAllListeners('unhandledRejection');",
+      "process.on('uncaughtException', () => process.exit(0));",
+      "setImmediate(() => { throw new Error('hidden crash outside a test'); });",
+      '',
+    ].join('\n'));
+    const swallowed = runWorld(['--suite', 'm-swallow-crash.mjs']);
+    assert.equal(swallowed.status, 3, `a suite that swallows its own out-of-test crash must be refused by name, got ${swallowed.status}: ${swallowed.stdout}${swallowed.stderr}`);
+    assert.match(swallowed.stderr + swallowed.stdout, /removed the driver's[^\n]*listener/i,
+      'the refusal must say what happened: the crash handlers were removed');
+    assert.match(swallowed.stderr + swallowed.stdout, /airhorn-sjgc/, 'and name the finding');
+    assert.doesNotMatch(swallowed.stdout, /verdict: fix-does-not-close/,
+      'it must not be scored as a measured verdict at all - nothing was measured');
 
     for (const world of ['h-async-no-test.mjs', 'i-async-decoy.mjs', 'j-indirect-async.mjs']) {
       const r = runWorld(['--suite', world]);
