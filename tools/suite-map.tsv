@@ -156,8 +156,7 @@ tools/lib/update-outcome.mjs	tests/update-outcome.test.js
 tools/install-https-proof.mjs	tests/gate-smoke.test.js tests/test-support.test.js
 tests/resilience-probe.test.js	tests/resilience-probe.test.js
 tests/resilience-report.test.js	tests/resilience-report.test.js
-tools/resilience-audit.mjs	tests/resilience-report.test.js
-tools/resilience-audit.mjs	tests/resilience-probe.test.js
+tools/resilience-audit.mjs	tests/resilience-probe.test.js tests/resilience-report.test.js
 # The SW/offline suite covers the PWA surface (it verifies sw caching + manifest contents in dist)
 # AND the worker's cache-integrity behaviour (a corrupt entry must be evicted and healed, never
 # served - airhorn-un5; merged into it in airhorn-iwf so one worker change pays one Chromium launch,
