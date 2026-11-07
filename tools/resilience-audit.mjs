@@ -1363,7 +1363,13 @@ async function runAudit() {
   // airhorn-olju: cross-assert the two copies of the scenario id set (see the comment at
   // want()). Every want('<id>') call above ran regardless of the selection, so seenSelectors
   // is the complete second copy; a rename on either side throws here, by name, every run.
-  {
+  // SCOPE (the union-gate FAIL on 1b4513e): only when the REAL scenario block ran. The stub
+  // seam (RESILIENCE_STUB_SCENARIO under test mode) deliberately replaces the block with one
+  // staged row, so the want() calls never execute and the seen set is empty - asserting there
+  // threw the drift error over the stub's intended outcome and no report was written
+  // (test-support's w1wh stub worlds). The rule's claim is 'the full audit exercises every
+  // known id', so the full audit is exactly the world it asserts.
+  if (!useStub) {
     const drift = scenarioIdDrift(KNOWN_SCENARIOS, [...seenSelectors]);
     if (drift) throw new Error(`resilience-audit: ${drift}`);
   }
