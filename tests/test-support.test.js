@@ -1461,6 +1461,79 @@ test('request-path: the install-proof server answers a malformed escape with 400
 });
 
 /*
+ * airhorn-k77v: the SIBLING world, end to end. A root of /tmp/x and a directory /tmp/xyz share the string prefix
+ * "/tmp/x", so a containment check written as `candidate.startsWith(root)` (what the install-proof handler and the
+ * soak guard both did before the shared request-path helper) treated the sibling as inside the root: at 4f3fcfb the
+ * shipped handler answered /../xyz/secret.txt with 200 and the sibling's bytes. The helper checks the prefix WITH a
+ * separator and then decides on the OPENED handle, so both tools refuse - this test drives the shipped server over a
+ * real socket, which is the only level the original defect was visible at, and asserts the same paths through the
+ * helper soak calls.
+ *
+ * It also pins the two ways a fix like this fails in the other direction: a legitimate nested in-root path must still
+ * serve, and a symlink that lives in the root but points AT the sibling must be refused rather than followed.
+ */
+test('request-path: a SIBLING directory sharing the root prefix is refused, and an in-root subdirectory still serves (airhorn-k77v)', async () => {
+  const { makeServer } = await import('../tools/install-https-proof.mjs');
+  const { openRequestUrl } = await import('../tools/lib/request-path.mjs');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'k77v-sibling-'));
+  const rootDir = path.join(base, 'x');
+  const siblingDir = path.join(base, 'xyz');
+  fs.mkdirSync(path.join(rootDir, 'nested', 'deep'), { recursive: true });
+  fs.mkdirSync(siblingDir, { recursive: true });
+  fs.writeFileSync(path.join(rootDir, 'index.html'), '<!doctype html>in-root');
+  fs.writeFileSync(path.join(rootDir, 'nested', 'deep', 'asset.txt'), 'IN_ROOT_NESTED');
+  fs.writeFileSync(path.join(siblingDir, 'secret.txt'), 'SIBLING_SECRET');
+  fs.symlinkSync(siblingDir, path.join(rootDir, 'escape'));
+  const server = await makeServer(rootDir, null);
+  try {
+    const port = server.address().port;
+    const get = (requestPath) => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: requestPath, method: 'GET' }, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    // The two spellings of the sibling walk, both of which a bare prefix check accepts.
+    for (const requestPath of ['/../xyz/secret.txt', '/%2e%2e/xyz/secret.txt']) {
+      const sibling = await get(requestPath);
+      assert.equal(sibling.status, 403, `${requestPath} must be refused, not served: ${sibling.status} ${sibling.body}`);
+      assert.doesNotMatch(sibling.body, /SIBLING_SECRET/, `${requestPath} leaked the sibling directory's bytes`);
+      assert.match(sibling.body, /refusing to serve|outside the served root/);
+    }
+    // A symlink in the root that points AT the sibling: lexically inside, really outside.
+    const viaLink = await get('/escape/secret.txt');
+    assert.equal(viaLink.status, 403, `a symlink to the sibling must be refused: ${viaLink.status} ${viaLink.body}`);
+    assert.doesNotMatch(viaLink.body, /SIBLING_SECRET/);
+
+    // The other direction: refusing everything is not a fix.
+    const index = await get('/');
+    assert.equal(index.status, 200, 'the root index must still serve');
+    assert.equal(index.body, '<!doctype html>in-root');
+    const nested = await get('/nested/deep/asset.txt');
+    assert.equal(nested.status, 200, 'a legitimate nested path must still serve');
+    assert.equal(nested.body, 'IN_ROOT_NESTED');
+
+    // soak's guard is the same helper, driven with the same inputs (soak never builds a server here).
+    for (const requestPath of ['/../xyz/secret.txt', '/%2e%2e/xyz/secret.txt', '/escape/secret.txt']) {
+      const decision = openRequestUrl(rootDir, requestPath);
+      assert.equal(decision.ok, false, `soak's guard must refuse ${requestPath} too`);
+      assert.equal(decision.status, 403);
+      assert.match(decision.reason, /refusing to serve|not found/);
+    }
+    const soakNested = openRequestUrl(rootDir, '/nested/deep/asset.txt');
+    assert.equal(soakNested.ok, true, "soak's guard must still serve an in-root nested path");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+/*
  * The reviewer's own reproduction of the containment hole (airhorn-k0xp review FAIL): a
  * symlink INSIDE dist that points OUTSIDE it. A lexical containment check approves
  * '/linked.txt' because the request path is inside the root; the bytes came from outside.
