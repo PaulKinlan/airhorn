@@ -1,7 +1,8 @@
 name: Deploy to Cloudflare Pages
 
 # airhorn-9dal (fleet-fpr18): airhorn is a Tier 3 static site — the whole artifact is `npm run build`'s
-# dist/ directory (25 files, ~332 KB) and it needs no runtime: no Pages Functions, no bindings, no
+# dist/ directory (26 files, ~332 KB: 24 copied from public/ plus index.html and one hashed bundle) and it needs no
+# runtime: no Pages Functions, no bindings, no
 # server. This workflow is the ONLY deploy automation in the repo (there was no CI before it); the
 # manual equivalent is the one command in the last step, run by hand, if the workflow is unavailable.
 #
