@@ -116,20 +116,35 @@ test('the deploy workflow cannot fire automatically: dispatch only, preview by d
   const yaml = read('.github', 'workflows', 'deploy-pages.yml');
   // airhorn-9dal production-safety: with both secrets present a push trigger would publish to PRODUCTION on
   // every merge, and Paul has not authorised switching the production origin. Auto-deploy must stay OFF.
-  assert.equal(/^on:\s*$/m.test(yaml), true, 'the workflow needs an `on:` block');
   // A BLACKLIST can only name the triggers someone thought of (airhorn-yvjr: `schedule:` was invisible to the
   // version of this test that checked push/pull_request only, so an hourly cron would auto-deploy while every
   // assertion here stayed green). So the `on:` block is read as a WHITELIST: workflow_dispatch is the only
   // trigger a deploy may have, and anything else fails by name.
+  // airhorn-hrv2 (review of the whitelist itself): reading only keys whose line ENDS after the colon was still
+  // blind - `push: {branches: [master]}` and `schedule: # hourly` are YAML GitHub honours and both were missed.
+  // The lesson is that a partial reader is the same defect as a blacklist, one indirection down, so this pin
+  // REFUSES anything it cannot account for instead of skipping it:
+  //   - the `on:` key must appear exactly once, in BLOCK form (`on:` alone on its line). `on: {push: ...}`,
+  //     `on: [push]` and a second document with its own `on:` are all refused by name rather than parsed.
+  //   - inside the block, every line at the trigger indent is either a comment, blank, or a quoted or unquoted
+  //     key with ANY value shape after it (block, inline flow, inline comment, nothing). A line that does not
+  //     fit that shape is refused, so a shape nobody anticipated fails loudly instead of contributing nothing.
   const lines = yaml.split('\n');
-  const onAt = lines.findIndex((line) => /^on:\s*$/.test(line));
-  assert.ok(onAt > -1, 'the workflow needs an `on:` block');
+  const onLines = lines.map((line, i) => [line, i]).filter(([line]) => /^on\s*:/.test(line));
+  assert.equal(onLines.length, 1, `the workflow must declare \`on:\` exactly once, at the top level (found ${onLines.length})`);
+  assert.match(onLines[0][0], /^on:\s*$/, 'the `on:` trigger list must use the BLOCK form, one trigger per line, '
+    + 'so this pin can see every trigger - an inline `on: {...}` or `on: [...]` cannot be audited and is refused');
+  const onAt = onLines[0][1];
   const triggers = [];
   for (let i = onAt + 1; i < lines.length; i += 1) {
     const line = lines[i];
-    if (line.trim() !== '' && line.search(/\S/) === 0) break;          // the next top-level key ends `on:`
-    const trigger = /^ {2}([A-Za-z_][A-Za-z0-9_-]*):\s*$/.exec(line);
-    if (trigger) triggers.push(trigger[1]);
+    if (line.trim() === '' || /^\s*#/.test(line)) continue;            // blank or comment: no trigger here
+    if (line.search(/\S/) === 0) break;                                // the next top-level key ends `on:`
+    if (!/^ {2}\S/.test(line)) continue;                               // deeper lines are the body of a trigger above
+    const trigger = /^ {2}(["']?)([A-Za-z_][A-Za-z0-9_-]*)\1\s*:(.*)$/.exec(line);
+    assert.ok(trigger, `the \`on:\` block has an entry this pin cannot read as a trigger name, so it refuses rather than `
+      + `assuming it is harmless: ${JSON.stringify(line)}`);
+    triggers.push(trigger[2]);
   }
   assert.deepEqual(triggers, ['workflow_dispatch'],
     `workflow_dispatch must be the ONLY trigger, or the deploy can fire without a human (found: ${JSON.stringify(triggers)})`);
