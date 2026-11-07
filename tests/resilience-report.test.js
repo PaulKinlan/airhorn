@@ -59,6 +59,31 @@ test('hovu: a seam set to a truthy non-1 value WITH test mode is dropped LOUDLY 
     `a seam that is set but not honoured must SAY so (was silent with test mode on):\n${run.stderr}`);
 });
 
+test('aizv: the note/explains columns carry the reason and the measured document (airhorn-aizv)', () => {
+  // Not a whole-table snapshot (s68m owns row count/identity): assert the CONTENT of the
+  // reason/doc columns for exactly the rows that exercise them, so the markdown cannot
+  // drift (drop the doc, drop the error reason) without this going red.
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'aizv-'));
+  const origLog = console.log;
+  console.log = () => {};
+  try {
+    writeReport([
+      stubRow('docrow', { measuredDocument: 'http://x/deep-link' }),
+      stubRow('errrow', { status: 'ERROR', error: 'browser exploded', hornVisible: false, hornUsable: false, explainsItself: false, explanationEvidence: 'none' }),
+    ], out);
+  } finally {
+    console.log = origLog;
+  }
+  const md = fs.readFileSync(path.join(out, 'report.md'), 'utf8');
+  const lineFor = (id) => md.split('\n').find((l) => l.startsWith(`| ${id} —`));
+  assert.ok(lineFor('docrow'), 'the doc row must exist');
+  assert.match(lineFor('docrow'), /doc: http:\/\/x\/deep-link/, 'the note column must carry the measured document');
+  assert.match(lineFor('docrow'), /yes \(e\)/, 'the explains column must carry the evidence in parentheses');
+  assert.ok(lineFor('errrow'), 'the error row must exist');
+  assert.match(lineFor('errrow'), /\| ERROR \|/, 'an error row must read ERROR in the renders column');
+  assert.match(lineFor('errrow'), /browser exploded/, 'the note column must carry the error reason');
+});
+
 test('jhf3: the blocked-asset headline is the subcase that measured a failure, JS first (airhorn-jhf3)', () => {
   const ok = { label: 'css', hornUsable: true, degraded: false, navigationCompleted: true };
   const jsFailed = { label: 'js', hornUsable: false, degraded: false, navigationCompleted: true };
