@@ -140,8 +140,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *
  * @param {(method: string, params?: object) => Promise<any>} send CDP send()
  * @param {object} [options]
- * @param {number} [options.timeoutMs] ABSOLUTE CEILING on the whole wait, a
- *   backstop rather than the criterion (airhorn-ypfn). A wall clock cannot tell
+ * @param {number} [options.timeoutMs] Ceiling on the wait LOOP, checked BETWEEN
+ *   samples - not an absolute bound on the whole wait (airhorn-ynvv: the doc used
+ *   to claim 'ABSOLUTE CEILING', which is false: one sample is a single
+ *   Runtime.evaluate round-trip bounded only by the caller's send, so a hung or
+ *   starved sample overshoots the ceiling arbitrarily; the guarantee is that the
+ *   wait ends within timeoutMs of the last COMPLETED sample, and a slow-sample
+ *   world is pinned in tests/quiescence-bound.test.js). A wall clock cannot tell
  *   "still working" from "starved": on a loaded host a single Runtime.evaluate
  *   round-trip can take seconds, so a fixed 20 s bound failed a page that was
  *   ALREADY quiet and printed "work is still pending" next to a probe showing
