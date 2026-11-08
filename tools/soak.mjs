@@ -410,6 +410,24 @@ const instrumentation = (mutantScript) => `
 export const cycleHeapGrowth = (heapSeries, baselineBytes, afterCyclesBytes) =>
   growthFromSeries(heapSeries, baselineBytes, afterCyclesBytes);
 
+// The heap check's evidence line. It MUST print the anchors the growth is measured from
+// (airhorn-karx): with few samples the growth is the TRUE endpoints (baseline vs the
+// quiesced after-cycles sample), and a detail that omits them cannot be recomputed by a
+// reader - the summary's own evidence was incomplete.
+// The basis named in the detail must be the basis growthFromSeries actually used
+// (airhorn-8ao4): under 4 samples the growth IS the endpoint delta (baseline vs the
+// quiesced after-cycles sample, which is NOT part of the series), so the anchors are
+// printed as the evidence; with 4+ samples the growth is the windowed median over the
+// series, so printing 'endpoints ...' would label a number with a computation that did
+// not produce it - a report contradicting itself.
+export const heapGrowthDetail = (heapSeries, growthBytes, budgetMb, monotonic, baselineBytes, afterCyclesBytes) => {
+  const series = `${heapSeries.map((bytes) => mb(bytes)).join(' -> ')} MB, growth ${mb(growthBytes)} MB`;
+  const basis = heapSeries.length < 4
+    ? `endpoints baseline ${mb(baselineBytes)} MB -> after-cycles ${mb(afterCyclesBytes)} MB (fewer than 4 samples: the true endpoints ARE the measurement)`
+    : `windowed-median basis over the ${heapSeries.length} cycle samples (the endpoints are context, not the measured delta)`;
+  return `${series} (${basis}; budget ${budgetMb} MB, monotonic=${monotonic})`;
+};
+
 export const offlineHeapGrowth = (offlineHeap) =>
   offlineHeap.length ? growthFromSeries(offlineHeap, offlineHeap[0], offlineHeap[offlineHeap.length - 1]) : 0;
 
@@ -920,8 +938,7 @@ async function main() {
     const heapCheck = check(
       'retained heap does not grow across the cycles',
       heapGrowth < heapBudget && !heapMonotonic,
-      `${heapSeries.map((bytes) => mb(bytes)).join(' -> ')} MB, growth ${mb(heapGrowth)} MB ` +
-      `(budget ${options.heapBudgetMb} MB, monotonic=${heapMonotonic})`,
+      heapGrowthDetail(heapSeries, heapGrowth, options.heapBudgetMb, heapMonotonic, baseline.heapUsed, afterCycles.heapUsed),
     );
 
     const audioNodes = audioNodesReleased(samples, afterCycles);

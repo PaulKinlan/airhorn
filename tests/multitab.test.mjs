@@ -53,6 +53,7 @@ import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
 import { awaitSocketOpen } from './cdp-command-bound.mjs';
 import { installSignalExit } from './support/signal-exit.mjs';
+import { installLockSpySource } from './support/lock-spy.mjs';
 
 // A bound-kill (SIGTERM first, then the grace bound) bypasses the try/finally
 // in run(), which is the only place the browser is closed (SIGTERM, tree
@@ -240,24 +241,10 @@ const tabInstrumentation = `
   window.__badgeWrites = [];
   window.__heldLocks = [];
   try {
-    const request = navigator.locks && navigator.locks.request;
-    if (request) {
-      navigator.locks.request = function (name, ...rest) {
-        const cb = rest[rest.length - 1];
-        if (typeof cb !== 'function') return request.call(this, name, ...rest);
-        const wrapped = (...args) => {
-          window.__heldLocks.push(name);
-          try {
-            return cb(...args);
-          } finally {
-            const at = window.__heldLocks.lastIndexOf(name);
-            if (at >= 0) window.__heldLocks.splice(at, 1);
-          }
-        };
-        rest[rest.length - 1] = wrapped;
-        return request.call(this, name, ...rest);
-      };
-    }
+    // The lock spy is the shared tests/support/lock-spy.mjs source (airhorn-gk2p): it holds
+    // the lock until an ASYNC body SETTLES, not at callback return, so a post-await write is
+    // recorded truthfully. tests/lock-spy.test.js drives the same function in node.
+    ${installLockSpySource}
     const setItem = Storage.prototype.setItem;
     const note = (value) => {
       // Named lock, not "some lock": a write while an unrelated lock is held is

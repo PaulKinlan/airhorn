@@ -49,7 +49,7 @@ test('a STARVED host still reaches quiescence when the ceiling allows it - the s
   await assert.rejects(
     () => waitForQuiescence(starved(), { timeoutMs: 400 }),
     (error) => {
-      assert.match(error.message, /absolute ceiling/, 'the failure names the ceiling');
+      assert.match(error.message, /ceiling \(checked between samples/, 'the failure names the ceiling');
       assert.match(error.message, /WAS quiet/, 'and says the page was quiet, so the host was starved');
       assert.doesNotMatch(error.message, /work is still pending/, 'the old message is gone');
       return true;
@@ -63,7 +63,7 @@ test('a page that keeps changing never passes, and the ceiling says it was still
   await assert.rejects(
     () => waitForQuiescence(busy(), { timeoutMs: 400 }),
     (error) => {
-      assert.match(error.message, /absolute ceiling/, 'names the ceiling');
+      assert.match(error.message, /ceiling \(checked between samples/, 'names the ceiling');
       assert.match(error.message, /still doing work, not merely starved/, 'and distinguishes busy from starved');
       assert.doesNotMatch(error.message, /work is still pending/, 'the old message is gone');
       return true;
@@ -98,7 +98,7 @@ test('the a11y call site shape has no flat wall-clock pin (airhorn-ixk1)', async
   // the same shape WITH a flat pin smaller than the sampling cost is what the bead removed
   await assert.rejects(
     () => waitForQuiescence(sender(200, () => quiet), a11yShape(400)),
-    /absolute ceiling/,
+    /ceiling \(checked between samples/,
   );
 });
 
@@ -118,4 +118,19 @@ test('a missing probe is still a hard error rather than a silent pass', async ()
     () => waitForQuiescence(sender(0, () => ({ probe: 'missing' }))),
     /Quiescence probe is missing/,
   );
+});
+
+test('ynvv: the ceiling is BETWEEN samples - one slow sample completes, then the ceiling fires, named (airhorn-ynvv)', async () => {
+  // The doc used to claim an ABSOLUTE ceiling; the code checks the deadline at the top of
+  // the loop, so a single 2s sample with a 400ms ceiling overshoots - and that is the
+  // honest semantic: the wait ends within timeoutMs of the last COMPLETED sample.
+  const started = Date.now();
+  await assert.rejects(
+    () => waitForQuiescence(sender(2000, () => quiet), { timeoutMs: 400, stateTimeoutMs: 0 }),
+    /ceiling/,
+    'after the slow sample completes, the ceiling must fire and be named',
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 1900, `the slow sample ran to completion before the ceiling fired (${elapsed}ms) - the ceiling is not absolute`);
+  assert.ok(elapsed < 3000, `but it fired at the next loop check, not never (${elapsed}ms)`);
 });
