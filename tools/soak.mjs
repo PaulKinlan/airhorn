@@ -440,6 +440,16 @@ export const audioSummaryLine = (samples, afterCycles, contextMin, contextMax) =
 
 export const exitCodeForSummary = (summary) => (summary.pass ? 0 : 1);
 
+// Row 5 of the tools/ sweep (batch D): zero checks is not zero failures - a run that
+// registered no checks measured nothing and must not pass. Pure so the pin drives it.
+export const summariseChecks = (checks) => {
+  const failures = checks.filter((entry) => !entry.pass);
+  return {
+    pass: failures.length === 0 && checks.length > 0,
+    failures: failures.map((entry) => `${entry.name}: ${entry.detail}`),
+  };
+};
+
 export const audioNodesReleased = (samples, afterCycles) => {
   const liveSourcesMax = Math.max(...samples.map((point) => point.liveSources));
   const liveOscillatorsMax = Math.max(...samples.map((point) => point.liveOscillators));
@@ -1149,11 +1159,7 @@ async function main() {
     );
 
     /* -------------------------------- report ------------------------------- */
-    const failures = checks.filter((entry) => !entry.pass);
-    const summary = {
-      pass: failures.length === 0,
-      failures: failures.map((entry) => `${entry.name}: ${entry.detail}`),
-    };
+    const summary = summariseChecks(checks);
 
     const report = {
       airhorn: {

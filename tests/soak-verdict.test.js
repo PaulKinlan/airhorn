@@ -23,7 +23,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { cycleHeapGrowth, offlineHeapGrowth, audioSummaryLine, exitCodeForSummary, heapGrowthDetail } from '../tools/soak.mjs';
+import { cycleHeapGrowth, offlineHeapGrowth, audioSummaryLine, exitCodeForSummary, heapGrowthDetail, summariseChecks } from '../tools/soak.mjs';
 import { storedBytesDrift, usageDrift } from '../tools/cache-growth.mjs';
 import { growthFromSeries } from '../tools/lib/endpoint-growth.mjs';
 
@@ -92,4 +92,11 @@ test('8ao4: the detail names the basis the growth was ACTUALLY computed from, in
   assert.match(many, /windowed-median basis/, 'with 4+ samples the basis is the windowed median and must say so');
   assert.doesNotMatch(many, /endpoints baseline .* -> after-cycles .* MB \(/,
     'the >=4-sample world must NOT label the growth as the endpoint delta - it is not');
+});
+
+
+test('a soak run with ZERO checks is not a pass (batch D row 5)', () => {
+  assert.equal(summariseChecks([]).pass, false, 'zero checks is a measurement of nothing');
+  assert.equal(summariseChecks([{ name: 'x', pass: true, detail: 'd' }]).pass, true);
+  assert.equal(summariseChecks([{ name: 'x', pass: false, detail: 'd' }]).pass, false);
 });

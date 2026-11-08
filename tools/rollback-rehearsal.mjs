@@ -917,9 +917,19 @@ async function main() {
   ].join('\n');
   fs.writeFileSync(path.join(OUT, 'report.txt'), report + '\n');
   reportWritten = true;   // the ledger is persisted: an EPIPE from here down is a DISPLAY failure, not a rehearsal failure (airhorn-nnbu)
+  if (checked.length === 0) {
+    console.log('\nNOT A REHEARSAL: zero steps carried an expectation, so nothing was checked - exiting nonzero rather than reporting a green nothing.');
+  }
   console.log(`\n${report}`);
-  process.exit(mismatches.length === 0 ? 0 : 1);
+  process.exit(rehearsalExitCode(checked.length, mismatches.length));
 }
+
+// Row 3 of the tools/ sweep (airhorn batch D): a rehearsal whose steps all parsed
+// expected=null used to print 'checks: 0, matched: 0' and exit 0 - the 7sfn shape
+// (zero measured, green exit) in the rehearsal. Zero checked steps is a rehearsal
+// that measured nothing, and it fails as itself.
+export const rehearsalExitCode = (checkedCount, mismatchCount) =>
+  checkedCount === 0 ? 1 : (mismatchCount === 0 ? 0 : 1);
 
 // Guard main() so importing the module (for the exported epipeExitCode) is pure - the
 // unguarded form ran a full browser drill on import (airhorn-fc98's lesson, applied here).

@@ -678,7 +678,12 @@ async function pressHorn(cdp, sessionId) {
   };
 }
 
-async function shot(cdp, sessionId, name) {
+// Row 2 of the tools/ sweep (airhorn batch D, coord's decision): a capture failure
+// returns null - NOT a thrown failure, because some scenarios legitimately carry no
+// image - but the null must not ride a green row unmarked: applyShotEvidenceGate
+// records the degraded evidence on the row, and a scenario that declares its shot
+// REQUIRED fails (FAILED) when the shot is absent.
+export async function shot(cdp, sessionId, name) {
   try {
     const { data } = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
     const file = path.join(OUT, `${name}.png`);
@@ -688,6 +693,21 @@ async function shot(cdp, sessionId, name) {
     return null;
   }
 }
+
+// The degraded-evidence gate, pure and exported for the pin. 'screenshot' (single) and
+// 'screenshots' (array) are the two shapes the rows carry.
+export const applyShotEvidenceGate = (row, shotsRequired) => {
+  if (!row || row.status === 'ERROR' || row.status === 'FAILED' || row.error) return row;
+  const missing = [];
+  if ('screenshot' in row && row.screenshot == null) missing.push('screenshot');
+  if (Array.isArray(row.screenshots) && row.screenshots.some((s) => s == null)) missing.push('screenshots');
+  if (missing.length === 0) return row;
+  const state = `degraded evidence: ${missing.join(', ')} could not be captured`;
+  if (shotsRequired) {
+    return { ...row, status: 'FAILED', screenshotState: state, error: `${state} - this scenario's shot is the evidence its claim rests on` };
+  }
+  return { ...row, screenshotState: state };
+};
 
 const EXPLAINS_RE = /offline|no connection|can.?t (?:reach|load|connect)|failed to load|unable to|retry|reconnect|try again|update available|new version|something went wrong|error/i;
 
@@ -740,7 +760,7 @@ const results = [];
 // relaunching a browser the host has already refused.
 let launchFailed = false;
 
-async function withBrowser(id, name, fn) {
+async function withBrowser(id, name, fn, mustBeTrue = [], shotsRequired = true) {
   if (launchFailed) {
     const result = { id, name, status: 'ERROR', error: 'not measured: the browser could not start earlier in this audit' };
     results.push(result);
@@ -767,7 +787,9 @@ async function withBrowser(id, name, fn) {
   }
   try {
     const collectors = makeCollectors(browser.cdp);
-    result = { id, name, status: 'OK', ...(await fn(browser, collectors)) };
+    result = applyShotEvidenceGate(
+      applyCoreFieldGate({ id, name, status: 'OK', ...(await fn(browser, collectors)) }, mustBeTrue),
+      shotsRequired);
   } catch (err) {
     result = { id, name, status: 'ERROR', error: String((err && err.message) || err) };
   } finally {
@@ -775,8 +797,8 @@ async function withBrowser(id, name, fn) {
   }
   results.push(result);
   const verdict = result.error
-    ? `ERROR ${result.error}`
-    : `renders=${result.renders} hornVisible=${result.hornVisible} hornUsable=${result.hornUsable} explains=${result.explainsItself}${result.measuredDocument ? ` doc=${result.measuredDocument}` : ''}`;
+    ? `${result.status === 'FAILED' ? 'FAILED' : 'ERROR'} ${result.error}`
+    : `renders=${result.renders} hornVisible=${result.hornVisible} hornUsable=${result.hornUsable} explains=${result.explainsItself}${result.measuredDocument ? ` doc=${result.measuredDocument}` : ''}${result.screenshotState ? ` | ${result.screenshotState}` : ''}`;
   console.log(`[${id}] ${name}\n  ${verdict}`);
 }
 
@@ -866,7 +888,7 @@ async function runAudit() {
       }
     } else {
     /* ---- 1. real offline after first load ---- */
-    if (want('offline')) await withBrowser('offline', 'offline after first load', async ({ cdp }, collectors) => {
+    if (want('offline')) await withBrowser('offline', 'offline after first load', ['navigationCompleted', 'renders', 'hornUsable'], async ({ cdp }, collectors) => {
       reset();
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
@@ -892,7 +914,7 @@ async function runAudit() {
     });
 
     /* ---- 2. lie-fi: cached navigation vs a navigation the precache does not cover ---- */
-    if (want('liefi')) await withBrowser('liefi', 'lie-fi (app-shell nav vs uncached subresource)', async ({ cdp }, collectors) => {
+    if (want('liefi')) await withBrowser('liefi', 'lie-fi (app-shell nav vs uncached subresource)', ['cachedShellWasAvailable'], async ({ cdp }, collectors) => {
       reset();
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
@@ -977,7 +999,7 @@ async function runAudit() {
     });
 
     /* ---- 3. service worker update while a page is open (and pressed) ---- */
-    if (want('update')) await withBrowser('update', 'SW update while page is open', async ({ cdp }, collectors) => {
+    if (want('update')) await withBrowser('update', 'SW update while page is open', ['autoReloaded', 'hornUsable'], async ({ cdp }, collectors) => {
       reset();
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
@@ -1059,7 +1081,7 @@ async function runAudit() {
     });
 
     /* ---- 4. storage-quota denial on a cache write ---- */
-    if (want('quota')) await withBrowser('quota', 'storage-quota denial on cache write', async ({ cdp }, collectors) => {
+    if (want('quota')) await withBrowser('quota', 'storage-quota denial on cache write', ['stillRenderedAfterFailedInstall', 'offlineNavigationCompleted', 'hornUsable'], async ({ cdp }, collectors) => {
       reset();
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
@@ -1109,7 +1131,8 @@ async function runAudit() {
     });
 
     /* ---- 5. blocked JS / CSS / font ---- */
-    if (want('blocked')) await withBrowser('blocked', 'blocked JS / CSS / font', async ({ cdp }, collectors) => {
+    if (want('blocked')) await withBrowser('blocked', 'blocked JS / CSS / font', ['renders'], /* shotsRequired */ false, // evidence is the measured subcases; the shot is supportive, and a degraded shot must not fail it
+      async ({ cdp }, collectors) => {
       reset();
       // Baseline: the same page with nothing blocked, so "degraded" is measured,
       // not guessed.
@@ -1195,7 +1218,7 @@ async function runAudit() {
     });
 
     /* ---- 6. corrupt cache state ---- */
-    if (want('corrupt')) await withBrowser('corrupt', 'corrupt cache state', async ({ cdp }, collectors) => {
+    if (want('corrupt')) await withBrowser('corrupt', 'corrupt cache state', ['renders', 'hornUsable', 'recoveredOnline', 'recoveredAfterSwUpdate'], async ({ cdp }, collectors) => {
       reset();
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
@@ -1415,8 +1438,34 @@ export function scenarioIdDrift(known, seen) {
 }
 
 export function auditExitCode(scenarios) {
-  return (scenarios || []).some((row) => row && (row.status === 'ERROR' || row.error)) ? 1 : 0;
+  return (scenarios || []).some((row) => row && (row.status === 'ERROR' || row.status === 'FAILED' || row.error)) ? 1 : 0;
 }
+
+// The top finding of the tools/ sweep (airhorn batch D, row 1): a scenario row was 'OK'
+// whenever the scenario function RETURNED - only a thrown error made ERROR - so a measured
+// failure field (renders: false, hornUsable: false) printed in the verdict line and the
+// audit exited 0. Each scenario now DECLARES the fields whose false means its own claim
+// failed, and this rule turns such a row into a named ERROR. An absent declared field is
+// unmeasured - also a failure, never a pass (the nxuv.14 shape). An 'unmeasurable: ...'
+// string in a gated field is the same shape wearing words (the v7ba string form).
+export const applyCoreFieldGate = (row, mustBeTrue = []) => {
+  if (!row || row.status === 'ERROR' || row.error) return row;
+  for (const field of mustBeTrue) {
+    const value = row[field];
+    // FAILED, not ERROR: a THROW means the scenario could not run; a measured-false
+    // core field means it ran and its claim failed. The report must not conflate them.
+    if (value === false) {
+      return { ...row, status: 'FAILED', error: `measured failure: ${field} is false - the scenario's own claim failed (the row used to stay OK and the audit exit 0)` };
+    }
+    if (value === undefined) {
+      return { ...row, status: 'FAILED', error: `unmeasured: this scenario declares ${field} as its claim but never produced it` };
+    }
+    if (typeof value === 'string' && value.startsWith('unmeasurable')) {
+      return { ...row, status: 'FAILED', error: `unmeasured: ${field} came back '${value.slice(0, 120)}' - a declared claim cannot pass as 'unmeasurable'` };
+    }
+  }
+  return row;
+};
 
 // Extracted from runAudit so a browser-free test can hand it a stubbed failing
 // scenario and check the row really lands in the file, not just in memory.
@@ -1466,7 +1515,7 @@ export function writeReport(scenarios, outDir = OUT) {
   const row = (r) => [
     r.id,
     r.name,
-    (r.status === 'ERROR' || r.error) ? 'ERROR' : (r.renders ? 'yes' : 'NO'),
+    r.status === 'FAILED' ? 'FAILED' : (r.status === 'ERROR' || r.error) ? 'ERROR' : (r.renders ? 'yes' : 'NO'),
     r.error ? '-' : (r.hornVisible ? 'yes' : 'NO'),
     r.error ? '-' : (r.hornUsable ? 'yes' : 'NO'),
     r.error
