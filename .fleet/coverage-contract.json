@@ -179,6 +179,12 @@
   "tests/gate-smoke.test.js",
   "tests/gate-map.test.js"
  ],
+ "tests/support/lock-spy.mjs": [
+  "tests/lock-spy.test.js"
+ ],
+ "tools/rollback-rehearsal.mjs": [
+  "tests/rollback-epipe.test.js"
+ ],
  "tools/idle-cost.mjs": [
   "tests/idle-cost-verdict.test.js"
  ],
