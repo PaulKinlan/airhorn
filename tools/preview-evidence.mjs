@@ -202,7 +202,11 @@ async function openBrowser(extraFlags = []) {
 
   const screenshot = async (file) => {
     const res = await send('Page.captureScreenshot', { format: 'png' });
-    fs.writeFileSync(path.join(outDir, file), Buffer.from(res.data, 'base64'));
+    const buf = Buffer.from(res.data, 'base64');
+    // Existence is not content (airhorn-nxuv.29): a 0-byte capture is a FAILED screenshot,
+    // and the old shape wrote it and let the existence check pass.
+    if (buf.length === 0) throw new Error(`zero-byte screenshot: ${file} - the capture produced nothing`);
+    fs.writeFileSync(path.join(outDir, file), buf);
     return file;
   };
 
@@ -468,6 +472,11 @@ export function assertPreviewEvidence(evidence, missing) {
   if (!evidence.checks.darkDetectorCanFail) throw new Error('dark detector negative control failed: forced-light was read as applied');
   if (!evidence.checks.offlinePlay || evidence.checks.offlinePlay.pressedWhileHeld !== 'true') {
     throw new Error('offline press did not sound the horn (aria-pressed not true)');
+  }
+  // airhorn-nxuv.29: a press is a press AND a release - a sticky-pressed horn passed the
+  // held check while never letting go.
+  if (evidence.checks.offlinePlay.released === 'true') {
+    throw new Error('offline press never RELEASED (aria-pressed still true after pointerup) - a sticky horn passes the held check but never lets go (airhorn-nxuv.29)');
   }
 }
 

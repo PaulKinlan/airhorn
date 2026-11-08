@@ -21,7 +21,7 @@ const goodEvidence = () => ({
     offlineBootFailureShown: false,
     darkApplied: true,
     darkDetectorCanFail: true,
-    offlinePlay: { pressedWhileHeld: 'true' },
+    offlinePlay: { pressedWhileHeld: 'true', released: 'false' },
   },
 });
 
@@ -47,4 +47,11 @@ test('nxuv.14: no interaction dispatched is UNMEASURED, not INP "None"', () => {
   assert.match(problems[0], /unmeasured, not "None"/);
   assert.deepEqual(measurePerfProblems({ swActive: true, interactionDispatched: true }), [],
     'a fully measured run has no structural problems');
+});
+
+test('nxuv.29: a sticky-pressed horn (never released) is a named failure', () => {
+  const sticky = goodEvidence();
+  sticky.checks.offlinePlay = { pressedWhileHeld: 'true', released: 'true' };
+  assert.throws(() => assertPreviewEvidence(sticky, []),
+    /never RELEASED/, 'held-true but never released must fail by name, not pass the held check');
 });

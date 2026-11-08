@@ -1178,7 +1178,11 @@ async function runAudit() {
         baselineHornSize: baseline.horn.present ? `${baseline.horn.width}x${baseline.horn.height}` : null,
         fonts: {
           requestedUrls: fontRequests,
-          webFontUsed: fontRequests.length > 0 || /@font-face/i.test(fontFace || ''),
+          // The fontRequests half ALONE carries this evidence (airhorn-nxuv.35): the old
+          // `|| /@font-face/i.test(computedFontFamily)` could never be true - a computed
+          // fontFamily never contains the string '@font-face' - so the regex guarded
+          // nothing. computedFontFamily is still reported below as context.
+          webFontUsed: fontRequests.length > 0,
           computedFontFamily: fontFace,
           note: fontRequests.length === 0
             ? 'no web font is requested; blocking fonts cannot affect this page'
