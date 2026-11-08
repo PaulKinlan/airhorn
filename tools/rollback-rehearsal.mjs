@@ -173,14 +173,20 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
 process.on('exit', reapAll);
 
 // A closed pipe is an exit path: take it THROUGH the exit hook instead of dying
-// with an unhandled EPIPE and leaving the browser behind.
+// with an unhandled EPIPE and leaving the browser behind. But the exit code must be
+// HONEST (airhorn-nnbu): exiting 0 on EPIPE before the ledger is written reports a
+// rehearsal that never completed as a success (`| head -1` green-lights nothing).
+// The only completed run is one whose report.txt is on disk; anything earlier exits 1.
+export const epipeExitCode = (reportWritten) => (reportWritten ? 0 : 1);
+let reportWritten = false;
+const epipeExit = () => { reapAll(); process.exit(epipeExitCode(reportWritten)); };
 for (const stream of [process.stdout, process.stderr]) {
   stream.on('error', (err) => {
-    if (err && err.code === 'EPIPE') { reapAll(); process.exit(0); }
+    if (err && err.code === 'EPIPE') { epipeExit(); }
   });
 }
 process.on('uncaughtException', (err) => {
-  if (err && err.code === 'EPIPE') { reapAll(); process.exit(0); }
+  if (err && err.code === 'EPIPE') { epipeExit(); }
   reapAll();
   console.error(err);
   process.exit(2);
@@ -910,12 +916,18 @@ async function main() {
     ...mismatches.map((m) => `MISMATCH [${m.drill}] ${m.step}\n  doc: ${m.expected}\n  saw: ${m.actual}`),
   ].join('\n');
   fs.writeFileSync(path.join(OUT, 'report.txt'), report + '\n');
+  reportWritten = true;   // the ledger is persisted: an EPIPE from here down is a DISPLAY failure, not a rehearsal failure (airhorn-nnbu)
   console.log(`\n${report}`);
   process.exit(mismatches.length === 0 ? 0 : 1);
 }
 
-main().catch((err) => {
-  console.error(err);
-  reapAll();
-  process.exit(2);
-});
+// Guard main() so importing the module (for the exported epipeExitCode) is pure - the
+// unguarded form ran a full browser drill on import (airhorn-fc98's lesson, applied here).
+const invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedAsScript) {
+  main().catch((err) => {
+    console.error(err);
+    reapAll();
+    process.exit(2);
+  });
+}
