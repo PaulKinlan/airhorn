@@ -322,13 +322,20 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
     const wrap = document.getElementById('installer');
     if (!wrap) return null;
     const b = wrap.querySelector('button');
-    const cs = getComputedStyle(wrap);
+    if (!b) return null;
+    // Read the BUTTON, never the wrapper (airhorn-nxuv.11): a wrap that is visible while the button inside it is
+    // display:none, zero-sized or pointer-events:none is not an affordance, and measuring the parent made all three
+    // read as fine. The rect is the only evidence that the thing would actually be painted where a user can hit it.
+    const cs = getComputedStyle(b);
+    const rect = b.getBoundingClientRect();
     return {
-      disabled: b ? b.disabled : null,
+      disabled: b.disabled,
       hasAvailableClass: wrap.classList.contains('available'),
+      display: cs.display,
       visibility: cs.visibility,
       pointerEvents: cs.pointerEvents,
-      text: b ? b.textContent.trim() : null,
+      rect: { width: rect.width, height: rect.height },
+      text: b.textContent.trim(),
     };
   })()`);
   ev.screenshot = await cdp.screenshot(`install-${label}.png`);
@@ -441,6 +448,25 @@ async function main() {
 // come from src/install.js: disabled=true until beforeinstallprompt fires, which
 // is also what adds the 'available' class - so over HTTP the honest contrast is
 // 'prompt never fired AND the button stayed disabled AND never got available'.
+/**
+ * Why this button would not be hit by a user, or null if it would (airhorn-nxuv.11).
+ *
+ * A button can be present in the DOM and still be unclickable in four independent ways, and checking two of them was
+ * how a display:none or zero-sized button kept passing: `visibility` stays 'visible' under display:none, and neither
+ * property notices that the element has no painted box at all. Both legs use this one function so the two halves of
+ * the contrast cannot drift into asking different questions again.
+ */
+export function affordanceProblem(btn) {
+  if (btn.display === 'none') return 'display is none, so nothing is painted';
+  if (btn.visibility !== 'visible') return `visibility is ${btn.visibility}`;
+  if (btn.pointerEvents === 'none') return 'pointer-events is none, so a click would pass through it';
+  const rect = btn.rect || {};
+  if (!(Number(rect.width) > 0 && Number(rect.height) > 0)) {
+    return `it has no painted box (rect ${JSON.stringify(rect)}) - zero pixels cannot be clicked`;
+  }
+  return null;
+}
+
 export function assertInstallEvidence(httpEv, httpsEv) {
   const httpsBtn = httpsEv.installButton;
   if (httpsBtn === null || httpsBtn === undefined || httpsBtn.disabled === null) {
@@ -449,14 +475,24 @@ export function assertInstallEvidence(httpEv, httpsEv) {
   if (httpsBtn.disabled !== false || !httpsBtn.hasAvailableClass) {
     throw new Error('Install button not enabled over HTTPS: ' + JSON.stringify(httpsBtn));
   }
-  if (httpsBtn.visibility !== 'visible' || httpsBtn.pointerEvents === 'none') {
-    throw new Error('Install button enabled over HTTPS but not clickable/visible (visibility='
-      + httpsBtn.visibility + ', pointerEvents=' + httpsBtn.pointerEvents + ') - an affordance the user cannot use');
+  const httpsUnusable = affordanceProblem(httpsBtn);
+  if (httpsUnusable) {
+    throw new Error('Install button enabled over HTTPS but not clickable/visible: ' + httpsUnusable
+      + ' (visibility=' + httpsBtn.visibility + ', pointerEvents=' + httpsBtn.pointerEvents
+      + ', display=' + httpsBtn.display + ', rect=' + JSON.stringify(httpsBtn.rect)
+      + ') - an affordance the user cannot use');
   }
   if (httpEv.installPrompt.fired) throw new Error('the insecure-HTTP contrast fired the prompt - the contrast is invalid');
   const httpBtn = httpEv.installButton;
   if (httpBtn === null || httpBtn === undefined || httpBtn.disabled === null) {
     throw new Error('install button unmeasurable over HTTP (no #installer wrap or no button in it) - the contrast measures nothing');
+  }
+  // The HTTP leg collects the SAME evidence (same evaluate, same shape) so a future edit cannot measure less on one
+  // side than the other and call the contrast done. Its polarity is inverted on purpose - over HTTP an enabled,
+  // paintable button is the defect - so it asks the shared helper only whether the evidence exists.
+  if (httpBtn.display === undefined || httpBtn.rect === undefined) {
+    throw new Error('install button evidence over HTTP is incomplete (display/rect not collected): '
+      + JSON.stringify(httpBtn) + ' - the two legs must measure the same properties');
   }
   if (httpBtn.disabled !== true || httpBtn.hasAvailableClass) {
     throw new Error('Install button USABLE over insecure HTTP: ' + JSON.stringify(httpBtn)
