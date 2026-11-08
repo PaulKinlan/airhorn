@@ -105,7 +105,55 @@ function loadWorker({ fetchImpl } = {}) {
   return { sandbox, caches, instances, warnings, listeners };
 }
 
-// A Response that a real fetch would return after following a redirect: the
+/*
+ * airhorn-awhn: the precache POOL. public/sw.js:188 uses mapPooled with PRECACHE_CONCURRENCY = 6 (the 86mz work took the
+ * install from 484 ms serial to 121 ms pooled), and nothing committed pinned it - a refactor back to a serial loop left
+ * every suite green. The observable is not the constant or a counter: it is how many fetches the pool actually keeps in
+ * flight at once, which is what the install time actually depends on. So the stub below counts overlapping fetches and
+ * the assertion is on the MAXIMUM observed overlap.
+ *
+ * Deliberately tolerant about the exact number: a limit of 3 is not the defect, unbounded fan-out is not the defect
+ * either - one-at-a-time is. The assertion is "more than one", with the measured peak in the message so a lane reading a
+ * failure learns what the pool really did.
+ */
+test('the install precache keeps more than one request in flight (airhorn-awhn)', async () => {
+  let inFlight = 0;
+  let peak = 0;
+  let started = 0;
+  const settleAfter = 5;
+  const worker = loadWorker({
+    fetchImpl: (request) => new Promise((resolve) => {
+      started += 1;
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      setTimeout(() => {
+        inFlight -= 1;
+        // A response that vouches for the URL it was requested as (sameUrlResponse), because putVerified refuses
+        // anything whose .url does not match the pathname it would be stored under - and this test must fail on the
+        // POOL, not on the redirect guard.
+        const requested = new URL(request.url ?? String(request), ORIGIN);
+        resolve(sameUrlResponse(ORIGIN + requested.pathname, `bytes for ${requested.pathname}`));
+      }, settleAfter);
+    }),
+  });
+
+  let waited;
+  for (const listener of worker.listeners.install) {
+    listener({ waitUntil: (promise) => { waited = promise; } });
+  }
+  assert.ok(waited, 'the install handler must register work with waitUntil');
+  await Promise.race([
+    waited,
+    new Promise((resolve, reject) => setTimeout(() => reject(new Error('the install precache never settled - the pool is stuck')), 15000)),
+  ]);
+
+  assert.ok(started >= 2, `the install must fetch its precache list, started ${started}`);
+  assert.ok(peak > 1, `the precache pool must keep more than one request in flight; peak was ${peak} of ${started} - a `
+    + 'serial loop is a measuring-invisible regression (the 86mz work took install from 484 ms to 121 ms), and this '
+    + 'assertion is the only thing that notices it');
+});
+
+// A Response that a real fetch would return after following a redirect: the// A Response that a real fetch would return after following a redirect: the
 // browser marks it redirected and leaves .url at the FINAL address.
 function redirectedResponse(finalUrl, body = 'poison') {
   const response = new Response(body, { status: 200, headers: { 'content-type': 'text/plain' } });

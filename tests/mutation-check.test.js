@@ -21,6 +21,63 @@ import {
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tool = path.join(root, 'tools', 'mutation-check.mjs');
 
+/* --- a refusal that would otherwise be unobservable is pinned (airhorn-1vfh, airhorn-lpgh) ---- */
+
+test('no start, but failures reported: never a caught mutant (airhorn-1vfh)', () => {
+  // The reporter can see a run where failures were reported but no test ever STARTED. That is the exact combination
+  // that produced false "caught" verdicts before the rule existed, and until now the refusal was LIVE but UNPINNED:
+  // deleting it left every test green, because no real suite produces the shape by accident. So it is driven here
+  // against the classifier that makes the decision, with the honest pair as a control so this cannot pass vacuously.
+  const noStart = classifyRun({
+    report: { driver: { importFailed: false }, realTests: 2, realFailed: 1, startedTests: 0, wrapperEvents: 0, failing: ['x'] },
+    exitCode: 1,
+  });
+  assert.equal(noStart.mode, 'threw-outside-a-test',
+    `a failure with no started test must never be scored caught, got ${JSON.stringify(noStart)}`);
+  assert.match(noStart.problem, /no test ever STARTED/);
+  assert.notEqual(noStart.rc, 1, 'and it must not carry the caught exit code');
+
+  // Control: the same counts WITH a started test are a caught mutant - else the assertion above could be satisfied
+  // by refusing every failure.
+  const caught = classifyRun({
+    report: { driver: { importFailed: false }, realTests: 2, realFailed: 1, startedTests: 1, wrapperEvents: 0, failing: ['x'] },
+    exitCode: 1,
+  });
+  assert.equal(caught.mode, 'caught');
+  assert.equal(caught.rc, 1);
+});
+
+test('--dry-run writes nothing and runs nothing, and the same command without it does mutate (airhorn-lpgh)', () => {
+  // The flag was parsed and stored and then never read, so a caller asking for a rehearsal got the real mutation, the
+  // real suite run and the real restore. This pins the plan-only contract end to end, and the control run proves the
+  // fixture is otherwise capable of mutating - otherwise "the file did not change" would be satisfied by a broken tool.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-lpgh-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    const subject = path.join(tmp, 'src', 'subject.js');
+    const original = 'export const f = (n) => n + 1;\n';
+    fs.writeFileSync(subject, original);
+    fs.writeFileSync(path.join(tmp, 'green.mjs'), "import test from 'node:test';\ntest('green', () => {});\n");
+    const run = (...extra) => spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', 'n + 1', '--to', 'n + 2', '--suite', 'green.mjs', ...extra], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+
+    const dry = run('--dry-run');
+    assert.equal(dry.status, 0, `a clean dry run exits 0: ${dry.stdout}${dry.stderr}`);
+    assert.match(dry.stdout, /dry run - nothing was written and no suite was run/);
+    assert.match(dry.stdout, /would mutate src\/subject\.js/);
+    assert.match(dry.stdout, /would then run green\.mjs/);
+    assert.match(dry.stdout, /would restore src\/subject\.js/);
+    assert.doesNotMatch(dry.stdout, /mutant applied/, 'a dry run must not claim it applied anything');
+    assert.doesNotMatch(dry.stdout, /verdict:/, 'and must not produce a verdict - it measured nothing');
+    assert.equal(fs.readFileSync(subject, 'utf8'), original, 'the file must be byte-identical after a dry run');
+
+    const real = run();
+    assert.match(real.stdout, /mutant applied/, 'the control run must really mutate, or the check above proves nothing');
+    assert.equal(fs.readFileSync(subject, 'utf8'), original, 'and it restores the file afterwards');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 /* --- the guards: a mutation that did not apply is an error, never a result ---- */
 
 test('applyMutation replaces exactly one occurrence', () => {
