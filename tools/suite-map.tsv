@@ -116,6 +116,7 @@ tools/merge-suite-map.mjs	tests/suite-map-merge.test.js
 .gitattributes	tests/suite-map-merge.test.js
 tests/suite-map-merge.test.js	tests/suite-map-merge.test.js
 tests/gate-conf-merge.test.js	tests/gate-conf-merge.test.js
+tests/webmcp-refusal-bound.test.js	tests/webmcp-refusal-bound.test.js
 # tools/guarded-call.mjs turns "the suite really calls the tested enforcer, and
 # nothing can swallow its throw" into a question about the syntax tree
 # (airhorn-6829). Its hostile worlds - deleted, commented, stringified, shadowed,

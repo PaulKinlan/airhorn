@@ -17,6 +17,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { refusalMessageViolations } from './support/webmcp-refusals.mjs';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
 import { awaitSocketOpen } from './cdp-command-bound.mjs';
@@ -629,21 +630,13 @@ async function run() {
           throw new Error(`${entry.label} should not have looped: ${JSON.stringify(entry.result)}`);
         }
       }
-      // An unmeasurable state must fail AS ITSELF (airhorn-mhhz, airhorn-5bvj): a refusal
-      // that carries a code but no message used to crash this line with "Cannot read
-      // properties of undefined (reading 'length')", which reads as a harness bug rather than
-      // as the product defect it is - an agent told "invalid_input" and nothing else has
-      // nothing to act on. "No message" includes a message with no CONTENT: a type-only check
-      // accepted error:"" and error:"   ", which are the same defect wearing a string. The
-      // test is a TRIM-based blank test rather than a length test, because whitespace is what
-      // a template produced around an empty value looks like; trimming is used ONLY to decide
-      // presence, never to change the value that the 200-character bound below measures.
-      const hasUsableMessage = typeof entry.result.error === 'string' && entry.result.error.trim() !== '';
-      if (entry.result.code && !hasUsableMessage) {
-        throw new Error(`${entry.label} was refused with code ${JSON.stringify(entry.result.code)} but carried no usable error message (blank or absent, got ${JSON.stringify(entry.result.error ?? null)})`);
-      }
-      if (entry.result.code && entry.result.error.length > 200) {
-        throw new Error(`${entry.label} returned a ${entry.result.error.length}-character error message`);
+      // The message contract lives in tests/support/webmcp-refusals.mjs (pure, pinned
+      // browser-free): an unmeasurable state fails AS ITSELF (airhorn-mhhz, airhorn-5bvj),
+      // blank-but-present counts as no message, and the length bound is NOT gated on the
+      // refusal carrying a code (airhorn-g0qr.13 - a code-less refusal used to carry an
+      // unbounded message through every check).
+      for (const violation of refusalMessageViolations(entry.label, entry.result)) {
+        throw new Error(violation);
       }
     }
 
