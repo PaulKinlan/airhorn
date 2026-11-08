@@ -410,6 +410,14 @@ const instrumentation = (mutantScript) => `
 export const cycleHeapGrowth = (heapSeries, baselineBytes, afterCyclesBytes) =>
   growthFromSeries(heapSeries, baselineBytes, afterCyclesBytes);
 
+// The heap check's evidence line. It MUST print the anchors the growth is measured from
+// (airhorn-karx): with few samples the growth is the TRUE endpoints (baseline vs the
+// quiesced after-cycles sample), and a detail that omits them cannot be recomputed by a
+// reader - the summary's own evidence was incomplete.
+export const heapGrowthDetail = (heapSeries, growthBytes, budgetMb, monotonic, baselineBytes, afterCyclesBytes) =>
+  `${heapSeries.map((bytes) => mb(bytes)).join(' -> ')} MB, growth ${mb(growthBytes)} MB ` +
+  `(endpoints baseline ${mb(baselineBytes)} MB -> after-cycles ${mb(afterCyclesBytes)} MB; budget ${budgetMb} MB, monotonic=${monotonic})`;
+
 export const offlineHeapGrowth = (offlineHeap) =>
   offlineHeap.length ? growthFromSeries(offlineHeap, offlineHeap[0], offlineHeap[offlineHeap.length - 1]) : 0;
 
@@ -920,8 +928,7 @@ async function main() {
     const heapCheck = check(
       'retained heap does not grow across the cycles',
       heapGrowth < heapBudget && !heapMonotonic,
-      `${heapSeries.map((bytes) => mb(bytes)).join(' -> ')} MB, growth ${mb(heapGrowth)} MB ` +
-      `(budget ${options.heapBudgetMb} MB, monotonic=${heapMonotonic})`,
+      heapGrowthDetail(heapSeries, heapGrowth, options.heapBudgetMb, heapMonotonic, baseline.heapUsed, afterCycles.heapUsed),
     );
 
     const audioNodes = audioNodesReleased(samples, afterCycles);

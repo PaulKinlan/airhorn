@@ -23,7 +23,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { cycleHeapGrowth, offlineHeapGrowth, audioSummaryLine, exitCodeForSummary } from '../tools/soak.mjs';
+import { cycleHeapGrowth, offlineHeapGrowth, audioSummaryLine, exitCodeForSummary, heapGrowthDetail } from '../tools/soak.mjs';
 import { storedBytesDrift, usageDrift } from '../tools/cache-growth.mjs';
 import { growthFromSeries } from '../tools/lib/endpoint-growth.mjs';
 
@@ -71,4 +71,14 @@ test('(c) cache-growth usage: a null estimate is NOT MEASURED, not a zero drift'
   const measured = usageDrift([100, 100]);
   assert.equal(measured.measured, true);
   assert.equal(measured.growth, 0);
+});
+
+test('karx: the heap detail prints the anchors the growth is measured from (airhorn-karx)', () => {
+  // cycleHeapGrowth falls back to the TRUE endpoints (baseline, after-cycles) below four
+  // samples - a detail that omits them cannot be recomputed by a reader.
+  const MB = 1024 * 1024;
+  const detail = heapGrowthDetail([10 * MB, 12 * MB], 2 * MB, 16, false, 10 * MB, 12 * MB);
+  assert.match(detail, /endpoints baseline 10\.00 MB -> after-cycles 12\.00 MB/,
+    `the endpoint anchors must be printed, or the growth number is unverifiable: ${detail}`);
+  assert.match(detail, /growth 2\.00 MB/);
 });
