@@ -96,3 +96,80 @@ test('everything outside the block survives a union verbatim (comments, the runn
   assert.ok(res.stdout.includes('# the z4cn rationale comment'), 'a comment outside the block must survive');
   assert.ok(res.stdout.includes('FAST_GATE_RUNNER="node --test --test-reporter=tap"'), 'the runner pin must survive');
 });
+
+/*
+ * Import purity (the airhorn-fc98 class, seen FOUR times: soak, the nnbu probe,
+ * preview-evidence, measure-perf - each found by a human, each cost a round):
+ * a tool that tests import must be IMPORT-PURE, so its entry point - main() or
+ * any top-level browser/server/child work - must sit behind an invoked-as-script
+ * guard. This scans the tools the suites actually import (the scope coord set:
+ * policing the whole repo would cry wolf) and fails when an imported tool calls
+ * main() with no recognized guard.
+ *
+ * Recognized guard idioms (the codebase already uses four, all equivalent):
+ *   if (invokedAsScript) ... / if (isMain) ... /
+ *   process.argv[1] compared with fileURLToPath(import.meta.url) (either order).
+ * A genuinely run-only script is out of scope BY CONSTRUCTION (no test imports
+ * it); the failure message names the two honest resolutions.
+ */
+test('tools that tests import never run main() unguarded (the fc98 class)', () => {
+  const testsDir = path.join(root, 'tests');
+  const importedTools = new Set();
+  const importRe = /from\s+['"]\.\.\/(tools\/[a-zA-Z0-9./_-]+\.mjs)['"]/g;
+  for (const entry of fs.readdirSync(testsDir)) {
+    if (!/\.test\.(js|mjs)$/.test(entry)) continue;
+    const src = fs.readFileSync(path.join(testsDir, entry), 'utf8');
+    for (const m of src.matchAll(importRe)) importedTools.add(m[1]);
+  }
+  assert.ok(importedTools.size > 5, 'the scan must find the real import set, not an empty one');
+
+  // A top-level main() invocation: `main()` / `main().catch(...)` / `await main()`,
+  // at line start - the entry point shape every incident had.
+  // Call shapes seen in the tree: `main()`, `await main()`, `const code = main()`,
+  // `process.exitCode = await main()` - all at line start (comments and prose
+  // mentions start with '*' or '//' and never match).
+  const mainCallRe = /(^|\n)\s*(?:(?:const|let|var)\s+\w+|[\w.]+)?\s*=?\s*(?:await\s+)?main\s*\(\s*\)/g;
+  // The guard must WRAP the call, not merely exist in the file: a probe that
+  // neutered 'if (invokedAsScript)' to 'if (false)' left the declaration text
+  // behind and a presence-check passed it. Recognized guard tokens (the tree's
+  // five idioms): invokedAsScript / isMain / invokedDirectly / an argv[1] or
+  // import.meta.url comparison inline.
+  const guardToken = /invokedAsScript|\bisMain\b|invokedDirectly|argv\[1\]|import\.meta\.url/;
+  // A call is guarded when it sits INSIDE the block of an if whose condition carries
+  // a guard token. Indentation is unreliable (cache-growth's guarded call is at column
+  // 0) and a windowed nearest-if is unreliable (mutation-check's guard block is ~1000
+  // chars of signal handlers, so the nearest if to its call is an unrelated inner one),
+  // so: take the LAST guard-token if before the call and require its block to be still
+  // open at the call - no net brace close between them. Heuristic, documented: braces
+  // inside strings/comments in that window could skew the balance; the tree's five
+  // idioms all balance.
+  const isGuardedCall = (src, callIndex) => {
+    const before = src.slice(0, callIndex);
+    // Conditions allow ONE level of nested parens: invokedDirectly(), fileURLToPath(...).
+    const guardIfs = [...before.matchAll(/if\s*\(((?:[^()]|\([^()]*\))*)\)\s*\{/g)].filter((m) => guardToken.test(m[1]));
+    const guard = guardIfs[guardIfs.length - 1];
+    if (!guard) return false;
+    const between = src.slice(guard.index + guard[0].length, callIndex);
+    const opens = (between.match(/\{/g) || []).length;
+    const closes = (between.match(/\}/g) || []).length;
+    return closes <= opens;
+  };
+
+  const offenders = [];
+  for (const rel of importedTools) {
+    const file = path.join(root, rel);
+    if (!fs.existsSync(file)) continue; // imports of pending tools are the map's problem
+    const src = fs.readFileSync(file, 'utf8');
+    let unguarded = false;
+    for (const m of src.matchAll(mainCallRe)) {
+      const idx = m.index + m[0].indexOf('main');
+      if (/function\s*$/.test(src.slice(Math.max(0, m.index - 30), m.index))) continue; // the declaration, not a call
+      if (!isGuardedCall(src, m.index)) unguarded = true;
+    }
+    if (unguarded) offenders.push(rel);
+  }
+  assert.deepEqual(offenders, [],
+    `tools imported by tests must not run main() at import (the fc98 class). ` +
+    `Fix by gating the entry: const invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); if (invokedAsScript) main()... ` +
+    `- or, if the tool is genuinely run-only, stop importing it from tests. Offenders: ${offenders.join(', ')}`);
+});
