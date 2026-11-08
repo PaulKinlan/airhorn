@@ -1668,24 +1668,33 @@ test('tools that tests import never run main() unguarded (the fc98 class)', () =
   assert.ok(importedTools.size > 5, 'the scan must find the real import set, not an empty one');
 
   // A top-level main() invocation: `main()` / `main().catch(...)` / `await main()`,
-  // at any indent - the entry point shape every incident had.
-  const mainCallRe = /(^|\n)\s*(?:await\s+)?main\s*\(\s*\)/;
-  // The guard idioms, named so a failure message can teach the pattern.
-  const guardRes = [
-    /if\s*\(\s*invokedAsScript\s*\)/,
-    /if\s*\(\s*isMain\s*\)/,
-    /argv\[1\][\s\S]{0,200}?import\.meta\.url/,
-    /import\.meta\.url[\s\S]{0,200}?argv\[1\]/,
-  ];
+  // at line start - the entry point shape every incident had.
+  const mainCallRe = /(^|\n)\s*(?:await\s+)?main\s*\(\s*\)/g;
+  // The guard must WRAP the call, not merely exist in the file: a probe that
+  // neutered 'if (invokedAsScript)' to 'if (false)' left the declaration text
+  // behind and a presence-check passed it. Recognized guard tokens (the tree's
+  // five idioms): invokedAsScript / isMain / invokedDirectly / an argv[1] or
+  // import.meta.url comparison inline.
+  const guardToken = /invokedAsScript|\bisMain\b|invokedDirectly|argv\[1\]|import\.meta\.url/;
+  const isGuardedCall = (src, callIndex) => {
+    const before = src.slice(Math.max(0, callIndex - 400), callIndex);
+    const ifs = [...before.matchAll(/if\s*\(([^)]*)\)/g)];
+    const nearest = ifs[ifs.length - 1];
+    return Boolean(nearest && guardToken.test(nearest[1]));
+  };
 
   const offenders = [];
   for (const rel of importedTools) {
     const file = path.join(root, rel);
     if (!fs.existsSync(file)) continue; // imports of pending tools are the map's problem
     const src = fs.readFileSync(file, 'utf8');
-    if (!mainCallRe.test(src)) continue;   // no entry call: import-pure by shape
-    if (guardRes.some((re) => re.test(src))) continue; // a recognized guard gates it
-    offenders.push(rel);
+    let unguarded = false;
+    for (const m of src.matchAll(mainCallRe)) {
+      const idx = m.index + m[0].indexOf('main');
+      if (/function\s*$/.test(src.slice(Math.max(0, m.index - 30), m.index))) continue; // the declaration, not a call
+      if (!isGuardedCall(src, m.index)) unguarded = true;
+    }
+    if (unguarded) offenders.push(rel);
   }
   assert.deepEqual(offenders, [],
     `tools imported by tests must not run main() at import (the fc98 class). ` +
