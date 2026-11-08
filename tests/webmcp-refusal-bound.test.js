@@ -2,6 +2,7 @@
 // carries a code. Drives the REAL predicate the browser suite uses
 // (tests/support/webmcp-refusals.mjs), browser-free.
 
+import fs from 'node:fs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { refusalMessageViolations, REFUSAL_MESSAGE_MAX } from './support/webmcp-refusals.mjs';
@@ -27,4 +28,16 @@ test('well-formed refusals pass: coded+short, code-less+short, no error at all',
   assert.deepEqual(refusalMessageViolations('ok1', { code: 'invalid_input', error: 'nope' }), []);
   assert.deepEqual(refusalMessageViolations('ok2', { error: 'short but code-less' }), []);
   assert.deepEqual(refusalMessageViolations('ok3', {}), []);
+});
+
+// The call-site pin (coord's requirement: the pin must not pass while the suite ignores
+// the predicate). Text-level, and honest about what that proves: the suite invokes the
+// shared predicate and does not carry the old inline gated form. It does NOT prove the
+// loop's wiring beyond that - the browser suite itself remains the behavioural proof.
+test('the browser suite drives the shared predicate (call-site pin)', () => {
+  const suite = fs.readFileSync(new URL('./webmcp-browser.test.mjs', import.meta.url), 'utf8');
+  assert.match(suite, /refusalMessageViolations\(entry\.label, entry\.result\)/,
+    'the hostile-input loop must call the shared predicate');
+  assert.doesNotMatch(suite, /entry\.result\.code && entry\.result\.error\.length/,
+    'the old code-gated inline bound must not return');
 });
