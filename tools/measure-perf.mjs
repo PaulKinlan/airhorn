@@ -36,6 +36,20 @@ const mimeTypes = {
   '.ico': 'image/x-icon',
 };
 
+// The verdict over what was ACTUALLY measured, pure and exported so the pin drives it
+// (airhorn-nxuv.13/.14): a repeat load with no SW is network/disk, not 'SW-cached'; and an
+// INP figure with no interaction dispatched is unmeasured, not 'None'. These feed the
+// existing measurementExitCode mechanism (airhorn-lmlu), not a parallel one.
+export const repeatLoadLabel = (swActive) =>
+  swActive ? 'Repeat (SW-cached) Load' : 'Repeat (no SW - network/disk) Load';
+
+export const measurePerfProblems = ({ swActive, interactionDispatched }) => {
+  const problems = [];
+  if (!swActive) problems.push('repeat load: the service worker never activated - this is a network/disk load, NOT SW-cached (airhorn-nxuv.13)');
+  if (!interactionDispatched) problems.push('INP: no interaction was dispatched (no .horn hit area) - the figure is unmeasured, not "None" (airhorn-nxuv.14)');
+  return problems;
+};
+
 async function main() {
   if (!fs.existsSync(distDir)) {
     throw new Error('dist directory does not exist. Run build first.');
@@ -231,7 +245,10 @@ async function main() {
       `,
       returnByValue: true
     });
-    if (boxEval.result.value) {
+    // One dispatch decision for BOTH pages (airhorn-nxuv.14): if the horn has no hit area,
+    // no interaction happens on either page, and the INP figure is unmeasured - not 'None'.
+    const interactionDispatched = Boolean(boxEval.result.value);
+    if (interactionDispatched) {
       const { x, y } = boxEval.result.value;
       await send('Input.dispatchMouseEvent', {
         type: 'mousePressed',
@@ -270,7 +287,7 @@ async function main() {
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
     await new Promise(r => setTimeout(r, 1000));
 
-    if (boxEval.result.value) {
+    if (interactionDispatched) {
       const { x, y } = boxEval.result.value;
       await send('Input.dispatchMouseEvent', {
         type: 'mousePressed',
@@ -356,15 +373,15 @@ async function main() {
         'Request Provenance': summarizeResponses(coldResponses),
         'First Paint (FP)': coldMetrics.fp !== null ? `${Math.round(coldMetrics.fp)} ms` : 'None',
         'LCP': formatLcp(coldMetrics),
-        'INP (p98)': computeInp(coldMetrics),
+        'INP (p98)': interactionDispatched ? computeInp(coldMetrics) : 'unmeasured (no interaction dispatched)',
         'CLS': coldMetrics.cls.toFixed(4)
       },
-      'Repeat (SW-cached) Load': {
+      [repeatLoadLabel(swActive)]: {
         'Transferred Bytes': `${repeatTransferred} B`,
         'Request Provenance': summarizeResponses(repeatResponses),
         'First Paint (FP)': repeatMetrics.fp !== null ? `${Math.round(repeatMetrics.fp)} ms` : 'None',
         'LCP': formatLcp(repeatMetrics),
-        'INP (p98)': computeInp(repeatMetrics),
+        'INP (p98)': interactionDispatched ? computeInp(repeatMetrics) : 'unmeasured (no interaction dispatched)',
         'CLS': repeatMetrics.cls.toFixed(4)
       }
     });
@@ -382,7 +399,9 @@ async function main() {
       for (const finding of notMeasured) console.log(`  - ${finding}`);
       console.log('Exiting nonzero so an unmeasured report cannot be read as a green one.');
     }
-    process.exitCode = measurementExitCode(notMeasured);
+    const structuralProblems = measurePerfProblems({ swActive, interactionDispatched });
+    for (const problem of structuralProblems) console.log(`  - ${problem}`);
+    process.exitCode = measurementExitCode([...notMeasured, ...structuralProblems]);
 
   } finally {
     try { ws.close(); } catch { /* already closed */ }
@@ -400,7 +419,10 @@ async function main() {
   }
 }
 
-main().catch(err => {
+// Guard main() so importing the module (for the exported pure verdict functions) is pure -
+// the unguarded form launches Chrome at import (the airhorn-fc98 lesson).
+const invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedAsScript) main().catch(err => {
   console.error(err);
   process.exit(1);
 });

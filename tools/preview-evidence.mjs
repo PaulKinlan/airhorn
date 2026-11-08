@@ -202,7 +202,11 @@ async function openBrowser(extraFlags = []) {
 
   const screenshot = async (file) => {
     const res = await send('Page.captureScreenshot', { format: 'png' });
-    fs.writeFileSync(path.join(outDir, file), Buffer.from(res.data, 'base64'));
+    const buf = Buffer.from(res.data, 'base64');
+    // Existence is not content (airhorn-nxuv.29): a 0-byte capture is a FAILED screenshot,
+    // and the old shape wrote it and let the existence check pass.
+    if (buf.length === 0) throw new Error(`zero-byte screenshot: ${file} - the capture produced nothing`);
+    fs.writeFileSync(path.join(outDir, file), buf);
     return file;
   };
 
@@ -451,17 +455,35 @@ async function main() {
   // Required captures must exist; installability/WebMCP shortfalls are recorded, not fatal.
   const required = ['horn-light.png', 'horn-dark.png', 'horn-320.png', 'horn-offline.png'];
   const missing = required.filter(f => !fs.existsSync(path.join(outDir, f)));
+  assertPreviewEvidence(evidence, missing);
+  console.log('preview-evidence: PASS');
+}
+
+// The verdict, pure and exported so the pin drives the real assertions with stubbed
+// evidence (airhorn-nxuv.12: offlineBootFailureShown was collected and printed but never
+// gated - a page showing the boot-crash banner offline passed).
+export function assertPreviewEvidence(evidence, missing) {
   if (missing.length) throw new Error('missing captures: ' + missing.join(', '));
   if (!evidence.checks.offlineRenders) throw new Error('offline reload did not render the horn');
+  if (evidence.checks.offlineBootFailureShown) {
+    throw new Error('offline reload SHOWED the boot-failure banner - the shell boot failed offline, which is exactly what this check exists to catch (airhorn-nxuv.12)');
+  }
   if (!evidence.checks.darkApplied) throw new Error('dark scheme did not change the page (detector says not applied)');
   if (!evidence.checks.darkDetectorCanFail) throw new Error('dark detector negative control failed: forced-light was read as applied');
   if (!evidence.checks.offlinePlay || evidence.checks.offlinePlay.pressedWhileHeld !== 'true') {
     throw new Error('offline press did not sound the horn (aria-pressed not true)');
   }
-  console.log('preview-evidence: PASS');
+  // airhorn-nxuv.29: a press is a press AND a release - a sticky-pressed horn passed the
+  // held check while never letting go.
+  if (evidence.checks.offlinePlay.released === 'true') {
+    throw new Error('offline press never RELEASED (aria-pressed still true after pointerup) - a sticky horn passes the held check but never lets go (airhorn-nxuv.29)');
+  }
 }
 
-main().catch(err => {
+// Guard main() so importing the module (for the exported pure verdict functions) is pure -
+// the unguarded form launches Chrome at import (the airhorn-fc98 lesson).
+const invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedAsScript) main().catch(err => {
   console.error(err);
   process.exit(1);
 });

@@ -158,6 +158,7 @@ tools/lib/update-outcome.mjs	tests/update-outcome.test.js
 # top of the gate-smoke row every tools/* file already selects (airhorn-w1wh review).
 tools/install-https-proof.mjs	tests/gate-smoke.test.js tests/test-support.test.js
 tests/resilience-probe.test.js	tests/resilience-probe.test.js
+tests/tool-verdicts.test.js	tests/tool-verdicts.test.js
 tests/resilience-report.test.js	tests/resilience-report.test.js
 tools/resilience-audit.mjs	tests/resilience-probe.test.js tests/resilience-report.test.js
 # The SW/offline suite covers the PWA surface (it verifies sw caching + manifest contents in dist)

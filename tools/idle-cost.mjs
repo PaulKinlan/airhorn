@@ -118,6 +118,14 @@ export const afterBlastSilentPass = (b) =>
 // asserted, so a horn that never started (a silent start() failure) stopped in 0 ms and D
 // passed GREEN. The playing-before-hide fact is part of the verdict, and when it is false
 // the verdict fails as itself, named - never silently green.
+// One boundary snapshot of the idle counters INCLUDING the resource-entry count
+// (airhorn-nxuv.37): the count must be captured AT the boundary, not after the window -
+// the old post-window back-to-back reads made the delta measure the read-to-read gap (~0),
+// never the window's activity. Exported so the pin drives the real capture shape.
+export const readIdleCounters = (evaluate) => evaluate('JSON.parse(JSON.stringify(window.__idle))')
+  .then((c) => evaluate(`performance.getEntriesByType('resource').length`)
+    .then((resources) => ({ ...c, resourceEntries: resources })));
+
 export const hiddenStopPass = (hidden, mainThreadCpuPct) =>
   hidden?.beforeHide?.playing === true
   && hidden?.stopLatencyMs !== null && hidden?.stopLatencyMs !== undefined
@@ -334,7 +342,7 @@ async function main() {
       }
       return perProcess;
     };
-    const counters = () => evaluate('JSON.parse(JSON.stringify(window.__idle))');
+    const counters = () => readIdleCounters(evaluate);
 
     /*
      * One measurement window: wait, then report the CPU the renderer and the main
@@ -366,11 +374,6 @@ async function main() {
       const pageAfter = busiest(after.cpu);
       const comparable = [...after.cpu.keys()].filter((id) => before.cpu.has(id)).length;
       const rendererValid = pageBefore !== null && pageBefore === pageAfter;
-      const resourcesBefore = await evaluate(`performance.getEntriesByType('resource').length`);
-      after.counters.resourceEntries = 0;
-      before.counters.resourceEntries = 0;
-      const resourcesAfter = await evaluate(`performance.getEntriesByType('resource').length`);
-      after.counters.resourceEntries = resourcesAfter - resourcesBefore;
       const delta = (key) => after.counters[key] - before.counters[key];
       const sample = {
         phase: label,

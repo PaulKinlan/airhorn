@@ -634,6 +634,9 @@ async function readState(cdp, sessionId) {
   return evaluate(cdp, sessionId, READ_STATE);
 }
 
+// Pure so the pin drives the real decision (airhorn-nxuv.26).
+export const hornResponded = (beforePressed, midPressed) => beforePressed !== 'true' && midPressed === 'true';
+
 /** Real pointer press on the horn: does it respond, and does audio actually run? */
 async function pressHorn(cdp, sessionId) {
   const box = await evaluate(cdp, sessionId, `(() => {
@@ -646,7 +649,11 @@ async function pressHorn(cdp, sessionId) {
   if (!box || box.w < 2 || box.h < 2) {
     return { dispatched: false, responded: false, sounded: false, reason: 'horn has no hit area' };
   }
+  // The pre-press BASELINE, both halves (airhorn-nxuv.26): a horn whose aria-pressed was
+  // already true BEFORE the press cannot 'respond' to it - without the baseline the verdict
+  // reads a stuck-on control as a response.
   const before = await evaluate(cdp, sessionId, 'window.__probe ? (window.__probe.bufferStarts + window.__probe.oscStarts) : -1');
+  const beforePressed = (await readState(cdp, sessionId)).horn.ariaPressed;
   await cdp.send('Input.dispatchMouseEvent', {
     type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1,
   }, sessionId);
@@ -663,7 +670,9 @@ async function pressHorn(cdp, sessionId) {
   return {
     dispatched: true,
     ariaPressedWhileHeld: mid.horn.ariaPressed,
-    responded: mid.horn.ariaPressed === 'true',
+    // A response is a TRANSITION, not a state (airhorn-nxuv.26): pressed now AND not pressed
+    // before. A horn stuck aria-pressed=true fails this, which is the point.
+    responded: hornResponded(beforePressed, mid.horn.ariaPressed),
     sounded: started,
     audioStarts: { before, after, startThrows: throws, lastStartError: lastError },
   };
@@ -1169,7 +1178,11 @@ async function runAudit() {
         baselineHornSize: baseline.horn.present ? `${baseline.horn.width}x${baseline.horn.height}` : null,
         fonts: {
           requestedUrls: fontRequests,
-          webFontUsed: fontRequests.length > 0 || /@font-face/i.test(fontFace || ''),
+          // The fontRequests half ALONE carries this evidence (airhorn-nxuv.35): the old
+          // `|| /@font-face/i.test(computedFontFamily)` could never be true - a computed
+          // fontFamily never contains the string '@font-face' - so the regex guarded
+          // nothing. computedFontFamily is still reported below as context.
+          webFontUsed: fontRequests.length > 0,
           computedFontFamily: fontFace,
           note: fontRequests.length === 0
             ? 'no web font is requested; blocking fonts cannot affect this page'
