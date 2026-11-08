@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { hiddenStopPass } from '../tools/idle-cost.mjs';
+import { hiddenStopPass, readIdleCounters } from '../tools/idle-cost.mjs';
 
 // airhorn-nxuv.2: idle-cost's verdict D ("a looping horn stops when hidden") never asserted
 // the horn was PLAYING before the hide - beforeHide was captured into the report but not
@@ -47,4 +47,17 @@ test('D fails when the hidden page is not quiet, even with a clean stop', () => 
 test('D fails on a missing/absent hidden report rather than passing on undefined', () => {
   assert.equal(hiddenStopPass(undefined, QUIET_CPU), false);
   assert.equal(hiddenStopPass({}, QUIET_CPU), false);
+});
+
+test('nxuv.37: the resource count is captured AT the window boundary, not after (airhorn-nxuv.37)', async () => {
+  // Synthetic counter world: the page's resource count grows DURING the window (5 -> 9).
+  // The fixed capture puts each read inside its boundary snapshot, so the delta is 4.
+  let resources = 5;
+  const evaluate = (expr) => Promise.resolve(
+    expr.includes('getEntriesByType') ? resources : { rafs: 0 });
+  const before = await readIdleCounters(evaluate);
+  resources = 9;   // the window's activity happens between the snapshots
+  const after = await readIdleCounters(evaluate);
+  assert.equal(after.resourceEntries - before.resourceEntries, 4,
+    'a window with known resource activity must produce a non-zero delta (was ~0 when the reads happened after the window)');
 });
