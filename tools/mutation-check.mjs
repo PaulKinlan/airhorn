@@ -32,7 +32,11 @@
  *     --suite tests/multitab.test.mjs [--suite-old /tmp/old-suite.mjs] \
  *     [--build "npx --no-install vite build"] [--allow-test-mutation] [--dry-run]
  *
- * Exit: 0 hole-proven, 1 not-reproducible, 2 fix-does-not-close, 3 refused/error.
+ * --dry-run does everything that can be refused before the file is touched (the target guard, the unique-occurrence
+ * check) and then prints the plan - which file would be mutated with which replacement, which suite would run, and that
+ * the file would be restored and verified - and exits 0 having written nothing and run nothing (airhorn-lpgh).
+ *
+ * Exit: 0 hole-proven (or a clean dry run), 1 not-reproducible, 2 fix-does-not-close, 3 refused/error.
  */
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -504,6 +508,19 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   if (!applied.ok) {
     console.error(`mutation-check: refusing: ${applied.error}`);
     return 3;
+  }
+
+  // --dry-run has a consumer (airhorn-lpgh): it was parsed and stored and then never read, so a caller who asked for a
+  // rehearsal got the real mutation, the real suite runs and the real restore. Everything that can be refused WITHOUT
+  // touching the file has already run above (the target guard and the unique-occurrence check), so a dry run here is
+  // exactly the plan that a real run would carry out - printed, and nothing done.
+  if (args.dryRun) {
+    const bytes = applied.content.length - original.length;
+    console.log(`mutation-check: dry run - nothing was written and no suite was run`);
+    console.log(`  would mutate ${args.file} (${bytes >= 0 ? '+' : ''}${bytes} bytes): ${JSON.stringify(args.from)} -> ${JSON.stringify(args.to ?? '')}`);
+    console.log(`  would then run ${args.suite}${args.suiteOld ? ` (after a baseline run of ${args.suiteOld})` : ''}`);
+    console.log(`  would restore ${args.file} in a finally block, and verify the restore on disk`);
+    return 0;
   }
 
   let mutantRc = 3;
