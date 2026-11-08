@@ -82,3 +82,14 @@ test('karx: the heap detail prints the anchors the growth is measured from (airh
     `the endpoint anchors must be printed, or the growth number is unverifiable: ${detail}`);
   assert.match(detail, /growth 2\.00 MB/);
 });
+
+test('8ao4: the detail names the basis the growth was ACTUALLY computed from, in both worlds (airhorn-8ao4)', () => {
+  const MB = 1024 * 1024;
+  const few = heapGrowthDetail([10 * MB, 12 * MB], 2 * MB, 16, false, 10 * MB, 12 * MB);
+  assert.match(few, /endpoints baseline 10\.00 MB -> after-cycles 12\.00 MB/,
+    'under 4 samples the endpoints ARE the measurement and must be printed as such');
+  const many = heapGrowthDetail([10 * MB, 11 * MB, 12 * MB, 13 * MB, 14 * MB], 3 * MB, 16, false, 10 * MB, 14 * MB);
+  assert.match(many, /windowed-median basis/, 'with 4+ samples the basis is the windowed median and must say so');
+  assert.doesNotMatch(many, /endpoints baseline .* -> after-cycles .* MB \(/,
+    'the >=4-sample world must NOT label the growth as the endpoint delta - it is not');
+});

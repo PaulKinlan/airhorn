@@ -279,7 +279,7 @@ export async function waitForQuiescence(send, {
       ? `nothing the page reports changed across ${noProgressSamples + 1} consecutive samples, so this is a page that is not progressing rather than a host that is merely slow`
       : `the page kept changing across ${samples} samples, so it is still doing work, not merely starved`;
   throw new Error(
-    `Page never reached quiescence within the ${timeoutMs}ms absolute ceiling ` +
+    `Page never reached quiescence within the ${timeoutMs}ms ceiling (checked between samples; a slow sample completes first - airhorn-n1qu) ` +
     `(${probe}, ${samples} samples, ${noProgressSamples} consecutive with no change): ${why}. ` +
     `Quiescence needs ${stableSamples} consecutive quiet samples; the ceiling is a backstop, not the criterion (airhorn-ypfn).`,
   );
