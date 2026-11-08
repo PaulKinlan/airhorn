@@ -6,6 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { applyCoreFieldGate, shot, auditExitCode } from '../tools/resilience-audit.mjs';
 
 const runProbe = (PROBE, { throwOnStart = false } = {}) => {
   const window = { __errors: [], addEventListener() {} };
@@ -58,4 +59,38 @@ test('the mutation seam makes the same world without app cooperation (RESILIENCE
     delete process.env.RESILIENCE_TEST_MODE;
     delete process.env.RESILIENCE_START_THROWS;
   }
+});
+
+
+/* batch D row 1: a scenario row must fail when its own declared claim fields come back
+ * false / absent / 'unmeasurable' - before, only a thrown error failed a scenario, so a
+ * measured failure printed in the verdict line and the audit exited 0. */
+test('the core-field gate fails a row whose declared claim is false, named', () => {
+  const row = applyCoreFieldGate({ id: 'x', name: 'x', status: 'OK', navigationCompleted: true, renders: false, hornUsable: true },
+    ['navigationCompleted', 'renders', 'hornUsable']);
+  assert.equal(row.status, 'ERROR');
+  assert.match(row.error, /renders is false/);
+  assert.equal(auditExitCode([row]), 1, 'the exit code must see the gated failure');
+});
+
+test('the core-field gate fails an absent declared field as unmeasured, and an unmeasurable string the same', () => {
+  const absent = applyCoreFieldGate({ id: 'x', status: 'OK', renders: true }, ['renders', 'hornUsable']);
+  assert.equal(absent.status, 'ERROR');
+  assert.match(absent.error, /hornUsable.*never produced/);
+  const unmeasurable = applyCoreFieldGate({ id: 'x', status: 'OK', recoveredAfterSwUpdate: 'unmeasurable: state unreadable' }, ['recoveredAfterSwUpdate']);
+  assert.equal(unmeasurable.status, 'ERROR');
+});
+
+test('the core-field gate passes a row whose claims held, and never masks a thrown error', () => {
+  const ok = applyCoreFieldGate({ id: 'x', status: 'OK', renders: true, hornUsable: true }, ['renders', 'hornUsable']);
+  assert.equal(ok.status, 'OK');
+  const already = { id: 'x', status: 'ERROR', error: 'threw' };
+  assert.equal(applyCoreFieldGate(already, ['renders']), already, 'a thrown error passes through untouched');
+});
+
+/* batch D row 2: a failed screenshot is a failed scenario, named - never a null that
+ * rides a green row. */
+test('shot() throws named when the capture fails', async () => {
+  const rejectingCdp = { send: async () => { throw new Error('CDP gone'); } };
+  await assert.rejects(() => shot(rejectingCdp, 's1', 'probe-shot'), /screenshot 'probe-shot' could not be captured/);
 });
