@@ -669,20 +669,36 @@ async function pressHorn(cdp, sessionId) {
   };
 }
 
-// Row 2 of the tools/ sweep (airhorn batch D): a capture failure used to return null,
-// and the null landed in the row's screenshot field on a green row - the report's
-// evidence silently absent. A scenario whose screenshot cannot be captured fails AS
-// ITSELF, named: the shot is the evidence the row exists to carry.
+// Row 2 of the tools/ sweep (airhorn batch D, coord's decision): a capture failure
+// returns null - NOT a thrown failure, because some scenarios legitimately carry no
+// image - but the null must not ride a green row unmarked: applyShotEvidenceGate
+// records the degraded evidence on the row, and a scenario that declares its shot
+// REQUIRED fails (FAILED) when the shot is absent.
 export async function shot(cdp, sessionId, name) {
   try {
     const { data } = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
     const file = path.join(OUT, `${name}.png`);
     fs.writeFileSync(file, Buffer.from(data, 'base64'));
     return file;
-  } catch (err) {
-    throw new Error(`screenshot '${name}' could not be captured: ${String((err && err.message) || err)} - the scenario's evidence is absent, and a missing shot must not ride a green row`);
+  } catch {
+    return null;
   }
 }
+
+// The degraded-evidence gate, pure and exported for the pin. 'screenshot' (single) and
+// 'screenshots' (array) are the two shapes the rows carry.
+export const applyShotEvidenceGate = (row, shotsRequired) => {
+  if (!row || row.status === 'ERROR' || row.status === 'FAILED' || row.error) return row;
+  const missing = [];
+  if ('screenshot' in row && row.screenshot == null) missing.push('screenshot');
+  if (Array.isArray(row.screenshots) && row.screenshots.some((s) => s == null)) missing.push('screenshots');
+  if (missing.length === 0) return row;
+  const state = `degraded evidence: ${missing.join(', ')} could not be captured`;
+  if (shotsRequired) {
+    return { ...row, status: 'FAILED', screenshotState: state, error: `${state} - this scenario's shot is the evidence its claim rests on` };
+  }
+  return { ...row, screenshotState: state };
+};
 
 const EXPLAINS_RE = /offline|no connection|can.?t (?:reach|load|connect)|failed to load|unable to|retry|reconnect|try again|update available|new version|something went wrong|error/i;
 
@@ -735,7 +751,7 @@ const results = [];
 // relaunching a browser the host has already refused.
 let launchFailed = false;
 
-async function withBrowser(id, name, fn, mustBeTrue = []) {
+async function withBrowser(id, name, fn, mustBeTrue = [], shotsRequired = true) {
   if (launchFailed) {
     const result = { id, name, status: 'ERROR', error: 'not measured: the browser could not start earlier in this audit' };
     results.push(result);
@@ -762,7 +778,9 @@ async function withBrowser(id, name, fn, mustBeTrue = []) {
   }
   try {
     const collectors = makeCollectors(browser.cdp);
-    result = applyCoreFieldGate({ id, name, status: 'OK', ...(await fn(browser, collectors)) }, mustBeTrue);
+    result = applyShotEvidenceGate(
+      applyCoreFieldGate({ id, name, status: 'OK', ...(await fn(browser, collectors)) }, mustBeTrue),
+      shotsRequired);
   } catch (err) {
     result = { id, name, status: 'ERROR', error: String((err && err.message) || err) };
   } finally {
@@ -770,8 +788,8 @@ async function withBrowser(id, name, fn, mustBeTrue = []) {
   }
   results.push(result);
   const verdict = result.error
-    ? `ERROR ${result.error}`
-    : `renders=${result.renders} hornVisible=${result.hornVisible} hornUsable=${result.hornUsable} explains=${result.explainsItself}${result.measuredDocument ? ` doc=${result.measuredDocument}` : ''}`;
+    ? `${result.status === 'FAILED' ? 'FAILED' : 'ERROR'} ${result.error}`
+    : `renders=${result.renders} hornVisible=${result.hornVisible} hornUsable=${result.hornUsable} explains=${result.explainsItself}${result.measuredDocument ? ` doc=${result.measuredDocument}` : ''}${result.screenshotState ? ` | ${result.screenshotState}` : ''}`;
   console.log(`[${id}] ${name}\n  ${verdict}`);
 }
 
@@ -1104,7 +1122,8 @@ async function runAudit() {
     });
 
     /* ---- 5. blocked JS / CSS / font ---- */
-    if (want('blocked')) await withBrowser('blocked', 'blocked JS / CSS / font', ['renders'], async ({ cdp }, collectors) => {
+    if (want('blocked')) await withBrowser('blocked', 'blocked JS / CSS / font', ['renders'], /* shotsRequired */ false, // evidence is the measured subcases; the shot is supportive, and a degraded shot must not fail it
+      async ({ cdp }, collectors) => {
       reset();
       // Baseline: the same page with nothing blocked, so "degraded" is measured,
       // not guessed.
@@ -1406,7 +1425,7 @@ export function scenarioIdDrift(known, seen) {
 }
 
 export function auditExitCode(scenarios) {
-  return (scenarios || []).some((row) => row && (row.status === 'ERROR' || row.error)) ? 1 : 0;
+  return (scenarios || []).some((row) => row && (row.status === 'ERROR' || row.status === 'FAILED' || row.error)) ? 1 : 0;
 }
 
 // The top finding of the tools/ sweep (airhorn batch D, row 1): a scenario row was 'OK'
@@ -1420,14 +1439,16 @@ export const applyCoreFieldGate = (row, mustBeTrue = []) => {
   if (!row || row.status === 'ERROR' || row.error) return row;
   for (const field of mustBeTrue) {
     const value = row[field];
+    // FAILED, not ERROR: a THROW means the scenario could not run; a measured-false
+    // core field means it ran and its claim failed. The report must not conflate them.
     if (value === false) {
-      return { ...row, status: 'ERROR', error: `measured failure: ${field} is false - the scenario's own claim failed (the row used to stay OK and the audit exit 0)` };
+      return { ...row, status: 'FAILED', error: `measured failure: ${field} is false - the scenario's own claim failed (the row used to stay OK and the audit exit 0)` };
     }
     if (value === undefined) {
-      return { ...row, status: 'ERROR', error: `unmeasured: this scenario declares ${field} as its claim but never produced it` };
+      return { ...row, status: 'FAILED', error: `unmeasured: this scenario declares ${field} as its claim but never produced it` };
     }
     if (typeof value === 'string' && value.startsWith('unmeasurable')) {
-      return { ...row, status: 'ERROR', error: `unmeasured: ${field} came back '${value.slice(0, 120)}' - a declared claim cannot pass as 'unmeasurable'` };
+      return { ...row, status: 'FAILED', error: `unmeasured: ${field} came back '${value.slice(0, 120)}' - a declared claim cannot pass as 'unmeasurable'` };
     }
   }
   return row;
@@ -1481,7 +1502,7 @@ export function writeReport(scenarios, outDir = OUT) {
   const row = (r) => [
     r.id,
     r.name,
-    (r.status === 'ERROR' || r.error) ? 'ERROR' : (r.renders ? 'yes' : 'NO'),
+    r.status === 'FAILED' ? 'FAILED' : (r.status === 'ERROR' || r.error) ? 'ERROR' : (r.renders ? 'yes' : 'NO'),
     r.error ? '-' : (r.hornVisible ? 'yes' : 'NO'),
     r.error ? '-' : (r.hornUsable ? 'yes' : 'NO'),
     r.error

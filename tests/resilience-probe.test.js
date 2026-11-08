@@ -6,7 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyCoreFieldGate, shot, auditExitCode } from '../tools/resilience-audit.mjs';
+import { applyCoreFieldGate, applyShotEvidenceGate, auditExitCode } from '../tools/resilience-audit.mjs';
 
 const runProbe = (PROBE, { throwOnStart = false } = {}) => {
   const window = { __errors: [], addEventListener() {} };
@@ -68,17 +68,17 @@ test('the mutation seam makes the same world without app cooperation (RESILIENCE
 test('the core-field gate fails a row whose declared claim is false, named', () => {
   const row = applyCoreFieldGate({ id: 'x', name: 'x', status: 'OK', navigationCompleted: true, renders: false, hornUsable: true },
     ['navigationCompleted', 'renders', 'hornUsable']);
-  assert.equal(row.status, 'ERROR');
+  assert.equal(row.status, 'FAILED');
   assert.match(row.error, /renders is false/);
   assert.equal(auditExitCode([row]), 1, 'the exit code must see the gated failure');
 });
 
 test('the core-field gate fails an absent declared field as unmeasured, and an unmeasurable string the same', () => {
   const absent = applyCoreFieldGate({ id: 'x', status: 'OK', renders: true }, ['renders', 'hornUsable']);
-  assert.equal(absent.status, 'ERROR');
+  assert.equal(absent.status, 'FAILED');
   assert.match(absent.error, /hornUsable.*never produced/);
   const unmeasurable = applyCoreFieldGate({ id: 'x', status: 'OK', recoveredAfterSwUpdate: 'unmeasurable: state unreadable' }, ['recoveredAfterSwUpdate']);
-  assert.equal(unmeasurable.status, 'ERROR');
+  assert.equal(unmeasurable.status, 'FAILED');
 });
 
 test('the core-field gate passes a row whose claims held, and never masks a thrown error', () => {
@@ -88,9 +88,27 @@ test('the core-field gate passes a row whose claims held, and never masks a thro
   assert.equal(applyCoreFieldGate(already, ['renders']), already, 'a thrown error passes through untouched');
 });
 
-/* batch D row 2: a failed screenshot is a failed scenario, named - never a null that
- * rides a green row. */
-test('shot() throws named when the capture fails', async () => {
-  const rejectingCdp = { send: async () => { throw new Error('CDP gone'); } };
-  await assert.rejects(() => shot(rejectingCdp, 's1', 'probe-shot'), /screenshot 'probe-shot' could not be captured/);
+/* batch D row 2 (coord's decision): a missing shot is NOT automatically a failure -
+ * it is recorded as degraded evidence on the row; a scenario that declares its shot
+ * REQUIRED fails (FAILED) when it is absent; one that does not stays green with the
+ * state visible. */
+test('a required-but-missing shot fails the row, named as degraded evidence', () => {
+  const row = applyShotEvidenceGate({ id: 'x', status: 'OK', renders: true, screenshot: null }, true);
+  assert.equal(row.status, 'FAILED');
+  assert.match(row.error, /degraded evidence: screenshot/);
+  assert.equal(auditExitCode([row]), 1, 'the exit code must see FAILED');
+});
+
+test('a missing shot on a shot-optional scenario stays green WITH the state visible', () => {
+  const row = applyShotEvidenceGate({ id: 'x', status: 'OK', renders: true, screenshot: null }, false);
+  assert.equal(row.status, 'OK', 'not every scenario is its screenshot');
+  assert.match(row.screenshotState, /degraded evidence/);
+  assert.equal(auditExitCode([row]), 0);
+});
+
+test('a captured shot leaves the row untouched, and the array form is checked too', () => {
+  const ok = { id: 'x', status: 'OK', screenshot: 'out/1-offline.png' };
+  assert.equal(applyShotEvidenceGate(ok, true), ok);
+  const partial = applyShotEvidenceGate({ id: 'y', status: 'OK', screenshots: ['a.png', null] }, true);
+  assert.equal(partial.status, 'FAILED');
 });
