@@ -599,8 +599,14 @@ test('install-https-proof asserts the Install button, not just the prompt (airho
   // assertions now live in an exported function; without a test of its own a future edit
   // could drop the button half and nothing would notice. Semantics come from
   // src/install.js: disabled=true and no 'available' class until beforeinstallprompt fires.
-  const { assertInstallEvidence } = await import(`${pathToFileURL(INSTALL_TOOL).href}?nxuv10=${Date.now()}`);
-  const button = (over = {}) => ({ disabled: false, hasAvailableClass: true, visibility: 'visible', pointerEvents: 'auto', ...over });
+  const { assertInstallEvidence, affordanceProblem } = await import(`${pathToFileURL(INSTALL_TOOL).href}?nxuv11=${Date.now()}`);
+  // The evidence a real run collects now: the BUTTON's own computed display/visibility/pointer-events and its rect
+  // (airhorn-nxuv.11). It used to be the wrapper's two style properties, which passed for a button that was never
+  // painted at all.
+  const button = (over = {}) => ({
+    disabled: false, hasAvailableClass: true, display: 'block', visibility: 'visible',
+    pointerEvents: 'auto', rect: { width: 120, height: 40 }, ...over,
+  });
   const httpEv = (over = {}) => ({ installPrompt: { fired: false }, installButton: button({ disabled: true, hasAvailableClass: false, ...over }) });
   const httpsEv = (over = {}) => ({ installPrompt: { fired: true }, installButton: button(over) });
 
@@ -615,6 +621,27 @@ test('install-https-proof asserts the Install button, not just the prompt (airho
     /not clickable\/visible/, 'an enabled but invisible button is not an affordance');
   assert.throws(() => assertInstallEvidence(httpEv(), httpsEv({ pointerEvents: 'none' })),
     /not clickable\/visible/, 'nor is an unclickable one');
+
+  // airhorn-nxuv.11: the four ways a present button is not an affordance. The first two PASSED before this change,
+  // because the old check read the wrapper's `visibility` - which stays 'visible' under display:none - and never looked
+  // at the box at all. Each must fail BY NAME, so a future reader can tell which property was wrong.
+  assert.throws(() => assertInstallEvidence(httpEv(), httpsEv({ display: 'none' })),
+    /display is none, so nothing is painted/, 'a display:none button is not painted, whatever its visibility says');
+  assert.throws(() => assertInstallEvidence(httpEv(), httpsEv({ rect: { width: 0, height: 40 } })),
+    /no painted box .*zero pixels cannot be clicked/, 'a zero-width button cannot be clicked');
+  assert.throws(() => assertInstallEvidence(httpEv(), httpsEv({ rect: { width: 120, height: 0 } })),
+    /no painted box/, 'nor a zero-height one');
+  assert.throws(() => assertInstallEvidence(httpEv(), httpsEv({ rect: undefined })),
+    /no painted box/, 'nor an unmeasured one - unknown is not a pass');
+  assert.throws(() => assertInstallEvidence(httpEv(), httpsEv({ visibility: 'hidden' })),
+    /visibility is hidden/);
+  // The shared check is exported so both legs cannot drift: a wrapper-level reading cannot sneak back in unnoticed.
+  assert.equal(affordanceProblem(button()), null, 'a visible, painted, clickable button has no problem');
+  assert.match(affordanceProblem(button({ pointerEvents: 'none' })), /pointer-events is none/);
+  assert.equal(affordanceProblem(button({ display: 'inline' })), null,
+    'a non-block display is not itself a problem: an inline-block button with a real rect is clickable');
+  assert.match(affordanceProblem(button({ display: 'inline', rect: { width: 0, height: 0 } })), /no painted box/,
+    'the RECT is what decides paintability, not the display keyword');
   assert.throws(() => assertInstallEvidence({ installPrompt: { fired: true }, installButton: httpEv().installButton }, httpsEv()),
     /the contrast is invalid/, 'if the prompt fired over HTTP the contrast measured nothing');
 });
