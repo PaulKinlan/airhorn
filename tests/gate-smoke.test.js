@@ -1641,63 +1641,6 @@ test('waitForSw distinguishes active, redundant, unsupported, evaluate error, an
   assert.equal(attemptCount, 3);
 });
 
-/*
- * Import purity (the airhorn-fc98 class, seen FOUR times: soak, the nnbu probe,
- * preview-evidence, measure-perf - each found by a human, each cost a round):
- * a tool that tests import must be IMPORT-PURE, so its entry point - main() or
- * any top-level browser/server/child work - must sit behind an invoked-as-script
- * guard. This scans the tools the suites actually import (the scope coord set:
- * policing the whole repo would cry wolf) and fails when an imported tool calls
- * main() with no recognized guard.
- *
- * Recognized guard idioms (the codebase already uses four, all equivalent):
- *   if (invokedAsScript) ... / if (isMain) ... /
- *   process.argv[1] compared with fileURLToPath(import.meta.url) (either order).
- * A genuinely run-only script is out of scope BY CONSTRUCTION (no test imports
- * it); the failure message names the two honest resolutions.
- */
-test('tools that tests import never run main() unguarded (the fc98 class)', () => {
-  const testsDir = path.join(root, 'tests');
-  const importedTools = new Set();
-  const importRe = /from\s+['"]\.\.\/(tools\/[a-zA-Z0-9./_-]+\.mjs)['"]/g;
-  for (const entry of fs.readdirSync(testsDir)) {
-    if (!/\.test\.(js|mjs)$/.test(entry)) continue;
-    const src = fs.readFileSync(path.join(testsDir, entry), 'utf8');
-    for (const m of src.matchAll(importRe)) importedTools.add(m[1]);
-  }
-  assert.ok(importedTools.size > 5, 'the scan must find the real import set, not an empty one');
-
-  // A top-level main() invocation: `main()` / `main().catch(...)` / `await main()`,
-  // at line start - the entry point shape every incident had.
-  const mainCallRe = /(^|\n)\s*(?:await\s+)?main\s*\(\s*\)/g;
-  // The guard must WRAP the call, not merely exist in the file: a probe that
-  // neutered 'if (invokedAsScript)' to 'if (false)' left the declaration text
-  // behind and a presence-check passed it. Recognized guard tokens (the tree's
-  // five idioms): invokedAsScript / isMain / invokedDirectly / an argv[1] or
-  // import.meta.url comparison inline.
-  const guardToken = /invokedAsScript|\bisMain\b|invokedDirectly|argv\[1\]|import\.meta\.url/;
-  const isGuardedCall = (src, callIndex) => {
-    const before = src.slice(Math.max(0, callIndex - 400), callIndex);
-    const ifs = [...before.matchAll(/if\s*\(([^)]*)\)/g)];
-    const nearest = ifs[ifs.length - 1];
-    return Boolean(nearest && guardToken.test(nearest[1]));
-  };
-
-  const offenders = [];
-  for (const rel of importedTools) {
-    const file = path.join(root, rel);
-    if (!fs.existsSync(file)) continue; // imports of pending tools are the map's problem
-    const src = fs.readFileSync(file, 'utf8');
-    let unguarded = false;
-    for (const m of src.matchAll(mainCallRe)) {
-      const idx = m.index + m[0].indexOf('main');
-      if (/function\s*$/.test(src.slice(Math.max(0, m.index - 30), m.index))) continue; // the declaration, not a call
-      if (!isGuardedCall(src, m.index)) unguarded = true;
-    }
-    if (unguarded) offenders.push(rel);
-  }
-  assert.deepEqual(offenders, [],
-    `tools imported by tests must not run main() at import (the fc98 class). ` +
-    `Fix by gating the entry: const invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); if (invokedAsScript) main()... ` +
-    `- or, if the tool is genuinely run-only, stop importing it from tests. Offenders: ${offenders.join(', ')}`);
-});
+// The import-purity lint lives in tests/gate-map.test.js, NOT here: this file imports the
+// tools it would scan, and an unguarded tool would exit the process at import, before the
+// check could run - the very defect class it polices (observed live in the RED probe).
