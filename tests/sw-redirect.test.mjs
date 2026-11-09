@@ -459,6 +459,11 @@ test('integrity baseline: bytes that DO match the build still install and record
   assert.ok(meta, `the integrity cache must exist after a matching install, caches: ${JSON.stringify([...worker.caches.keys()])}`);
   assert.ok(meta.entries.has('/styles/main.css'),
     `a matching body is recorded - the binding must not be "refuse everything"; recorded: ${JSON.stringify([...meta.entries.keys()])}`);
+  // airhorn-oybq option (a): the record must SAY the build verified these bytes, or a reader cannot tell a bound baseline
+  // from a first-write one.
+  const record = JSON.parse(await (await meta.match(new Request(ORIGIN + '/styles/main.css'))).clone().text());
+  assert.equal(record.basis, 'build-manifest', 'bytes checked against the build must be recorded as build-manifest');
+  assert.equal(record.verifiedAgainstBuild, true);
 });
 
 test('integrity baseline: an UNBUILT worker says out loud that it is trust-on-first-use (airhorn-oybq)', async () => {
@@ -471,4 +476,66 @@ test('integrity baseline: an UNBUILT worker says out loud that it is trust-on-fi
   const said = worker.warnings.filter((line) => line.includes('trust-on-first-use'));
   assert.ok(said.length >= 1, `an unbuilt worker must warn that its records are TOFU, got: ${JSON.stringify(worker.warnings)}`);
   assert.match(said[0], /no build digest .* trust-on-first-use \(airhorn-oybq\)/);
+});
+
+/*
+ * airhorn-oybq, options (a) and (b) as coord specified them: a record must SAY how its baseline was established, and a
+ * second record with different bytes must not silently replace the first.
+ *
+ * The shape that matters is "the digest changes between runs": the worker installs, verifies and records; then the same
+ * worker version sees different bytes for the same path. Before this, the record was simply overwritten, so the changed
+ * script BECAME the new truth and every later read compared against it happily.
+ */
+test('integrity record: a second, different digest is REFUSED rather than silently becoming the new baseline (airhorn-oybq)', async () => {
+  // Option (b). The world has to reach record() TWICE for the same path with different bytes, so this worker is UNBOUND
+  // (no build manifest): with a manifest the first-copy check refuses earlier and the overwrite path is never exercised -
+  // my first version of this test made that mistake and stayed green when the refusal was deleted, which is the exact
+  // false-green this fleet keeps finding. Under an unbound worker, the old behaviour was: record 1 = good bytes, then
+  // record 2 = changed bytes REPLACES it, so every later read compares against the changed copy and passes.
+  const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+  let css = 'the original stylesheet';
+  const worker = loadWorker({
+    digests: {},
+    fetchImpl: async (req) => {
+      const p = new URL(req.url).pathname;
+      return sameUrlResponse(ORIGIN + p, p === '/styles/main.css' ? css : `bytes for ${p}`);
+    },
+  });
+  const install = async () => {
+    let waited;
+    for (const listener of worker.listeners.install) listener({ waitUntil: (promise) => { waited = promise; } });
+    return waited;
+  };
+  const recorded = async (pathname, meta) => JSON.parse(await (await meta.match(new Request(ORIGIN + pathname))).clone().text());
+
+  await install();
+  const meta = worker.caches.get([...worker.caches.keys()].find((k) => k.startsWith('horn-integrity-')));
+  const first = await recorded('/styles/main.css', meta);
+  assert.equal(first.sha256, sha('the original stylesheet'));
+  assert.equal(first.basis, 'tofu', 'an unbound baseline is labelled tofu, never build-manifest');
+
+  // The response changes under the same worker version. The reinstall must not adopt the new bytes as the baseline.
+  css = 'a changed stylesheet';
+  await install();
+  const after = await recorded('/styles/main.css', meta);
+  assert.equal(after.sha256, first.sha256,
+    `the recorded baseline must survive a changed response, got ${after.sha256} (the new bytes) vs ${first.sha256}`);
+  assert.ok(worker.warnings.some((line) => line.includes('refusing to replace the baseline recorded for /styles/main.css')
+    && line.includes(first.sha256) && line.includes(sha('a changed stylesheet'))),
+    'and the refusal must be NAMED, with both digests, so an operator can see what changed: '
+    + JSON.stringify(worker.warnings));
+});
+
+test('integrity record: an UNVERIFIED baseline is labelled tofu, not left looking verified (airhorn-oybq)', async () => {
+  // No manifest for this path: the worker still precaches (offline must work), but the record must not claim the build
+  // verified it. This is option (a) - provenance on the record itself, so an audit reads the truth without reading code.
+  const worker = loadWorker({ digests: {}, fetchImpl: async (req) => sameUrlResponse(ORIGIN + new URL(req.url).pathname, 'bytes') });
+  let waited;
+  for (const listener of worker.listeners.install) listener({ waitUntil: (promise) => { waited = promise; } });
+  await waited;
+  const meta = worker.caches.get([...worker.caches.keys()].find((k) => k.startsWith('horn-integrity-')));
+  const record = JSON.parse(await (await meta.match(new Request(ORIGIN + '/styles/main.css'))).clone().text());
+  assert.equal(record.basis, 'tofu', 'a first-write baseline must be labelled tofu');
+  assert.equal(record.verifiedAgainstBuild, false);
+  assert.equal(record.sha256.length, 64, 'the digest is still recorded - the label is provenance, not a weaker check');
 });

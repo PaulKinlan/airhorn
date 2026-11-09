@@ -80,17 +80,52 @@ async function digest(buffer) {
 
 // Record what a good copy of this response looked like, so a later hit can be
 // checked against it instead of trusted (airhorn-un5).
-async function record(meta, pathname, response) {
+/**
+ * Write the integrity record for a precached copy, with the provenance that justifies it (airhorn-oybq).
+ *
+ * A record is only evidence if it says HOW the baseline was established, because the two cases are not equally strong:
+ *   basis: 'build-manifest' - the bytes were checked against the digest the build shipped. The baseline is the build's,
+ *                             not the response's, so a poisoned origin cannot become the truth.
+ *   basis: 'tofu'           - no build digest for this path; the baseline IS this response. Labelled, because a record
+ *                             that reads as verified when it is merely first-write is how an audit gets misled.
+ *
+ * And it REFUSES to overwrite a baseline with different bytes (option (b)): within one worker version the cache name is
+ * fixed, so a second record with a different digest means the response changed under a worker that had already verified
+ * it. Replacing the baseline with the new bytes would turn a detected change into the new truth; the caller has to say it
+ * expects a change (`expectChange`), and nothing in the install path does.
+ */
+async function record(meta, pathname, response, { basis, expectChange = false } = {}) {
   const body = await response.clone().arrayBuffer();
-  await meta.put(requestFor(pathname), new Response(JSON.stringify({
-    sha256: await digest(body),
+  const sha256 = await digest(body);
+  const existing = await meta.match(requestFor(pathname), { ignoreSearch: true });
+  if (existing && !expectChange) {
+    let previous = null;
+    // Read a CLONE: consumers of these records exist (the test harness, and any future code that inspects a baseline),
+    // and a cache that hands back the stored object would otherwise be left with a consumed body.
+    try { previous = await existing.clone().json(); } catch { previous = null; }
+    if (previous && typeof previous.sha256 === 'string' && previous.sha256 !== sha256) {
+      console.warn(`integrity: refusing to replace the baseline recorded for ${pathname} (recorded sha256 `
+        + `${previous.sha256}, this response ${sha256}). A changed body under an already-verified worker version is a `
+        + 'detected change, not a new baseline (airhorn-oybq)');
+      return { kept: true, previous };
+    }
+  }
+  const record = {
+    sha256,
     length: body.byteLength,
-  }), { headers: { 'content-type': 'application/json' } }));
+    // Provenance, so a reader can tell the two kinds of baseline apart without asking the code (airhorn-oybq).
+    basis: basis === 'build-manifest' ? 'build-manifest' : 'tofu',
+    verifiedAgainstBuild: basis === 'build-manifest',
+    url: response.url || null,
+    redirected: Boolean(response.redirected),
+  };
+  await meta.put(requestFor(pathname), new Response(JSON.stringify(record), { headers: { 'content-type': 'application/json' } }));
+  return { kept: false, record };
 }
 
-async function store(cache, meta, pathname, response) {
+async function store(cache, meta, pathname, response, basis) {
   await cache.put(requestFor(pathname), response.clone());
-  await record(meta, pathname, response);
+  await record(meta, pathname, response, { basis });
 }
 
 async function evict(cache, meta, request) {
@@ -194,7 +229,7 @@ async function putVerified(cache, url) {
       + 'integrity records are trust-on-first-use (airhorn-oybq)');
   }
   await cache.put(requestFor(pathname), response);
-  return { stored: pathname };
+  return { stored: pathname, basis: typeof expectedDigest === 'string' ? 'build-manifest' : 'tofu' };
 }
 
 // Bounded concurrency (airhorn-86mz): the redirect fix's per-URL
@@ -242,11 +277,13 @@ async function precache() {
     console.warn('Fallback asset precaching error:', err);
   }
 
-  // One record per precached copy: the baseline the next read is checked against.
+  // One record per precached copy: the baseline the next read is checked against, carrying the provenance that
+  // justified it (build-manifest where the bytes matched the build, tofu where they were only ever first-write).
+  const basisByPath = new Map(written.filter(entry => entry && entry.stored).map(entry => [entry.stored, entry.basis]));
   for (const url of storedUrls) {
     const pathname = new URL(url, self.location.origin).pathname;
     const cached = await cache.match(requestFor(pathname), { ignoreSearch: true });
-    if (cached) await record(meta, pathname, cached);
+    if (cached) await record(meta, pathname, cached, { basis: basisByPath.get(pathname) });
   }
 }
 
