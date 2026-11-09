@@ -195,8 +195,8 @@ case names.
 | `loop` defaults to a single blast | `play_horn defaults to a single, non-looping blast`, `missing arguments are a single, non-looping blast`; browser suite's "single blast" section |
 | `play_horn` replaces whatever is sounding | `repeated accepted calls supersede each other rather than accumulating`, `a concurrent flood never stacks playback and every call resolves` |
 | 20 starts per 1000 ms, and refusals report the current state | `the shipped defaults are the documented ones: 20 starts per second` |
-| start timeout abandons **and** silences | `a start that never settles times out as a structured error and is silenced` |
-| input validated, not coerced; type named, payload never echoed | `play_horn refuses wrong-typed input with a structured error instead of coercing it`, `a hostile megabyte payload is refused quickly and never echoed back` |
+| start timeout abandons **and** silences | `a start that never settles times out on its own timer and is silenced` (`tests/webmcp-fuzz.test.mjs`) |
+| input validated, not coerced; type named, payload never echoed | `play_horn refuses wrong-typed input with a structured error instead of coercing it`, `a hostile megabyte payload is refused without processing or echoing it` (`tests/webmcp-fuzz.test.mjs`) |
 | extra properties ignored, no prototype pollution | `a huge argument object with a valid loop flag is a safe no-op on the extra data`, `unknown properties and prototype-shaped keys cannot change behaviour or pollute` |
 | `stop_horn` always silences | `stop_horn silences the horn whatever the caller sends, and state is always readable`, `stop_horn is never rate limited and answers immediately during a play flood`, `stop_horn still silences the horn when its own call is aborted` |
 | `stop_horn`/`get_horn_state` take no arguments | `stop_horn and get_horn_state ignore extra properties`, `the published schemas and descriptions match what the tools actually do` |

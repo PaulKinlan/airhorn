@@ -197,6 +197,9 @@
  "docs/runbooks/DEPLOY.md": [
   "tests/docs-recipe.test.mjs"
  ],
+ "docs/webmcp-tools.md": [
+  "tests/docs-evidence-map.test.mjs"
+ ],
  "docs/runbooks/**": [
   "tests/docs-recipe.test.mjs"
  ],
