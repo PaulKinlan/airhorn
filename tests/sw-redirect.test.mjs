@@ -25,7 +25,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { injectIntegrity } from '../tools/lib/sw-integrity.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SW_SOURCE = fs.readFileSync(path.join(root, 'public', 'sw.js'), 'utf8');
@@ -59,7 +61,7 @@ function fakeCache(name) {
 
 // Load the shipped worker with the platform stubs, and hand back the listeners
 // it registered plus the caches it opened, so a test can dispatch events.
-function loadWorker({ fetchImpl } = {}) {
+function loadWorker({ fetchImpl, digests } = {}) {
   const caches = new Map();
   const instances = [];
   const warnings = [];
@@ -100,7 +102,9 @@ function loadWorker({ fetchImpl } = {}) {
   };
   sandbox.self = sandbox;
   vm.createContext(sandbox);
-  vm.runInContext(SW_SOURCE, sandbox, { filename: 'public/sw.js' });
+  // airhorn-oybq: the build injects the digest manifest into dist/sw.js. A test that passes `digests` stands in for a
+  // built worker; without it the placeholder stays a comment and the worker is UNBOUND, which is its own world below.
+  vm.runInContext(digests ? injectIntegrity(SW_SOURCE, digests) : SW_SOURCE, sandbox, { filename: 'public/sw.js' });
 
   return { sandbox, caches, instances, warnings, listeners };
 }
@@ -396,4 +400,75 @@ test('an alias read with an unparseable record evicts the canonical entry too', 
   const response = await navigate(worker, '/index.html');
   await response.text();
   assert.equal(content.entries.has('/'), false, 'a record that cannot be parsed evicts the entry it describes');
+});
+
+/*
+ * airhorn-oybq: the integrity record used to be TRUST-ON-FIRST-USE - its baseline digest was computed from the very
+ * fetch it later vouched for, so a poisoned first fetch became the truth the record defended. The build now ships a
+ * digest per emitted file and the worker refuses a first fetch that is not the built bytes.
+ *
+ * Three worlds, because the failure mode has a direction that matters: refusing everything would be as dishonest as
+ * trusting everything.
+ */
+test('integrity baseline: a first fetch that disagrees with the build is refused, not recorded (airhorn-oybq)', async () => {
+  const POISON = 'POISONED-BYTES';
+  const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+  // The build says every precache URL is the good bytes; the network serves poison for one of them.
+  const honest = '/sounds/airhorn.mp3';
+  const digests = {};
+  for (const url of ['/', '/index.html', '/styles/main.css', honest]) digests[url] = sha(`good ${url}`);
+  digests[honest] = sha('good /sounds/airhorn.mp3');
+  digests['/styles/main.css'] = sha('DEFINITELY-NOT-THE-SERVED-CSS');
+  const worker = loadWorker({
+    digests,
+    fetchImpl: async (req) => {
+      const p = new URL(req.url).pathname;
+      return sameUrlResponse(ORIGIN + p, p === '/styles/main.css' ? POISON : `good ${p}`);
+    },
+  });
+  let waited;
+  for (const listener of worker.listeners.install) listener({ waitUntil: (promise) => { waited = promise; } });
+  await assert.rejects(waited, /do not match the build/,
+    'an install whose fetched bytes disagree with the build must fail, naming the reason');
+
+  // And nothing survived: the install's own cleanup deletes the half-built caches, so no poisoned body and no
+  // integrity record for it are left behind to be read later.
+  const leftovers = [...worker.caches.keys()];
+  for (const name of leftovers) {
+    const cache = worker.caches.get(name);
+    assert.equal(cache.entries.has('/styles/main.css'), false,
+      `${name} still holds /styles/main.css after a refused install: ${JSON.stringify([...cache.entries.keys()])}`);
+  }
+});
+
+test('integrity baseline: bytes that DO match the build still install and record (airhorn-oybq)', async () => {
+  const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+  const urls = ['/', '/index.html', '/styles/main.css', '/sounds/airhorn.mp3'];
+  const digests = Object.fromEntries(urls.map((u) => [u, sha(`good ${u}`)]));
+  const worker = loadWorker({
+    digests,
+    fetchImpl: async (req) => {
+      const p = new URL(req.url).pathname;
+      return sameUrlResponse(ORIGIN + p, `good ${p}`);
+    },
+  });
+  let waited;
+  for (const listener of worker.listeners.install) listener({ waitUntil: (promise) => { waited = promise; } });
+  await waited; // must NOT reject: binding the baseline must not break the honest path
+  const meta = worker.caches.get([...worker.caches.keys()].find((k) => k.startsWith('horn-integrity-')));
+  assert.ok(meta, `the integrity cache must exist after a matching install, caches: ${JSON.stringify([...worker.caches.keys()])}`);
+  assert.ok(meta.entries.has('/styles/main.css'),
+    `a matching body is recorded - the binding must not be "refuse everything"; recorded: ${JSON.stringify([...meta.entries.keys()])}`);
+});
+
+test('integrity baseline: an UNBUILT worker says out loud that it is trust-on-first-use (airhorn-oybq)', async () => {
+  const worker = loadWorker({
+    fetchImpl: async (req) => sameUrlResponse(ORIGIN + new URL(req.url).pathname, 'good'),
+  });
+  let waited;
+  for (const listener of worker.listeners.install) listener({ waitUntil: (promise) => { waited = promise; } });
+  await waited; // unbound is a documented degradation, not a failure - but it must be NAMED
+  const said = worker.warnings.filter((line) => line.includes('trust-on-first-use'));
+  assert.ok(said.length >= 1, `an unbuilt worker must warn that its records are TOFU, got: ${JSON.stringify(worker.warnings)}`);
+  assert.match(said[0], /no build digest .* trust-on-first-use \(airhorn-oybq\)/);
 });

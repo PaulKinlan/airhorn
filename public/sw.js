@@ -24,6 +24,16 @@ const cacheName = `airhorner-${version}`;
 // treat `airhorner-*` as "the app's precache".
 const metaCacheName = `horn-integrity-${version}`;
 
+// The digests the BUILD shipped, one per emitted file (airhorn-oybq). The integrity record is only as trustworthy as its
+// baseline: it used to be computed from the very fetch it later vouched for, so a poisoned first fetch became the truth.
+// With this map the first fetch is checked against bytes the worker did not derive, and a mismatch fails the install
+// instead of being recorded. An EMPTY map (an unrebuilt worker, or a dev server) is not silently accepted - the install
+// says so once, because "verified against nothing" must never read as "verified".
+// The build replaces the identifier below with a digest-map literal; the typeof guard keeps an UNBUILT worker parseable
+// (empty map -> the TOFU warning) instead of throwing a ReferenceError on load.
+const buildDigests = (typeof __PRECACHE_INTEGRITY__ === 'object') ? __PRECACHE_INTEGRITY__ : {};
+let integrityUnboundWarned = false;
+
 const precacheUrls = [
   // Both shell spellings, deliberately (airhorn-btt): `/` is what a navigation
   // matches, and storing a navigation response is the only way an emptied cache
@@ -162,6 +172,26 @@ async function putVerified(cache, url) {
       return { alias: pathname, canonical };
     }
     throw new Error(`precache refuses a redirected response for ${pathname} (final URL ${response.url}): the bytes would be stored and recorded as ${pathname}`);
+  }
+  // BIND THE FIRST COPY TO THE BUILD (airhorn-oybq). A digest recorded from this same response would be
+  // trust-on-first-use - the record would then vouch for whatever arrived first. The build ships the digest it produced,
+  // so a body that is not the built bytes is refused here, before anything is stored or recorded: the install fails
+  // named, and the install catch deletes the half-built caches.
+  const expectedDigest = buildDigests[pathname];
+  const bytes = await response.clone().arrayBuffer();
+  if (typeof expectedDigest === 'string') {
+    const actualDigest = await digest(bytes);
+    if (actualDigest !== expectedDigest) {
+      throw new Error(`precache refuses ${pathname}: the fetched bytes do not match the build (expected sha256 `
+        + `${expectedDigest}, got ${actualDigest}). A poisoned or mismatched first copy must not become the integrity `
+        + 'baseline (airhorn-oybq)');
+    }
+  } else if (!integrityUnboundWarned) {
+    // Named once, not per URL: an unbound build is still TOFU, and a reader of the console must not be able to think
+    // otherwise.
+    integrityUnboundWarned = true;
+    console.warn(`precache: no build digest for ${pathname} - this worker was not built with a digest manifest, so its `
+      + 'integrity records are trust-on-first-use (airhorn-oybq)');
   }
   await cache.put(requestFor(pathname), response);
   return { stored: pathname };

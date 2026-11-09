@@ -588,6 +588,44 @@ test('the stretched bound is the one a stalled launch actually reports (airhorn-
   }
 });
 
+/* --- the build side of the worker's integrity manifest (airhorn-oybq) --------- */
+
+test('sw-integrity: the manifest maps served paths to the bytes the build emitted (airhorn-oybq)', async () => {
+  const { digestsFor, injectIntegrity, servedPathFor, INTEGRITY_PLACEHOLDER } = await import(
+    `${pathToFileURL(path.join(import.meta.dirname, '..', 'tools', 'lib', 'sw-integrity.mjs')).href}?oybq=${Date.now()}`);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oybq-dist-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'index.html'), 'root document');
+    fs.mkdirSync(path.join(dir, 'styles'));
+    fs.writeFileSync(path.join(dir, 'styles', 'main.css'), 'css bytes');
+    fs.mkdirSync(path.join(dir, 'assets'));
+    fs.writeFileSync(path.join(dir, 'assets', 'app-abc123.js'), 'bundle');
+    fs.writeFileSync(path.join(dir, 'sw.js'), 'the worker itself');
+
+    const digests = digestsFor(dir);
+    const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+    assert.equal(servedPathFor('index.html'), '/', 'the root document is served as /, not /index.html');
+    assert.equal(servedPathFor(path.join('assets', 'app-abc123.js')), '/assets/app-abc123.js', 'nested files keep their path');
+    assert.equal(digests['/'], sha('root document'), 'the root digest is the digest of index.html');
+    assert.equal(digests['/styles/main.css'], sha('css bytes'));
+    assert.equal(digests['/assets/app-abc123.js'], sha('bundle'), 'hashed assets are bound too - they are precached dynamically');
+    assert.equal(digests['/sw.js'], undefined, 'sw.js cannot digest itself');
+
+    // The injection replaces EVERY occurrence and leaves a parseable worker in both directions: built, and unbuilt.
+    const built = injectIntegrity('const d = (typeof __PRECACHE_INTEGRITY__ === \'object\') ? __PRECACHE_INTEGRITY__ : {};', { '/a': 'x' });
+    assert.doesNotMatch(built, /__PRECACHE_INTEGRITY__/, 'no placeholder may survive into the built worker');
+    assert.match(built, /typeof \{"\/a":"x"\} ===/, 'the literal replaces the identifier in both places');
+    assert.equal(injectIntegrity('const d = {};', { '/a': 'x' }), 'const d = {};', 'a source with no placeholder is untouched');
+    assert.doesNotMatch(injectIntegrity(`const d = ${INTEGRITY_PLACEHOLDER};`, {}), /undefined/,
+      'an EMPTY map injects {} rather than the word undefined');
+    // An empty output dir is valid (no files yet) and yields an empty map, not a crash.
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'oybq-empty-'));
+    try { assert.deepEqual(digestsFor(empty), {}); } finally { fs.rmSync(empty, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 const CHROME_MJS = path.join(import.meta.dirname, '..', 'tools', 'lib', 'chrome.mjs');
 const INSTALL_TOOL = path.join(import.meta.dirname, '..', 'tools', 'install-https-proof.mjs');
 const httpsProofProfiles = () => fs.readdirSync(os.tmpdir())
