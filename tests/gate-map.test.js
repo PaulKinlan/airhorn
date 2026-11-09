@@ -694,3 +694,24 @@ test('the page instrument turns DOM facts into the model verdict (airhorn-0w9, -
 // its targets can be exited at import time by the very defect it polices (observed live: a
 // probe that removed derive-coverage-contract's guard ran main() at import and the harness
 // counted the early exit(0) as a green run - the fc98 mechanism masking itself).
+
+
+/* airhorn-m85h: the map's prose lives in docs/coverage-map.md and each non-obvious row
+ * points at its section. A pointer whose section is gone (renamed heading, deleted
+ * section) is a dead reference - a reader follows it into a wall. Pin the link. */
+test('every coverage-map pointer in suite-map.tsv resolves to a section in the doc (airhorn-m85h)', () => {
+  const map = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
+  const doc = fs.readFileSync(path.join(root, 'docs', 'coverage-map.md'), 'utf8');
+  const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  // The doc's anchors: slug of each backticked heading, with an <!-- anchor: x -->
+  // override for repeated patterns.
+  const anchors = new Set();
+  for (const line of doc.split('\n')) {
+    const h = line.match(/^## `([^`]+)`(?: *<!-- anchor: ([a-z0-9-]+) -->)?$/);
+    if (h) anchors.add(h[2] || slug(h[1]));
+  }
+  const pointers = [...map.matchAll(/^# why: docs\/coverage-map\.md#([a-z0-9-]+)$/gm)].map((m) => m[1]);
+  assert.ok(pointers.length > 10, 'the map must carry the pointers (sanity: the move happened)');
+  const dead = pointers.filter((a) => !anchors.has(a));
+  assert.deepEqual(dead, [], 'every pointer must resolve to a doc section; dead: ' + dead.join(', '));
+});
