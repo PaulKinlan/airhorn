@@ -350,6 +350,9 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
   if (!report || !report.driver) {
     return { mode: 'never-ran', problem: `produced no record of the suite loading (exit ${exitCode}), so nothing was measured - a suite that never ran proves nothing about the mutant` };
   }
+  if (report.driver.handlersPreceded) {
+    return { mode: 'report-not-trustworthy', problem: `${report.driver.precededReason || 'the suite installed a rejection listener ahead of the driver\'s'} - a rejection it hid cannot be told from a pass, so nothing here is evidence either way (exit ${exitCode}) (airhorn-rnj5)` };
+  }
   if (report.driver.tampered || report.driver.nonceMismatch) {
     return { mode: 'report-not-trustworthy', problem: `the driver record sequence was invalid (${report.driver.lines || 0} record line(s), or a nonce that was not this run's) - a record was forged or broken, so nothing it says is evidence either way (exit ${exitCode}) (airhorn-y3d6)` };
   }
@@ -551,7 +554,7 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     // The trust boundary, printed and not just commented (airhorn-p0dg): what the record
     // channel CANNOT see. A tool that states its own limit is honest; one that implies
     // closure is not.
-    console.log('trust: driver records are grammar-checked - forged records, and crash-handler strips reported synchronously at strip time, are refused by name; a suite that removes the driver\'s removeListener watcher FIRST can still suppress an out-of-test crash undetected - closing that needs the suite run in a child the driver owns');
+    console.log('trust: driver records are grammar-checked, and crash laundering is refused by name where it can be seen - uncaught exceptions from the uncaughtExceptionMonitor (which runs before every listener and before a capture callback, so prepend/prependOnce/self-removing listeners cannot get ahead of it), strips reported synchronously at strip time, and a rejection listener installed ahead of the driver\'s (position, because node has no rejection monitor). What CANNOT be seen: a prepended once or self-removing unhandledRejection listener, a suite that removes the driver\'s own removeListener watcher first, and a crash that runs no JS at all (abort, OOM, hard kill) - closing those needs the suite run in a child the driver owns');
 
     if (args.build) {
       console.log(`building: ${args.build}`);

@@ -95,6 +95,20 @@ process.on('removeListener', (name, fn) => {
   }
 });
 
+// UNHANDLED REJECTIONS have no monitor - node exposes none - so precedence cannot be claimed for them. What can be said is
+// narrower and it is checked: our rejection handler is registered first, so a suite can only run ahead of it by PREPENDING,
+// and a prepended listener is still in the list at exit. That covers the plain shape; it cannot cover a prepended `once`
+// (node unwraps and removes it before invoking) or a listener that removes itself, because neither is in the list by then.
+// Measured before writing this: a prepended rejection swallow laundered an out-of-test rejection into "the suite passed"
+// (rc 2, no refusal), so this check is the difference between the common shape and none at all.
+process.on('exit', () => {
+  const listeners = process.listeners('unhandledRejection');
+  const index = listeners.indexOf(onRejection);
+  if (index > 0) {
+    record({ handlersPreceded: true, reason: `the suite installed ${index} unhandledRejection listener(s) AHEAD of the driver's - a rejection it hid cannot be told from a pass (suppression, not a measurement)` });
+  }
+});
+
 // Two evasions that the monitor closes, recorded here because I shipped the weaker instrument first (airhorn-rnj5, then
 // airhorn-5qdd from the review of it): a suite that PREPENDS a swallow ahead of the driver's listener, and one that prepends a
 // ONCE listener - node unwraps a `once` wrapper before invoking it, and a self-removing listener is gone by the time anything

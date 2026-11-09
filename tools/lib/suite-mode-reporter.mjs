@@ -201,6 +201,12 @@ export default async function* suiteModeReporter(source) {
     // sequence cannot come from suppression: accept it as a crash. (I deleted this branch when removing a dead sibling in
     // airhorn-5qdd and the honest-crash world caught it - the grammar is load-bearing, not decoration.)
     driver = { ...driverLines[0], ...driverLines[2] };
+  } else if (driverLines.length === 2
+      && typeof driverLines[0].importFailed === 'boolean' && driverLines[0].importFailed === false
+      && driverLines[1].handlersPreceded === true) {
+    // IMPORT, A REJECTION LISTENER AHEAD OF OURS (airhorn-rnj5/5qdd): rejections have no monitor, so this is the one place a
+    // position check still earns its keep. Refused as untrustworthy rather than read as a pass.
+    driver = { ...driverLines[0], handlersPreceded: true, precededReason: driverLines[1].reason };
   } else if (driverLines.length > 0) {
     driver = { tampered: true, lines: driverLines.length };     // any other sequence: forged or broken
   }

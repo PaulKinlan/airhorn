@@ -413,12 +413,22 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     // only via the crash's exit code.
     assert.match(stripped.stderr + stripped.stdout, /report-not-trustworthy|exited 1 with no failing test|registered no tests|crashed/i);
 
+    // The rejection path has no monitor, so it is checked by POSITION at exit - which covers the plain prepend and cannot
+    // cover a prepended once or a self-removing listener. That boundary is asserted, not glossed: the first is refused, and
+    // the second is recorded here as the known residual so nobody reads the trust line as covering it.
+    write('k-prepend-rejection-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { process.prependListener('unhandledRejection', () => process.exit(0)); Promise.reject(new Error('swallowed rejection')); }, 5);\n");
+
     for (const world of ['k-prepend-swallow.mjs', 'k-prepend-once-swallow.mjs', 'k-self-removing-swallow.mjs']) {
       const laundered = runWorld(['--suite', world]);
       assert.equal(laundered.status, 3, `${world} must be a named refusal, got ${laundered.status}: ${laundered.stdout}${laundered.stderr}`);
       assert.match(laundered.stderr + laundered.stdout, /threw-outside-a-test|uncaught exception after the suite loaded/,
         `${world} must be reported as the crash it is (the monitor sees it first), not as a pass`);
     }
+
+    const rejectionLaunder = runWorld(['--suite', 'k-prepend-rejection-swallow.mjs']);
+    assert.equal(rejectionLaunder.status, 3, `a prepended rejection swallow must be a named refusal, got ${rejectionLaunder.status}: ${rejectionLaunder.stdout}${rejectionLaunder.stderr}`);
+    assert.match(rejectionLaunder.stderr + rejectionLaunder.stdout, /AHEAD of the driver's/,
+      'the rejection refusal must name the listener ahead of the driver, since there is no monitor for rejections');
 
     for (const world of ['h-async-no-test.mjs', 'i-async-decoy.mjs', 'j-indirect-async.mjs']) {
       const r = runWorld(['--suite', world]);
