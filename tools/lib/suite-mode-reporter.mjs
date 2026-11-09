@@ -196,6 +196,13 @@ export default async function* suiteModeReporter(source) {
     // the CRASH line. After a REAL strip the driver holds no handler that could write CRASH, so
     // this sequence cannot come from suppression: accept it as a crash.
     driver = { ...driverLines[0], ...driverLines[2] };
+  } else if (driverLines.length === 2
+      && driverLines[0].importFailed === false
+      && driverLines[1].handlersPreceded === true) {
+    // IMPORT, A HANDLER AHEAD OF OURS (airhorn-rnj5): the suite put its own handler ahead of the driver's on a crash event, so it
+    // could exit before the crash was recorded - and then no CRASH line can follow, which is exactly why this sequence must
+    // be refused rather than read as a clean pass. Reported separately from `tampered` so the refusal names the cause.
+    driver = { ...driverLines[0], handlersPreceded: true, precededReason: driverLines[1].reason };
   } else if (driverLines.length > 0) {
     driver = { tampered: true, lines: driverLines.length };     // any other sequence: forged or broken
   }

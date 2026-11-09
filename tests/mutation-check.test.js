@@ -369,6 +369,10 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     // airhorn-a6ch: the suite strips the driver's crash handlers, then crashes asynchronously -
     // the wrapper event must be attributed to the DRIVER, not counted as a failing test.
     write('g-strip-handlers.mjs', "import test from 'node:test';\ntest('one', () => {});\nprocess.removeAllListeners('uncaughtException');\nprocess.removeAllListeners('unhandledRejection');\nsetImmediate(() => { throw new Error('strip boom'); });\n");
+    // airhorn-rnj5: the mirror evasion - PREPEND a swallow so it runs before the driver's handler and exits 0. Nothing is
+    // removed, so the strip watcher is silent; the driver's handler is never reached, so no CRASH line is written; from
+    // outside it is indistinguishable from a suite that simply passed. Position at exit is what separates them.
+    write('k-prepend-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { process.prependListener('uncaughtException', () => process.exit(0)); throw new Error('looks like a pass'); }, 5);\n");
     // airhorn-so88: an async throw AFTER a clean import (the reviewer's repro shape)
     write('f-async-crash.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetImmediate(() => { throw new Error('async boot failure'); });\n");
     // airhorn-lnme: node names the file-level event with the path AS PASSED, so a
@@ -403,6 +407,11 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     // time, so this world refuses as report-not-trustworthy (the strip is named) rather than
     // only via the crash's exit code.
     assert.match(stripped.stderr + stripped.stdout, /report-not-trustworthy|exited 1 with no failing test|registered no tests|crashed/i);
+
+    const laundered = runWorld(['--suite', 'k-prepend-swallow.mjs']);
+    assert.equal(laundered.status, 3, `a suite whose own handler runs ahead of the driver's must be a named refusal, got ${laundered.status}: ${laundered.stdout}${laundered.stderr}`);
+    assert.match(laundered.stderr + laundered.stdout, /AHEAD of the driver's/,
+      'and the refusal must say a listener sits ahead of the driver, not that a record was forged');
 
     for (const world of ['h-async-no-test.mjs', 'i-async-decoy.mjs', 'j-indirect-async.mjs']) {
       const r = runWorld(['--suite', world]);

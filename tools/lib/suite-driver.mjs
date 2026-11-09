@@ -84,6 +84,29 @@ process.on('removeListener', (name, fn) => {
   }
 });
 
+// The mirror-image evasion (airhorn-rnj5 #1): PREPENDING a handler puts the suite's code AHEAD of the driver's, so it can
+// exit(0) before the crash is recorded and the driver's own handler is never reached - nothing was removed, so the strip
+// watcher above sees nothing.
+//
+// Measured, and why this is a POSITION check at EXIT rather than a listener-add watcher: node has no 'prependListener'
+// event (my first version watched it and was dead code - the attack still scored rc 2), and watching 'newListener' instead
+// false-positives on node:test, which installs its OWN uncaughtException/unhandledRejection handlers (measured: three extra
+// records for an honest suite). Position cannot be read at add time either, and deferring to a microtask to look is the
+// mistake p0dg's review caught, because a suite that prepends AND throws in one callback exits before any microtask.
+// process.exit() DOES run 'exit' listeners, so the position at exit is observable after a swallowed crash and needs no
+// deferral: if anything sits ahead of our handler, the suite could have acted first, and that is refused by name.
+// Residual, unchanged in kind: a suite that removes THIS exit listener first is still undetected (nothing in-process is
+// unremovable at the same uid), and a crash that kills the process outright (abort, OOM) runs no exit listener at all.
+for (const [name, own] of [['uncaughtException', onUncaught], ['unhandledRejection', onRejection]]) {
+  process.on('exit', () => {
+    const listeners = process.listeners(name);
+    const index = listeners.indexOf(own);
+    if (index > 0) {
+      record({ handlersPreceded: true, reason: `the suite installed ${index} ${name} listener(s) AHEAD of the driver's - it can exit before the crash is recorded (suppression, not a measurement)` });
+    }
+  });
+}
+
 // Scrub the driver machinery's variables BEFORE the suite loads (airhorn-y3d6): the suite
 // shares this process and inherits this environment. Stated plainly: /proc/<pid>/environ shows
 // the EXEC-TIME environment, so this scrub does not hide anything from a suite that reads proc -
