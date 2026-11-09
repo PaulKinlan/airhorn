@@ -455,8 +455,13 @@ export function suiteFiles(tsvText, { root = DEFAULT_ROOT, fileExists: fileExist
     let entries;
     try {
       entries = fs.readdirSync(path.join(root, dirRel), { withFileTypes: true });
-    } catch {
-      return;
+    } catch (err) {
+      // A MISSING directory is legitimate (a root may have no tests/ at all); an
+      // EXISTING but unreadable one is a broken tree (airhorn-31ep): the old blanket
+      // swallow dropped the whole subtree from the scan with no error - the same
+      // silent-green direction the row-4 fix closed one function down.
+      if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return;
+      throw new Error(`suite scan could not read directory '${dirRel}': ${String((err && err.message) || err)} - a subtree vanished from the coverage scan; refuse rather than report coverage it never derived`);
     }
     for (const ent of entries) {
       const rel = normRel(path.posix.join(dirRel, ent.name));
