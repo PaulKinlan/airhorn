@@ -988,5 +988,12 @@ test('passes', () => {});
 `);
   const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
   assert.match(run.stdout, /trust: driver records are grammar-checked/);
-  assert.match(run.stdout, /removeListener watcher FIRST/);
+  assert.match(run.stdout, /removeListener watcher first/, 'the watcher-first evasion must still be named');
+  // airhorn-rnj5/5qdd: the line must separate what is seen BY PRECEDENCE (uncaught exceptions, via the monitor), what is seen
+  // BY POSITION (rejection listeners, since node has no rejection monitor) and what is not seen at all - a boundary that does
+  // not enumerate its own gaps reads as closure.
+  assert.match(run.stdout, /uncaughtExceptionMonitor/);
+  assert.match(run.stdout, /no rejection monitor/);
+  assert.match(run.stdout, /prepended once or self-removing unhandledRejection listener/);
+  assert.match(run.stdout, /crash that runs no JS at all/);
 });
