@@ -14,6 +14,7 @@ import {
   validateSuiteMap,
   globToRegex,
   globMatchesAny,
+  suiteFiles,
 } from '../tools/derive-coverage-contract.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -431,4 +432,32 @@ test('validateSuiteMap supports bracket/character-class globs (airhorn-onz0)', (
   assert.ok(failViolations[0].message.includes('src/[xy]orn.js'), 'the message names the offending token');
   assert.match(failViolations[0].message, /matches zero files on disk/,
     'the message names the failure MODE: a message that merely restates the token must not pass (same genre as g0qr map #24)');
+});
+
+
+test('an unreadable DIRECTORY fails the suite scan naming it; a MISSING one is legitimate (airhorn-31ep)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-scan-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'tests', 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'tests', 'readable.test.js'), '// fine\n');
+    fs.writeFileSync(path.join(tmp, 'tests', 'nested', 'hidden.test.js'), '// hidden\n');
+    fs.chmodSync(path.join(tmp, 'tests', 'nested'), 0o000);
+    // The reviewer's repro: the subtree must not vanish silently.
+    assert.throws(
+      () => suiteFiles('src/horn.js	tests/readable.test.js\n', { root: tmp }),
+      /could not read directory 'tests\/nested'/,
+      'an unreadable directory must fail the scan naming it, not drop the subtree');
+    fs.chmodSync(path.join(tmp, 'tests', 'nested'), 0o700);
+    // A root with no tests/ at all is a legitimate absence: quiet, empty.
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-empty-'));
+    try {
+      assert.deepEqual(suiteFiles('src/horn.js	tests/readable.test.js\n', { root: empty }), [],
+        'a missing tests/ directory is a root without tests, not a failure');
+    } finally {
+      fs.rmSync(empty, { recursive: true, force: true });
+    }
+  } finally {
+    fs.chmodSync(path.join(tmp, 'tests', 'nested'), 0o700);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
