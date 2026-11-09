@@ -67,10 +67,12 @@ function makeEvidenceDir() {
   return path.join('/tmp/airhorn-resilience', `${sha}-${stamp}`);
 }
 
-const OUT = makeEvidenceDir();
-// No module-scope mkdir (airhorn side-effect enumeration): creating the evidence
-// directory at IMPORT time is a side effect a test that imports this module does
-// not expect. The writers create it on first use instead.
+// airhorn-nrmn: makeEvidenceDir() itself is a side effect (it execSyncs git when
+// RESILIENCE_OUT is unset), so even a module-scope const OUT = makeEvidenceDir()
+// spawns a child process at IMPORT. Resolve lazily on first use instead - an import
+// of this module does no I/O and spawns nothing.
+let _out = null;
+const evidenceDir = () => (_out ??= makeEvidenceDir());
 
 /* ------------------------------------------------------------------ server */
 
@@ -688,6 +690,7 @@ async function pressHorn(cdp, sessionId) {
 export async function shot(cdp, sessionId, name) {
   try {
     const { data } = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
+    const OUT = evidenceDir();
     const file = path.join(OUT, `${name}.png`);
     fs.mkdirSync(OUT, { recursive: true });
     fs.writeFileSync(file, Buffer.from(data, 'base64'));
@@ -1500,7 +1503,7 @@ export const blockedAssetHeadline = (js, css) => {
         : `both subcases measured failures (${failed.map((s) => s.label).join(', ')}); ${headline.label} is shown as the headline`,
   };
 };
-export function writeReport(scenarios, outDir = OUT) {
+export function writeReport(scenarios, outDir = evidenceDir()) {
   const results = scenarios;
   const OUT = outDir;
   fs.mkdirSync(OUT, { recursive: true });
@@ -1559,7 +1562,7 @@ export function writeReport(scenarios, outDir = OUT) {
   // from stdout, an invented negative (airhorn-s68m). The pin is the row count and the
   // last row's identity, in tests/resilience-report.test.js.
   console.log(`\n${lines.slice(5, 7 + results.length).join('\n')}\n`);
-  console.log(`Evidence: ${OUT}`);
+  console.log(`Evidence: ${evidenceDir()}`);
   const exitCode = auditExitCode(results);
   console.log(exitCode === 0
     ? '\nThis is an audit: every selected scenario was measured and none reported an error.'

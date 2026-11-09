@@ -115,13 +115,24 @@ test('everything outside the block survives a union verbatim (comments, the runn
  *     top-level await, a module-scope child_process spawn, a server started at
  *     module scope, a fetch, a filesystem write. Detecting those honestly
  *     requires runtime interception, which is deliberately out of scope (a
- *     fragile sandbox is worse than a documented limit). The 2026-11-09
- *     enumeration of the scanned set found exactly two, both module-scope
- *     fs.mkdirSync(OUT) - since made lazy (writers create the dir on first use)
- *     and pinned by 'importing a tool creates no evidence directory' below.
+ *     fragile sandbox is worse than a documented limit).
+ *   ENUMERATION - what was verified and how, not an absolute count: on the 26-tool
+ *     scanned set at 503df37, a line-start grep for top-level await, module-scope
+ *     spawn/exec/listen/fetch/fs-write found two fs.mkdirSync(OUT); a reviewer's
+ *     marker-shim probe (airhorn-nrmn) then found a third the grep's shapes could
+ *     not see - resilience-audit's const OUT = makeEvidenceDir() execSyncs git at
+ *     import when RESILIENCE_OUT is unset, a spawn behind an innocent-looking const.
+ *     All three are now lazy (resolved on first use) and pinned behaviorally in
+ *     tests/resilience-probe.test.js / tests/rollback-epipe.test.js: importing a
+ *     tool creates no directory and spawns no git, with or without its OUT env var.
+ *     soak.mjs / cache-growth.mjs resolve their evidence dirs inside main() only.
+ *     The check did NOT catch the spawn BY DESIGN: it detects unguarded main()
+ *     calls; a non-main() side effect is this documented blind spot, reachable
+ *     through the closure walk but out of detection scope.
  *   REVIEW BY EYE INSTEAD: when a tool gains module-scope code that is not a
  *     declaration or a cheap constant, the reviewer checks by eye that it
- *     performs no I/O, spawns nothing, and awaits nothing.
+ *     performs no I/O, spawns nothing, and awaits nothing - INCLUDING through
+ *     calls whose bodies do those things (the nrmn lesson).
  *
  * Recognized guard idioms (the codebase already uses four, all equivalent):
  *   if (invokedAsScript) ... / if (isMain) ... /
