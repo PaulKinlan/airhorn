@@ -30,7 +30,9 @@ const suite = process.env.MUTATION_SUITE_FILE;
 // rename of the file turned a named refusal into 'fix-does-not-close'. Same process and same
 // uid mean NO secret can be kept from the suite at all: env leaks via /proc, files are
 // same-uid readable, and the grandchild inherits no extra fds. So the design keeps no secret:
-// forgery is DETECTED, not prevented. The honest sequence is a grammar the reporter validates:
+// forgery is DETECTED, not prevented - and the PIPE does not prevent suppression either: a suite that patches the write path
+// can stop a line being written (the writer is captured at load time, so it cannot stop a line already owed, but it can stop
+// the crash line - airhorn-39yh shape (a)). The honest sequence is a grammar the reporter validates:
 //   IMPORT            (one line: { importFailed } - the only line when the import decides it)
 //   IMPORT, CRASH     (a clean import followed by a crash outside any test, airhorn-so88)
 // Any other sequence - a forged line before, between or after - is tampering, and the parent
@@ -38,10 +40,14 @@ const suite = process.env.MUTATION_SUITE_FILE;
 // cannot unwrite it), so a forged record always makes the sequence invalid.
 const DRIVER_RECORD_PREFIX = 'MUTATION-DRIVER-RECORD ';
 
+// CAPTURED AT LOAD TIME (airhorn-39yh): the driver is imported before the suite, so binding the writer now means a suite that
+// patches fs.writeSync later - the reviewer's shape (a) - cannot suppress a record. Patching cannot UNWRITE a line already in
+// the pipe, but it could stop the next one being written, and the crash line is exactly the next one.
+const writeRecordSync = fs.writeSync;
 const record = (value) => {
   try {
     // Sync write to fd 1: an async console.log can be truncated by the crash handler's exit.
-    fs.writeSync(1, `${DRIVER_RECORD_PREFIX}${JSON.stringify(value)}\n`);
+    writeRecordSync.call(fs, 1, `${DRIVER_RECORD_PREFIX}${JSON.stringify(value)}\n`);
   } catch {
     /* the parent reports a missing record as a named refusal, never as a verdict */
   }
@@ -90,7 +96,11 @@ process.on('unhandledRejection', onRejection);
 // the same uid. The tool prints this boundary once per run (airhorn-p0dg).
 process.on('removeListener', (name, fn) => {
   if (exitingForCrash) return;
-  if ((name === 'uncaughtExceptionMonitor' && fn === onUncaught) || (name === 'unhandledRejection' && fn === onRejection)) {
+  // Our 'exit' listeners are instrumentation too: removing one means the check it performs never runs (airhorn-39yh shape
+  // (b) - the rejection position check was bypassed exactly that way).
+  if ((name === 'uncaughtExceptionMonitor' && fn === onUncaught)
+      || (name === 'unhandledRejection' && fn === onRejection)
+      || (name === 'exit' && fn === onExitCheck)) {
     record({ handlersStripped: true, reason: "the suite removed the driver's crash handlers - a crash outside any test would now be invisible (suppression, not a measurement)" });
   }
 });
@@ -101,13 +111,14 @@ process.on('removeListener', (name, fn) => {
 // (node unwraps and removes it before invoking) or a listener that removes itself, because neither is in the list by then.
 // Measured before writing this: a prepended rejection swallow laundered an out-of-test rejection into "the suite passed"
 // (rc 2, no refusal), so this check is the difference between the common shape and none at all.
-process.on('exit', () => {
+const onExitCheck = () => {
   const listeners = process.listeners('unhandledRejection');
   const index = listeners.indexOf(onRejection);
   if (index > 0) {
     record({ handlersPreceded: true, reason: `the suite installed ${index} unhandledRejection listener(s) AHEAD of the driver's - a rejection it hid cannot be told from a pass (suppression, not a measurement)` });
   }
-});
+};
+process.on('exit', onExitCheck);
 
 // Two evasions that the monitor closes, recorded here because I shipped the weaker instrument first (airhorn-rnj5, then
 // airhorn-5qdd from the review of it): a suite that PREPENDS a swallow ahead of the driver's listener, and one that prepends a

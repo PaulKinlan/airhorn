@@ -425,6 +425,16 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
         `${world} must be reported as the crash it is (the monitor sees it first), not as a pass`);
     }
 
+    // airhorn-39yh, the two shapes this change closes: (a) patch the record channel so the crash line is never written, and
+    // (b) strip the driver's EXIT listeners so the rejection position check never runs. Both scored rc 2 before.
+    write('k-patch-channel-swallow.mjs', "import test from 'node:test';\nimport fs from 'node:fs';\ntest('one', () => {});\nsetTimeout(() => { const real = fs.writeSync; fs.writeSync = (...args) => (String(args[1]).includes('crashedOutsideTest') ? 0 : real.apply(fs, args)); process.prependListener('uncaughtException', () => process.exit(0)); throw new Error('swallowed after patching the channel'); }, 5);\n");
+    write('k-strip-exit-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { for (const fn of process.listeners('exit')) process.removeListener('exit', fn); process.prependListener('unhandledRejection', () => process.exit(0)); Promise.reject(new Error('swallowed after stripping exit listeners')); }, 5);\n");
+
+    for (const world of ['k-patch-channel-swallow.mjs', 'k-strip-exit-swallow.mjs']) {
+      const closed = runWorld(['--suite', world]);
+      assert.equal(closed.status, 3, `${world} must be a named refusal, got ${closed.status}: ${closed.stdout}${closed.stderr}`);
+    }
+
     const rejectionLaunder = runWorld(['--suite', 'k-prepend-rejection-swallow.mjs']);
     assert.equal(rejectionLaunder.status, 3, `a prepended rejection swallow must be a named refusal, got ${rejectionLaunder.status}: ${rejectionLaunder.stdout}${rejectionLaunder.stderr}`);
     assert.match(rejectionLaunder.stderr + rejectionLaunder.stdout, /AHEAD of the driver's/,
@@ -996,4 +1006,8 @@ test('passes', () => {});
   assert.match(run.stdout, /no rejection monitor/);
   assert.match(run.stdout, /prepended once or self-removing unhandledRejection listener/);
   assert.match(run.stdout, /crash that runs no JS at all/);
+  // airhorn-39yh: the reviewer's three shapes, two of which this change CLOSES and one of which remains - the line must name
+  // the remaining one (reallyExit) rather than leaving the list looking exhaustive.
+  assert.match(run.stdout, /process\.reallyExit\(\)/);
+  assert.match(run.stdout, /patches the record write path/);
 });
