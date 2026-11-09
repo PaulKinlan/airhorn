@@ -321,6 +321,7 @@ tests/press-guard.test.mjs	tests/press-guard.test.mjs
 # hosting config and its deploy workflow are pinned by one browser-free suite: it asserts the config
 # is minimal and points at dist/, that the workflow carries the two secrets by name, and it RUNS the
 # workflow's credential guard to prove the no-secret path fails by name before anything is built.
+public/_headers	tests/pages-config.test.js
 wrangler.jsonc	tests/pages-config.test.js
 .github/workflows/deploy-pages.yml	tests/pages-config.test.js
 tests/pages-config.test.js	tests/pages-config.test.js

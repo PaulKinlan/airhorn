@@ -283,6 +283,9 @@
  "tests/support/axe.min.js": [
   "tests/a11y.test.mjs"
  ],
+ "public/_headers": [
+  "tests/pages-config.test.js"
+ ],
  "wrangler.jsonc": [
   "tests/pages-config.test.js"
  ],
