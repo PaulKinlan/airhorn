@@ -1,0 +1,19 @@
+# Cloudflare Pages response headers (airhorn-kv7m). This file is copied verbatim into
+# dist/ by `npm run build` (public/ is the Vite publicDir) and served by Cloudflare
+# Pages on every response. It takes effect when the Pages deploy is the live origin;
+# the current Google Frontend origin ignores it (the production switch is Paul's
+# decision - see .github/workflows/deploy-pages.yml).
+#
+# Scope decision: these five are no-app-risk. The CSP is NOT here on purpose:
+# index.html carries two deliberate inline scripts (the boot watchdog and the SW
+# registration) plus one inline critical stylesheet, so script-src 'self' would
+# break the boot - the CSP needs the inline-script decision first (external files
+# vs hashes), tracked separately.
+#
+# Pinned by tests/pages-config.test.js - if you change a value, the pin names it.
+/*
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: geolocation=(), camera=(), microphone=(), payment=(), usb=()
+  X-Frame-Options: DENY
