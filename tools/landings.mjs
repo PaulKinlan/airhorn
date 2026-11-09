@@ -139,12 +139,17 @@ export function parseGate(block, { present = true } = {}) {
     // `absent` = the message has no GATE block at all (a landing made before the generator wrote
     // one); `placeholder` = the generator's "no cached verdict yet" line for a batch's inner merges.
     // They are different absences and the weekly review must not read one as the other.
-    return { state: 'unrecorded', form: present ? 'placeholder' : 'absent', verdict, kind: null, tree: null, commit: null, at: null, log: null };
+    return { state: 'unrecorded', form: present ? 'placeholder' : 'absent', verdict, kind: null, tree: null, commit: null, at: null, secs: null, log: null };
   }
   const joined = lines.join(' ');
   const tree = (joined.match(/for tree ([0-9a-f]{40})/) || [])[1] || null;
   const commit = (joined.match(/cached for commit ([0-9a-f]{7,40})/) || [])[1] || null;
   const at = (joined.match(/run by merger at (\S+)/) || [])[1] || null;
+  // The duration the record kept with the verdict. Suite counts and the steal figure are prose in the
+  // landing message (BATCH GATE SCOPE AND HOST, or the lines after GATE), so they are reported as the
+  // message recorded them rather than parsed into a half-schema.
+  const secsMatch = joined.match(/\bin (\d+)s run by merger\b/);
+  const secs = secsMatch ? Number(secsMatch[1]) : null;
   const log = (lines.find((line) => /^Log \S+/.test(line)) || '').replace(/^Log /, '') || null;
   return {
     state: verdictMatch[1] === 'PASS' ? 'pass' : 'fail',
@@ -154,6 +159,7 @@ export function parseGate(block, { present = true } = {}) {
     tree,
     commit,
     at,
+    secs,
     log,
   };
 }

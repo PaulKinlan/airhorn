@@ -92,8 +92,8 @@ test('a batch note is its own block, never read as the GATE block', () => {
 test('a PASS is recognised structurally, and a placeholder is not read as one', () => {
   const pass = parseGate(passGate(TREE_A));
   assert.deepEqual(
-    { state: pass.state, form: pass.form, kind: pass.kind, tree: pass.tree, commit: pass.commit, at: pass.at },
-    { state: 'pass', form: 'verdict', kind: 'full', tree: TREE_A, commit: 'abc1234', at: '2026-01-01T00:00:00Z' }
+    { state: pass.state, form: pass.form, kind: pass.kind, tree: pass.tree, commit: pass.commit, at: pass.at, secs: pass.secs },
+    { state: 'pass', form: 'verdict', kind: 'full', tree: TREE_A, commit: 'abc1234', at: '2026-01-01T00:00:00Z', secs: 12 }
   );
   assert.equal(pass.log, `/tmp/checks/${TREE_A}.log`);
 
