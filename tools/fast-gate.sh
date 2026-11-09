@@ -1008,6 +1008,18 @@ report_suite_failure() { # $1 = suite, $2 = key, $3 = log
       fi
     fi
   fi
+  # airhorn-dxa3: the attempt suffix has SECOND precision (fleet-check stores now|todate),
+  # so two attempts in the same second name the same archive file and the later one
+  # clobbers the earlier one's evidence. Pick a name that does not exist and cite THAT.
+  local archive_leaf="$key.log"
+  if [ -n "$attempt_suffix" ]; then
+    archive_leaf="$key$attempt_suffix.log"
+    local n=2
+    while [ -e "$checks_dir/$tree.fast.failing-suites/$archive_leaf" ]; do
+      archive_leaf="$key$attempt_suffix-$n.log"
+      n=$((n + 1))
+    done
+  fi
   if [ -n "${AIRHORN_FAILING_SUITES_DIR:-}" ]; then
     dest_dirs+=("$AIRHORN_FAILING_SUITES_DIR")
   fi
@@ -1016,9 +1028,12 @@ report_suite_failure() { # $1 = suite, $2 = key, $3 = log
     mkdir -p "$d" 2>/dev/null || true
     local target_file="$d/$key.log"
     if [ "$d" = "$checks_dir/$tree.fast.failing-suites" ] && [ -n "$attempt_suffix" ]; then
-      target_file="$d/$key$attempt_suffix.log"
+      target_file="$d/$archive_leaf"
+    else
+      # The unscoped copies are the LATEST-attempt view and overwrite intentionally;
+      # only the attempt-scoped archive must never clobber.
+      rm -f "$target_file" 2>/dev/null || true
     fi
-    rm -f "$target_file" 2>/dev/null || true
     if tail -c 524288 "$log" > "$target_file" 2>/dev/null && [ -s "$target_file" ]; then
       echo "fast-gate: suite log preserved at $target_file"
       if [ "$target_file" != "$d/$key.log" ]; then
@@ -1039,7 +1054,7 @@ report_suite_failure() { # $1 = suite, $2 = key, $3 = log
       in_fail { print; if (/^[ \t]*\.\.\.[ \t]*$/) in_fail=0 }
     ' "$log" 2>/dev/null | head -n 30)
     [ -n "$snippet" ] || snippet=$(tail -n 25 "$log" 2>/dev/null)
-    local cited_path="$checks_dir/$tree.fast.failing-suites/$key${attempt_suffix:-}.log"
+    local cited_path="$checks_dir/$tree.fast.failing-suites/${archive_leaf}"
     if [ -s "$cited_path" ]; then
       jq --arg s "$s" --arg p "$cited_path" --arg snip "$snippet" \
         '.failing_suites = ((.failing_suites // {}) + {($s): {log: $p, snippet: $snip}})' \
