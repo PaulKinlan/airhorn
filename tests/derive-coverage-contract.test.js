@@ -15,6 +15,7 @@ import {
   globToRegex,
   globMatchesAny,
   suiteFiles,
+  importersOf,
 } from '../tools/derive-coverage-contract.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -458,6 +459,27 @@ test('an unreadable DIRECTORY fails the suite scan naming it; a MISSING one is l
     }
   } finally {
     fs.chmodSync(path.join(tmp, 'tests', 'nested'), 0o700);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable LISTED suite fails the @importers derivation, named (tools/ sweep row 4)', () => {
+  // Inject the race directly: existence says yes, the read fails. The silent continue
+  // used to drop the suite and report coverage it never scanned.
+  // The real shape: the walk finds the file (it exists and is regular), the READ fails
+  // (permission flip, transient IO). A temp root keeps the world hermetic.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'imp-scan-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'tests'));
+    fs.writeFileSync(path.join(tmp, 'tests', 'unreadable.test.js'), '// present but unreadable\n');
+    fs.chmodSync(path.join(tmp, 'tests', 'unreadable.test.js'), 0o000);
+    const tsv = 'src/horn.js	tests/unreadable.test.js\n';
+    assert.throws(
+      () => importersOf('src/horn.js', { root: tmp, tsvText: tsv }),
+      /could not read listed suite 'tests\/unreadable\.test\.js'/,
+      'an unreadable listed suite must fail the derivation naming it, not vanish from the scan');
+  } finally {
+    fs.chmodSync(path.join(tmp, 'tests', 'unreadable.test.js'), 0o600);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
