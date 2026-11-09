@@ -1646,3 +1646,61 @@ test('waitForSw distinguishes active, redundant, unsupported, evaluate error, an
 // tools it would scan, and an unguarded tool would exit the process at import, before the
 // check could run - the very defect class it polices (observed live in the RED probe).
 // gate-conf-merge.test.js imports only node builtins, so it can host the scan safely.
+
+
+test('two failing attempts in the SAME second never clobber each other (airhorn-dxa3)', () => {
+  // The attempt suffix is second-precision; a same-second re-gate used to overwrite the
+  // first attempt's archived log. The archive must pick a free name and the record must
+  // cite the name actually written.
+  const { probe, run } = buildGateProbe();
+  try {
+    const failingResultsDir = path.join(probe, 'custom-results');
+    const fakeChecksDir = path.join(probe, 'fake-checks');
+    fs.mkdirSync(fakeChecksDir, { recursive: true });
+    const tree = spawnSync('git', ['-C', probe, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).stdout.trim();
+    const fakeRec = path.join(fakeChecksDir, `${tree}.fast.json`);
+    const sameSecond = '2026-10-31T02:23:47Z';
+    const archivesDir = path.join(fakeChecksDir, `${tree}.fast.failing-suites`);
+
+    const writeFailing = (marker) => {
+      fs.writeFileSync(path.join(probe, 'tests', 'fail.test.js'), [
+        "import { test } from 'node:test';",
+        "import assert from 'node:assert/strict';",
+        "test('failing case', () => {",
+        `  assert.equal(false, true, '${marker}');`,
+        "});",
+      ].join('\n') + '\n');
+    };
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'fail-src.js\ttests/fail.test.js\n');
+    fs.writeFileSync(path.join(probe, 'fail-src.js'), '// fail');
+
+    writeFailing('DXA3_FIRST_MARKER');
+    fs.writeFileSync(fakeRec, JSON.stringify({ state: 'RUNNING', tree, at: sameSecond }));
+    const res1 = run(['--changed', 'fail-src.js'], { AIRHORN_RESULTS_DIR: failingResultsDir, AIRHORN_CHECKS_DIR: fakeChecksDir });
+    assert.equal(res1.status, 1);
+    const firstArchive = path.join(archivesDir, 'tests_fail_test_js.20261031T022347Z.log');
+    assert.ok(fs.existsSync(firstArchive), `first attempt archive must exist: ${firstArchive}`);
+
+    // Same tree, same .at (same second), different failure content.
+    writeFailing('DXA3_SECOND_MARKER');
+    fs.writeFileSync(fakeRec, JSON.stringify({ state: 'RUNNING', tree, at: sameSecond }));
+    const res2 = run(['--changed', 'fail-src.js'], { AIRHORN_RESULTS_DIR: failingResultsDir, AIRHORN_CHECKS_DIR: fakeChecksDir });
+    assert.equal(res2.status, 1);
+
+    // The first attempt's archive keeps ITS evidence.
+    const firstContent = fs.readFileSync(firstArchive, 'utf8');
+    assert.ok(firstContent.includes('DXA3_FIRST_MARKER'),
+      'the first attempt\'s archived log must not be clobbered by a same-second re-attempt');
+    assert.ok(!firstContent.includes('DXA3_SECOND_MARKER'),
+      'the first attempt\'s archived log must not contain the second attempt\'s output');
+
+    // The second attempt's record cites a DIFFERENT path that holds its own output.
+    const rec2 = JSON.parse(fs.readFileSync(fakeRec, 'utf8'));
+    const cited = rec2.failing_suites['tests/fail.test.js'].log;
+    assert.ok(cited && cited !== firstArchive, `the second attempt must cite a distinct archive, got: ${cited}`);
+    assert.ok(fs.readFileSync(cited, 'utf8').includes('DXA3_SECOND_MARKER'),
+      'the cited second-attempt archive must contain the second attempt\'s output');
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+});
