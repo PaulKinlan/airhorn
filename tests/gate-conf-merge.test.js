@@ -106,6 +106,23 @@ test('everything outside the block survives a union verbatim (comments, the runn
  * policing the whole repo would cry wolf) and fails when an imported tool calls
  * main() with no recognized guard.
  *
+ * THE LIMITS OF THIS CHECK (hh3k follow-up, coord 2026-11-09 - a check that
+ * implies completeness is worse than one that names its blind spot):
+ *   CATCHES: a top-level main() call not wrapped by a recognized guard idiom,
+ *     in any tool reachable from tests/ (static, dynamic, require, side-effect
+ *     import shapes, plus the transitive tool->tool closure).
+ *   CANNOT CATCH: side effects at import that are not a main() call - a
+ *     top-level await, a module-scope child_process spawn, a server started at
+ *     module scope, a fetch, a filesystem write. Detecting those honestly
+ *     requires runtime interception, which is deliberately out of scope (a
+ *     fragile sandbox is worse than a documented limit). The 2026-11-09
+ *     enumeration of the scanned set found exactly two, both module-scope
+ *     fs.mkdirSync(OUT) - since made lazy (writers create the dir on first use)
+ *     and pinned by 'importing a tool creates no evidence directory' below.
+ *   REVIEW BY EYE INSTEAD: when a tool gains module-scope code that is not a
+ *     declaration or a cheap constant, the reviewer checks by eye that it
+ *     performs no I/O, spawns nothing, and awaits nothing.
+ *
  * Recognized guard idioms (the codebase already uses four, all equivalent):
  *   if (invokedAsScript) ... / if (isMain) ... /
  *   process.argv[1] compared with fileURLToPath(import.meta.url) (either order).
