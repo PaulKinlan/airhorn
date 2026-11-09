@@ -640,3 +640,62 @@ test('provenance: a bound hashed asset and a bound runtime re-store are labelled
   assert.equal(restored.basis, 'build-manifest', 'a re-store of bytes that match the build is still build-verified');
   assert.equal(restored.sha256, sha('good /styles/main.css'), 'and it re-established the GOOD bytes, not the tampered ones');
 });
+
+/*
+ * airhorn-lu8a (P2, found by the second review): the manifest mapped index.html to '/' only, but the worker precaches BOTH
+ * shell spellings on purpose, so '/index.html' had no build digest and basisFor() fell back to TOFU for a statically
+ * precached path. A poisoned first fetch of '/index.html' installed cleanly and was then served offline as a VERIFIED hit.
+ *
+ * Two grounds, because the fix has two halves and either one alone can regress silently: the manifest must cover every
+ * spelling the worker asks for, and a built worker must REFUSE an uncovered static path rather than record it as TOFU.
+ */
+test('manifest covers both shell spellings, so a poisoned /index.html cannot install (airhorn-lu8a)', async () => {
+  const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+  const HTML = 'the one document, under two spellings';
+  // A real build's manifest now carries both keys; the network poisons the NON-canonical spelling.
+  const digests = {
+    '/': sha(HTML),
+    '/index.html': sha(HTML),
+    '/styles/main.css': sha('good /styles/main.css'),
+    '/sounds/airhorn.mp3': sha('good /sounds/airhorn.mp3'),
+  };
+  const worker = loadWorker({
+    digests,
+    fetchImpl: async (req) => {
+      const p = new URL(typeof req === 'string' ? req : req.url, ORIGIN).pathname;
+      if (p === '/index.html') return sameUrlResponse(ORIGIN + p, 'POISONED DOCUMENT');
+      return sameUrlResponse(ORIGIN + p, p === '/' ? HTML : `good ${p}`);
+    },
+  });
+  let waited;
+  for (const listener of worker.listeners.install) listener({ waitUntil: (promise) => { waited = promise; } });
+  await assert.rejects(waited, /do not match the build/,
+    'a document fetched under a second spelling is still the build\'s bytes and must be checked as such');
+  // The failed install's own cleanup deletes the half-built caches, so check EVERY surviving cache rather than assume the
+  // content cache still exists - and check the bytes, not just presence, since a record is also a place poison can hide.
+  for (const name of worker.caches.keys()) {
+    const cache = worker.caches.get(name);
+    const held = cache.entries.get('/index.html');
+    assert.notEqual(held?.body, 'POISONED DOCUMENT', `${name} must not hold the poisoned document`);
+  }
+});
+
+test('a BUILT worker REFUSES a statically precached path the manifest does not cover (airhorn-lu8a)', async () => {
+  // The belt to the manifest's braces: if a future precacheUrls entry (or a mapping regression) is uncovered, the install
+  // must fail by name. Silently recording TOFU for a static path is precisely how lu8a went unnoticed - the record looked
+  // fine and the gap was in what the manifest omitted.
+  const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+  const digests = {
+    '/': sha('doc'),
+    '/styles/main.css': sha('good /styles/main.css'),
+    '/sounds/airhorn.mp3': sha('good /sounds/airhorn.mp3'),
+    // '/index.html' deliberately missing, which is exactly the real build's behaviour before this fix.
+  };
+  const worker = loadWorker({ digests, fetchImpl: async (req) => sameUrlResponse(ORIGIN + new URL(typeof req === 'string' ? req : req.url, ORIGIN).pathname, 'doc') });
+  let waited;
+  for (const listener of worker.listeners.install) listener({ waitUntil: (promise) => { waited = promise; } });
+  await assert.rejects(waited, /build manifest does not cover this path/,
+    'an uncovered STATIC precache path must fail the install in a built worker, not degrade to TOFU');
+  assert.ok(worker.warnings.every((line) => !line.includes('trust-on-first-use')),
+    `and it must not also claim TOFU-by-design for it: ${JSON.stringify(worker.warnings)}`);
+});

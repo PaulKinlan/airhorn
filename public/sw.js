@@ -92,7 +92,7 @@ async function digest(buffer) {
  * this path (a dev server, an unrebuilt worker, or a path outside the emitted output), and throws on a mismatch so the
  * caller refuses to store, record or (at install) complete.
  */
-async function basisFor(pathname, bytes) {
+async function basisFor(pathname, bytes, { staticallyPrecached = false } = {}) {
   const expectedDigest = buildDigests[pathname];
   if (typeof expectedDigest === 'string') {
     const actualDigest = await digest(bytes);
@@ -101,6 +101,15 @@ async function basisFor(pathname, bytes) {
         + `${actualDigest}). A poisoned or mismatched copy must not become the integrity baseline (airhorn-oybq)`);
     }
     return 'build-manifest';
+  }
+  // A BUILT worker (non-empty manifest) that is asked to precache a static path the manifest does not cover is a BUILD
+  // BUG, and one that would silently degrade to TOFU for exactly the paths an attacker would pick (airhorn-lu8a: the
+  // manifest mapped index.html to '/' only, so the statically precached '/index.html' was unbound). Refuse it by name
+  // instead of warning: a warning here reads as "unverified but fine", and the gap is invisible in the record.
+  if (staticallyPrecached && Object.keys(buildDigests).length > 0) {
+    throw new Error(`${pathname}: the build manifest does not cover this path, but the worker precaches it statically. `
+      + 'That is a build bug, not a first-write - refusing rather than recording a trust-on-first-use baseline '
+      + '(airhorn-lu8a)');
   }
   if (!integrityUnboundWarned) {
     // Named once, not per URL: an unbound path is still TOFU, and a reader of the console must not be able to think
@@ -159,7 +168,7 @@ async function store(cache, meta, pathname, response) {
   // A copy stored AFTER an eviction is still a first copy, so it gets the same question the install asks (airhorn-5km4).
   // The bytes are verified from this response, then THAT response is stored: no second fetch, and nothing is written
   // when the build disagrees.
-  const basis = await basisFor(pathname, await response.clone().arrayBuffer());
+  const basis = await basisFor(pathname, await response.clone().arrayBuffer(), { staticallyPrecached: true });
   await cache.put(requestFor(pathname), response.clone());
   await record(meta, pathname, response, { basis });
 }
@@ -244,7 +253,9 @@ async function putVerified(cache, url) {
     }
     throw new Error(`precache refuses a redirected response for ${pathname} (final URL ${response.url}): the bytes would be stored and recorded as ${pathname}`);
   }
-  const basis = await basisFor(pathname, await response.clone().arrayBuffer());
+  const basis = await basisFor(pathname, await response.clone().arrayBuffer(), {
+    staticallyPrecached: precachePaths.has(pathname),
+  });
   await cache.put(requestFor(pathname), response);
   return { stored: pathname, basis };
 }

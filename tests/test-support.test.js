@@ -607,6 +607,9 @@ test('sw-integrity: the manifest maps served paths to the bytes the build emitte
     assert.equal(servedPathFor('index.html'), '/', 'the root document is served as /, not /index.html');
     assert.equal(servedPathFor(path.join('assets', 'app-abc123.js')), '/assets/app-abc123.js', 'nested files keep their path');
     assert.equal(digests['/'], sha('root document'), 'the root digest is the digest of index.html');
+    // airhorn-lu8a: the worker precaches BOTH shell spellings, so the manifest must carry both or the non-canonical one
+    // silently degrades to trust-on-first-use.
+    assert.equal(digests['/index.html'], sha('root document'), 'the second shell spelling is bound to the same bytes');
     assert.equal(digests['/styles/main.css'], sha('css bytes'));
     assert.equal(digests['/assets/app-abc123.js'], sha('bundle'), 'hashed assets are bound too - they are precached dynamically');
     assert.equal(digests['/sw.js'], undefined, 'sw.js cannot digest itself');

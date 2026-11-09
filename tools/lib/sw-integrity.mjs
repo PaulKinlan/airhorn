@@ -35,6 +35,20 @@ export function servedPathFor(relativePath) {
 }
 
 /**
+ * Every path a file is precached under, which for one file can be several (airhorn-lu8a).
+ *
+ * The worker precaches BOTH shell spellings on purpose (airhorn-btt: `/` for navigations, `/index.html` for in-page
+ * fetches and the navigation fallback), and they are one file. Mapping index.html only to '/' left '/index.html' with no
+ * build digest, so basisFor() fell back to TOFU for a path the worker precaches statically: a poisoned first fetch of
+ * '/index.html' installed cleanly and was served offline as a verified hit. The manifest must cover every spelling the
+ * worker asks for, not just the canonical one.
+ */
+export function servedPathsFor(relativePath) {
+  const primary = servedPathFor(relativePath);
+  return primary === '/' ? ['/', '/index.html'] : [primary];
+}
+
+/**
  * SHA-256 of every file the build emitted, keyed by the path the browser asks for.
  *
  * Deliberately the WHOLE output, not a hand-kept list: the worker precaches a fixed set plus whatever hashed assets
@@ -51,7 +65,8 @@ export function digestsFor(distDir) {
       if (!entry.isFile()) continue;
       // sw.js itself is not served to the page as content and cannot contain its own digest.
       if (servedPathFor(rel) === '/sw.js') continue;
-      digests[servedPathFor(rel)] = crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex');
+      const sha = crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex');
+      for (const served of servedPathsFor(rel)) digests[served] = sha;
     }
   };
   if (fs.existsSync(distDir)) walk(distDir, '');
