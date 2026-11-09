@@ -81,6 +81,38 @@ async function digest(buffer) {
 // Record what a good copy of this response looked like, so a later hit can be
 // checked against it instead of trusted (airhorn-un5).
 /**
+ * What the BUILD can say about these bytes, or a refusal (airhorn-oybq, airhorn-5km4).
+ *
+ * This is the one place the build check lives. It used to live inside putVerified alone, so the install refused a
+ * mismatched copy while the RUNTIME path stored and recorded whatever the network returned - and after an eviction there
+ * is no record left for record()'s refusal to compare against, so poison became a fresh, durable baseline (5km4). A check
+ * that exists on one of two write paths is not a guarantee; it is a guarantee-shaped comment.
+ *
+ * Returns 'build-manifest' when the bytes match the digest the build shipped, 'tofu' when the build knows nothing about
+ * this path (a dev server, an unrebuilt worker, or a path outside the emitted output), and throws on a mismatch so the
+ * caller refuses to store, record or (at install) complete.
+ */
+async function basisFor(pathname, bytes) {
+  const expectedDigest = buildDigests[pathname];
+  if (typeof expectedDigest === 'string') {
+    const actualDigest = await digest(bytes);
+    if (actualDigest !== expectedDigest) {
+      throw new Error(`${pathname}: the fetched bytes do not match the build (expected sha256 ${expectedDigest}, got `
+        + `${actualDigest}). A poisoned or mismatched copy must not become the integrity baseline (airhorn-oybq)`);
+    }
+    return 'build-manifest';
+  }
+  if (!integrityUnboundWarned) {
+    // Named once, not per URL: an unbound path is still TOFU, and a reader of the console must not be able to think
+    // otherwise.
+    integrityUnboundWarned = true;
+    console.warn(`integrity: no build digest for ${pathname} - this worker (or this path) was not covered by a build `
+      + 'manifest, so records for it are trust-on-first-use (airhorn-oybq)');
+  }
+  return 'tofu';
+}
+
+/**
  * Write the integrity record for a precached copy, with the provenance that justifies it (airhorn-oybq).
  *
  * A record is only evidence if it says HOW the baseline was established, because the two cases are not equally strong:
@@ -123,7 +155,11 @@ async function record(meta, pathname, response, { basis, expectChange = false } 
   return { kept: false, record };
 }
 
-async function store(cache, meta, pathname, response, basis) {
+async function store(cache, meta, pathname, response) {
+  // A copy stored AFTER an eviction is still a first copy, so it gets the same question the install asks (airhorn-5km4).
+  // The bytes are verified from this response, then THAT response is stored: no second fetch, and nothing is written
+  // when the build disagrees.
+  const basis = await basisFor(pathname, await response.clone().arrayBuffer());
   await cache.put(requestFor(pathname), response.clone());
   await record(meta, pathname, response, { basis });
 }
@@ -208,28 +244,9 @@ async function putVerified(cache, url) {
     }
     throw new Error(`precache refuses a redirected response for ${pathname} (final URL ${response.url}): the bytes would be stored and recorded as ${pathname}`);
   }
-  // BIND THE FIRST COPY TO THE BUILD (airhorn-oybq). A digest recorded from this same response would be
-  // trust-on-first-use - the record would then vouch for whatever arrived first. The build ships the digest it produced,
-  // so a body that is not the built bytes is refused here, before anything is stored or recorded: the install fails
-  // named, and the install catch deletes the half-built caches.
-  const expectedDigest = buildDigests[pathname];
-  const bytes = await response.clone().arrayBuffer();
-  if (typeof expectedDigest === 'string') {
-    const actualDigest = await digest(bytes);
-    if (actualDigest !== expectedDigest) {
-      throw new Error(`precache refuses ${pathname}: the fetched bytes do not match the build (expected sha256 `
-        + `${expectedDigest}, got ${actualDigest}). A poisoned or mismatched first copy must not become the integrity `
-        + 'baseline (airhorn-oybq)');
-    }
-  } else if (!integrityUnboundWarned) {
-    // Named once, not per URL: an unbound build is still TOFU, and a reader of the console must not be able to think
-    // otherwise.
-    integrityUnboundWarned = true;
-    console.warn(`precache: no build digest for ${pathname} - this worker was not built with a digest manifest, so its `
-      + 'integrity records are trust-on-first-use (airhorn-oybq)');
-  }
+  const basis = await basisFor(pathname, await response.clone().arrayBuffer());
   await cache.put(requestFor(pathname), response);
-  return { stored: pathname, basis: typeof expectedDigest === 'string' ? 'build-manifest' : 'tofu' };
+  return { stored: pathname, basis };
 }
 
 // Bounded concurrency (airhorn-86mz): the redirect fix's per-URL
@@ -270,8 +287,11 @@ async function precache() {
       const html = await res.text();
       const assetMatches = html.matchAll(/(?:src|href)=['"](\/assets\/[^'"]+)['"]/g);
       const dynamicUrls = Array.from(assetMatches, m => m[1]);
-      await mapPooled(dynamicUrls, PRECACHE_CONCURRENCY, (url) => putVerified(cache, url));
-      storedUrls.push(...dynamicUrls);
+      // Keep the results (airhorn-s15g): discarding them is why a hashed asset whose bytes the manifest BOUND was
+      // recorded as 'tofu' - the label said first-write about a copy the build had verified.
+      const dynamicWritten = await mapPooled(dynamicUrls, PRECACHE_CONCURRENCY, (url) => putVerified(cache, url));
+      written.push(...dynamicWritten.filter(Boolean));
+      storedUrls.push(...dynamicWritten.filter(result => result && result.stored).map(result => result.stored));
     }
   } catch (err) {
     console.warn('Fallback asset precaching error:', err);
@@ -393,7 +413,9 @@ self.addEventListener('fetch', event => {
         if (redirectedAwayFrom(response, url.pathname)) {
           console.warn(`sw: not caching ${url.pathname}: the response came from ${response.url} (redirected=${response.redirected})`);
         } else {
-          await store(cache, meta, url.pathname, response.clone()).catch(() => {});
+          await store(cache, meta, url.pathname, response.clone()).catch((err) => {
+            console.warn(`sw: not caching ${url.pathname}: ${err && err.message ? err.message : err}`);
+          });
         }
       }
       return response;

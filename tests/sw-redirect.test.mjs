@@ -539,3 +539,104 @@ test('integrity record: an UNVERIFIED baseline is labelled tofu, not left lookin
   assert.equal(record.verifiedAgainstBuild, false);
   assert.equal(record.sha256.length, 64, 'the digest is still recorded - the label is provenance, not a weaker check');
 });
+
+/*
+ * airhorn-5km4 (P2, found by the cross-family review of oybq): the build check lived only in putVerified, so the INSTALL
+ * refused a mismatched copy while the RUNTIME path stored and recorded whatever the network returned. After an eviction
+ * there is no record for record()'s refusal to compare against, so poison became a fresh, durable baseline - the exact
+ * TOFU shape oybq exists to close, one step later on a path anyone can reach by leaving the tab open.
+ */
+test('runtime re-store: after an eviction, bytes that disagree with the build are NOT cached or recorded (airhorn-5km4)', async () => {
+  const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+  const urls = ['/', '/index.html', '/styles/main.css', '/sounds/airhorn.mp3'];
+  const digests = Object.fromEntries(urls.map((u) => [u, sha(`good ${u}`)]));
+  const POISON = 'POISONED-CSS';
+  let servePoison = false;
+  const worker = loadWorker({
+    digests,
+    fetchImpl: async (req) => {
+      // Accept a string too: precache()'s dynamic step calls fetch('/index.html') that way, and a stub that threw on it
+      // would leave "Invalid URL" in the warning list, where it would look like a worker defect in a later failure.
+      const p = new URL(typeof req === 'string' ? req : req.url, ORIGIN).pathname;
+      const body = p === '/styles/main.css' ? (servePoison ? POISON : `good ${p}`) : `good ${p}`;
+      return sameUrlResponse(ORIGIN + p, body);
+    },
+  });
+  const install = async () => {
+    let waited;
+    for (const listener of worker.listeners.install) listener({ waitUntil: (promise) => { waited = promise; } });
+    return waited;
+  };
+  await install();
+  const meta = worker.caches.get([...worker.caches.keys()].find((k) => k.startsWith('horn-integrity-')));
+  const content = worker.caches.get([...worker.caches.keys()].find((k) => k.startsWith('airhorner-')));
+
+  // Something corrupts the cached body, so the next read fails verification and the worker evicts - which also deletes
+  // the record the (b) refusal would have compared against. Then the network answers with poison.
+  content.entries.set('/styles/main.css', new Response('tampered on disk'));
+  servePoison = true;
+  await runFetch(worker, '/styles/main.css');
+
+  // The refusal must be NAMED (a silently swallowed side-effect failure looks identical to a successful store).
+  assert.ok(worker.warnings.some((line) => line.includes('not caching /styles/main.css') && line.includes('do not match the build')),
+    `the runtime refusal must say why nothing was cached, got: ${JSON.stringify(worker.warnings)}`);
+  // And nothing durable: no body, and no record vouching for the poison.
+  assert.equal(content.entries.has('/styles/main.css'), false, 'poison must not be left in the content cache');
+  assert.equal(meta.entries.has('/styles/main.css'), false, 'and no record may vouch for it');
+
+  // Offline afterwards: the poison must not come back as a verified hit.
+  servePoison = false;
+  const gone = { offline: true };
+  worker.sandbox.fetch = async () => { throw new TypeError('network down'); };
+  const offline = await runFetch(worker, '/styles/main.css').catch((err) => err);
+  if (offline instanceof Response) {
+    const text = await offline.text();
+    assert.doesNotMatch(text, /POISONED-CSS/, 'a poisoned body must never be served from cache as verified');
+  } else {
+    assert.ok(offline, 'an offline miss may reject, but must not resolve to the poisoned cached body');
+  }
+});
+
+/*
+ * airhorn-s15g (P3, same review): the provenance label under-claimed in two places. A hashed asset whose bytes the
+ * manifest BOUND was recorded as 'tofu' because precache() threw away the dynamic batch's results - the label said
+ * first-write about a copy the build had verified. And a runtime re-store of identical good bytes flipped a
+ * build-manifest baseline to tofu. Under-claiming is the safe direction, but (a)'s whole point is that an audit reads the
+ * record and learns how the baseline was established, so a wrong label is a wrong record.
+ */
+test('provenance: a bound hashed asset and a bound runtime re-store are labelled build-manifest, not tofu (airhorn-s15g)', async () => {
+  const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+  const ASSET = '/assets/app-abc123.js';
+  const HTML = '<script type="module" src="/assets/app-abc123.js"></script>';
+  const urls = ['/', '/styles/main.css', '/sounds/airhorn.mp3', ASSET];
+  const digests = Object.fromEntries(urls.map((u) => [u, sha(`good ${u}`)]));
+  digests['/index.html'] = sha(HTML);
+  const worker = loadWorker({
+    digests,
+    fetchImpl: async (req) => {
+      // precache()'s dynamic step calls fetch('/index.html') with a STRING, so this stub has to accept both shapes.
+      const p = new URL(typeof req === 'string' ? req : req.url, ORIGIN).pathname;
+      if (p === '/index.html') return sameUrlResponse(ORIGIN + p, HTML);
+      return sameUrlResponse(ORIGIN + p, `good ${p}`);
+    },
+  });
+  let waited;
+  for (const listener of worker.listeners.install) listener({ waitUntil: (promise) => { waited = promise; } });
+  await waited;
+  const meta = worker.caches.get([...worker.caches.keys()].find((k) => k.startsWith('horn-integrity-')));
+  const recorded = async (pathname) => JSON.parse(await (await meta.match(new Request(ORIGIN + pathname))).clone().text());
+
+  // (1) The dynamically discovered hashed asset: bound by the manifest, so its record must say so.
+  const asset = await recorded(ASSET);
+  assert.equal(asset.basis, 'build-manifest',
+    'a hashed asset the manifest bound must not be labelled tofu just because it was discovered from index.html');
+  assert.equal(asset.verifiedAgainstBuild, true);
+
+  // (2) A runtime re-store of IDENTICAL good bytes after an eviction keeps the build-manifest label.
+  const content = worker.caches.get([...worker.caches.keys()].find((k) => k.startsWith('airhorner-')));
+  content.entries.set('/styles/main.css', new Response('tampered on disk'));
+  await runFetch(worker, '/styles/main.css');
+  const restored = await recorded('/styles/main.css');
+  assert.equal(restored.basis, 'build-manifest', 'a re-store of bytes that match the build is still build-verified');
+  assert.equal(restored.sha256, sha('good /styles/main.css'), 'and it re-established the GOOD bytes, not the tampered ones');
+});
