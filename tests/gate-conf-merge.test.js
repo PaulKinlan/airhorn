@@ -140,6 +140,38 @@ test('tools that tests import never run main() unguarded (the fc98 class)', () =
     }
   }
   assert.ok(importedTools.size > 5, 'the scan must find the real import set, not an empty one');
+  // hh3k pin, vector 1: every import SHAPE must be caught, including the bare
+  // side-effect form a reviewer misread as escaping (import\s*\(? matches it).
+  for (const shape of [
+    "import x from '../tools/a.mjs';",
+    "import '../tools/b.mjs';",
+    "await import('../tools/c.mjs');",
+    "require('../tools/d.mjs');",
+  ]) {
+    assert.ok(specRe.test(shape), `the scan must catch this import shape: ${shape}`);
+    specRe.lastIndex = 0;
+  }
+  // hh3k vector 2: the transitive closure. A tool reached only via ANOTHER tool
+  // (today: tools/lib/reap.mjs via install-https-proof.mjs) would otherwise escape
+  // the scan; if it ever grew a top-level main() the fc98 class would recur through
+  // a door the lint never watches. Walk tool->tool imports to a fixpoint; skip
+  // specifiers that name no real file (phantoms live in regex-string example text).
+  const closure = [...importedTools];
+  for (let i = 0; i < closure.length; i++) {
+    const file = path.join(root, closure[i]);
+    if (!fs.existsSync(file)) continue;
+    const src = fs.readFileSync(file, 'utf8');
+    for (const m of src.matchAll(specRe)) {
+      const rel = path.relative(root, path.resolve(path.dirname(file), m[1])).split(path.sep).join('/');
+      if (rel.startsWith('tools/') && rel.endsWith('.mjs') && !importedTools.has(rel)) {
+        importedTools.add(rel);
+        closure.push(rel);
+      }
+    }
+    specRe.lastIndex = 0;
+  }
+  assert.ok(importedTools.has('tools/lib/reap.mjs'),
+    'the transitive closure must include tools reached only via other tools (airhorn-hh3k): reap.mjs is imported only by install-https-proof.mjs');
   // airhorn-5su1 pin: the tools that today are reachable ONLY via dynamic import()
   // must be in the scanned set - with a static-from-only regex all three escape.
   for (const dynamicOnly of ['tools/lib/perf-metrics.mjs', 'tools/lib/request-path.mjs', 'tools/install-https-proof.mjs']) {
