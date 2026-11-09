@@ -350,12 +350,6 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
   if (!report || !report.driver) {
     return { mode: 'never-ran', problem: `produced no record of the suite loading (exit ${exitCode}), so nothing was measured - a suite that never ran proves nothing about the mutant` };
   }
-  // A suite's own handler AHEAD of the driver's on a crash event means the suite can exit before the crash is recorded, and
-  // no CRASH line can follow - so a pass here is unmeasurable rather than clean (airhorn-rnj5). Named separately from
-  // `tampered` because the cause is a specific manipulation, not a broken record.
-  if (report.driver.handlersPreceded) {
-    return { mode: 'report-not-trustworthy', problem: `${report.driver.precededReason || "the suite installed a crash-event listener ahead of the driver's"} - a crash it hid cannot be told from a pass, so nothing here is evidence either way (exit ${exitCode}) (airhorn-rnj5)` };
-  }
   if (report.driver.tampered || report.driver.nonceMismatch) {
     return { mode: 'report-not-trustworthy', problem: `the driver record sequence was invalid (${report.driver.lines || 0} record line(s), or a nonce that was not this run's) - a record was forged or broken, so nothing it says is evidence either way (exit ${exitCode}) (airhorn-y3d6)` };
   }

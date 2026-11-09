@@ -54,7 +54,12 @@ const record = (value) => {
  * mutant. These handlers are installed before the import so they are first in line, and they turn
  * the failure into a record instead of a verdict.
  */
+let exitingForCrash = false;
 const markCrash = (kind) => (error) => {
+  // A `once` handler is removed by node as it fires, which trips our own removeListener watcher. That artifact used to be
+  // disambiguated in the reporter's grammar (airhorn-p0dg); with the monitor it would land AFTER the CRASH line, so it is
+  // suppressed at the source instead - a removal we caused by firing is not the suite stripping anything.
+  exitingForCrash = true;
   const detail = error && error.stack ? error.stack.split('\n')[0] : String(error);
   // The grammar's CRASH line: valid only AFTER a clean-import line, which the reporter checks.
   record({ crashedOutsideTest: true, reason: `${kind} after the suite loaded: ${detail}` });
@@ -62,8 +67,13 @@ const markCrash = (kind) => (error) => {
 };
 const onUncaught = markCrash('uncaught exception');
 const onRejection = markCrash('unhandled rejection');
-process.once('uncaughtException', onUncaught);
-process.once('unhandledRejection', onRejection);
+// UNCAUGHT EXCEPTIONS GO THROUGH THE MONITOR, not an 'uncaughtException' listener (airhorn-5qdd). Node emits
+// 'uncaughtExceptionMonitor' BEFORE any 'uncaughtException' listener and before a capture callback, so listener ORDER stops
+// mattering: prependListener, prependOnceListener (which node unwraps before invoking, so an exit-time position check sees
+// nothing) and a listener that removes itself all sit downstream of the monitor. Measured: monitor -> prepended-once ->
+// plain, and monitor -> capture when a capture callback is installed. Rejections have no monitor, so they keep once().
+process.on('uncaughtExceptionMonitor', onUncaught);
+process.on('unhandledRejection', onRejection);
 
 // SUPPRESSION detection (airhorn-p0dg, corrected after the first fix FAILed review): a suite
 // can strip these two handlers, install a swallow that exits 0, and then crash - the CRASH
@@ -79,34 +89,24 @@ process.once('unhandledRejection', onRejection);
 // ('removeListener') or a full strip) strips silently; nothing in-process is unremovable at
 // the same uid. The tool prints this boundary once per run (airhorn-p0dg).
 process.on('removeListener', (name, fn) => {
-  if ((name === 'uncaughtException' && fn === onUncaught) || (name === 'unhandledRejection' && fn === onRejection)) {
+  if (exitingForCrash) return;
+  if ((name === 'uncaughtExceptionMonitor' && fn === onUncaught) || (name === 'unhandledRejection' && fn === onRejection)) {
     record({ handlersStripped: true, reason: "the suite removed the driver's crash handlers - a crash outside any test would now be invisible (suppression, not a measurement)" });
   }
 });
 
-// The mirror-image evasion (airhorn-rnj5 #1): PREPENDING a handler puts the suite's code AHEAD of the driver's, so it can
-// exit(0) before the crash is recorded and the driver's own handler is never reached - nothing was removed, so the strip
-// watcher above sees nothing.
+// Two evasions that the monitor closes, recorded here because I shipped the weaker instrument first (airhorn-rnj5, then
+// airhorn-5qdd from the review of it): a suite that PREPENDS a swallow ahead of the driver's listener, and one that prepends a
+// ONCE listener - node unwraps a `once` wrapper before invoking it, and a self-removing listener is gone by the time anything
+// could look at the list. An exit-time POSITION check therefore cannot see either of them, which is exactly what the second
+// reviewer measured (rc 2, "fix-does-not-close"). Precedence is the answer, not position: the monitor runs before every
+// listener and before a capture callback, so a crash is recorded before any suite code can act. Nothing needs to be checked
+// at exit for these shapes, and the check that remains is for what the monitor cannot cover.
 //
-// Measured, and why this is a POSITION check at EXIT rather than a listener-add watcher: node has no 'prependListener'
-// event (my first version watched it and was dead code - the attack still scored rc 2), and watching 'newListener' instead
-// false-positives on node:test, which installs its OWN uncaughtException/unhandledRejection handlers (measured: three extra
-// records for an honest suite). Position cannot be read at add time either, and deferring to a microtask to look is the
-// mistake p0dg's review caught, because a suite that prepends AND throws in one callback exits before any microtask.
-// process.exit() DOES run 'exit' listeners, so the position at exit is observable after a swallowed crash and needs no
-// deferral: if anything sits ahead of our handler, the suite could have acted first, and that is refused by name.
-// Residual, unchanged in kind: a suite that removes THIS exit listener first is still undetected (nothing in-process is
-// unremovable at the same uid), and a crash that kills the process outright (abort, OOM) runs no exit listener at all.
-for (const [name, own] of [['uncaughtException', onUncaught], ['unhandledRejection', onRejection]]) {
-  process.on('exit', () => {
-    const listeners = process.listeners(name);
-    const index = listeners.indexOf(own);
-    if (index > 0) {
-      record({ handlersPreceded: true, reason: `the suite installed ${index} ${name} listener(s) AHEAD of the driver's - it can exit before the crash is recorded (suppression, not a measurement)` });
-    }
-  });
-}
-
+// Residual, stated rather than implied: a suite that removes THIS monitor first (removeListener/removeAllListeners trips the
+// strip watcher above, so it is reported, not silent), and a crash that runs no JS at all - process.abort, OOM, a hard kill -
+// where nothing in-process can record anything. Closing the latter needs the suite run in a child the driver owns.
+//
 // Scrub the driver machinery's variables BEFORE the suite loads (airhorn-y3d6): the suite
 // shares this process and inherits this environment. Stated plainly: /proc/<pid>/environ shows
 // the EXEC-TIME environment, so this scrub does not hide anything from a suite that reads proc -
