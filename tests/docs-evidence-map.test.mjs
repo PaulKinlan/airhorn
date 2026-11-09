@@ -55,7 +55,21 @@ function evidenceRows() {
   return rows;
 }
 
-const isCaseName = (span) => span.includes(' ') && !span.includes('/') && !span.includes(':');
+/*
+ * What counts as a case citation (airhorn-xfci). The rule is ONE test - does the span contain a space - and it is a rule
+ * about SHAPE, not about punctuation that a case name happens to use.
+ *
+ * The previous rule also excluded spans containing '/' and ':', which meant any case whose name contained a colon was
+ * silently unaudited: this map cites "the shipped defaults are the documented ones: 20 starts per second", and renaming it
+ * left the pin green while the doc pointed at a name no suite declares (the exact drift the pin exists to catch). Names in
+ * this repo are prose and prose contains colons and slashes; the things that are NOT case names in the table (file paths
+ * like `src/main.js`, identifiers like `play_horn`, flags like `--enable-features=...`) contain no space at all.
+ *
+ * Fail-closed by design: a future prose span with a space in it (say a `npm run test:changed` command) fails this pin
+ * until it stops being backticked or the row's citation is corrected. That is the right direction - a citation the pin
+ * cannot follow must not look audited.
+ */
+const isCaseName = (span) => span.includes(' ');
 
 /** Case names cited in a row, and the suite files that row names. */
 function citations(rowText) {
@@ -96,11 +110,33 @@ test('where a row names its suite, the cited cases come from THAT suite, not mer
   assert.deepEqual(wrong, [], 'a row that names its suite must cite that suite\'s cases - otherwise the citation is unfollowable');
 });
 
-test('the map still has rows, and at least the two rows that have drifted before are cited with a suite', () => {
+test('a row that cites a case without naming its suite must cite a name only ONE suite declares', () => {
+  // This test used to assert a COUNT ("at least two rows name a suite"), which cannot fail on the drift it was meant to
+  // police: the reviewer renamed a case, the per-row count did not move, and the test stayed green (airhorn-9ohr).
+  //
+  // Twelve of the map's eighteen rows cite cases without naming a file. For those, "followable" means the documented name
+  // resolves to exactly one suite - otherwise a reader greps a name, finds two or more, and the citation does not tell them
+  // which behaviour the claim rests on. So the assertion is derived from the TREE per row: it has teeth when a name stops
+  // being unique, and it needs no list in this file that would drift with the doc.
+  const all = suites();
   const rows = evidenceRows();
   assert.ok(rows.length >= 10, 'the evidence map must still be the evidence map');
-  // Not a list of case names (that would drift): a list of CLAIMS, which are prose and are meant to be stable.
-  const withSuite = rows.filter((row) => citations(row.text).suites.length > 0);
-  assert.ok(withSuite.length >= 2, `at least two rows must name the suite they cite, found ${withSuite.length} - `
-    + 'a case name with no file on its row is a search, not a citation');
+  const ambiguous = [];
+  let suiteLess = 0;
+  for (const row of rows) {
+    const { cases, suites: named } = citations(row.text);
+    if (named.length > 0 || cases.length === 0) continue;
+    suiteLess += 1;
+    for (const caseName of cases) {
+      const owners = Object.keys(all).filter((file) => declares(all[file], caseName));
+      if (owners.length !== 1) {
+        ambiguous.push(`${DOC}:${row.index} cites ${JSON.stringify(caseName)} without naming a suite, and `
+          + `${owners.length === 0 ? 'no suite declares it' : `${owners.length} do (${owners.join(', ')})`}`);
+      }
+    }
+  }
+  assert.ok(suiteLess > 0, 'the map should still have rows that cite cases without naming a suite - otherwise this test '
+    + 'is measuring nothing and should be deleted rather than left as a green no-op');
+  assert.deepEqual(ambiguous, [],
+    'a citation with no file on its row must resolve to exactly one suite, or it is a search rather than a citation');
 });
