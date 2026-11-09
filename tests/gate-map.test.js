@@ -688,3 +688,9 @@ test('the page instrument turns DOM facts into the model verdict (airhorn-0w9, -
   assert.ok(state.bodyText.includes('contents region text'), `bodyText lost rendered text: ${state.bodyText}`);
   assert.ok(state.bodyText.includes('kept region text'), `bodyText lost a visibility override: ${state.bodyText}`);
 });
+
+// The import-purity lint lives in tests/gate-conf-merge.test.js, NOT here: this file imports
+// tools/render-model.mjs and tools/derive-coverage-contract.mjs, and a scan host that imports
+// its targets can be exited at import time by the very defect it polices (observed live: a
+// probe that removed derive-coverage-contract's guard ran main() at import and the harness
+// counted the early exit(0) as a green run - the fc98 mechanism masking itself).
