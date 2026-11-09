@@ -24,6 +24,16 @@ const cacheName = `airhorner-${version}`;
 // treat `airhorner-*` as "the app's precache".
 const metaCacheName = `horn-integrity-${version}`;
 
+// The digests the BUILD shipped, one per emitted file (airhorn-oybq). The integrity record is only as trustworthy as its
+// baseline: it used to be computed from the very fetch it later vouched for, so a poisoned first fetch became the truth.
+// With this map the first fetch is checked against bytes the worker did not derive, and a mismatch fails the install
+// instead of being recorded. An EMPTY map (an unrebuilt worker, or a dev server) is not silently accepted - the install
+// says so once, because "verified against nothing" must never read as "verified".
+// The build replaces the identifier below with a digest-map literal; the typeof guard keeps an UNBUILT worker parseable
+// (empty map -> the TOFU warning) instead of throwing a ReferenceError on load.
+const buildDigests = (typeof __PRECACHE_INTEGRITY__ === 'object') ? __PRECACHE_INTEGRITY__ : {};
+let integrityUnboundWarned = false;
+
 const precacheUrls = [
   // Both shell spellings, deliberately (airhorn-btt): `/` is what a navigation
   // matches, and storing a navigation response is the only way an emptied cache
@@ -70,17 +80,97 @@ async function digest(buffer) {
 
 // Record what a good copy of this response looked like, so a later hit can be
 // checked against it instead of trusted (airhorn-un5).
-async function record(meta, pathname, response) {
+/**
+ * What the BUILD can say about these bytes, or a refusal (airhorn-oybq, airhorn-5km4).
+ *
+ * This is the one place the build check lives. It used to live inside putVerified alone, so the install refused a
+ * mismatched copy while the RUNTIME path stored and recorded whatever the network returned - and after an eviction there
+ * is no record left for record()'s refusal to compare against, so poison became a fresh, durable baseline (5km4). A check
+ * that exists on one of two write paths is not a guarantee; it is a guarantee-shaped comment.
+ *
+ * Returns 'build-manifest' when the bytes match the digest the build shipped, 'tofu' when the build knows nothing about
+ * this path (a dev server, an unrebuilt worker, or a path outside the emitted output), and throws on a mismatch so the
+ * caller refuses to store, record or (at install) complete.
+ */
+async function basisFor(pathname, bytes, { staticallyPrecached = false } = {}) {
+  const expectedDigest = buildDigests[pathname];
+  if (typeof expectedDigest === 'string') {
+    const actualDigest = await digest(bytes);
+    if (actualDigest !== expectedDigest) {
+      throw new Error(`${pathname}: the fetched bytes do not match the build (expected sha256 ${expectedDigest}, got `
+        + `${actualDigest}). A poisoned or mismatched copy must not become the integrity baseline (airhorn-oybq)`);
+    }
+    return 'build-manifest';
+  }
+  // A BUILT worker (non-empty manifest) that is asked to precache a static path the manifest does not cover is a BUILD
+  // BUG, and one that would silently degrade to TOFU for exactly the paths an attacker would pick (airhorn-lu8a: the
+  // manifest mapped index.html to '/' only, so the statically precached '/index.html' was unbound). Refuse it by name
+  // instead of warning: a warning here reads as "unverified but fine", and the gap is invisible in the record.
+  if (staticallyPrecached && Object.keys(buildDigests).length > 0) {
+    throw new Error(`${pathname}: the build manifest does not cover this path, but the worker precaches it statically. `
+      + 'That is a build bug, not a first-write - refusing rather than recording a trust-on-first-use baseline '
+      + '(airhorn-lu8a)');
+  }
+  if (!integrityUnboundWarned) {
+    // Named once, not per URL: an unbound path is still TOFU, and a reader of the console must not be able to think
+    // otherwise.
+    integrityUnboundWarned = true;
+    console.warn(`integrity: no build digest for ${pathname} - this worker (or this path) was not covered by a build `
+      + 'manifest, so records for it are trust-on-first-use (airhorn-oybq)');
+  }
+  return 'tofu';
+}
+
+/**
+ * Write the integrity record for a precached copy, with the provenance that justifies it (airhorn-oybq).
+ *
+ * A record is only evidence if it says HOW the baseline was established, because the two cases are not equally strong:
+ *   basis: 'build-manifest' - the bytes were checked against the digest the build shipped. The baseline is the build's,
+ *                             not the response's, so a poisoned origin cannot become the truth.
+ *   basis: 'tofu'           - no build digest for this path; the baseline IS this response. Labelled, because a record
+ *                             that reads as verified when it is merely first-write is how an audit gets misled.
+ *
+ * And it REFUSES to overwrite a baseline with different bytes (option (b)): within one worker version the cache name is
+ * fixed, so a second record with a different digest means the response changed under a worker that had already verified
+ * it. Replacing the baseline with the new bytes would turn a detected change into the new truth; the caller has to say it
+ * expects a change (`expectChange`), and nothing in the install path does.
+ */
+async function record(meta, pathname, response, { basis, expectChange = false } = {}) {
   const body = await response.clone().arrayBuffer();
-  await meta.put(requestFor(pathname), new Response(JSON.stringify({
-    sha256: await digest(body),
+  const sha256 = await digest(body);
+  const existing = await meta.match(requestFor(pathname), { ignoreSearch: true });
+  if (existing && !expectChange) {
+    let previous = null;
+    // Read a CLONE: consumers of these records exist (the test harness, and any future code that inspects a baseline),
+    // and a cache that hands back the stored object would otherwise be left with a consumed body.
+    try { previous = await existing.clone().json(); } catch { previous = null; }
+    if (previous && typeof previous.sha256 === 'string' && previous.sha256 !== sha256) {
+      console.warn(`integrity: refusing to replace the baseline recorded for ${pathname} (recorded sha256 `
+        + `${previous.sha256}, this response ${sha256}). A changed body under an already-verified worker version is a `
+        + 'detected change, not a new baseline (airhorn-oybq)');
+      return { kept: true, previous };
+    }
+  }
+  const record = {
+    sha256,
     length: body.byteLength,
-  }), { headers: { 'content-type': 'application/json' } }));
+    // Provenance, so a reader can tell the two kinds of baseline apart without asking the code (airhorn-oybq).
+    basis: basis === 'build-manifest' ? 'build-manifest' : 'tofu',
+    verifiedAgainstBuild: basis === 'build-manifest',
+    url: response.url || null,
+    redirected: Boolean(response.redirected),
+  };
+  await meta.put(requestFor(pathname), new Response(JSON.stringify(record), { headers: { 'content-type': 'application/json' } }));
+  return { kept: false, record };
 }
 
 async function store(cache, meta, pathname, response) {
+  // A copy stored AFTER an eviction is still a first copy, so it gets the same question the install asks (airhorn-5km4).
+  // The bytes are verified from this response, then THAT response is stored: no second fetch, and nothing is written
+  // when the build disagrees.
+  const basis = await basisFor(pathname, await response.clone().arrayBuffer(), { staticallyPrecached: true });
   await cache.put(requestFor(pathname), response.clone());
-  await record(meta, pathname, response);
+  await record(meta, pathname, response, { basis });
 }
 
 async function evict(cache, meta, request) {
@@ -163,8 +253,11 @@ async function putVerified(cache, url) {
     }
     throw new Error(`precache refuses a redirected response for ${pathname} (final URL ${response.url}): the bytes would be stored and recorded as ${pathname}`);
   }
+  const basis = await basisFor(pathname, await response.clone().arrayBuffer(), {
+    staticallyPrecached: precachePaths.has(pathname),
+  });
   await cache.put(requestFor(pathname), response);
-  return { stored: pathname };
+  return { stored: pathname, basis };
 }
 
 // Bounded concurrency (airhorn-86mz): the redirect fix's per-URL
@@ -205,18 +298,23 @@ async function precache() {
       const html = await res.text();
       const assetMatches = html.matchAll(/(?:src|href)=['"](\/assets\/[^'"]+)['"]/g);
       const dynamicUrls = Array.from(assetMatches, m => m[1]);
-      await mapPooled(dynamicUrls, PRECACHE_CONCURRENCY, (url) => putVerified(cache, url));
-      storedUrls.push(...dynamicUrls);
+      // Keep the results (airhorn-s15g): discarding them is why a hashed asset whose bytes the manifest BOUND was
+      // recorded as 'tofu' - the label said first-write about a copy the build had verified.
+      const dynamicWritten = await mapPooled(dynamicUrls, PRECACHE_CONCURRENCY, (url) => putVerified(cache, url));
+      written.push(...dynamicWritten.filter(Boolean));
+      storedUrls.push(...dynamicWritten.filter(result => result && result.stored).map(result => result.stored));
     }
   } catch (err) {
     console.warn('Fallback asset precaching error:', err);
   }
 
-  // One record per precached copy: the baseline the next read is checked against.
+  // One record per precached copy: the baseline the next read is checked against, carrying the provenance that
+  // justified it (build-manifest where the bytes matched the build, tofu where they were only ever first-write).
+  const basisByPath = new Map(written.filter(entry => entry && entry.stored).map(entry => [entry.stored, entry.basis]));
   for (const url of storedUrls) {
     const pathname = new URL(url, self.location.origin).pathname;
     const cached = await cache.match(requestFor(pathname), { ignoreSearch: true });
-    if (cached) await record(meta, pathname, cached);
+    if (cached) await record(meta, pathname, cached, { basis: basisByPath.get(pathname) });
   }
 }
 
@@ -326,7 +424,9 @@ self.addEventListener('fetch', event => {
         if (redirectedAwayFrom(response, url.pathname)) {
           console.warn(`sw: not caching ${url.pathname}: the response came from ${response.url} (redirected=${response.redirected})`);
         } else {
-          await store(cache, meta, url.pathname, response.clone()).catch(() => {});
+          await store(cache, meta, url.pathname, response.clone()).catch((err) => {
+            console.warn(`sw: not caching ${url.pathname}: ${err && err.message ? err.message : err}`);
+          });
         }
       }
       return response;

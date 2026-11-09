@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import { digestsFor, injectIntegrity } from './tools/lib/sw-integrity.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -43,6 +44,10 @@ export default defineConfig({
           let content = fs.readFileSync(distSw, 'utf-8');
           content = content.replace(/__BUILD_HASH__/g, version);
           content = content.replace(/\/\* __PRECACHE_ASSETS__ \*\//g, assets.map(a => JSON.stringify(a)).join(',\n  '));
+          // The build also ships the DIGESTS of its own output, so the worker can refuse a first fetch that is not the
+          // bytes the builder produced (airhorn-oybq: without this the integrity record's baseline came from the very
+          // fetch it vouched for, i.e. trust-on-first-use).
+          content = injectIntegrity(content, digestsFor(distDir));
           fs.writeFileSync(distSw, content);
         }
       }
