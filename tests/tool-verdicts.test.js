@@ -21,7 +21,7 @@ const goodEvidence = () => ({
     offlineBootFailureShown: false,
     darkApplied: true,
     darkDetectorCanFail: true,
-    offlinePlay: { pressedWhileHeld: 'true', released: 'false' },
+    offlinePlay: { pressedBefore: 'false', pressedWhileHeld: 'true', released: 'false' },
   },
 });
 
@@ -51,7 +51,16 @@ test('nxuv.14: no interaction dispatched is UNMEASURED, not INP "None"', () => {
 
 test('nxuv.29: a sticky-pressed horn (never released) is a named failure', () => {
   const sticky = goodEvidence();
-  sticky.checks.offlinePlay = { pressedWhileHeld: 'true', released: 'true' };
+  sticky.checks.offlinePlay = { pressedBefore: 'false', pressedWhileHeld: 'true', released: 'true' };
   assert.throws(() => assertPreviewEvidence(sticky, []),
     /never RELEASED/, 'held-true but never released must fail by name, not pass the held check');
+});
+
+test('uu2m: a horn already pressed BEFORE the press is an invented positive, failed by name', () => {
+  const stuck = goodEvidence();
+  stuck.checks.offlinePlay = { pressedBefore: 'true', pressedWhileHeld: 'true', released: 'true' };
+  assert.throws(() => assertPreviewEvidence(stuck, []),
+    /aria-pressed=true BEFORE the press/, 'held state with no baseline cannot prove the press did anything (the nxuv.26 transition semantics)');
+  assert.doesNotThrow(() => assertPreviewEvidence(goodEvidence(), []),
+    'a real transition (unpressed -> held -> released) still passes');
 });

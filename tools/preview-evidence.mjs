@@ -346,12 +346,16 @@ async function captureMain(cdp, origin) {
   ev.checks.offlinePlay = await cdp.evaluate(`(async () => {
     const b = document.querySelector('button.horn');
     if (!b) return { pressed: false, error: 'no horn button' };
+    // airhorn-uu2m: a response is a TRANSITION (the nxuv.26 semantics). Without a
+    // pre-press baseline, a horn stuck aria-pressed=true BEFORE the dispatch passes
+    // the held check - an invented positive.
+    const pressedBefore = b.getAttribute('aria-pressed');
     b.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }));
     await new Promise(r => setTimeout(r, 400));
     const pressed = b.getAttribute('aria-pressed');
     b.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }));
     await new Promise(r => setTimeout(r, 100));
-    return { pressedWhileHeld: pressed, released: b.getAttribute('aria-pressed') };
+    return { pressedBefore, pressedWhileHeld: pressed, released: b.getAttribute('aria-pressed') };
   })()`);
 
   return ev;
@@ -472,6 +476,11 @@ export function assertPreviewEvidence(evidence, missing) {
   if (!evidence.checks.darkDetectorCanFail) throw new Error('dark detector negative control failed: forced-light was read as applied');
   if (!evidence.checks.offlinePlay || evidence.checks.offlinePlay.pressedWhileHeld !== 'true') {
     throw new Error('offline press did not sound the horn (aria-pressed not true)');
+  }
+  // airhorn-uu2m: a horn already aria-pressed=true BEFORE the press cannot demonstrate
+  // the press did anything - held state without a baseline is an invented positive.
+  if (evidence.checks.offlinePlay.pressedBefore === 'true') {
+    throw new Error('offline horn was aria-pressed=true BEFORE the press (no transition measured) - a stuck-on horn passes the held check, so the baseline must be unpressed');
   }
   // airhorn-nxuv.29: a press is a press AND a release - a sticky-pressed horn passed the
   // held check while never letting go.
