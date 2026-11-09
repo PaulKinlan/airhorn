@@ -284,3 +284,46 @@ test('trackEvent is silent without gtag and forwards when analytics is loaded', 
   }
   assert.deepEqual(calls, [['event', 'horn_play', { event_category: 'horn' }]]);
 });
+
+
+/* airhorn-f8ow: the transition semantics pin the zach mutation run proved absent
+ * (inverting the boot guard passed every browser-free suite). A stubbed
+ * window/navigator world drives all four: offline-at-boot announces once,
+ * online-at-boot stays silent, the offline event speaks, the online event says
+ * 'Back online.'. RED-proof: 'if (navigator.onLine)' (inverted) fails worlds 1-2. */
+test('status: bindStatus announces transitions and only transitions (airhorn-f8ow)', () => {
+  // The stub must outlive the LISTENERS (bindStatus's closures read window at event
+  // time, not at bind time), so cleanup happens once at the end.
+  const announcements = [];
+  const listeners = {};
+  Object.defineProperty(globalThis, 'navigator', { value: { onLine: false }, configurable: true });
+  Object.defineProperty(globalThis, 'window', {
+    value: {
+      __airhornAnnounce: (msg) => announcements.push(msg),
+      addEventListener: (type, fn) => { listeners[type] = fn; },
+    },
+    configurable: true,
+  });
+  try {
+    // Offline at boot: says so once, immediately.
+    bindStatus();
+    assert.equal(announcements.length, 1, 'a page opened offline says so once at boot');
+    assert.match(announcements[0], /No connection/);
+
+    // Online at boot: silent - the normal, connected case stays silent.
+    announcements.length = 0;
+    Object.defineProperty(globalThis, 'navigator', { value: { onLine: true }, configurable: true });
+    bindStatus();
+    assert.deepEqual(announcements, [], 'the normal, connected case stays silent');
+
+    // Transitions speak.
+    listeners.offline();
+    assert.equal(announcements.length, 1);
+    assert.match(announcements[0], /No connection/);
+    listeners.online();
+    assert.match(announcements[1], /Back online/);
+  } finally {
+    delete globalThis.window;
+    delete globalThis.navigator;
+  }
+});
