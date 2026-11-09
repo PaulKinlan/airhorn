@@ -202,7 +202,9 @@ process.on('unhandledRejection', (err) => {
 // ---------------------------------------------------------------------------
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const OUT = path.join(os.homedir(), 'rollback-rehearsal-evidence', stamp);
-fs.mkdirSync(OUT, { recursive: true });
+// No module-scope mkdir (airhorn side-effect enumeration): creating the evidence
+// directory at IMPORT time is a side effect a test importing this module does not
+// expect. The writers create it on first use instead.
 
 const results = [];
 const facts = [];
@@ -221,12 +223,14 @@ function note(drill, step, actual) {
 
 function recordFacts(drill, label, f) {
   facts.push({ drill, label, at: new Date().toISOString(), ...f });
+  fs.mkdirSync(OUT, { recursive: true });
   fs.appendFileSync(path.join(OUT, 'facts.jsonl'), JSON.stringify({ drill, label, ...f }) + '\n');
 }
 
 async function screenshot(page, drill, label) {
   try {
     const shot = await page.send('Page.captureScreenshot', { format: 'png' });
+    fs.mkdirSync(OUT, { recursive: true });
     fs.writeFileSync(path.join(OUT, `${drill}-${label}.png`), Buffer.from(shot.data, 'base64'));
   } catch { /* a chrome-error page cannot be captured; the facts still record it */ }
 }
@@ -915,6 +919,7 @@ async function main() {
     '',
     ...mismatches.map((m) => `MISMATCH [${m.drill}] ${m.step}\n  doc: ${m.expected}\n  saw: ${m.actual}`),
   ].join('\n');
+  fs.mkdirSync(OUT, { recursive: true });
   fs.writeFileSync(path.join(OUT, 'report.txt'), report + '\n');
   reportWritten = true;   // the ledger is persisted: an EPIPE from here down is a DISPLAY failure, not a rehearsal failure (airhorn-nnbu)
   if (checked.length === 0) {

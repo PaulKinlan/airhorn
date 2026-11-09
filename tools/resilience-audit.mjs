@@ -68,7 +68,9 @@ function makeEvidenceDir() {
 }
 
 const OUT = makeEvidenceDir();
-fs.mkdirSync(OUT, { recursive: true });
+// No module-scope mkdir (airhorn side-effect enumeration): creating the evidence
+// directory at IMPORT time is a side effect a test that imports this module does
+// not expect. The writers create it on first use instead.
 
 /* ------------------------------------------------------------------ server */
 
@@ -687,6 +689,7 @@ export async function shot(cdp, sessionId, name) {
   try {
     const { data } = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
     const file = path.join(OUT, `${name}.png`);
+    fs.mkdirSync(OUT, { recursive: true });
     fs.writeFileSync(file, Buffer.from(data, 'base64'));
     return file;
   } catch {
@@ -1500,6 +1503,7 @@ export const blockedAssetHeadline = (js, css) => {
 export function writeReport(scenarios, outDir = OUT) {
   const results = scenarios;
   const OUT = outDir;
+  fs.mkdirSync(OUT, { recursive: true });
   const report = {
     target: 'airhorn',
     auditedAt: new Date().toISOString(),

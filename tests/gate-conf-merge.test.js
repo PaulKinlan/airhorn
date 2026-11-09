@@ -106,6 +106,23 @@ test('everything outside the block survives a union verbatim (comments, the runn
  * policing the whole repo would cry wolf) and fails when an imported tool calls
  * main() with no recognized guard.
  *
+ * THE LIMITS OF THIS CHECK (hh3k follow-up, coord 2026-11-09 - a check that
+ * implies completeness is worse than one that names its blind spot):
+ *   CATCHES: a top-level main() call not wrapped by a recognized guard idiom,
+ *     in any tool reachable from tests/ (static, dynamic, require, side-effect
+ *     import shapes, plus the transitive tool->tool closure).
+ *   CANNOT CATCH: side effects at import that are not a main() call - a
+ *     top-level await, a module-scope child_process spawn, a server started at
+ *     module scope, a fetch, a filesystem write. Detecting those honestly
+ *     requires runtime interception, which is deliberately out of scope (a
+ *     fragile sandbox is worse than a documented limit). The 2026-11-09
+ *     enumeration of the scanned set found exactly two, both module-scope
+ *     fs.mkdirSync(OUT) - since made lazy (writers create the dir on first use)
+ *     and pinned by 'importing a tool creates no evidence directory' below.
+ *   REVIEW BY EYE INSTEAD: when a tool gains module-scope code that is not a
+ *     declaration or a cheap constant, the reviewer checks by eye that it
+ *     performs no I/O, spawns nothing, and awaits nothing.
+ *
  * Recognized guard idioms (the codebase already uses four, all equivalent):
  *   if (invokedAsScript) ... / if (isMain) ... /
  *   process.argv[1] compared with fileURLToPath(import.meta.url) (either order).
@@ -140,6 +157,38 @@ test('tools that tests import never run main() unguarded (the fc98 class)', () =
     }
   }
   assert.ok(importedTools.size > 5, 'the scan must find the real import set, not an empty one');
+  // hh3k pin, vector 1: every import SHAPE must be caught, including the bare
+  // side-effect form a reviewer misread as escaping (import\s*\(? matches it).
+  for (const shape of [
+    "import x from '../tools/a.mjs';",
+    "import '../tools/b.mjs';",
+    "await import('../tools/c.mjs');",
+    "require('../tools/d.mjs');",
+  ]) {
+    assert.ok(specRe.test(shape), `the scan must catch this import shape: ${shape}`);
+    specRe.lastIndex = 0;
+  }
+  // hh3k vector 2: the transitive closure. A tool reached only via ANOTHER tool
+  // (today: tools/lib/reap.mjs via install-https-proof.mjs) would otherwise escape
+  // the scan; if it ever grew a top-level main() the fc98 class would recur through
+  // a door the lint never watches. Walk tool->tool imports to a fixpoint; skip
+  // specifiers that name no real file (phantoms live in regex-string example text).
+  const closure = [...importedTools];
+  for (let i = 0; i < closure.length; i++) {
+    const file = path.join(root, closure[i]);
+    if (!fs.existsSync(file)) continue;
+    const src = fs.readFileSync(file, 'utf8');
+    for (const m of src.matchAll(specRe)) {
+      const rel = path.relative(root, path.resolve(path.dirname(file), m[1])).split(path.sep).join('/');
+      if (rel.startsWith('tools/') && rel.endsWith('.mjs') && !importedTools.has(rel)) {
+        importedTools.add(rel);
+        closure.push(rel);
+      }
+    }
+    specRe.lastIndex = 0;
+  }
+  assert.ok(importedTools.has('tools/lib/reap.mjs'),
+    'the transitive closure must include tools reached only via other tools (airhorn-hh3k): reap.mjs is imported only by install-https-proof.mjs');
   // airhorn-5su1 pin: the tools that today are reachable ONLY via dynamic import()
   // must be in the scanned set - with a static-from-only regex all three escape.
   for (const dynamicOnly of ['tools/lib/perf-metrics.mjs', 'tools/lib/request-path.mjs', 'tools/install-https-proof.mjs']) {

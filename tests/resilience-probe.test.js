@@ -1,3 +1,5 @@
+import { pathToFileURL } from 'node:url';
+import { spawnSync } from 'node:child_process';
 // Pin for airhorn-nxuv.9: the sounded probe must count a start() only when playback
 // actually STARTED. 18c0ad7 carried this fix and a later merge took the other side of
 // the PROBE section, restoring increment-before-call - so a start() that THREW still
@@ -6,7 +8,13 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { applyCoreFieldGate, applyShotEvidenceGate, auditExitCode } from '../tools/resilience-audit.mjs';
+
+const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const runProbe = (PROBE, { throwOnStart = false } = {}) => {
   const window = { __errors: [], addEventListener() {} };
@@ -111,4 +119,23 @@ test('a captured shot leaves the row untouched, and the array form is checked to
   assert.equal(applyShotEvidenceGate(ok, true), ok);
   const partial = applyShotEvidenceGate({ id: 'y', status: 'OK', screenshots: ['a.png', null] }, true);
   assert.equal(partial.status, 'FAILED');
+});
+
+
+/* Side-effect pin (coord 2026-11-09, the import-purity check's documented blind spot):
+ * importing the audit must not create its evidence directory - the enumeration found
+ * the module-scope mkdirSync(OUT) and it was made lazy. A child process keeps the
+ * world hermetic (the import happens there, not in this test's own module graph). */
+test('importing resilience-audit creates no evidence directory (side-effect pin)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-import-pure-'));
+  try {
+    const evidenceDir = path.join(tmp, 'evidence');
+    const run = spawnSync(process.execPath,
+      ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(path.join(root, 'tools', 'resilience-audit.mjs')).href)});`],
+      { env: { ...process.env, RESILIENCE_OUT: evidenceDir }, encoding: 'utf8', timeout: 30000 });
+    assert.equal(run.status, 0, `import itself must succeed: ${run.stderr}`);
+    assert.ok(!fs.existsSync(evidenceDir), 'an import must not create the evidence directory - writers make it on first use');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
