@@ -519,10 +519,10 @@ export function importersOf(modulePath, { root = DEFAULT_ROOT, tsvText, except =
   // the first version of this scanner counted this very test file that way.
   const Q = "['\"`]";
   const resolution = [
-    `\\bfrom\\s*${Q}`,                                    // import { x } from './h.mjs', export ... from
-    `\\bimport\\s+${Q}`,                                  // import './h.mjs' (side effect)
-    `\\bimport\\s*\\(\\s*${Q}`,                        // await import('./h.mjs')
-    `\\brequire\\s*\\(\\s*${Q}`,                       // require('./h.mjs')
+    `\\bfrom\\s*${Q}`,                                    // import { x } from MODULE, export ... from
+    `\\bimport\\s+${Q}`,                                  // import MODULE (side effect)
+    `\\bimport\\s*\\(\\s*${Q}`,                        // await import(MODULE)
+    `\\brequire\\s*\\(\\s*${Q}`,                       // require(MODULE)
     `\\b(?:path\\.join|path\\.resolve|require\\.resolve|createRequire)\\s*\\([^;\\n]{0,160}?${Q}`,
     `\\bpathToFileURL\\s*\\([^;\\n]{0,160}?${Q}`,
     `\\bnew URL\\s*\\([^;\\n]{0,160}?${Q}`,

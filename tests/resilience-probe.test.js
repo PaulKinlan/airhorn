@@ -129,12 +129,18 @@ test('a captured shot leaves the row untouched, and the array form is checked to
  * airhorn-nrmn: the pin also covers the SPAWN the first enumeration missed - with
  * RESILIENCE_OUT unset, makeEvidenceDir() execSyncs git; a marker git shim in PATH
  * proves no child is spawned at import. */
-test('importing resilience-audit creates no evidence directory and spawns nothing (side-effect pin)', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-import-pure-'));
+test('importing resilience-audit creates no evidence directory and spawns no git (side-effect pin)', () => {
+  // airhorn-4ve4: name what the instrument OBSERVES - a git spawn (the shim is a file
+  // named git). And the marker path travels via ENV, not shell interpolation: the
+  // unquoted-interpolation form word-splits on a TMPDIR with a space and turns the pin
+  // into a silent false green. The tmp root here deliberately CONTAINS a space so the
+  // quoting is load-bearing forever, not just when someone's TMPDIR is unusual.
+  const spacedParent = fs.mkdtempSync(path.join(os.tmpdir(), 'ra import-pure-'));
+  const tmp = fs.mkdtempSync(path.join(spacedParent, 'w'));
   try {
     const evidenceDir = path.join(tmp, 'evidence');
     const marker = path.join(tmp, 'git-spawned');
-    fs.writeFileSync(path.join(tmp, 'git'), `#!/bin/sh\ntouch ${JSON.stringify(marker).slice(1, -1)}\nexec /usr/bin/git "$@"\n`);
+    fs.writeFileSync(path.join(tmp, 'git'), '#!/bin/sh\nprintf x > "$AIRHORN_PIN_MARKER"\nexec /usr/bin/git "$@"\n');
     fs.chmodSync(path.join(tmp, 'git'), 0o755);
     const run = spawnSync(process.execPath,
       ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(path.join(root, 'tools', 'resilience-audit.mjs')).href)});`],
@@ -145,10 +151,10 @@ test('importing resilience-audit creates no evidence directory and spawns nothin
     // if it ran at import; the marker shim proves no child is spawned.
     const runNoEnv = spawnSync(process.execPath,
       ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(path.join(root, 'tools', 'resilience-audit.mjs')).href)});`],
-      { env: { ...process.env, PATH: `${tmp}:${process.env.PATH}`, RESILIENCE_OUT: undefined }, encoding: 'utf8', timeout: 30000 });
+      { env: { ...process.env, PATH: `${tmp}:${process.env.PATH}`, RESILIENCE_OUT: undefined, AIRHORN_PIN_MARKER: marker }, encoding: 'utf8', timeout: 30000 });
     assert.equal(runNoEnv.status, 0, `import without RESILIENCE_OUT must succeed: ${runNoEnv.stderr}`);
     assert.ok(!fs.existsSync(marker), 'an import must not spawn git (airhorn-nrmn) - the evidence dir resolves lazily on first use');
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(spacedParent, { recursive: true, force: true });
   }
 });

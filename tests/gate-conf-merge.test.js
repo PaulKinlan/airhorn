@@ -116,15 +116,25 @@ test('everything outside the block survives a union verbatim (comments, the runn
  *     module scope, a fetch, a filesystem write. Detecting those honestly
  *     requires runtime interception, which is deliberately out of scope (a
  *     fragile sandbox is worse than a documented limit).
- *   ENUMERATION - what was verified and how, not an absolute count: on the 26-tool
- *     scanned set at 503df37, a line-start grep for top-level await, module-scope
- *     spawn/exec/listen/fetch/fs-write found two fs.mkdirSync(OUT); a reviewer's
- *     marker-shim probe (airhorn-nrmn) then found a third the grep's shapes could
- *     not see - resilience-audit's const OUT = makeEvidenceDir() execSyncs git at
- *     import when RESILIENCE_OUT is unset, a spawn behind an innocent-looking const.
- *     All three are now lazy (resolved on first use) and pinned behaviorally in
- *     tests/resilience-probe.test.js / tests/rollback-epipe.test.js: importing a
- *     tool creates no directory and spawns no git, with or without its OUT env var.
+ *   ENUMERATION - reproducible, not absolute (airhorn-in2k, third iteration of
+ *     the same lesson): the scanned set is whatever THIS TEST's derivation yields
+ *     at the tip it runs on - computed at test time, never authored. At bb8ca46
+ *     the derivation yielded 21 real tools of the 23 .mjs files under tools/, with
+ *     zero phantom specifiers (a no-phantom pin below keeps it so; earlier counts
+ *     of 22-at-503df37 and 26-at-tip were falsified by review because 5 specifiers
+ *     resolved to no file - comment text and fixture strings spelling import shapes).
+ *     What the enumeration found, by the method named:
+ *     1. column-0 fs-write grep over the derivation's set: exactly two module-scope
+ *        fs.mkdirSync(OUT) - tools/resilience-audit.mjs and tools/rollback-rehearsal.mjs.
+ *     2. A reviewer's marker-shim probe (airhorn-nrmn) found a third the grep's
+ *        shapes could not see: resilience-audit's const OUT = makeEvidenceDir()
+ *        execSyncs git at import when RESILIENCE_OUT is unset - a spawn behind an
+ *        innocent-looking const. Count call CONSEQUENCES, not call shapes.
+ *     All three are now lazy (resolved on first use). Behavioural pins:
+ *     tests/resilience-probe.test.js pins BOTH worlds for resilience-audit (no
+ *     directory with RESILIENCE_OUT set; no git spawn with it unset, marker via
+ *     env, tmp root deliberately space-containing). tests/rollback-epipe.test.js
+ *     pins the directory world only - rollback-rehearsal contains no spawn at all.
  *     soak.mjs / cache-growth.mjs resolve their evidence dirs inside main() only.
  *     The check did NOT catch the spawn BY DESIGN: it detects unguarded main()
  *     calls; a non-main() side effect is this documented blind spot, reachable
@@ -159,22 +169,29 @@ test('tools that tests import never run main() unguarded (the fc98 class)', () =
     }
   };
   collect(testsDir);
+  const rawToolSpecifiers = [];
   for (const file of testFiles) {
     const src = fs.readFileSync(file, 'utf8');
     for (const m of src.matchAll(specRe)) {
       const resolved = path.resolve(path.dirname(file), m[1]);
       const rel = path.relative(root, resolved).split(path.sep).join('/');
-      if (rel.startsWith('tools/') && rel.endsWith('.mjs')) importedTools.add(rel);
+      if (rel.startsWith('tools/') && rel.endsWith('.mjs')) {
+        rawToolSpecifiers.push({ rel, from: path.relative(root, file) });
+        importedTools.add(rel);
+      }
     }
   }
   assert.ok(importedTools.size > 5, 'the scan must find the real import set, not an empty one');
   // hh3k pin, vector 1: every import SHAPE must be caught, including the bare
   // side-effect form a reviewer misread as escaping (import\s*\(? matches it).
+  // Fixture paths deliberately do NOT name tools/ (airhorn-in2k): these assert the
+  // specRe shapes; a tools/-prefixed fixture would enter the scan as a phantom
+  // specifier and break the no-phantom pin below.
   for (const shape of [
-    "import x from '../tools/a.mjs';",
-    "import '../tools/b.mjs';",
-    "await import('../tools/c.mjs');",
-    "require('../tools/d.mjs');",
+    "import x from '../fixtures/a.mjs';",
+    "import '../fixtures/b.mjs';",
+    "await import('../fixtures/c.mjs');",
+    "require('../fixtures/d.mjs');",
   ]) {
     assert.ok(specRe.test(shape), `the scan must catch this import shape: ${shape}`);
     specRe.lastIndex = 0;
@@ -182,8 +199,9 @@ test('tools that tests import never run main() unguarded (the fc98 class)', () =
   // hh3k vector 2: the transitive closure. A tool reached only via ANOTHER tool
   // (today: tools/lib/reap.mjs via install-https-proof.mjs) would otherwise escape
   // the scan; if it ever grew a top-level main() the fc98 class would recur through
-  // a door the lint never watches. Walk tool->tool imports to a fixpoint; skip
-  // specifiers that name no real file (phantoms live in regex-string example text).
+  // a door the lint never watches. Walk tool->tool imports to a fixpoint. Closure
+  // specifiers feed the same no-phantom pin (a tools/ specifier in comment text was
+  // the original phantom - tools/h.mjs in a derive-coverage-contract comment).
   const closure = [...importedTools];
   for (let i = 0; i < closure.length; i++) {
     const file = path.join(root, closure[i]);
@@ -191,13 +209,27 @@ test('tools that tests import never run main() unguarded (the fc98 class)', () =
     const src = fs.readFileSync(file, 'utf8');
     for (const m of src.matchAll(specRe)) {
       const rel = path.relative(root, path.resolve(path.dirname(file), m[1])).split(path.sep).join('/');
-      if (rel.startsWith('tools/') && rel.endsWith('.mjs') && !importedTools.has(rel)) {
-        importedTools.add(rel);
-        closure.push(rel);
+      if (rel.startsWith('tools/') && rel.endsWith('.mjs')) {
+        rawToolSpecifiers.push({ rel, from: path.relative(root, file) });
+        if (!importedTools.has(rel)) {
+          importedTools.add(rel);
+          closure.push(rel);
+        }
       }
     }
     specRe.lastIndex = 0;
   }
+  // airhorn-in2k, coord's pin: EVERY specifier the scan counts (tests/ AND the
+  // closure through tools/) must resolve to a real file. A phantom (comment text
+  // spelling an import shape - tools/h.mjs lived in a derive-coverage-contract
+  // comment until the reword; fixture strings naming tools/) inflates the set and
+  // falsifies any sentence that counts it. Fail naming the source.
+  const phantoms = rawToolSpecifiers.filter(({ rel }) => !fs.existsSync(path.join(root, rel)));
+  assert.deepEqual(phantoms, [],
+    'every tools/ specifier the scan counts must resolve to a real file (airhorn-in2k); ' +
+    'comment/prose text that spells an import shape must use a MODULE placeholder, and ' +
+    'shape fixtures must use a non-tools prefix. Phantoms: ' +
+    phantoms.map((p) => `${p.rel} (in ${p.from})`).join(', '));
   assert.ok(importedTools.has('tools/lib/reap.mjs'),
     'the transitive closure must include tools reached only via other tools (airhorn-hh3k): reap.mjs is imported only by install-https-proof.mjs');
   // airhorn-5su1 pin: the tools that today are reachable ONLY via dynamic import()
