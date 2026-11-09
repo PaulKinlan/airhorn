@@ -183,6 +183,11 @@ export default async function* suiteModeReporter(source) {
   let driver = null;
   if (driverLines.length === 1 && typeof driverLines[0].importFailed === 'boolean' && !driverLines[0].crashedOutsideTest) {
     driver = driverLines[0];                                    // IMPORT
+  } else if (driverLines.length === 1 && driverLines[0].crashedOutsideTest === true) {
+    // CRASH BEFORE THE IMPORT LINE (airhorn-5qdd): the monitor records the crash the instant it happens, which can be
+    // BEFORE the driver has finished importing the suite. The crash is real either way, and refusing it as "forged or
+    // broken" would report a genuine out-of-test crash as a tampered record, so it reads as the crash it is.
+    driver = { importFailed: false, ...driverLines[0] };
   } else if (driverLines.length === 2
       && typeof driverLines[0].importFailed === 'boolean' && driverLines[0].importFailed === false
       && driverLines[1].crashedOutsideTest === true) {
@@ -191,11 +196,17 @@ export default async function* suiteModeReporter(source) {
       && typeof driverLines[0].importFailed === 'boolean' && driverLines[0].importFailed === false
       && driverLines[1].handlersStripped === true
       && driverLines[2].crashedOutsideTest === true) {
-    // IMPORT, STRIP, CRASH (airhorn-p0dg): the strip line is the once() self-removal artifact -
-    // the handler fired, which REMOVES it and trips the driver's own strip watcher a beat before
-    // the CRASH line. After a REAL strip the driver holds no handler that could write CRASH, so
-    // this sequence cannot come from suppression: accept it as a crash.
+    // IMPORT, STRIP, CRASH (airhorn-p0dg): the strip line is a once() self-removal artifact - the handler fired, node removed
+    // it, and the CRASH line follows. After a REAL strip the driver holds no handler that could write CRASH, so this
+    // sequence cannot come from suppression: accept it as a crash. (I deleted this branch when removing a dead sibling in
+    // airhorn-5qdd and the honest-crash world caught it - the grammar is load-bearing, not decoration.)
     driver = { ...driverLines[0], ...driverLines[2] };
+  } else if (driverLines.length === 2
+      && typeof driverLines[0].importFailed === 'boolean' && driverLines[0].importFailed === false
+      && driverLines[1].handlersPreceded === true) {
+    // IMPORT, A REJECTION LISTENER AHEAD OF OURS (airhorn-rnj5/5qdd): rejections have no monitor, so this is the one place a
+    // position check still earns its keep. Refused as untrustworthy rather than read as a pass.
+    driver = { ...driverLines[0], handlersPreceded: true, precededReason: driverLines[1].reason };
   } else if (driverLines.length > 0) {
     driver = { tampered: true, lines: driverLines.length };     // any other sequence: forged or broken
   }

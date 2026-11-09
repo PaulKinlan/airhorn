@@ -369,6 +369,15 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     // airhorn-a6ch: the suite strips the driver's crash handlers, then crashes asynchronously -
     // the wrapper event must be attributed to the DRIVER, not counted as a failing test.
     write('g-strip-handlers.mjs', "import test from 'node:test';\ntest('one', () => {});\nprocess.removeAllListeners('uncaughtException');\nprocess.removeAllListeners('unhandledRejection');\nsetImmediate(() => { throw new Error('strip boom'); });\n");
+    // airhorn-rnj5 / airhorn-5qdd: three listener-order evasions. All three work the same way - a swallow runs BEFORE the
+    // driver's handler and exits 0, so nothing is removed (the strip watcher is silent), no CRASH line is written by the
+    // driver's listener, and from outside the run looks like a suite that simply passed. The fix is PRECEDENCE, not
+    // position: node emits 'uncaughtExceptionMonitor' before every listener and before a capture callback, so the driver
+    // records the crash first and the swallow never gets to run. prependOnceListener and a self-removing listener are the
+    // two shapes that an exit-time position check cannot see, which is why that check was removed rather than patched.
+    write('k-prepend-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { process.prependListener('uncaughtException', () => process.exit(0)); throw new Error('looks like a pass'); }, 5);\n");
+    write('k-prepend-once-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { process.prependOnceListener('uncaughtException', () => process.exit(0)); throw new Error('once swallow'); }, 5);\n");
+    write('k-self-removing-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { const swallow = () => { process.removeListener('uncaughtException', swallow); process.exit(0); }; process.prependListener('uncaughtException', swallow); throw new Error('self-removing swallow'); }, 5);\n");
     // airhorn-so88: an async throw AFTER a clean import (the reviewer's repro shape)
     write('f-async-crash.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetImmediate(() => { throw new Error('async boot failure'); });\n");
     // airhorn-lnme: node names the file-level event with the path AS PASSED, so a
@@ -403,6 +412,23 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     // time, so this world refuses as report-not-trustworthy (the strip is named) rather than
     // only via the crash's exit code.
     assert.match(stripped.stderr + stripped.stdout, /report-not-trustworthy|exited 1 with no failing test|registered no tests|crashed/i);
+
+    // The rejection path has no monitor, so it is checked by POSITION at exit - which covers the plain prepend and cannot
+    // cover a prepended once or a self-removing listener. That boundary is asserted, not glossed: the first is refused, and
+    // the second is recorded here as the known residual so nobody reads the trust line as covering it.
+    write('k-prepend-rejection-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { process.prependListener('unhandledRejection', () => process.exit(0)); Promise.reject(new Error('swallowed rejection')); }, 5);\n");
+
+    for (const world of ['k-prepend-swallow.mjs', 'k-prepend-once-swallow.mjs', 'k-self-removing-swallow.mjs']) {
+      const laundered = runWorld(['--suite', world]);
+      assert.equal(laundered.status, 3, `${world} must be a named refusal, got ${laundered.status}: ${laundered.stdout}${laundered.stderr}`);
+      assert.match(laundered.stderr + laundered.stdout, /threw-outside-a-test|uncaught exception after the suite loaded/,
+        `${world} must be reported as the crash it is (the monitor sees it first), not as a pass`);
+    }
+
+    const rejectionLaunder = runWorld(['--suite', 'k-prepend-rejection-swallow.mjs']);
+    assert.equal(rejectionLaunder.status, 3, `a prepended rejection swallow must be a named refusal, got ${rejectionLaunder.status}: ${rejectionLaunder.stdout}${rejectionLaunder.stderr}`);
+    assert.match(rejectionLaunder.stderr + rejectionLaunder.stdout, /AHEAD of the driver's/,
+      'the rejection refusal must name the listener ahead of the driver, since there is no monitor for rejections');
 
     for (const world of ['h-async-no-test.mjs', 'i-async-decoy.mjs', 'j-indirect-async.mjs']) {
       const r = runWorld(['--suite', world]);
@@ -914,7 +940,28 @@ setTimeout(() => {
   const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
   assert.equal(run.status, 3,
     `the one-timer suppression must be a named refusal - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
-  assert.match(run.stderr, /report-not-trustworthy/);
+  // airhorn-5qdd: this world strips the uncaughtException LISTENERS, which no longer decides anything - the driver records
+  // crashes from 'uncaughtExceptionMonitor', which the strip does not touch, so the crash is now named as the crash it is
+  // instead of being inferred from the strip. Both are named refusals; the strip is still what catches a suite that removes
+  // the MONITOR (the world below).
+  assert.match(run.stderr, /report-not-trustworthy|threw-outside-a-test/);
+
+  // And the monitor is the thing to strip now: removing it trips the same watcher, so the attempt is reported at strip time
+  // rather than succeeding.
+  fs.writeFileSync(path.join(tmp, 'monitor-strip.test.js'), `
+import { test } from 'node:test';
+test('passes', () => {});
+setTimeout(() => {
+  process.removeAllListeners('uncaughtExceptionMonitor');
+  process.on('uncaughtException', () => process.exit(0));
+  throw new Error('swallowed after removing the monitor');
+}, 30);
+`);
+  const monitorStrip = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'monitor-strip.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+  assert.equal(monitorStrip.status, 3,
+    `removing the crash monitor must still be a named refusal - rc=${monitorStrip.status}\nstdout:\n${monitorStrip.stdout}\nstderr:\n${monitorStrip.stderr}`);
+  assert.match(monitorStrip.stderr + monitorStrip.stdout, /report-not-trustworthy|handlersStripped|removed the driver/,
+    'a suite that removes the monitor must be reported at strip time, not silently swallowed');
 });
 
 test('an honest crash outside any test is still threw-outside-a-test, even with the strip watcher live (the once() artifact must not read as tamper)', () => {
@@ -941,5 +988,12 @@ test('passes', () => {});
 `);
   const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
   assert.match(run.stdout, /trust: driver records are grammar-checked/);
-  assert.match(run.stdout, /removeListener watcher FIRST/);
+  assert.match(run.stdout, /removeListener watcher first/, 'the watcher-first evasion must still be named');
+  // airhorn-rnj5/5qdd: the line must separate what is seen BY PRECEDENCE (uncaught exceptions, via the monitor), what is seen
+  // BY POSITION (rejection listeners, since node has no rejection monitor) and what is not seen at all - a boundary that does
+  // not enumerate its own gaps reads as closure.
+  assert.match(run.stdout, /uncaughtExceptionMonitor/);
+  assert.match(run.stdout, /no rejection monitor/);
+  assert.match(run.stdout, /prepended once or self-removing unhandledRejection listener/);
+  assert.match(run.stdout, /crash that runs no JS at all/);
 });
