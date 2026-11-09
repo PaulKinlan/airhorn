@@ -115,13 +115,37 @@ test('everything outside the block survives a union verbatim (comments, the runn
 test('tools that tests import never run main() unguarded (the fc98 class)', () => {
   const testsDir = path.join(root, 'tests');
   const importedTools = new Set();
-  const importRe = /from\s+['"]\.\.\/(tools\/[a-zA-Z0-9./_-]+\.mjs)['"]/g;
-  for (const entry of fs.readdirSync(testsDir)) {
-    if (!/\.test\.(js|mjs)$/.test(entry)) continue;
-    const src = fs.readFileSync(path.join(testsDir, entry), 'utf8');
-    for (const m of src.matchAll(importRe)) importedTools.add(m[1]);
+  // Static AND dynamic imports, from EVERY .js/.mjs under tests/ - helpers
+  // included, since tests/support/browser.mjs imports tools/lib/chrome.mjs via
+  // '../../tools/...' (airhorn-5su1: the from-only, *.test.js-only scan let the
+  // dynamically-imported tools perf-metrics/request-path/install-https-proof and
+  // any helper-only tool escape the scan entirely). The specifier is resolved
+  // against the importing file, so any relative prefix that lands in tools/ counts.
+  const specRe = /(?:from\s*|import\s*\(?\s*|require\s*\(\s*)['"](\.{1,2}\/[^'"]+)['"]/g;
+  const testFiles = [];
+  const collect = (dir) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) collect(full);
+      else if (/\.(js|mjs)$/.test(ent.name)) testFiles.push(full);
+    }
+  };
+  collect(testsDir);
+  for (const file of testFiles) {
+    const src = fs.readFileSync(file, 'utf8');
+    for (const m of src.matchAll(specRe)) {
+      const resolved = path.resolve(path.dirname(file), m[1]);
+      const rel = path.relative(root, resolved).split(path.sep).join('/');
+      if (rel.startsWith('tools/') && rel.endsWith('.mjs')) importedTools.add(rel);
+    }
   }
   assert.ok(importedTools.size > 5, 'the scan must find the real import set, not an empty one');
+  // airhorn-5su1 pin: the tools that today are reachable ONLY via dynamic import()
+  // must be in the scanned set - with a static-from-only regex all three escape.
+  for (const dynamicOnly of ['tools/lib/perf-metrics.mjs', 'tools/lib/request-path.mjs', 'tools/install-https-proof.mjs']) {
+    assert.ok(importedTools.has(dynamicOnly),
+      `the scan must cover dynamically-imported tools too (airhorn-5su1): ${dynamicOnly} is imported by tests only via import() and escaped a static-only scan`);
+  }
 
   // A top-level main() invocation: `main()` / `main().catch(...)` / `await main()`,
   // at line start - the entry point shape every incident had.

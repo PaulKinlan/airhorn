@@ -1641,6 +1641,8 @@ test('waitForSw distinguishes active, redundant, unsupported, evaluate error, an
   assert.equal(attemptCount, 3);
 });
 
-// The import-purity lint lives in tests/gate-map.test.js, NOT here: this file imports the
+// The import-purity lint lives in tests/gate-conf-merge.test.js, NOT here (airhorn-k4f0:
+// this comment pointed at gate-map after the second move): this file imports the
 // tools it would scan, and an unguarded tool would exit the process at import, before the
 // check could run - the very defect class it polices (observed live in the RED probe).
+// gate-conf-merge.test.js imports only node builtins, so it can host the scan safely.
