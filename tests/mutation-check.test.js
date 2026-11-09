@@ -1011,3 +1011,28 @@ test('passes', () => {});
   assert.match(run.stdout, /process\.reallyExit\(\)/);
   assert.match(run.stdout, /patches the record write path/);
 });
+
+
+/* airhorn-zach: the landing-path decision, pinned. The tool is ON-DEMAND ONLY -
+ * no gate surface may invoke it as a harness. If this ever goes red, the wiring
+ * needs a bead and a measured budget (two browser runs do not fit the fast gate). */
+test('no gate surface invokes mutation-check as a harness (airhorn-zach)', () => {
+  const surfaces = {
+    'tools/fast-gate.sh': /mutation-check/,
+    'tools/gate.conf': /^\s*tools\/mutation-check\.mjs\s*=/m,
+    'tools/check.conf': /^\s*tools\/mutation-check\.mjs\s*=/m,
+    'package.json': /mutation-check/,
+  };
+  for (const [file, re] of Object.entries(surfaces)) {
+    const text = fs.readFileSync(path.join(root, file), 'utf8');
+    assert.ok(!re.test(text), `${file} must not wire mutation-check into a gate (airhorn-zach: on-demand only)`);
+  }
+  // The map may name the tool only as INPUTS to its unit test, never as a suite itself.
+  const map = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
+  for (const line of map.split('\n')) {
+    if (/^\s*#/.test(line) || !line.trim()) continue;
+    const cells = line.split('\t');
+    assert.ok(!cells.slice(1).join(' ').split(/\s+/).includes('tools/mutation-check.mjs'),
+      `the tool must never be a map's SUITE column (right-hand side): ${line}`);
+  }
+});

@@ -22,6 +22,15 @@
  *      signal path restores and verifies the file itself before exiting non-zero (airhorn-rf0u).
  *      SIGKILL cannot be handled by any process: if the tool is killed that hard while the file is
  *      mutated, the mutant stays on disk and the recovery is `git checkout -- <the --file path>`;
+ *
+ * LANDING-PATH DECISION (airhorn-zach, 2026-11-09): this tool is ON-DEMAND ONLY. No gate
+ * invokes it - not tools/fast-gate.sh, not npm test, not tools/suite-map.tsv as a runnable
+ * suite (the map rows point at its UNIT TEST, tests/mutation-check.test.js, which is the
+ * browser-free node-test tier). A lane or reviewer runs it by hand when a one-off mutation
+ * honesty proof is wanted; the per-module enforcer + unit-test pattern (ADR
+ * docs/adr/0001-delegation-pin-not-prose-scan.md, precedent tests/press-guard.test.mjs) is
+ * what the gate relies on instead. Do NOT wire this tool into a gate without a bead and a
+ * measured budget - two browser runs do not fit the fast gate's 60s budget.
  *   5. the verdict is the triad, not a boolean:
  *        hole-proven        OLD suite passes the mutant, NEW suite fails it
  *        not-reproducible   OLD suite already fails the mutant (the guard is elsewhere)
