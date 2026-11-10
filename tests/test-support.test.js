@@ -1827,3 +1827,21 @@ test('parsePagesHeaders applies the shipped _headers and refuses outside the sub
     assert.throws(() => parsePagesHeaders(bad), /_headers/, `must refuse: ${JSON.stringify(bad)}`);
   }
 });
+
+
+/* airhorn-zm8z: a timeout's 'observed' payload must be the last page state, not the
+ * stringified Promise ('{}') that the un-awaited default observe produced. The diagnostic
+ * is the whole point of the message - every suite's timeout shipped without it. */
+test('waitForCondition timeout reports the awaited observed value, never {} (airhorn-zm8z)', async () => {
+  const { waitForCondition } = await import('./support/poll.mjs');
+  const err = await waitForCondition(async () => null, { timeout: 120, interval: 20, label: 'a never-true state' })
+    .then(() => null, (e) => e);
+  assert.ok(err, 'a never-true condition must time out');
+  assert.match(err.message, /observed null/, `the observed value must be the awaited result, got: ${err.message}`);
+  assert.doesNotMatch(err.message, /observed \{\}/, 'the Promise-stringification bug is back (airhorn-zm8z)');
+  // A rejecting observe reads as a named fallback, not a crash that masks the timeout.
+  const err2 = await waitForCondition(async () => null, {
+    timeout: 120, interval: 20, label: 'x', observe: async () => { throw new Error('observe blew up'); },
+  }).then(() => null, (e) => e);
+  assert.match(err2.message, /<unserializable>/, 'a rejecting observe must not mask the timeout');
+});
