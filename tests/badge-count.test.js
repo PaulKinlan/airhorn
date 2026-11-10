@@ -139,3 +139,19 @@ test('multitab scenario F waits for the cross-tab clear to propagate (airhorn-qf
     'the A2 read must be preceded by a waitUntil that observes the cleared (null) value - ' +
     'a one-shot read races cross-tab localStorage propagation (airhorn-qfxp, same lesson as airhorn-wzcw)');
 });
+
+
+/* airhorn-u9cd: the two sibling one-shot reads in multitab get the same treatment - the raw
+ * write must be OBSERVED through a wait, and the two-blast settle must allow for propagation
+ * lag. Both success conditions are monotone (a lost blast or an ineffective raw write never
+ * appears), so the waits cannot mask a real failure. */
+test('multitab observes cross-tab writes through bounded waits, not one-shot reads (airhorn-u9cd)', () => {
+  const src = fs.readFileSync(path.join(root, 'tests', 'multitab.test.mjs'), 'utf8');
+  const rawIdx = src.indexOf("localStorage.setItem('airhorn:blast-count', '1')");
+  assert.ok(rawIdx > 0, 'the raw-write step must be locatable');
+  const around = src.slice(rawIdx, rawIdx + 1200);
+  assert.ok(/waitUntil\(async \(\) =>[\s\S]{0,400}getItem\('airhorn:blast-count'\)[\s\S]{0,120}=== 1/.test(around),
+    'the raw write must be observed through a waitUntil before the assert (one-shot reads race propagation, airhorn-u9cd)');
+  assert.ok(/two blasts[\s\S]{0,0}/.test(src) && /return n === before \+ 2 \? n : null;\n      \}, 20000\)/.test(src),
+    'the two-blast settle window must be 20s - 5s expired under gate load on a value that arrived late (airhorn-u9cd)');
+});
