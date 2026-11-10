@@ -16,6 +16,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+const root = path.resolve(import.meta.dirname, '..');
 
 const installDom = (storage) => {
   const calls = [];
@@ -114,4 +117,25 @@ test('(d) acknowledge() clears the count and the OS badge', async () => {
   badge.acknowledge(); await settle(); await settle();
   assert.equal(count(storage), null, 'acknowledge left a count behind');
   assert.ok(calls.some(([op]) => op === 'clear'), 'acknowledge never cleared the OS badge');
+});
+
+
+/* airhorn-qfxp: scenario F's acknowledge must WAIT for the other tab to observe the clear -
+ * a single synchronous cross-tab storage read right after B's clear races asynchronous
+ * propagation and flakes the full gate (32wa, 2026-11-09: B=null A2="1" with B's clearAppBadge
+ * already in the spy log). The fix is the same lesson as airhorn-wzcw's blast-count write:
+ * waitUntil, not a one-shot read. This pin fails if the acknowledge block ever goes back to
+ * reading A2's storage once. */
+test('multitab scenario F waits for the cross-tab clear to propagate (airhorn-qfxp)', () => {
+  const src = fs.readFileSync(path.join(root, 'tests', 'multitab.test.mjs'), 'utf8');
+  const fStart = src.indexOf('--- F. returning to a tab acknowledges the shared badge');
+  const gStart = src.indexOf('--- G. a tab that cannot read storage');
+  assert.ok(fStart > 0 && gStart > fStart, 'scenario F block must be locatable');
+  const block = src.slice(fStart, gStart);
+  const readIdx = block.indexOf("const aStorage =");
+  assert.ok(readIdx > 0, 'the acknowledge block still reads A2 storage');
+  const before = block.slice(0, readIdx);
+  assert.ok(/waitUntil\(async \(\) =>[\s\S]{0,400}localStorage\.getItem\('airhorn:blast-count'\)[\s\S]{0,200}=== null/.test(before),
+    'the A2 read must be preceded by a waitUntil that observes the cleared (null) value - ' +
+    'a one-shot read races cross-tab localStorage propagation (airhorn-qfxp, same lesson as airhorn-wzcw)');
 });

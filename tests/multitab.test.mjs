@@ -709,7 +709,14 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
         const bLog = await B.badge();
         return bLog.length > bLogBefore && bLog.slice(bLogBefore).some((e) => e.fn === 'clearAppBadge') ? bLog : null;
       }, 5000);
-      const aStorage = await A2.evaluate(`window.localStorage.getItem('airhorn:blast-count')`);
+      // airhorn-qfxp: A2's storage read must WAIT for null, not read once. B's clear is
+      // observed through B's badge spy, but cross-tab localStorage propagation through the
+      // browser's storage process is asynchronous - on a loaded gate host A2 can still read
+      // the pre-clear value here (B=null A2="1" in a gate log) while B's own read is already
+      // null. Same race shape as airhorn-wzcw's blast-count write, one assert later.
+      const aCleared = await waitUntil(async () =>
+        (await A2.evaluate(`window.localStorage.getItem('airhorn:blast-count')`)) === null ? true : null, 6000);
+      const aStorage = aCleared ? null : await A2.evaluate(`window.localStorage.getItem('airhorn:blast-count')`);
       const bStorage = await B.evaluate(`window.localStorage.getItem('airhorn:blast-count')`);
       const aLogAfter = await A2.badge();
       assert(acked && aStorage === null && bStorage === null,
