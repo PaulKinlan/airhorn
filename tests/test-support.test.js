@@ -1466,9 +1466,24 @@ test('request-path: every tool serves through the shared guard, none keeps its o
   // so a future edit cannot quietly reintroduce the bare decode (which throws) or the bare
   // path.join (which follows '..') in one tool while the shared helper stays green.
   const toolsDir = path.join(import.meta.dirname, '..', 'tools');
-  const served = ['install-https-proof.mjs', 'soak.mjs', 'idle-cost.mjs', 'measure-perf.mjs'];
-  for (const name of served) {
-    const source = fs.readFileSync(path.join(toolsDir, name), 'utf8');
+  // DERIVED, not a snapshot (airhorn-0s4v): the list used to name four tools by hand, and the
+  // five that were left out (plus this module) kept the bare decode and the string-prefix
+  // containment for two more landings. Every file that opens an http server is in scope, so a
+  // NEW tool cannot arrive uncovered and no existing one can silently leave the guard.
+  const served = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { walk(full); continue; }
+      if (!entry.name.endsWith('.mjs')) continue;
+      const source = fs.readFileSync(full, 'utf8');
+      if (/createServer\s*\(/.test(source)) served.push([path.relative(toolsDir, full), source]);
+    }
+  };
+  walk(toolsDir);
+  assert.ok(served.length >= 10,
+    `the derived scan must still find the tool servers it guards, found ${JSON.stringify(served.map(([n]) => n))}`);
+  for (const [name, source] of served) {
     // openRequestUrl, not resolveRequestUrl: the guard must OPEN the file and decide on the
     // handle (airhorn-dklf), so pinning the opening call is what keeps the TOCTOU window shut
     // in every tool rather than only in the helper.
@@ -1844,4 +1859,73 @@ test('waitForCondition timeout reports the awaited observed value, never {} (air
     timeout: 120, interval: 20, label: 'x', observe: async () => { throw new Error('observe blew up'); },
   }).then(() => null, (e) => e);
   assert.match(err2.message, /<unserializable>/, 'a rejecting observe must not mask the timeout');
+});
+
+test('static-server: serveDist decodes the request path and contains it by handle (airhorn-0s4v)', async () => {
+  // Behaviour, not source: the suites' shared server (tools/lib/static-server.mjs, airhorn-yxxq)
+  // used to split the query off and match a SEPARATOR-LESS string prefix, so a sibling directory
+  // sharing the root's name prefix or a symlink under the root left the served tree - and an
+  // encoded path never matched its file at all. Driven over a real socket against a real tree.
+  const { serveDist } = await import('../tools/lib/static-server.mjs');
+  const net = await import('node:net');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'servedist-'));
+  const root = path.join(base, 'dist');
+  const sibling = path.join(base, 'dist-evil'); // shares the root's NAME PREFIX, is not inside it
+  const outside = path.join(base, 'outside');
+  for (const dir of [root, sibling, outside]) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(root, 'index.html'), 'INDEX');
+  fs.mkdirSync(path.join(root, 'assets'));
+  fs.writeFileSync(path.join(root, 'assets', 'app.js'), 'APP_JS');
+  fs.writeFileSync(path.join(sibling, 'secret.txt'), 'SIBLING_SECRET');
+  fs.writeFileSync(path.join(outside, 'secret.txt'), 'OUTSIDE_SECRET');
+  fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'link.txt'));
+
+  const rawGet = (port, target) => new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1', () => {
+      socket.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`);
+    });
+    let data = '';
+    socket.setEncoding('utf8');
+    socket.setTimeout(15000, () => socket.destroy(new Error('serveDist never answered')));
+    socket.on('data', (chunk) => { data += chunk; });
+    socket.on('error', reject);
+    socket.on('close', () => resolve(data));
+  });
+
+  const served = await serveDist({ dir: root });
+  try {
+    const statusOf = (response) => Number((response.match(/^HTTP\/1\.1 (\d{3})/) || [])[1]);
+
+    const index = await rawGet(served.port, '/');
+    assert.equal(statusOf(index), 200, index.slice(0, 200));
+    assert.match(index, /INDEX/, 'the directory index still resolves');
+
+    // The decode half: an encoded path must reach the file it names. Before the fix the raw
+    // '%2E'-bearing pathname was joined literally and 404'd.
+    const encoded = await rawGet(served.port, '/assets%2Fapp.js');
+    assert.equal(statusOf(encoded), 200, `an encoded path must resolve to its file: ${encoded.slice(0, 200)}`);
+    assert.match(encoded, /APP_JS/);
+
+    // The containment half, both shapes: ../ out to a SIBLING whose name shares the root's
+    // prefix, and a symlink that lives inside the root and points outside it.
+    const traversal = await rawGet(served.port, '/../dist-evil/secret.txt');
+    assert.equal(statusOf(traversal), 403, `a sibling sharing the root's name prefix must be refused: ${traversal.slice(0, 200)}`);
+    assert.doesNotMatch(traversal, /SIBLING_SECRET/, 'the sibling file must never be served');
+    assert.match(traversal, /outside the served root/, 'the refusal must name what it refused');
+
+    const symlink = await rawGet(served.port, '/link.txt');
+    assert.equal(statusOf(symlink), 403, `a symlink out of the root must be refused: ${symlink.slice(0, 200)}`);
+    assert.doesNotMatch(symlink, /OUTSIDE_SECRET/, 'the outside file must never be served');
+
+    // A malformed escape is a named 400, not a thrown URIError that kills the suite process.
+    const malformed = await rawGet(served.port, '/%zz');
+    assert.equal(statusOf(malformed), 400, malformed.slice(0, 200));
+    assert.match(malformed, /bad percent-escape/);
+
+    const missing = await rawGet(served.port, '/nope.txt');
+    assert.equal(statusOf(missing), 404);
+  } finally {
+    await served.close();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
 });
