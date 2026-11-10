@@ -155,3 +155,16 @@ test('multitab observes cross-tab writes through bounded waits, not one-shot rea
   assert.ok(/two blasts[\s\S]{0,0}/.test(src) && /return n === before \+ 2 \? n : null;\n      \}, 20000\)/.test(src),
     'the two-blast settle window must be 20s - 5s expired under gate load on a value that arrived late (airhorn-u9cd)');
 });
+
+
+/* airhorn-sdzb: the third member of the family - webmcp-browser must wait for the badge
+ * write (async behind the origin lock) before slicing the spy. */
+test('webmcp-browser waits for the lock-serialized badge write before slicing the spy (airhorn-sdzb)', () => {
+  const src = fs.readFileSync(path.join(root, 'tests', 'webmcp-browser.test.mjs'), 'utf8');
+  const sliceIdx = src.indexOf('badge: window.__badge.calls.slice()');
+  assert.ok(sliceIdx > 0, 'the badge slice must be locatable');
+  const before = src.slice(Math.max(0, sliceIdx - 1200), sliceIdx);
+  assert.ok(/__waitFor\(\(\) => window\.__badge\.calls\.length > 0/.test(before),
+    'the badge slice must be preceded by a waitFor on calls.length - the write is async behind the origin lock ' +
+    '(airhorn-sdzb, same lesson as airhorn-qfxp / airhorn-u9cd)');
+});
