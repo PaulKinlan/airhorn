@@ -347,6 +347,62 @@ async function testSwAndManifest() {
     if (!off.swController) {
       throw new Error('Offline page not controlled by service worker');
     }
+
+    // airhorn-yrpg (review finding on airhorn-xnd1): the boot watchdog can only
+    // report a blocked bundle if the watchdog ITSELF was served, and xnd1 makes
+    // it an external file (/boot-watchdog.js) instead of an inline block - so an
+    // offline load is the first place it can go missing with no other symptom:
+    // the shell renders from cache, the horn is there, and a dead bundle is
+    // silent. The two globals read below are authored by the watchdog ALONE, so
+    // their presence after an offline reload is proof the worker served and
+    // executed it. The precache LIST is pinned separately (tests/csp.test.js:
+    // entry, build digest, and airhorn-lu8a's refusal of an uncovered path);
+    // this is the browser-level half the bead's CHANGE section asked for.
+    //
+    // Two rules, both learned from airhorn-sdzb, and one correction to the FIRST
+    // attempt at this case (which read the state once, after readyState):
+    //   - wait on a page STATE, never the clock - the same fact the app itself
+    //     settles, not a sleep that happens to be long enough;
+    //   - the wait PERSISTS (a one-shot read is the sdzb defect: it reports a
+    //     value that simply had not arrived yet as a missing one), and
+    //   - when it gives up, it fails BY NAME, because a bare bound expiring
+    //     cannot tell a slow host from a page that never got its script.
+    // readOfflineScripts() is that state read; the wait below is support/poll.mjs's
+    // one policy (WAIT_TIMEOUT_MS, the suite's existing bound), and the named
+    // throw is what turns its expiry into a verdict that says which world it is in.
+    const readOfflineScripts = () => evaluate(`(() => ({
+      announce: typeof window.__airhornAnnounce,
+      booted: typeof window.__airhornBooted,
+      sheetSwapped: [...document.querySelectorAll('link[rel="stylesheet"]')]
+        .some((l) => l.media === 'all' && /\\/styles\\/main\\.css$/.test(l.href)),
+      sheetMedia: (document.querySelector('link[rel="stylesheet"]') || {}).media || null,
+    }))()`);
+
+    let offlineScripts;
+    try {
+      offlineScripts = await waitForCondition(async () => {
+        const seen = await readOfflineScripts();
+        return seen.announce === 'function' && seen.booted === 'function' && seen.sheetSwapped ? seen : null;
+      }, { label: 'the offline page to have executed its boot watchdog and swapped the stylesheet' });
+    } catch (err) {
+      // Classify the expiry instead of re-throwing a bound: read the state one last
+      // time and name what never arrived. If even the read fails, that is its own
+      // named verdict (the document is gone, not the script).
+      const last = await readOfflineScripts().catch(() => null);
+      if (last && (last.announce !== 'function' || last.booted !== 'function')) {
+        throw new Error('offlineWatchdogMissing: the boot watchdog did not execute on the offline page '
+          + `(__airhornAnnounce=${last.announce}, __airhornBooted=${last.booted}). An offline load whose watchdog `
+          + 'is missing cannot report a blocked bundle - the page would look alive and say nothing '
+          + '(airhorn-yrpg, airhorn-xnd1)');
+      }
+      if (last && !last.sheetSwapped) {
+        throw new Error('offlineSheetLoaderMissing: the main stylesheet never left media=print on the offline page '
+          + `(media=${last.sheetMedia}); /async-css.js was not served or did not run (airhorn-yrpg, airhorn-xnd1)`);
+      }
+      throw new Error(`offlineScriptsUnreadable: the offline page could not report its script state (${err.message})`);
+    }
+    console.log('Offline scripts verified:', offlineScripts);
+
     console.log('OFFLINE LOAD VERIFIED!');
 
     // Restore online network
