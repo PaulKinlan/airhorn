@@ -70,8 +70,11 @@ test('the deploy workflow names both Cloudflare secrets and never embeds a crede
   const yaml = read('.github', 'workflows', 'deploy-pages.yml');
   assert.match(yaml, /secrets\.CLOUDFLARE_API_TOKEN/, 'the API token must come from a repository secret');
   assert.match(yaml, /secrets\.CLOUDFLARE_ACCOUNT_ID/, 'the account id must come from a repository secret');
-  // No literal token shapes anywhere in the file.
-  assert.doesNotMatch(yaml, /\b[A-Za-z0-9_-]{40}\b/, 'no credential value may be embedded in the workflow');
+  // No literal token shapes anywhere in the file - except a pinned action, which is a 40-hex
+  // COMMIT SHA on purpose (airhorn-iae8) and is checked by its own test below. Strip `uses:`
+  // lines before the credential scan, or the pin would read as a leaked secret.
+  const withoutPins = yaml.split('\n').filter((line) => !/^\s*(-\s*)?uses:/.test(line)).join('\n');
+  assert.doesNotMatch(withoutPins, /\b[A-Za-z0-9_-]{40}\b/, 'no credential value may be embedded in the workflow');
   // Every YAML env assignment of either name must come from a secret - not just the first one, and not
   // just the token: a literal account id in the guard's env would otherwise slip past this test (it did,
   // until this loop covered both names). Shell uses ${NAME:-} tests, which the leading-`NAME:` anchor skips.
@@ -255,4 +258,35 @@ test('public/_headers carries the five no-risk security headers verbatim (airhor
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.ok(!pkg.vite || !pkg.vite.publicDir || pkg.vite.publicDir === 'public',
     'the pin assumes Vite copies public/ into dist/; a custom publicDir would need this rechecked');
+});
+
+/* airhorn-iae8: this workflow is the one path that runs with CLOUDFLARE_API_TOKEN in scope, and
+ * it used to execute code that was resolved AT RUN TIME - `actions/checkout@v4`,
+ * `actions/setup-node@v4` and `npx --yes wrangler@3` all name a mutable ref, so a tag move or a
+ * new 3.x publish would run in that environment without anyone choosing it. A review that has to
+ * notice a floating ref by eye is not a pin; this is. */
+test('every action and tool the deploy workflow runs is pinned to an immutable version (airhorn-iae8)', () => {
+  const yaml = read('.github', 'workflows', 'deploy-pages.yml');
+
+  const uses = yaml.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('- uses:') || l.startsWith('uses:'));
+  assert.ok(uses.length >= 2, `the workflow must still use actions to check out and set up node, found ${JSON.stringify(uses)}`);
+  for (const line of uses) {
+    const ref = line.replace(/^(-\s*)?uses:\s*/, '').split(/\s|#/)[0];
+    const [action, pin] = ref.split('@');
+    assert.ok(action.includes('/'), `a uses: line must name owner/action, got ${JSON.stringify(ref)}`);
+    // A tag or branch (v4, master, latest) is mutable: the code that runs is whatever that ref
+    // points at on the day of the deploy. Only a 40-hex commit sha is immutable.
+    assert.match(pin || '', /^[0-9a-f]{40}$/,
+      `${action} must be pinned to a 40-hex commit sha, not the mutable ref ${JSON.stringify(pin)} (airhorn-iae8)`);
+    assert.match(line, /#\s*v\d+(\.\d+)*\b/,
+      `${action}@<sha> needs its human-readable version in a trailing comment (# vX.Y.Z), or nobody can tell what runs: ${line.trim()}`);
+  }
+
+  // Same rule for the tool npx fetches: an exact x.y.z, never a floating major.
+  const npx = [...yaml.matchAll(/\bnpx\s+(?:--yes\s+)?([^\s@]+)@([^\s]+)/g)];
+  assert.ok(npx.length >= 1, 'the deploy step still runs wrangler through npx; this pin must keep tracking it');
+  for (const [, pkg, version] of npx) {
+    assert.match(version, /^\d+\.\d+\.\d+$/,
+      `${pkg} must be pinned to an exact version (x.y.z); ${JSON.stringify(version)} is a range or a major, which npx resolves from the registry at run time with the deploy credential in scope (airhorn-iae8)`);
+  }
 });
