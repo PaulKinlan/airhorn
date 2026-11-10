@@ -378,28 +378,48 @@ async function testSwAndManifest() {
       sheetMedia: (document.querySelector('link[rel="stylesheet"]') || {}).media || null,
     }))()`);
 
+    // Classification reads the LAST OBSERVED poll result, never a fresh read. A second read
+    // after the bound looks obvious and is wrong: if the state settles in the milliseconds
+    // between the last failed poll and that read, the read comes back HEALTHY, neither named
+    // branch matches, and the fall-through calls a page that reported perfectly
+    // "unreadable" - a misnamed verdict in the exact race this wait exists to handle
+    // (airhorn-6r6y, reproduced by the reviewer with an instrumented run). Capturing the
+    // observation inside the check means the state classified IS the state at expiry.
     let offlineScripts;
+    let lastSeen = null;
+    let lastReadError = null;
     try {
       offlineScripts = await waitForCondition(async () => {
-        const seen = await readOfflineScripts();
-        return seen.announce === 'function' && seen.booted === 'function' && seen.sheetSwapped ? seen : null;
+        try {
+          const seen = await readOfflineScripts();
+          lastSeen = seen;
+          lastReadError = null;
+          return seen.announce === 'function' && seen.booted === 'function' && seen.sheetSwapped ? seen : null;
+        } catch (err) {
+          // A torn-down context mid-navigation is not a verdict on the page; keep polling.
+          lastReadError = err;
+          return null;
+        }
       }, { label: 'the offline page to have executed its boot watchdog and swapped the stylesheet' });
     } catch (err) {
-      // Classify the expiry instead of re-throwing a bound: read the state one last
-      // time and name what never arrived. If even the read fails, that is its own
-      // named verdict (the document is gone, not the script).
-      const last = await readOfflineScripts().catch(() => null);
-      if (last && (last.announce !== 'function' || last.booted !== 'function')) {
+      // Name the world the LAST OBSERVATION was in, not the one a later read guesses at.
+      if (lastSeen && lastSeen.announce === 'function' && lastSeen.booted === 'function' && lastSeen.sheetSwapped) {
+        throw new Error('offlineScriptsSettledLate: the offline page reported a healthy script state but the wait '
+          + `still expired (${JSON.stringify(lastSeen)}); the poll and the observation disagree, which is a defect in `
+          + 'this case, not in the page (airhorn-6r6y)');
+      }
+      if (lastSeen && (lastSeen.announce !== 'function' || lastSeen.booted !== 'function')) {
         throw new Error('offlineWatchdogMissing: the boot watchdog did not execute on the offline page '
-          + `(__airhornAnnounce=${last.announce}, __airhornBooted=${last.booted}). An offline load whose watchdog `
+          + `(__airhornAnnounce=${lastSeen.announce}, __airhornBooted=${lastSeen.booted}). An offline load whose watchdog `
           + 'is missing cannot report a blocked bundle - the page would look alive and say nothing '
           + '(airhorn-yrpg, airhorn-xnd1)');
       }
-      if (last && !last.sheetSwapped) {
+      if (lastSeen && !lastSeen.sheetSwapped) {
         throw new Error('offlineSheetLoaderMissing: the main stylesheet never left media=print on the offline page '
-          + `(media=${last.sheetMedia}); /async-css.js was not served or did not run (airhorn-yrpg, airhorn-xnd1)`);
+          + `(media=${lastSeen.sheetMedia}); /async-css.js was not served or did not run (airhorn-yrpg, airhorn-xnd1)`);
       }
-      throw new Error(`offlineScriptsUnreadable: the offline page could not report its script state (${err.message})`);
+      throw new Error('offlineScriptsUnreadable: the offline page never reported its script state'
+        + (lastReadError ? ` (last read failed: ${lastReadError.message})` : '') + ' (airhorn-yrpg)');
     }
     console.log('Offline scripts verified:', offlineScripts);
 
