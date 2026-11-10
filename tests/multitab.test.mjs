@@ -927,10 +927,15 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
         `the bump did not take the lock, so it is a non-atomic read-modify-write and interleaved tabs can lose a blast (airhorn-rqz1)`);
       await A2.evaluate(`window.__rqz1Release && window.__rqz1Release()`);
       await B.evaluate(`window.__airhorn.start()`);
+      // airhorn-u9cd: 20s, not 5s. A2's VIEW of the shared count lags the writes through
+      // cross-tab propagation, and on a starved gate host that lag has been observed past
+      // 5s. The success condition is MONOTONE - the value becomes before + 2 only if both
+      // increments really landed - so a longer window cannot mask a lost blast, it only
+      // stops failing on slow propagation (same lesson as airhorn-qfxp and airhorn-wzcw).
       const settled = await waitUntil(async () => {
         const n = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
         return n === before + 2 ? n : null;
-      }, 5000);
+      }, 20000);
       const after = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
       assert(settled,
         `two blasts in two tabs produced a shared count of ${after}, expected ${before + 2} - ` +
@@ -1000,7 +1005,13 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
         `the bumps never quiesced at ${before + 2} (last stable read: ${JSON.stringify(quiesced)}) - ` +
         `a late count write is still in flight and the boundary measurement would race it (airhorn-f5ut)`);
       await B.evaluate(`(window.localStorage.setItem('airhorn:blast-count', '1'), true)`);
-      const afterUnlocked = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count'))`);
+      // airhorn-u9cd: wait for A2 to OBSERVE the raw write, do not read once - the write
+      // reaches A2 through asynchronous cross-tab propagation (same lesson as airhorn-qfxp).
+      // Monotone again: if the raw write truly did not take effect, 1 never appears and this
+      // still fails - the wait cannot turn a boundary violation green.
+      const observedRaw = await waitUntil(async () =>
+        (await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count'))`)) === 1 ? true : null, 10000);
+      const afterUnlocked = observedRaw ? 1 : await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count'))`);
       const lateRecords = JSON.parse(await B.evaluate(`JSON.stringify(window.__badgeWrites || [])`));
       const late = lateRecords.filter((r) => !r.inLock);
       assert(late.length >= 1,
