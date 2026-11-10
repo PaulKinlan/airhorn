@@ -20,7 +20,7 @@
  * Run with: npm run test:acceptance   (builds first)
  */
 
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -419,7 +419,12 @@ async function run() {
     notes.webmcp = {
       native: webmcpNative,
       source: await evaluate('window.__webmcpSource || "none"'),
-      chrome: execSync(`${JSON.stringify(chromeBin())} --version`).toString().trim(),
+      // execFileSync with an argv, never a shell string: CHROME_BIN is environment, and
+      // JSON.stringify quoting does NOT survive /bin/sh -c - inside double quotes a backslash
+      // does not neutralise substitution, so `id` or $(...) in the value would run
+      // (airhorn-7jqv). The literal 'git rev-parse ...' calls elsewhere in this tree have no
+      // interpolation, so they are not the same shape.
+      chrome: execFileSync(chromeBin(), ['--version']).toString().trim(),
       flags: '--enable-features=WebMCP,WebMCPTesting',
     };
 
