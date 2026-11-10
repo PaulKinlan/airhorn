@@ -1929,3 +1929,61 @@ test('static-server: serveDist decodes the request path and contains it by handl
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+/* airhorn-7jqv: the acceptance harness reports the browser's version to its JSON payload, and
+ * the value it reports comes from CHROME_BIN - the environment. It used to ask with
+ *   execSync(`${JSON.stringify(chromeBin())} --version`)
+ * and execSync with a STRING runs /bin/sh -c. JSON.stringify does quote the value, so spaces,
+ * semicolons and quotes are contained (measured); what quoting does NOT contain is substitution,
+ * because inside double quotes a backslash does not stop `...` or $(...). Measured on this box
+ * with CHROME_BIN set to a path carrying `touch <marker>`: the old shape CREATED the marker and
+ * then ran the command, the argv shape cannot. So the pin has two halves - the SHAPE (no shell
+ * string is built from the environment) and the BEHAVIOUR (a metacharacter-laden path reaches
+ * chrome as a path) - and its negative control is the old shape, which must still show teeth.
+ *
+ * What this covers, honestly: tests/support/browser.mjs's chromeBin() resolution and the exact
+ * invocation tests/acceptance.mjs now makes. It does not boot the acceptance run itself. */
+test('CHROME_BIN reaches chrome as an argv, never as shell text (airhorn-7jqv)', async () => {
+  const { chromeBin } = await import(SUPPORT);
+  const { execFileSync: execArgv, execSync: execShell } = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-bin-7jqv-'));
+  // Two hazards in one value: a SPACE (a naive unquoted concatenation breaks on it) and a
+  // SUBSTITUTION (which shell quoting cannot neutralise). `$(echo)` substitutes to nothing, so
+  // the same directory also holds the file the shell WOULD have run - which is how the negative
+  // control proves the substitution happened without needing a marker file or a failing command.
+  const argvBin = path.join(dir, 'fake$(echo) chrome');
+  const shellBin = path.join(dir, 'fake chrome');
+  const stub = '#!/bin/sh\necho "FakeChrome 1.0 $0"\n';
+  for (const f of [argvBin, shellBin]) fs.writeFileSync(f, stub, { mode: 0o755 });
+  const realChromeBin = process.env.CHROME_BIN;
+  try {
+    process.env.CHROME_BIN = argvBin;
+    assert.equal(chromeBin(), argvBin, 'chromeBin() must pass the environment value through unchanged');
+
+    // THE SHIPPED CALL: an argv, so the value stays a path and the substitution stays text.
+    const version = execArgv(chromeBin(), ['--version']).toString().trim();
+    assert.equal(version, `FakeChrome 1.0 ${argvBin}`,
+      `a metacharacter-laden CHROME_BIN must reach chrome verbatim: got ${JSON.stringify(version)}`);
+    assert.equal(version.includes('$(echo)'), true,
+      'the argv call substituted in CHROME_BIN: the environment value is reaching a shell again');
+
+    // NEGATIVE CONTROL: the shape this replaced. It substitutes, so the same value resolves to
+    // the OTHER file - if this stops happening the pin has lost its teeth (a different shell, a
+    // Node change) and would pass for the wrong reason.
+    const old = execShell(`${JSON.stringify(argvBin)} --version`).toString().trim();
+    assert.equal(old, `FakeChrome 1.0 ${shellBin}`,
+      `execSync(string) no longer substitutes, so this pin cannot show that the argv shape is what `
+      + `prevents it - got ${JSON.stringify(old)}`);
+
+    // And the SHAPE, so a regression to the string form fails here even if no run happens to hit it.
+    const harness = fs.readFileSync(path.join(import.meta.dirname, 'acceptance.mjs'), 'utf8');
+    assert.equal(/execSync\([^)]*chromeBin\(/.test(harness), false,
+      'tests/acceptance.mjs must not build a shell string from chromeBin(): CHROME_BIN is environment '
+      + 'and execSync(string) runs it through /bin/sh -c (airhorn-7jqv)');
+    assert.match(harness, /execFileSync\(chromeBin\(\), \['--version'\]\)/,
+      'tests/acceptance.mjs must ask chrome for its version with an argv');
+  } finally {
+    process.env.CHROME_BIN = realChromeBin;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
