@@ -57,6 +57,7 @@ import { fileURLToPath } from 'node:url';
 import { quiescenceProbe, waitForQuiescence } from '../tests/support/quiescence.mjs';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 import { connectPage, launchChrome } from './lib/chrome.mjs';
+import { decodeRequestPath, openWithinRoot } from './lib/request-path.mjs';
 
 // A bound-kill (fleet-gate's SIGTERM, a job-tree reaper, Ctrl-C) never runs the
 // try/finally below, so a mid-run kill left the chrome tree and its /tmp profile
@@ -366,9 +367,17 @@ async function main() {
   // hashed asset must come back 404, exactly as it would from the real CDN.
   const origin = { current: variants[0] };
   const server = http.createServer((req, res) => {
-    const requestPath = decodeURIComponent((req.url || '/').split('?')[0]);
     const variant = origin.current;
-    if (requestPath === '/sw.js') {
+    // Decode THEN contain, one named refusal per failure (airhorn-017s): a hand-rolled
+    // decode threw URIError on '/%zz' and killed the run with a stack, and a lexical
+    // path prefix let a sibling directory or a symlink out of the served root.
+    const decoded = decodeRequestPath(req.url);
+    if (!decoded.ok) {
+      res.writeHead(decoded.status, { 'Content-Type': 'text/plain' });
+      res.end(decoded.reason);
+      return;
+    }
+    if (decoded.pathname === '/sw.js') {
       res.writeHead(200, {
         'Content-Type': 'application/javascript',
         'Service-Worker-Allowed': '/',
@@ -377,19 +386,23 @@ async function main() {
       res.end(variant.worker);
       return;
     }
-    let filePath = path.join(variant.dir, requestPath === '/' ? 'index.html' : requestPath);
-    if (!path.resolve(filePath).startsWith(path.resolve(variant.dir)) || !fs.existsSync(filePath)) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('Not found');
+    // OPEN FIRST, THEN DECIDE (airhorn-dklf): containment is read off the OPENED handle,
+    // and the bytes come from the descriptor that was verified.
+    const served = openWithinRoot(variant.dir, decoded.pathname);
+    if (!served.ok) {
+      res.writeHead(served.status, { 'Content-Type': 'text/plain' });
+      res.end(served.reason);
       return;
     }
-    if (fs.statSync(filePath).isDirectory()) filePath = path.join(filePath, 'index.html');
     res.writeHead(200, {
-      'Content-Type': mimeTypes[path.extname(filePath)] || 'application/octet-stream',
+      'Content-Type': mimeTypes[path.extname(served.realPath)] || 'application/octet-stream',
+      'Content-Length': served.size,
       'Service-Worker-Allowed': '/',
       'Cache-Control': 'no-store',
     });
-    fs.createReadStream(filePath).pipe(res);
+    const fileStream = fs.createReadStream(null, { fd: served.fd });
+    fileStream.on('error', () => res.destroy());
+    fileStream.pipe(res);
   });
 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));

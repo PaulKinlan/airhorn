@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
+import { decodeRequestPath, openWithinRoot } from './lib/request-path.mjs';
 
 // Every launch's teardown lives in a try/finally, which a bound-kill (fleet-gate's
 // SIGTERM, a job-tree reaper, Ctrl-C) never reaches - so the chrome tree and its
@@ -78,19 +79,22 @@ const BIP_PROBE = `
 
 async function startServer() {
   const server = http.createServer((req, res) => {
-    let reqUrl = decodeURIComponent(req.url.split('?')[0]);
-    let filePath = path.join(distDir, reqUrl === '/' ? 'index.html' : reqUrl);
-    if (!path.resolve(filePath).startsWith(path.resolve(distDir))) {
-      res.writeHead(403); res.end('Forbidden'); return;
-    }
-    if (!fs.existsSync(filePath)) { res.writeHead(404); res.end('Not found'); return; }
-    if (fs.statSync(filePath).isDirectory()) filePath = path.join(filePath, 'index.html');
-    const ext = path.extname(filePath);
+    // Decode THEN contain, each refusal named (airhorn-017s): the hand-rolled version
+    // threw URIError on '/%zz' (killing the capture run) and containment was a lexical
+    // prefix, which a sibling directory or a symlink leaves.
+    const decoded = decodeRequestPath(req.url);
+    if (!decoded.ok) { res.writeHead(decoded.status, { 'Content-Type': 'text/plain' }); res.end(decoded.reason); return; }
+    // OPEN FIRST, THEN DECIDE (airhorn-dklf): the bytes come from the verified handle.
+    const served = openWithinRoot(distDir, decoded.pathname);
+    if (!served.ok) { res.writeHead(served.status, { 'Content-Type': 'text/plain' }); res.end(served.reason); return; }
     res.writeHead(200, {
-      'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+      'Content-Type': mimeTypes[path.extname(served.realPath)] || 'application/octet-stream',
+      'Content-Length': served.size,
       'Service-Worker-Allowed': '/',
     });
-    fs.createReadStream(filePath).pipe(res);
+    const fileStream = fs.createReadStream(null, { fd: served.fd });
+    fileStream.on('error', () => res.destroy());
+    fileStream.pipe(res);
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   return server;

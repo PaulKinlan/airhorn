@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -156,5 +157,55 @@ test('importing resilience-audit creates no evidence directory and spawns no git
     assert.ok(!fs.existsSync(marker), 'an import must not spawn git (airhorn-nrmn) - the evidence dir resolves lazily on first use');
   } finally {
     fs.rmSync(spacedParent, { recursive: true, force: true });
+  }
+});
+
+/* ---- airhorn-017s: the harness origin's request path is decoded and contained by the
+ * shared helper, not by hand. The hand-rolled version threw URIError inside the request
+ * listener for a malformed escape (uncaught -> the whole run dies with a stack instead of
+ * answering), and matched containment with a lexical path prefix (a sibling directory
+ * sharing the root's prefix, or a symlink under the root, left the served tree).
+ * These drive the REAL startServer() over a real socket. */
+
+const rawGet = (port, target) => new Promise((resolve, reject) => {
+  const socket = net.connect(port, '127.0.0.1', () => {
+    socket.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`);
+  });
+  let data = '';
+  socket.setEncoding('utf8');
+  socket.setTimeout(15000, () => socket.destroy(new Error('the origin never answered')));
+  socket.on('data', (chunk) => { data += chunk; });
+  socket.on('error', reject);
+  socket.on('close', () => resolve(data));
+});
+
+const statusOf = (response) => Number((response.match(/^HTTP\/1\.1 (\d{3})/) || [])[1]);
+
+test('the harness origin answers a malformed escape with a named 400 and keeps serving (017s)', async () => {
+  const { startServer } = await import('../tools/resilience-audit.mjs');
+  const { server, port } = await startServer();
+  try {
+    const bad = await rawGet(port, '/%zz');
+    assert.equal(statusOf(bad), 400, `a malformed escape must be a 400, not a thrown URIError: ${bad.slice(0, 200)}`);
+    assert.match(bad, /bad percent-escape/, 'the refusal must name the cause, not answer a bare status');
+    // The crash this pins was process-fatal: the run never got to its teardown or report.
+    const after = await rawGet(port, '/index.html');
+    assert.equal(statusOf(after), 200, 'the origin must still answer after refusing a malformed request');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('the harness origin refuses a request that resolves outside the served root (017s)', async () => {
+  const { startServer } = await import('../tools/resilience-audit.mjs');
+  const { server, port } = await startServer();
+  try {
+    const escape = await rawGet(port, '/../outside.txt');
+    assert.equal(statusOf(escape), 403, `traversal must be refused, not served: ${escape.slice(0, 200)}`);
+    assert.match(escape, /outside the served root/, 'the refusal must name what it refused');
+    const contained = await rawGet(port, '/index.html');
+    assert.equal(statusOf(contained), 200);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
   }
 });
