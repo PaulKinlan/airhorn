@@ -59,7 +59,11 @@ export async function waitForCondition(check, {
   }
   const elapsed = Date.now() - started;
   let observed;
-  try { observed = JSON.stringify(observe()); } catch { observed = '<unserializable>'; }
+  // airhorn-zm8z: AWAIT the observation - the default observe IS check, an async fn, and
+  // stringifying its Promise printed 'observed {}' in every timeout, so the diagnostic the
+  // message exists to carry (the last page state) never shipped. The try/catch stays: a
+  // rejecting observe reads as '<unserializable>' rather than masking the timeout itself.
+  try { observed = JSON.stringify(await observe()); } catch { observed = '<unserializable>'; }
   const why = lastError ? `; last error: ${lastError.message}` : '';
   throw new Error(`timed out after ${elapsed} ms waiting for ${label} (bound ${timeout} ms); observed ${observed}${why}`);
 }
