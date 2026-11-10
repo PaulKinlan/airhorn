@@ -268,7 +268,16 @@ test('public/_headers carries the five no-risk security headers verbatim (airhor
 test('every action and tool the deploy workflow runs is pinned to an immutable version (airhorn-iae8)', () => {
   const yaml = read('.github', 'workflows', 'deploy-pages.yml');
 
-  const uses = yaml.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('- uses:') || l.startsWith('uses:'));
+  // SHAPE-PROOF COLLECTOR (airhorn-fmjg): `startsWith('- uses:')` after trim missed a valid YAML
+  // list item written with extra spaces ('-    uses: actions/checkout@v4'), so that line was
+  // never checked and a mutable ref stayed green. Match the KEY, not one spelling of the dash.
+  const collector = (line) => /^(?:-\s*)?uses:/.test(line.trim()) && !/^\s*#/.test(line);
+  const uses = yaml.split('\n').filter(collector).map((l) => l.trim());
+  // Fail closed on the collector itself: it must see every uses: line in the file. A shape it
+  // does not recognise is a line this test silently stops guarding.
+  const usesLines = yaml.split('\n').filter((l) => /(?:^|\s)uses:/.test(l) && !/^\s*#/.test(l)).map((l) => l.trim());
+  assert.deepEqual(uses, usesLines,
+    'the uses: collector must see every uses: line; a line it misses is a ref this pin silently stops guarding (airhorn-fmjg)');
   assert.ok(uses.length >= 2, `the workflow must still use actions to check out and set up node, found ${JSON.stringify(uses)}`);
   for (const line of uses) {
     const ref = line.replace(/^(-\s*)?uses:\s*/, '').split(/\s|#/)[0];
@@ -282,11 +291,23 @@ test('every action and tool the deploy workflow runs is pinned to an immutable v
       `${action}@<sha> needs its human-readable version in a trailing comment (# vX.Y.Z), or nobody can tell what runs: ${line.trim()}`);
   }
 
-  // Same rule for the tool npx fetches: an exact x.y.z, never a floating major.
-  const npx = [...yaml.matchAll(/\bnpx\s+(?:--yes\s+)?([^\s@]+)@([^\s]+)/g)];
-  assert.ok(npx.length >= 1, 'the deploy step still runs wrangler through npx; this pin must keep tracking it');
-  for (const [, pkg, version] of npx) {
-    assert.match(version, /^\d+\.\d+\.\d+$/,
-      `${pkg} must be pinned to an exact version (x.y.z); ${JSON.stringify(version)} is a range or a major, which npx resolves from the registry at run time with the deploy credential in scope (airhorn-iae8)`);
+  // Every npx invocation must name an EXACT version (airhorn-fmjg). The first version of this
+  // guard matched only `npx <pkg>@<something>` and asserted that at least ONE such match existed -
+  // so a version-less `npx --yes tool` (which resolves `latest` from the registry at run time,
+  // inside the credential-bearing step) matched nothing and the pinned wrangler line satisfied the
+  // count. Same false green, one spelling over (airhorn-hrv2's lesson in this same file).
+  const invocations = [];
+  for (const line of yaml.split('\n')) {
+    if (/^\s*#/.test(line)) continue; // a comment is documentation, not a command
+    const starts = [...line.matchAll(/\bnpx\b/g)].map((m) => m.index);
+    starts.forEach((at, i) => invocations.push(line.slice(at, starts[i + 1] ?? line.length).trim()));
+  }
+  assert.ok(invocations.length >= 1, 'the deploy step still runs wrangler through npx; this pin must keep tracking it');
+  for (const invocation of invocations) {
+    // The package spec is the first token that is not a flag. Anything npx would fetch - a bare
+    // name (=> `latest`), a major/range, a tag, a git url - is refused; only name@x.y.z passes.
+    const spec = invocation.split(/\s+/).slice(1).find((t) => t && !t.startsWith('-')) || '';
+    assert.match(spec, /^(?:@[^/@]+\/)?[^/@]+@\d+\.\d+\.\d+$/,
+      `npx must name an exact version (name@x.y.z); this invocation resolves its package at run time with the deploy credential in scope: ${JSON.stringify(invocation)} (airhorn-fmjg, airhorn-iae8)`);
   }
 });
