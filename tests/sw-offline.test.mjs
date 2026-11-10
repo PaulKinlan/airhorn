@@ -34,6 +34,7 @@ import { quiescenceProbe, waitForQuiescence, lateErrorMutant } from './support/q
 import { waitForCondition } from './support/poll.mjs';
 import { launchBrowser } from './support/browser.mjs';
 import { awaitSocketOpen } from './cdp-command-bound.mjs';
+import { serveDist } from './support/static-server.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -104,47 +105,24 @@ async function testSwAndManifest() {
   // worker's own fetch() runs in the worker target, so it does not reach it.
   const originState = { down: false };
 
-  // 2. Start HTTP server
-  const server = http.createServer((req, res) => {
-    if (originState.down) {
-      req.destroy();
-      return;
-    }
-    let reqUrl = req.url.split('?')[0];
-    if (reqUrl === '/sw.js' && swVersionOverride) {
-      let content = fs.readFileSync(path.join(distDir, 'sw.js'), 'utf-8');
-      content = content.replace(/airhorner-2\.0\.0-[a-zA-Z0-9_-]+/g, `airhorner-${swVersionOverride}`);
-      content = content.replace(/const version = "[^"]+"/g, `const version = "${swVersionOverride}"`);
-      res.writeHead(200, {
-        'Content-Type': 'application/javascript',
-        'Service-Worker-Allowed': '/'
-      });
-      res.end(content);
-      return;
-    }
-
-    let filePath = path.join(distDir, reqUrl === '/' ? 'index.html' : reqUrl);
-    if (!filePath.startsWith(distDir) || !fs.existsSync(filePath)) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('Not found');
-      return;
-    }
-    if (fs.statSync(filePath).isDirectory()) {
-      filePath = path.join(filePath, 'index.html');
-    }
-    const ext = path.extname(filePath);
-    res.writeHead(200, {
-      'Content-Type': mimeTypes[ext] || 'application/octet-stream',
-      'Service-Worker-Allowed': '/',
-      // no-store (from the integrity stages): healed re-fetches must reach the
-      // origin, never an HTTP-cache copy of bytes the worker already rejected.
-      'Cache-Control': 'no-store'
-    });
-    fs.createReadStream(filePath).pipe(res);
+  // 2. Start HTTP server - the ONE shared static server (airhorn-yxxq), under the real
+  // Pages headers, with this suite's two behaviours expressed as the route hook: taking the
+  // origin down for real, and the sw.js version override. no-store is the shared default
+  // (the integrity stages need healed re-fetches to reach the origin).
+  const { server, port } = await serveDist({
+    dir: distDir,
+    headers: 'auto',
+    extraHeaders: { 'Service-Worker-Allowed': '/' },
+    route: (pathname, req) => {
+      if (originState.down) return { destroy: true };
+      if (pathname === '/sw.js' && swVersionOverride) {
+        let content = fs.readFileSync(path.join(distDir, 'sw.js'), 'utf-8');
+        content = content.replace(/airhorner-2\.0\.0-[a-zA-Z0-9_-]+/g, `airhorner-${swVersionOverride}`);
+        content = content.replace(/const version = "[^"]+"/g, `const version = "${swVersionOverride}"`);
+        return { body: content, contentType: 'application/javascript' };
+      }
+    },
   });
-
-  await new Promise(r => server.listen(0, '127.0.0.1', r));
-  const port = server.address().port;
   console.log(`Server listening on port ${port}`);
 
   // 3. Launch Chrome (the gate's shared one when it offers a page)

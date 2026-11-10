@@ -28,6 +28,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser } from './support/browser.mjs';
+import { serveDist } from './support/static-server.mjs';
 import { awaitSocketOpen } from './cdp-command-bound.mjs';
 import { WAIT_TIMEOUT_MS } from './support/poll.mjs';
 import { installSignalExit } from './support/signal-exit.mjs';
@@ -74,43 +75,27 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+// The ONE shared static server (airhorn-yxxq), under the real Pages headers, with this
+// suite's three behaviours as the route hook: down (offline), hang (lie-fi), and the
+// sw.js version/shim rewriting. The state object stays here so call sites are unchanged.
 function startServer() {
   const state = { hang: false, down: false, version: null, swShim: null };
-  const server = http.createServer((req, res) => {
-    if (state.down) {
-      req.destroy();
-      return;
-    }
-    if (state.hang) {
-      const timer = setTimeout(() => res.destroy(), LIE_FI_DELAY_MS);
-      req.on('close', () => clearTimeout(timer));
-      return;
-    }
-    let pathname = req.url.split('?')[0];
-    if (pathname === '/') pathname = '/index.html';
-    const file = path.join(distDir, pathname);
-    if (!file.startsWith(distDir) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
-      res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
-      return;
-    }
-    let body = fs.readFileSync(file);
-    if (pathname === '/sw.js') {
-      let text = body.toString();
-      if (state.version) {
-        text = text.replace(/const version = "[^"]*";/, `const version = "${state.version}";`);
+  return serveDist({
+    dir: distDir,
+    headers: 'auto',
+    route: (pathname) => {
+      if (state.down) return { destroy: true };
+      if (state.hang) return { hang: LIE_FI_DELAY_MS };
+      if (pathname === '/sw.js') {
+        let text = fs.readFileSync(path.join(distDir, 'sw.js'), 'utf-8');
+        if (state.version) {
+          text = text.replace(/const version = "[^"]*";/, `const version = "${state.version}";`);
+        }
+        if (state.swShim) text = `${state.swShim}\n${text}`;
+        return { body: text, contentType: 'application/javascript' };
       }
-      if (state.swShim) text = `${state.swShim}\n${text}`;
-      body = Buffer.from(text);
-    }
-    res.writeHead(200, {
-      'content-type': mimeTypes[path.extname(file)] || 'application/octet-stream',
-      'cache-control': 'no-store',
-    });
-    res.end(body);
-  });
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve({ server, state, port: server.address().port }));
-  });
+    },
+  }).then(({ server, port }) => ({ server, state, port }));
 }
 
 async function connectCdp(wsUrl) {
