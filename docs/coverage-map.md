@@ -346,3 +346,9 @@ Cloudflare Pages hosting (airhorn-9dal, fleet-fpr18). The site is a static Vite 
 hosting config and its deploy workflow are pinned by one browser-free suite: it asserts the config
 is minimal and points at dist/, that the workflow carries the two secrets by name, and it RUNS the
 workflow's credential guard to prove the no-secret path fails by name before anything is built.
+
+Since airhorn-yxxq the file is also SERVED: tests/csp-boot.test.mjs drives dist/ through the
+shared static server (tools/lib/static-server.mjs, the tools/lib/** row; re-exported at
+tests/support/static-server.mjs, @importers) with headers: 'auto' applying this very file, and
+asserts the page boots under the policy - the difference between "the file says nosniff" and
+"the page still boots when the server sends it".

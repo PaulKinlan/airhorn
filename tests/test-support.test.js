@@ -1809,3 +1809,21 @@ test('request-path: containment is decided on the OPENED handle, so the dklf swa
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+
+/* airhorn-yxxq: the shared static server's Pages-_headers parser must apply the real file
+ * and REFUSE what it does not understand - a rule silently ignored is a test running
+ * without the policy it claims to serve. */
+test('parsePagesHeaders applies the shipped _headers and refuses outside the subset (airhorn-yxxq)', async () => {
+  const { parsePagesHeaders } = await import('../tools/lib/static-server.mjs');
+  const real = parsePagesHeaders(fs.readFileSync(path.resolve(import.meta.dirname, '..', 'public', '_headers'), 'utf8'));
+  assert.equal(real['X-Content-Type-Options'], 'nosniff', 'the real file parses');
+  assert.equal(real['X-Frame-Options'], 'DENY');
+  for (const bad of [
+    '/only-this-path\n  X-Test: 1',          // a non-/* path block
+    '/*\n  X-Test: 1\n/admin/*\n  X-Other: 2', // a second block
+    '/*\n  not a header line',               // garbage inside the block
+  ]) {
+    assert.throws(() => parsePagesHeaders(bad), /_headers/, `must refuse: ${JSON.stringify(bad)}`);
+  }
+});

@@ -208,6 +208,7 @@
  ],
  "tests/support/browser.mjs": [
   "tests/a11y.test.mjs",
+  "tests/csp-boot.test.mjs",
   "tests/horn.test.js",
   "tests/keyboard.test.mjs",
   "tests/multitab.test.mjs",
@@ -221,8 +222,15 @@
   "tests/visual-overrides.test.mjs",
   "tests/webmcp-browser.test.mjs"
  ],
+ "tests/support/static-server.mjs": [
+  "tests/csp-boot.test.mjs",
+  "tests/sw-failover.test.mjs",
+  "tests/sw-offline.test.mjs",
+  "tests/test-support.test.js"
+ ],
  "tests/cdp-command-bound.mjs": [
   "tests/a11y.test.mjs",
+  "tests/csp-boot.test.mjs",
   "tests/keyboard.test.mjs",
   "tests/multitab.test.mjs",
   "tests/reflow-zoom.test.mjs",
@@ -245,6 +253,7 @@
  ],
  "tests/support/report-hook.mjs": [
   "tests/a11y.test.mjs",
+  "tests/csp-boot.test.mjs",
   "tests/keyboard.test.mjs",
   "tests/multitab.test.mjs",
   "tests/reflow-zoom.test.mjs",
@@ -287,7 +296,8 @@
   "tests/a11y.test.mjs"
  ],
  "public/_headers": [
-  "tests/pages-config.test.js"
+  "tests/pages-config.test.js",
+  "tests/csp-boot.test.mjs"
  ],
  "wrangler.jsonc": [
   "tests/pages-config.test.js"

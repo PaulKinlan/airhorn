@@ -492,7 +492,7 @@ test('a shared helper\'s selection is DERIVED from the tree, not hand-listed (ai
   // suites - a false green inside the fix for false greens. What is pinned now:
   //   1. the scan itself, on fixtures in each import SHAPE (static, require, dynamic, template,
   //      computed path.join) and on a prose mention that must NOT count;
-  //   2. the TRUE reference count in this tree, by name of the suites (13 for cdp-command-bound.mjs);
+  //   2. the TRUE reference count in this tree, by name of the suites (14 for cdp-command-bound.mjs - the 13th is tests/csp-boot.test.mjs, added by airhorn-yxxq);
   //   3. the gate's selection for that module == that set minus the explicit-only acceptance pass
   //      (12), as EXACT set equality - over- and under-selection both fail;
   //   4. the row is an `@importers` row, so re-hand-listing it fails here;
@@ -531,12 +531,12 @@ test('a shared helper\'s selection is DERIVED from the tree, not hand-listed (ai
 
   // 2. the true reference count in THIS tree, spelled out: losing a caller from the row must fail.
   const all = importersOf(helper, { root, tsvText: tsv });
-  assert.equal(all.length, 13, `every suite that references ${helper} must be found, got ${JSON.stringify(all, null, 2)}`);
+  assert.equal(all.length, 14, `every suite that references ${helper} must be found, got ${JSON.stringify(all, null, 2)}`);
   assert.ok(all.includes('tests/test-support.test.js'),
     'the computed path.join reference in tests/test-support.test.js must count - it is the one the old regex missed');
   assert.ok(!all.includes('tests/horn.test.js'), 'tests/horn.test.js references the browser helper, not this one');
   const expected = all.filter((s) => !EXPLICIT_ONLY.includes(s));
-  assert.equal(expected.length, 12, `12 suites minus the explicit-only acceptance pass must remain, got ${JSON.stringify(expected)}`);
+  assert.equal(expected.length, 13, `13 suites minus the explicit-only acceptance pass must remain, got ${JSON.stringify(expected)}`);
 
   // 3. what the REAL gate does, as exact set equality.
   const selected = listFor(helper);
