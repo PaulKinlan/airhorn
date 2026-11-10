@@ -350,6 +350,15 @@ self.addEventListener('activate', event => {
   );
 });
 
+// DECISION (airhorn-htix, threat-model tm-sw-skipwaiting-unvalidated): the sender is NOT
+// validated, deliberately. postMessage to a ServiceWorkerGlobalScope is reachable only from
+// this origin's clients (a cross-origin document cannot obtain this registration's worker),
+// so the 'attacker' this would stop already runs script on this origin - at which point the
+// horn, the cache and the integrity records are all theirs anyway, and a check here buys
+// nothing. A strict check would also add a real failure mode: event.source can be null, and
+// refusing then would drop the page's own legitimate update request (tests/screenreader
+// .test.mjs asserts this exact message is posted). Revisit only if the threat model gains a
+// cross-origin path to this worker.
 self.addEventListener('message', event => {
   if (event.data === 'skipWaiting') {
     self.skipWaiting();
