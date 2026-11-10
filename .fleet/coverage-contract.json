@@ -224,6 +224,7 @@
  ],
  "tests/support/static-server.mjs": [
   "tests/csp-boot.test.mjs",
+  "tests/health.test.mjs",
   "tests/sw-failover.test.mjs",
   "tests/sw-offline.test.mjs",
   "tests/test-support.test.js"

@@ -41,26 +41,33 @@ worker's scope is `/` — with any static file server, for example
 `npx serve dist`, or the Deno server in `server.ts`:
 
 ```bash
-deno run --allow-net --allow-read=dist,package.json \
-  --allow-env=PORT,APP_VERSION,GIT_COMMIT,COMMIT_SHA,BUILD_TIMESTAMP \
+deno run --allow-net=127.0.0.1 --allow-read=dist,package.json \
+  --allow-env=PORT,HOST,APP_VERSION,GIT_COMMIT,COMMIT_SHA,BUILD_TIMESTAMP \
   --allow-run=git server.ts
 
-PORT=9000 deno run --allow-net --allow-read=dist,package.json \
-  --allow-env=PORT,APP_VERSION,GIT_COMMIT,COMMIT_SHA,BUILD_TIMESTAMP \
+PORT=9000 deno run --allow-net=127.0.0.1 --allow-read=dist,package.json \
+  --allow-env=PORT,HOST,APP_VERSION,GIT_COMMIT,COMMIT_SHA,BUILD_TIMESTAMP \
   --allow-run=git server.ts
 ```
 
 The first line serves `dist/` on port 8000; the second moves the listener, which
 matters on hosts where 8000 is taken. Every grant is scoped to what the server
-actually touches — it listens on a public port, so "read the whole filesystem" is
-not a reasonable default. Each flag earns its place, and leaving one out changes what
-you get rather than failing loudly:
+actually touches — it listens on ONE interface, so neither "read the whole
+filesystem" nor "bind any address" is a reasonable default. Each flag earns its
+place, and leaving one out changes what you get rather than failing loudly:
+
+`server.ts` binds **127.0.0.1** by default: the recipe above is a look-at-it preview,
+and a preview has no business being reachable from the LAN. To serve a real
+deployment, opt in explicitly and widen the one grant to match — `HOST=0.0.0.0 deno
+run --allow-net=0.0.0.0 …` — and put it behind whatever front door that host has
+(the live origin is Cloudflare/Google Frontend, which sends the same headers from
+`public/_headers` that `server.ts` now sends itself).
 
 | Flag | What it buys | Left out |
 | --- | --- | --- |
-| `--allow-net` | the listener itself | nothing to connect to |
+| `--allow-net=127.0.0.1` | the listener on loopback (widen it with `HOST`) | nothing to connect to |
 | `--allow-read=dist,package.json` | `dist/`, and `package.json`'s `version` | no app; `version` is `"unknown"` |
-| `--allow-env=…` | `PORT` and the five build stamps | `PORT` is **ignored** — it still listens on 8000 |
+| `--allow-env=…` | `PORT`, `HOST` and the five build stamps | `PORT`/`HOST` are **ignored** — it still listens on 127.0.0.1:8000 |
 | `--allow-run=git` | `commit`, read from this checkout | `commit` is `"unknown"` |
 
 That exact command line is exercised as written by `tests/docs-recipe.test.mjs`, so

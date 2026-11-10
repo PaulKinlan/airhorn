@@ -84,11 +84,39 @@ function readPort(): number {
   return port;
 }
 
+/** HOST env override for the bound interface; LOOPBACK by default (airhorn-bs19).
+ *
+ * The server used to pass no hostname, so Deno bound 0.0.0.0 and every self-hosted
+ * preview became a LAN/public listener by accident. Loopback is the honest default for
+ * the documented "serve dist and look at it" recipe; a real deployment opts in with
+ * HOST=0.0.0.0 and a matching --allow-net grant, which the runbooks say out loud. */
+function readHostname(): string {
+  return envOpt("HOST") ?? "127.0.0.1";
+}
+
+/* The response headers public/_headers ships for the Pages origin (airhorn-kv7m), applied
+ * to THIS server too (airhorn-bs19): it is the documented self-host origin, and it served
+ * dist/ with none of them. The values are deliberately identical to public/_headers -
+ * tests/health.test.mjs compares the served responses against that file, so the two cannot
+ * drift apart.
+ *
+ * The CSP is deliberately NOT here, exactly as it is not in _headers: index.html carries two
+ * deliberate inline scripts (the boot watchdog and the SW registration) plus an inline
+ * critical stylesheet, so script-src 'self' would break the boot. It arrives with
+ * airhorn-xnd1, and the parity test will demand it here on the same day it lands there. */
+const POLICY_HEADERS: Record<string, string> = {
+  "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "permissions-policy": "geolocation=(), camera=(), microphone=(), payment=(), usb=()",
+  "x-frame-options": "DENY",
+};
+
 const [version, commit] = await Promise.all([resolveVersion(), resolveCommit()]);
 const BUILD_TIMESTAMP = envOpt("BUILD_TIMESTAMP") ?? new Date().toISOString();
 
 const HEALTH_BODY = JSON.stringify({ status: "ok", version, commit, buildTimestamp: BUILD_TIMESTAMP });
-const HEALTH_HEADERS = { "content-type": "application/json; charset=utf-8" };
+const HEALTH_HEADERS = { "content-type": "application/json; charset=utf-8", ...POLICY_HEADERS };
 // The length GET sends, derived from the body rather than written down twice, so
 // the HEAD below cannot drift from it (airhorn-ld31).
 const HEALTH_BODY_BYTES = new TextEncoder().encode(HEALTH_BODY).byteLength;
@@ -109,8 +137,21 @@ function handler(req: Request): Response | Promise<Response> {
       headers: { ...HEALTH_HEADERS, allow: "GET, HEAD" },
     });
   }
-  return serveDir(req, { fsRoot: "dist" });
+  return serveDist(req);
 }
 
-const server = Deno.serve({ port: readPort() }, handler);
+/** Serve dist/ under the same policy headers as /health and the Pages origin.
+ *
+ * `serveDir` builds the Response (status, content-type, ranges, 304s), so its body and status
+ * are kept verbatim and only the policy headers are added on a copy of its headers. Rebuilding
+ * the Response is deliberate: mutating the headers of a Response built by the file server is
+ * not a contract we own, and this way a 304/204 keeps its empty body. */
+async function serveDist(req: Request): Promise<Response> {
+  const served = await serveDir(req, { fsRoot: "dist" });
+  const headers = new Headers(served.headers);
+  for (const [name, value] of Object.entries(POLICY_HEADERS)) headers.set(name, value);
+  return new Response(served.body, { status: served.status, statusText: served.statusText, headers });
+}
+
+const server = Deno.serve({ port: readPort(), hostname: readHostname() }, handler);
 console.log(`airhorner: serving dist/ on http://${server.addr.hostname}:${server.addr.port}`);
