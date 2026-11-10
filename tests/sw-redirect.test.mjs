@@ -699,3 +699,16 @@ test('a BUILT worker REFUSES a statically precached path the manifest does not c
   assert.ok(worker.warnings.every((line) => !line.includes('trust-on-first-use')),
     `and it must not also claim TOFU-by-design for it: ${JSON.stringify(worker.warnings)}`);
 });
+
+
+/* airhorn-htix: the skipWaiting handler's unvalidated sender is a DECISION, not an
+ * oversight - the nightly threat-model station re-reported it until the reasoning sat next
+ * to the handler. The pin keeps the decision with the code: remove the handler's decision
+ * comment and this fails, so the next audit reads the answer instead of re-asking. */
+test('the skipWaiting message handler carries its sender-validation decision (airhorn-htix)', () => {
+  const handlerIdx = SW_SOURCE.indexOf("event.data === 'skipWaiting'");
+  assert.ok(handlerIdx > 0, 'the skipWaiting handler must exist (the update flow depends on it)');
+  const before = SW_SOURCE.slice(Math.max(0, handlerIdx - 1400), handlerIdx);
+  assert.match(before, /DECISION \(airhorn-htix/,
+    'the handler must carry the htix decision comment: unvalidated sender is deliberate (same-origin-only reachability, null-source risk), not an oversight');
+});
