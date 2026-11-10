@@ -54,6 +54,9 @@ tools/cache-growth.mjs	tests/soak-verdict.test.js tests/tool-bound-kill.test.mjs
 tools/soak.mjs	tests/soak-verdict.test.js tests/tool-bound-kill.test.mjs
 # why: docs/coverage-map.md#tools-derive-coverage-contract-mjs
 tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
+# why: docs/coverage-map.md#tools-landings-mjs
+tools/landings.mjs	tests/landings.test.js
+tests/landings.test.js	tests/landings.test.js
 # why: docs/coverage-map.md#tools-mutation-check-mjs
 tools/mutation-check.mjs	tests/mutation-check.test.js
 tools/lib/suite-driver.mjs	tests/mutation-check.test.js
@@ -140,8 +143,6 @@ docs/runbooks/**	tests/docs-recipe.test.mjs
 !.gitignore
 !public/**
 # why: docs/coverage-map.md#preview
-!preview/**
-# why: docs/coverage-map.md#preview-2
 !preview/**
 # why: docs/coverage-map.md#tests-acceptance-mjs
 tests/acceptance.mjs	tests/acceptance.mjs

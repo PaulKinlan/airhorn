@@ -165,6 +165,13 @@ airhorn-cyga). ~0.5 s for both tools.
 tools/derive-coverage-contract.mjs is covered by its own unit suite as well
 as the tools/* gate-smoke check (airhorn-1qw6).
 
+## `tools/landings.mjs`
+
+tools/landings.mjs answers "was this landing gated?" from the merge commit record instead of the
+pruned verdict cache (airhorn-32wa, ADR 0002). Its parse/classify rules and its git walk are pinned
+by their own hermetic suite - the fixtures are message shapes real history contains, and the read
+path runs against a throwaway repo, so a change to either rule selects the suite that can fail.
+
 ## `tools/mutation-check.mjs`
 
 tools/mutation-check.mjs is the guard every sweep's mutation step runs through, so its
@@ -294,12 +301,10 @@ Static assets and prose carry no behaviour; no suite covers them.
 ## `!preview/**`
 
 Generated preview-evidence artifacts (screenshots, captured JSON) carry no
-behaviour; no suite covers them (airhorn-8uu, airhorn-c4n).
-
-## `!preview/**`  <!-- anchor: preview-2 -->
-
-Generated preview-evidence artifacts (screenshots, captured JSON) carry no
-behaviour; no suite covers them (airhorn-8uu).
+behaviour; no suite covers them (airhorn-8uu, airhorn-c4n). The map carried this
+row twice, so the move produced two sections with the same text; the rows are
+deduped and the sections merged (airhorn-zd9g) - the union driver treated the
+duplicate as a set anyway, so the gate's selection is unchanged.
 
 ## `tests/acceptance.mjs`
 
