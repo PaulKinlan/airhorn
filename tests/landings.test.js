@@ -361,4 +361,8 @@ test('an unknown argument is refused instead of absorbed', () => {
   assert.throws(() => parseArgs(['--nonsense']), /unknown argument: --nonsense/);
   assert.throws(() => parseArgs(['--limit', '0']), /positive integer/);
   assert.throws(() => parseArgs(['--since']), /needs a value/);
+  // airhorn-0xdd: a stray positional is a typo, not a subcommand. 'audit' was absorbed silently while
+  // every other positional threw, so the CLI contract disagreed with itself; there is no such mode.
+  assert.throws(() => parseArgs(['audit']), /unknown argument: audit/);
+  assert.throws(() => parseArgs(['anything']), /unknown argument: anything/);
 });

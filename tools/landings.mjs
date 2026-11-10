@@ -337,7 +337,6 @@ export function parseArgs(argv) {
       return value;
     };
     switch (arg) {
-      case 'audit': break;
       case '--ref': options.ref = take(); break;
       case '--since': options.since = take(); break;
       case '--until': options.until = take(); break;
