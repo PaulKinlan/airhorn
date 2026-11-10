@@ -347,6 +347,82 @@ async function testSwAndManifest() {
     if (!off.swController) {
       throw new Error('Offline page not controlled by service worker');
     }
+
+    // airhorn-yrpg (review finding on airhorn-xnd1): the boot watchdog can only
+    // report a blocked bundle if the watchdog ITSELF was served, and xnd1 makes
+    // it an external file (/boot-watchdog.js) instead of an inline block - so an
+    // offline load is the first place it can go missing with no other symptom:
+    // the shell renders from cache, the horn is there, and a dead bundle is
+    // silent. The two globals read below are authored by the watchdog ALONE, so
+    // their presence after an offline reload is proof the worker served and
+    // executed it. The precache LIST is pinned separately (tests/csp.test.js:
+    // entry, build digest, and airhorn-lu8a's refusal of an uncovered path);
+    // this is the browser-level half the bead's CHANGE section asked for.
+    //
+    // Two rules, both learned from airhorn-sdzb, and one correction to the FIRST
+    // attempt at this case (which read the state once, after readyState):
+    //   - wait on a page STATE, never the clock - the same fact the app itself
+    //     settles, not a sleep that happens to be long enough;
+    //   - the wait PERSISTS (a one-shot read is the sdzb defect: it reports a
+    //     value that simply had not arrived yet as a missing one), and
+    //   - when it gives up, it fails BY NAME, because a bare bound expiring
+    //     cannot tell a slow host from a page that never got its script.
+    // readOfflineScripts() is that state read; the wait below is support/poll.mjs's
+    // one policy (WAIT_TIMEOUT_MS, the suite's existing bound), and the named
+    // throw is what turns its expiry into a verdict that says which world it is in.
+    const readOfflineScripts = () => evaluate(`(() => ({
+      announce: typeof window.__airhornAnnounce,
+      booted: typeof window.__airhornBooted,
+      sheetSwapped: [...document.querySelectorAll('link[rel="stylesheet"]')]
+        .some((l) => l.media === 'all' && /\\/styles\\/main\\.css$/.test(l.href)),
+      sheetMedia: (document.querySelector('link[rel="stylesheet"]') || {}).media || null,
+    }))()`);
+
+    // Classification reads the LAST OBSERVED poll result, never a fresh read. A second read
+    // after the bound looks obvious and is wrong: if the state settles in the milliseconds
+    // between the last failed poll and that read, the read comes back HEALTHY, neither named
+    // branch matches, and the fall-through calls a page that reported perfectly
+    // "unreadable" - a misnamed verdict in the exact race this wait exists to handle
+    // (airhorn-6r6y, reproduced by the reviewer with an instrumented run). Capturing the
+    // observation inside the check means the state classified IS the state at expiry.
+    let offlineScripts;
+    let lastSeen = null;
+    let lastReadError = null;
+    try {
+      offlineScripts = await waitForCondition(async () => {
+        try {
+          const seen = await readOfflineScripts();
+          lastSeen = seen;
+          lastReadError = null;
+          return seen.announce === 'function' && seen.booted === 'function' && seen.sheetSwapped ? seen : null;
+        } catch (err) {
+          // A torn-down context mid-navigation is not a verdict on the page; keep polling.
+          lastReadError = err;
+          return null;
+        }
+      }, { label: 'the offline page to have executed its boot watchdog and swapped the stylesheet' });
+    } catch (err) {
+      // Name the world the LAST OBSERVATION was in, not the one a later read guesses at.
+      if (lastSeen && lastSeen.announce === 'function' && lastSeen.booted === 'function' && lastSeen.sheetSwapped) {
+        throw new Error('offlineScriptsSettledLate: the offline page reported a healthy script state but the wait '
+          + `still expired (${JSON.stringify(lastSeen)}); the poll and the observation disagree, which is a defect in `
+          + 'this case, not in the page (airhorn-6r6y)');
+      }
+      if (lastSeen && (lastSeen.announce !== 'function' || lastSeen.booted !== 'function')) {
+        throw new Error('offlineWatchdogMissing: the boot watchdog did not execute on the offline page '
+          + `(__airhornAnnounce=${lastSeen.announce}, __airhornBooted=${lastSeen.booted}). An offline load whose watchdog `
+          + 'is missing cannot report a blocked bundle - the page would look alive and say nothing '
+          + '(airhorn-yrpg, airhorn-xnd1)');
+      }
+      if (lastSeen && !lastSeen.sheetSwapped) {
+        throw new Error('offlineSheetLoaderMissing: the main stylesheet never left media=print on the offline page '
+          + `(media=${lastSeen.sheetMedia}); /async-css.js was not served or did not run (airhorn-yrpg, airhorn-xnd1)`);
+      }
+      throw new Error('offlineScriptsUnreadable: the offline page never reported its script state'
+        + (lastReadError ? ` (last read failed: ${lastReadError.message})` : '') + ' (airhorn-yrpg)');
+    }
+    console.log('Offline scripts verified:', offlineScripts);
+
     console.log('OFFLINE LOAD VERIFIED!');
 
     // Restore online network
