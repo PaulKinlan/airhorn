@@ -403,6 +403,17 @@ async function run() {
       await new Promise((r) => setTimeout(r, 350));
       const levelB = window.__probe.level;
       const state = await window.__call('get_horn_state');
+      // airhorn-sdzb: the badge write lands ASYNCHRONOUSLY behind the origin lock
+      // (src/badge.js: rqz1, 'the value arrives asynchronously'), and every state waited
+      // on above settles WITHOUT the lock - so a one-shot slice here read [] on 1-in-5
+      // solo runs and failed a union gate (tree ddd366cc). Wait for the call (the sesh
+      // helper: a page STATE, never the clock); the timeout flag keeps a genuinely
+      // never-called badge distinguishable from late arrival (same lesson as
+      // airhorn-qfxp / airhorn-u9cd).
+      let badgeTimedOut = false;
+      try {
+        await window.__waitFor(() => window.__badge.calls.length > 0, 'the badge write (async behind the origin lock)');
+      } catch { badgeTimedOut = true; }
       return {
         before, result, during,
         levelA, levelB,
@@ -411,6 +422,7 @@ async function run() {
         ctxState: window.__probe.ctxState,
         state,
         badge: window.__badge.calls.slice(),
+        badgeTimedOut,
       };
     })()`);
     console.log('play_horn:', played);
@@ -438,7 +450,8 @@ async function run() {
       throw new Error(`get_horn_state should report a playing, looping horn: ${JSON.stringify(played.state)}`);
     }
     if (!played.badge.some((value) => typeof value === 'number' && value > 0)) {
-      throw new Error(`App badge was not updated (calls: ${JSON.stringify(played.badge)})`);
+      throw new Error(`App badge was not updated (calls: ${JSON.stringify(played.badge)}, badgeWriteTimedOut: ${played.badgeTimedOut}) - ` +
+        `badgeWriteTimedOut true means the write never arrived within the bound: a real badge regression, not lag (airhorn-sdzb)`);
     }
 
     const screenshotPlaying = await send('Page.captureScreenshot', { format: 'png' });
