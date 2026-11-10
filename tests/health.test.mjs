@@ -93,15 +93,19 @@ function startServer(overrides = {}, readyTimeoutMs = 30000, where = {}) {
     const onData = (chunk) => {
       stdout += chunk;
       if (ready) return;
-      // server.ts's own listening line is the port contract (PORT=0 -> ephemeral).
-      const match = stdout.match(/serving dist\/ on \S+:(\d+)/);
+      // server.ts's own listening line is the port contract (PORT=0 -> ephemeral) AND the
+      // address contract (airhorn-bs19): it prints the interface it actually bound, so a test
+      // can read the bind back instead of trusting the flag it passed.
+      const match = stdout.match(/serving dist\/ on (?:[a-z]+:\/\/)?([^:\s]+):(\d+)/);
       if (!match) return;
       ready = true;
       clearTimeout(timer);
-      const port = Number(match[1]);
+      const host = match[1];
+      const port = Number(match[2]);
       const url = `http://127.0.0.1:${port}`;
       resolve({
         url,
+        host,
         spawnedAt,
         listeningAt: Date.now(),
         fetch: (p, init) => fetch(url + p, { ...init, signal: AbortSignal.timeout(5000) }),
@@ -291,5 +295,69 @@ test('HEAD answers like GET (empty body), other methods get 405, and the app sti
       'the static app must still serve with the /health route in front of it');
   } finally {
     await srv.kill();
+  }
+});
+
+/* airhorn-bs19: the self-host origin shipped dist/ with none of the response headers the
+ * Pages origin gets from public/_headers (airhorn-kv7m). The fix is a constant in server.ts,
+ * so the pin that matters is PARITY: every header public/_headers declares must come back on
+ * the wire from this server, with the same value, on both a static file and /health. Parsing
+ * the file rather than restating its values means the CSP (airhorn-xnd1) cannot land in
+ * _headers and be forgotten here: on that day this test starts demanding it from server.ts. */
+test('the self-host origin sends exactly the policy headers public/_headers declares', async (t) => {
+  if (!deno) return t.skip('deno is not installed on this machine; the headers are served by server.ts');
+  const { parsePagesHeaders } = await import('../tools/lib/static-server.mjs');
+  const declared = parsePagesHeaders(fs.readFileSync(path.join(root, 'public/_headers'), 'utf8'));
+  assert.ok(Object.keys(declared).length >= 5,
+    `public/_headers must still declare the policy set this test compares against, got ${JSON.stringify(declared)}`);
+
+  const srv = await startServer();
+  try {
+    // '/' is a STATIC FILE through serveDir; '/health' is the JSON route. Both must carry the
+    // policy, because the header gap was in the static path while /health had its own map.
+    for (const [label, target] of [['the static app', '/'], ['/health', '/health']]) {
+      const res = await srv.fetch(target);
+      assert.equal(res.status, 200, `${label} must still answer 200`);
+      for (const [name, value] of Object.entries(declared)) {
+        assert.equal(res.headers.get(name), value,
+          `${label} must send ${name}: ${value} exactly as public/_headers does (airhorn-bs19)`);
+      }
+      assert.equal(res.headers.get('content-security-policy'), null,
+        'the CSP is a documented deferral (airhorn-xnd1) and must stay absent from both origins until then');
+    }
+
+    // A 404 from the static path is still a response from this server: the policy must not
+    // depend on the file existing (a self-hoster's error page is as sniffable as the app).
+    const missing = await srv.fetch('/definitely-not-here');
+    assert.equal(missing.status, 404);
+    assert.equal(missing.headers.get('x-content-type-options'), 'nosniff',
+      '404s from this server must carry the policy too, not just successful files');
+  } finally {
+    await srv.kill();
+  }
+});
+
+/* airhorn-bs19: the listener used to bind every interface by accident (Deno.serve with no
+ * hostname), so a self-hosted preview was reachable from the LAN without anyone asking.
+ * Loopback is the default; HOST is the explicit opt-in, and this reads the bound address back
+ * out of the server's own listening line rather than trusting the flag that was passed. */
+test('the listener binds loopback by default, and HOST is the only way to widen it', async (t) => {
+  if (!deno) return t.skip('deno is not installed on this machine; the listener is server.ts');
+  const byDefault = await startServer();
+  try {
+    assert.equal(byDefault.host, '127.0.0.1',
+      'server.ts must bind loopback by default: an unconfigured preview is not a public listener');
+  } finally {
+    await byDefault.kill();
+  }
+
+  const widened = await startServer({ HOST: '0.0.0.0' });
+  try {
+    assert.equal(widened.host, '0.0.0.0',
+      'HOST must be the documented opt-in for a deployment that is reached from outside the box');
+    const res = await widened.fetch('/health');
+    assert.equal(res.status, 200, 'a widened listener must still serve /health');
+  } finally {
+    await widened.kill();
   }
 });

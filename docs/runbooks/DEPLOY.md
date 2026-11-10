@@ -185,9 +185,9 @@ serve `dist/` with something that 404s properly:
 python3 -m http.server 8099 -d dist     # 127.0.0.1:8099, real 404s, correct MIME types
 ```
 
-(`README.md`'s `deno run --allow-net --allow-read=dist,package.json
---allow-env=PORT,APP_VERSION,GIT_COMMIT,COMMIT_SHA,BUILD_TIMESTAMP
---allow-run=git server.ts` does the same on :8000; it was not exercised in this
+(`README.md`'s `deno run --allow-net=127.0.0.1 --allow-read=dist,package.json
+--allow-env=PORT,HOST,APP_VERSION,GIT_COMMIT,COMMIT_SHA,BUILD_TIMESTAMP
+--allow-run=git server.ts` does the same on 127.0.0.1:8000; it was not exercised in this
 dry run because port 8000 was already occupied on the dry-run host.)
 
 ### GET /health — the running build, in one request
@@ -210,10 +210,20 @@ are read access to `dist/` and `package.json` and the named env vars.
 APP_VERSION="$(node -p 'require("./package.json").version')" \
 GIT_COMMIT="$(git rev-parse --short HEAD)" \
 BUILD_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" \
-deno run --allow-net --allow-read=dist,package.json \
-  --allow-env=PORT,APP_VERSION,GIT_COMMIT,COMMIT_SHA,BUILD_TIMESTAMP \
+deno run --allow-net=127.0.0.1 --allow-read=dist,package.json \
+  --allow-env=PORT,HOST,APP_VERSION,GIT_COMMIT,COMMIT_SHA,BUILD_TIMESTAMP \
   server.ts
 ```
+
+`server.ts` binds **127.0.0.1** by default (airhorn-bs19), including in the recipe above,
+because a recipe that `tests/docs-recipe.test.mjs` executes must never open a listener off
+the test host. A real deployment is the explicit opt-in: add `HOST=0.0.0.0` and widen that
+one grant to `--allow-net=0.0.0.0` (their values must match, or the bind is refused). Every response from this server also carries the same five
+policy headers `public/_headers` ships for the Pages origin (airhorn-kv7m): HSTS,
+`nosniff`, the referrer policy, the permissions policy and `X-Frame-Options: DENY`.
+`tests/health.test.mjs` compares the served headers against `public/_headers` line for
+line, so the two origins cannot drift; the CSP is absent from both until airhorn-xnd1
+lands (the inline boot scripts need their decision first).
 
 `tests/docs-recipe.test.mjs` runs this recipe exactly as printed (and README.md's
 two) on every gate run, so the flags and the prose cannot part company.
