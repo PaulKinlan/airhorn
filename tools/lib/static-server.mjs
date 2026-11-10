@@ -35,12 +35,15 @@
  * above declares. It answers one question: does the page work when the declared
  * headers are on the wire.
  *
- * Every response is no-store; MIME by extension; path traversal and directory
- * requests refuse with 404. Returns { server, port, close() }.
+ * Every response is no-store; MIME by extension; request paths are decoded and contained
+ * through tools/lib/request-path.mjs, so a traversal is a named 403 and a missing file a named
+ * 404 (airhorn-0s4v - the hand-rolled separator-less prefix is gone). Returns
+ * { server, port, close() }.
  */
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { decodeRequestPath, openWithinRoot } from './request-path.mjs';
 
 const MIME = {
   '.html': 'text/html',
@@ -93,7 +96,16 @@ export function serveDist({ dir, headers = 'none', route = null, extraHeaders = 
     policy = headers;
   }
   const server = http.createServer((req, res) => {
-    const pathname = req.url.split('?')[0];
+    // Decode THEN contain, through the shared helper (airhorn-0s4v). The hand-rolled version
+    // split the query off and matched a SEPARATOR-LESS string prefix, so a sibling directory
+    // whose name shares the root's prefix - or a symlink under the root - walked out of the
+    // served tree, and an encoded path ('/sounds/airhorn%2Emp3') never matched its file.
+    const decoded = decodeRequestPath(req.url);
+    if (!decoded.ok) {
+      res.writeHead(decoded.status, { 'content-type': 'text/plain' }).end(decoded.reason);
+      return;
+    }
+    const pathname = decoded.pathname;
     if (route) {
       const r = route(pathname, req);
       if (r && r.destroy) { req.destroy(); return; }
@@ -113,22 +125,22 @@ export function serveDist({ dir, headers = 'none', route = null, extraHeaders = 
         return;
       }
     }
-    const rel = pathname === '/' ? '/index.html' : pathname;
-    let file = path.join(root, rel);
-    // Pages serves index.html for directory paths; do the same.
-    if (file.startsWith(root) && fs.existsSync(file) && fs.statSync(file).isDirectory()) {
-      file = path.join(file, 'index.html');
-    }
-    if (!file.startsWith(root) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
-      res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
+    // OPEN FIRST, THEN DECIDE (airhorn-dklf): the bytes come from the descriptor that was
+    // verified, so re-pointing the name between the check and the read cannot redirect it.
+    // A directory resolves to its index.html inside the helper, exactly as Pages does.
+    const served = openWithinRoot(root, pathname);
+    if (!served.ok) {
+      res.writeHead(served.status, { 'content-type': 'text/plain' }).end(served.reason);
       return;
     }
     res.writeHead(200, {
-      'content-type': MIME[path.extname(file)] || 'application/octet-stream',
+      'content-type': MIME[path.extname(served.realPath)] || 'application/octet-stream',
       'cache-control': 'no-store',
       ...policy, ...extraHeaders,
     });
-    res.end(fs.readFileSync(file));
+    const fileStream = fs.createReadStream(null, { fd: served.fd });
+    fileStream.on('error', () => res.destroy());
+    fileStream.pipe(res);
   });
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve({

@@ -228,6 +228,12 @@
   "tests/sw-offline.test.mjs",
   "tests/test-support.test.js"
  ],
+ "tools/lib/static-server.mjs": [
+  "tests/test-support.test.js",
+  "tests/csp-boot.test.mjs",
+  "tests/sw-failover.test.mjs",
+  "tests/sw-offline.test.mjs"
+ ],
  "tests/cdp-command-bound.mjs": [
   "tests/a11y.test.mjs",
   "tests/csp-boot.test.mjs",

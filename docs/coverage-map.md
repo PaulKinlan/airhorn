@@ -4,6 +4,20 @@ The table of record is tools/suite-map.tsv (one line per row; the union driver m
 mechanically). This file carries the PROSE: the reason, the incident ids, and the cost
 decision for each non-obvious row. Sections are keyed by the row pattern they explain.
 
+## `tools/lib/static-server.mjs`
+
+The implementation needs its OWN row even though the suite-facing re-export
+(`tests/support/static-server.mjs`) already carries `@importers` (airhorn-0s4v). The scan
+behind `@importers` reads the SUITE files for a reference to the module it is asked about:
+the browser suites import `./support/static-server.mjs`, never `tools/lib/static-server.mjs`,
+so an `@importers` row on the implementation would derive nothing (or, today, only
+tests/test-support.test.js, which imports it directly). One hop through a re-export is
+invisible to the scanner, so the three suites that actually drive this server are named here
+explicitly. Drift risk is real and accepted for one file: if a fourth suite starts serving
+dist/ through `tests/support/static-server.mjs`, it is covered for changes to the RE-EXPORT and
+not for changes to the implementation - extend this row when that happens. `tools/lib/**`
+still selects tests/test-support.test.js, and rows are additive, so the union is what runs.
+
 ## About this map (file header)
 
 tools/suite-map.tsv — the changed-path -> suite map. THE MAP IS THE GATE.
