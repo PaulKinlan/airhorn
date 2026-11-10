@@ -144,8 +144,6 @@ docs/runbooks/**	tests/docs-recipe.test.mjs
 !public/**
 # why: docs/coverage-map.md#preview
 !preview/**
-# why: docs/coverage-map.md#preview-2
-!preview/**
 # why: docs/coverage-map.md#tests-acceptance-mjs
 tests/acceptance.mjs	tests/acceptance.mjs
 # why: docs/coverage-map.md#tests-support-browser-mjs

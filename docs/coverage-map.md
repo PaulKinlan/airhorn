@@ -301,12 +301,10 @@ Static assets and prose carry no behaviour; no suite covers them.
 ## `!preview/**`
 
 Generated preview-evidence artifacts (screenshots, captured JSON) carry no
-behaviour; no suite covers them (airhorn-8uu, airhorn-c4n).
-
-## `!preview/**`  <!-- anchor: preview-2 -->
-
-Generated preview-evidence artifacts (screenshots, captured JSON) carry no
-behaviour; no suite covers them (airhorn-8uu).
+behaviour; no suite covers them (airhorn-8uu, airhorn-c4n). The map carried this
+row twice, so the move produced two sections with the same text; the rows are
+deduped and the sections merged (airhorn-zd9g) - the union driver treated the
+duplicate as a set anyway, so the gate's selection is unchanged.
 
 ## `tests/acceptance.mjs`
 
