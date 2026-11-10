@@ -50,6 +50,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installSignalExit } from '../tests/support/signal-exit.mjs';
 import { connectPage, launchChrome } from './lib/chrome.mjs';
+import { decodeRequestPath, openWithinRoot } from './lib/request-path.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -702,24 +703,39 @@ const page = `<!doctype html>
 // resolves from the repo root.
 
 const server = http.createServer((req, res) => {
-  const url = (req.url || '/').split('?')[0];
+  // Decode THEN contain, per root, through the shared helper (airhorn-017s): the old
+  // handler had no decode at all and a lexical `startsWith(root)` containment, so a
+  // sibling directory sharing the root's prefix passed and a symlink left the tree.
+  const decoded = decodeRequestPath(req.url);
+  if (!decoded.ok) {
+    res.writeHead(decoded.status, { 'Content-Type': 'text/plain' });
+    res.end(decoded.reason);
+    return;
+  }
+  const url = decoded.pathname;
   if (url === '/audio-parity.html' || url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(page);
     return;
   }
-  const relative = path.normalize(url).replace(/^([/\\])+/, '');
-  const candidates = [path.join(root, relative), path.join(root, 'public', relative)];
-  const filePath = candidates.find(
-    (candidate) => fs.existsSync(candidate) && !fs.statSync(candidate).isDirectory(),
-  );
-  if (!filePath || !filePath.startsWith(root)) {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('not found');
+  let refusal = null;
+  for (const servedRoot of [root, path.join(root, 'public')]) {
+    const served = openWithinRoot(servedRoot, url);
+    if (!served.ok) {
+      refusal = served;
+      continue;
+    }
+    res.writeHead(200, {
+      'Content-Type': mimeTypes[path.extname(served.realPath)] || 'application/octet-stream',
+      'Content-Length': served.size,
+    });
+    const fileStream = fs.createReadStream(null, { fd: served.fd });
+    fileStream.on('error', () => res.destroy());
+    fileStream.pipe(res);
     return;
   }
-  res.writeHead(200, { 'Content-Type': mimeTypes[path.extname(filePath)] || 'application/octet-stream' });
-  fs.createReadStream(filePath).pipe(res);
+  res.writeHead(refusal.status, { 'Content-Type': 'text/plain' });
+  res.end(refusal.reason);
 });
 
 // --- reporting --------------------------------------------------------------

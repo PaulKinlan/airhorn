@@ -29,6 +29,7 @@
 // and the shared module's three passes include the fork-race pass this copy
 // had lost.
 import { launchChrome } from './lib/chrome.mjs';
+import { decodeRequestPath, openWithinRoot } from './lib/request-path.mjs';
 import { assertUpdateMeasured, classifyUpdateOutcome } from './lib/update-outcome.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -76,7 +77,7 @@ const evidenceDir = () => (_out ??= makeEvidenceDir());
 
 /* ------------------------------------------------------------------ server */
 
-function startServer() {
+export function startServer() {
   const state = { version: '2.0.0-audit-base', overrides: new Map(), lieFi: null };
 
   // The SW version shim's contract, validated BEFORE the first request (airhorn-7mwy):
@@ -103,13 +104,15 @@ function startServer() {
   }
 
   const server = http.createServer((req, res) => {
-    let pathname;
-    try {
-      pathname = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-    } catch {
-      res.writeHead(400).end('bad url');
+    // Decode THEN contain through the shared helper (airhorn-017s): same 400-on-bad-escape
+    // shape this handler already had, and containment is now read off the OPENED handle
+    // instead of a lexical path prefix (airhorn-dklf).
+    const decoded = decodeRequestPath(req.url);
+    if (!decoded.ok) {
+      res.writeHead(decoded.status, { 'content-type': 'text/plain' }).end(decoded.reason);
       return;
     }
+    const pathname = decoded.pathname;
     // Lie-fi is modelled at the server, not with CDP network emulation: a service
     // worker's own fetch() runs in the worker target, which per-page emulation does
     // not reach (that is how an earlier run of this audit measured a 404 in 303ms and
@@ -136,19 +139,20 @@ function startServer() {
       return;
     }
     const rel = pathname === '/' ? '/index.html' : pathname;
-    const file = path.join(distDir, rel);
-    if (!file.startsWith(distDir) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
-      res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
+    const served = openWithinRoot(distDir, rel);
+    if (!served.ok) {
+      res.writeHead(served.status, { 'content-type': 'text/plain' }).end(served.reason);
       return;
     }
-    let body = fs.readFileSync(file);
+    let body = fs.readFileSync(served.fd);
     if (rel === '/sw.js') {
       const text = body.toString()
         .replace(/const version = "[^"]*";/, `const version = "${state.version}";`);
       body = Buffer.from(state.swShim ? state.swShim + '\n' + text : text);
     }
+    fs.closeSync(served.fd);
     res.writeHead(200, {
-      'content-type': MIME[path.extname(file)] || 'application/octet-stream',
+      'content-type': MIME[path.extname(served.realPath)] || 'application/octet-stream',
       'cache-control': 'no-store',
       'service-worker-allowed': '/',
     });

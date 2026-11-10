@@ -56,6 +56,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchChrome } from './lib/chrome.mjs';
+import { decodeRequestPath, openWithinRoot } from './lib/request-path.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -99,23 +100,36 @@ function send404(res) {
   res.end('Not found');
 }
 
-function serve(res, root, urlPath, relOverride = null) {
-  const rel = relOverride || (urlPath === '/' ? 'index.html' : urlPath.replace(/^\//, ''));
-  const file = path.join(root, rel);
-  if (!file.startsWith(root) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) return send404(res);
-  const ext = path.extname(file);
+/** One refusal, named, straight from the shared helper (airhorn-017s). */
+function sendRefusal(res, refusal) {
+  res.writeHead(refusal.status, { 'content-type': 'text/plain' });
+  res.end(refusal.reason);
+}
+
+function serve(res, root, requestPath) {
+  // Containment is read off the OPENED handle, not a lexical path prefix (airhorn-dklf):
+  // the old check let a sibling directory sharing the root's prefix, or a symlink under
+  // the root, out of the served tree.
+  const served = openWithinRoot(root, requestPath);
+  if (!served.ok) return sendRefusal(res, served);
+  const ext = path.extname(served.realPath);
   const headers = {
     'content-type': MIME[ext] || 'application/octet-stream',
+    'content-length': served.size,
     // Production's measured header (docs/runbooks/ROLLBACK.md §1/§2), on every file incl. /sw.js.
-    'cache-control': (rel === 'sw.js' && state.swCacheControl) || 'public, max-age=10',
+    'cache-control': (requestPath === '/sw.js' && state.swCacheControl) || 'public, max-age=10',
   };
-  if (rel === 'sw.js') headers['service-worker-allowed'] = '/';
+  if (requestPath === '/sw.js') headers['service-worker-allowed'] = '/';
   res.writeHead(200, headers);
-  fs.createReadStream(file).pipe(res);
+  const fileStream = fs.createReadStream(null, { fd: served.fd });
+  fileStream.on('error', () => res.destroy());
+  fileStream.pipe(res);
 }
 
 const server = http.createServer((req, res) => {
-  const urlPath = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname);
+  const decoded = decodeRequestPath(req.url);
+  if (!decoded.ok) return sendRefusal(res, decoded);
+  const urlPath = decoded.pathname;
   state.requests.push({ path: urlPath, origin: state.origin, at: Date.now() });
   if (state.down) return req.destroy();
   if (state.missing && state.missing === urlPath) return send404(res);
@@ -123,7 +137,7 @@ const server = http.createServer((req, res) => {
   if (state.origin === 'v1') return serve(res, V1_LIVE, urlPath);
   if (state.origin === 'v1-overlay') {
     // R1 = the archived V1 tree plus §6's worker as /sw.js, and nothing else changed.
-    if (urlPath === '/sw.js') return serve(res, path.dirname(OVERLAY), '/sw.js', 'sw.js');
+    if (urlPath === '/sw.js') return serve(res, path.dirname(OVERLAY), '/sw.js');
     return serve(res, V1_LIVE, urlPath);
   }
   return send404(res);
