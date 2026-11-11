@@ -226,6 +226,18 @@ export const describeNonFile = (root, relPath) => {
   }
 };
 
+/* airhorn-huud: the ONE rule for suite-path spellings, shared by the map validator and the
+ * pins (no second implementation). Spellings fs resolves to the same file are naming variants
+ * ('./x', './/x', 'x/./y', 'x//y', trailing '/', in-tree '..' like 'tests/../tools/x.mjs') and
+ * NORMALISE; a spelling that climbs out of the tree is an ESCAPE - refused, never normalised,
+ * because normalising '../' could silently point a suite at a file outside the intended tree.
+ * Note: path.posix.normalize PRESERVES a trailing '/', so it is stripped explicitly. */
+export function normalizeSuiteToken(token) {
+  const n = path.posix.normalize(token);
+  if (n === '..' || n.startsWith('../')) return { escape: true, raw: token };
+  return { path: n.endsWith('/') && n.length > 1 ? n.slice(0, -1) : n };
+}
+
 export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileExists: fileExistsOpt } = {}) {
   const usingDefault = !existsFn && !fileExistsOpt;
   const fileExists = existsFn || fileExistsOpt || ((relPath) => defaultFileIsRegular(root, relPath));
@@ -248,6 +260,20 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
     if (!pattern) continue;
 
     const suiteTokens = parts.slice(1).join(' ').trim().split(/\s+/).filter(Boolean);
+
+    // airhorn-huud: an escape-spelled path is refused BY NAME here, before any disk check.
+    for (const tok of [pattern.replace(/^[~!]/, ''), ...suiteTokens.map((t) => t.startsWith('except=') ? t.slice(7) : t)]) {
+      if (!tok || isDirective(tok) || tok.includes('*')) continue;
+      const n = normalizeSuiteToken(tok);
+      if (n.escape) {
+        violations.push({
+          type: 'escape',
+          token: tok,
+          pattern,
+          message: `path escapes the tree ('${tok}' normalises to '${path.posix.normalize(tok)}') - a row may not point outside the repo; refuse, never normalise`,
+        });
+      }
+    }
 
     // Directive tokens are not suite paths: `@importers` makes the suite set a RUN-TIME scan of the
     // tree (airhorn-ooqm), and `except=<file>` names a suite deliberately kept off such a row.

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { exportedSameFile } from '../tools/lib/suite-mode-reporter.mjs';
+import { normalizeSuiteToken } from '../tools/derive-coverage-contract.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -1032,10 +1033,13 @@ test('no gate surface invokes mutation-check as a harness (airhorn-zach)', () =>
   for (const line of map.split('\n')) {
     if (/^\s*#/.test(line) || !line.trim()) continue;
     const cells = line.split('\t');
-    // airhorn-vqgp + airhorn-huud: compare PATH-NORMALISED tokens - exact match let
-    // './tools/...' bypass, and stripping one './' still let './/' and 'tests/../tools/...'
-    // through. path.posix.normalize resolves the whole resolve-but-string-differs class.
-    const tokens = cells.slice(1).join(' ').split(/\s+/).map((t) => path.posix.normalize(t));
+    // airhorn-vqgp + airhorn-huud: compare via the derive tool's ONE spelling rule -
+    // './', './/', 'x/./y', 'x//y', trailing '/', in-tree '..' all normalise; escapes are
+    // refused by the validator (they can never name this tool, but they die loudly there).
+    const tokens = cells.slice(1).join(' ').split(/\s+/).map((t) => {
+      const n = normalizeSuiteToken(t);
+      return n.escape ? n.raw : n.path;
+    });
     assert.ok(!tokens.includes('tools/mutation-check.mjs'),
       `the tool must never be a map's SUITE column (right-hand side, any spelling): ${line}`);
   }
