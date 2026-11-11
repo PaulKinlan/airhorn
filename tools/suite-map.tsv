@@ -6,9 +6,10 @@
 # tests/acceptance.mjs, which is not spelled *.test.* so its row is what makes it a suite at all
 # (and it is explicit-only by design, airhorn-i8i).
 # CONFLICT HERE? Do not hand-merge it (airhorn-tp3g, airhorn-fp5q). The map is a SET the gate unions at run
-# time, so a collision is resolved by key, mechanically:
-#   git show :2:tools/suite-map.tsv > /tmp/ours.tsv; git show :3:tools/suite-map.tsv > /tmp/theirs.tsv
-#   node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv --write tools/suite-map.tsv
+# time, so a collision is resolved by key, mechanically - with the merge BASE as the third file, so a row or
+# comment block one side DELETED stays deleted instead of being put back (airhorn-famo):
+#   git show :1:tools/suite-map.tsv > /tmp/base.tsv; git show :2:tools/suite-map.tsv > /tmp/ours.tsv; git show :3:tools/suite-map.tsv > /tmp/theirs.tsv
+#   node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv /tmp/base.tsv --write tools/suite-map.tsv
 #   node tools/derive-coverage-contract.mjs   # the contract is DERIVED: regenerate it, never merge it
 #   git add tools/suite-map.tsv .fleet/coverage-contract.json   # or the merge cannot continue (airhorn-nn8g)
 # tools/gate.conf's SUITE_TIERS block has the SAME treatment (airhorn-09dr): union with
