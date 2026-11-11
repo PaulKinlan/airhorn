@@ -71,7 +71,7 @@ tools/lib/**	tests/test-support.test.js
 tools/lib/update-outcome.mjs	tests/update-outcome.test.js
 # why: docs/coverage-map.md#tools-install-https-proof-mjs
 tools/install-https-proof.mjs	tests/gate-smoke.test.js tests/test-support.test.js
-tools/resilience-audit.mjs	tests/resilience-probe.test.js tests/resilience-report.test.js
+tools/resilience-audit.mjs	tests/resilience-probe.test.js tests/resilience-report.test.js tests/scenario-id-drift.test.js
 # why: docs/coverage-map.md#public-sw-js
 public/sw.js	tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/sw-redirect.test.mjs
 public/manifest.json	tests/sw-offline.test.mjs
