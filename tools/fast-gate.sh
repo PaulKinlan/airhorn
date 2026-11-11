@@ -13,13 +13,20 @@
 # Do not reformat those lines. Additional loud lines that are NOT in the contract:
 #   fast-gate: pending: <suite>          (declared by a `~` row, file not landed yet; skipped, not counted)
 #   fast-gate: derived: <module> -> <n> suite(s)   (an `@importers` row, scanned from the tree NOW)
-#   fast-gate: unmapped-suite: <suite>   (suite in the tree but not reachable from the map; exit 1)
 #   fast-gate: zero-suite: <path>        (changed file that selected nothing when 0 suites ran,
 #                                         suffixed with why: exempt or deleted suite; exit 1 unless
 #                                         FAST_GATE_ALLOW_ZERO=1, which prints ZERO-SUITE PASS)
 # The gate builds dist/ before running the browser suites that serve it, and only when the build
 # decision says a build is needed (no dist/, an unstamped dist/, changed inputs, or changed dist/
 # bytes): a build failure exits 1, and a build that changes its own inputs is not stamped.
+#
+# A suite file present in the tree maps to ITSELF with no row (airhorn-xh81): a change to
+# tests/x.test.mjs selects tests/x.test.mjs, so the map only ever needs rows placing suites over
+# other files. Nothing has to be "reachable from a row" for a suite to run; what stays loud is the
+# inverse - a changed file that maps to NO suite is 'unmapped:' and fails, a row naming a suite that
+# does not exist fails, and a selection that runs nothing fails (zero-suite). A new suite is still not
+# edit-free: its TIER is declared in tools/gate.conf, and the audit below fails a suite with no
+# declaration (that is a statement about how to RUN it, not a coverage opinion - airhorn-z4cn).
 #
 # A map row whose suite column is `@importers` derives its suite set at run time from every file that
 # REFERENCES that module (any import shape: static, dynamic import(), require, a computed path.join),
@@ -453,7 +460,6 @@ MAP_ROWS_PAT=()
 MAP_ROWS_REST=()
 MAP_ROWS_DERIVED=()
 declare -A PENDING_SET=()
-declare -A REACHABLE_SET=()
 EXEMPT_PATTERNS=()
 
 while IFS=$'\t' read -r pat rest || [ -n "$pat" ]; do
@@ -468,16 +474,13 @@ while IFS=$'\t' read -r pat rest || [ -n "$pat" ]; do
   MAP_ROWS_DERIVED+=("$derived_row")
   case $pat in
     ~*)
-      for s in $rest; do PENDING_SET["$s"]=1; REACHABLE_SET["$s"]=1; done ;;
+      for s in $rest; do PENDING_SET["$s"]=1; done ;;
     \!*)
       [ -n "${pat#!}" ] && EXEMPT_PATTERNS+=("${pat#!}") ;;
     *)
-      # A derived row's tokens are DIRECTIVES, not suite names; its suites are scanned below only
-      # for the paths actually changed (an eager scan would cost every gate run). The reverse
-      # reachability check is unaffected: every discovered suite carries its own self-row.
-      if [ -z "$derived_row" ]; then
-        for s in $rest; do REACHABLE_SET["$s"]=1; done
-      fi ;;
+      # Nothing to record: a suite needs no row to be reachable (it maps to itself), so the only
+      # rows the gate indexes are the exemptions and the pending declarations above.
+      ;;
   esac
 done < "$MAP"
 
@@ -513,10 +516,6 @@ suites_for() { # $1 = path -> newline-separated suites (empty = unmapped)
 
 is_pending() { # $1 = suite path ; true iff a `~` row DECLARES it (arriving with a sibling branch)
   [[ -n "${PENDING_SET[$1]-}" ]]
-}
-
-map_reaches() { # $1 = suite path ; true iff a NON-exemption row names it (plain or `~`)
-  [[ -n "${REACHABLE_SET[$1]-}" ]]
 }
 
 # --- map honesty: validated by derive-coverage-contract.mjs --validate-map ---
@@ -711,34 +710,20 @@ if [ "${#UNMAPPED[@]}" -gt 0 ]; then
   exit 1
 fi
 
-# --- reverse check (fleet-1n0z mode a, other direction): every suite PRESENT in the tree must be -----
-# --- reachable from the map (a row naming it, or an explicit `!` ignore), or the gate fails. --------
-# Without this, a second suite covering src/main.js that forgot its map row silently never runs for
-# the code it covers, while the gate still prints a positive suite count.
-TREE_SUITE_NOT_REACHABLE=()
-# Any depth, not just depth 1: tests/sub/deep.test.js was INVISIBLE to the old
-# depth-1 globs, so a nested suite was never reverse-checked and could sit
-# unmapped forever - a blind spot in the layer that exists to catch coverage
-# blind spots (map P2). The *.test.* extension keeps tests/support helpers out;
-# the tests//test/ roots exclude the repo's OWN node_modules and dist - but
-# globstar DOES descend symlinked directories (verified), so a symlink inside
-# tests/ pointing outside would expose the target's *.test.* files. And note:
-# ANY *.test.* file at any depth - helper or fixture included - now fails here
-# unless it is mapped or exempted with '!': the honest reading of a file
-# spelled like a suite.
-for s in tests/**/*.test.js tests/**/*.test.mjs tests/**/*.test.ts test/**/*.test.js test/**/*.test.mjs test/**/*.test.ts; do
-  [ -f "$ROOT/$s" ] || continue          # unmatched globs stay literal; skip them
-  if is_exempt "$s" || map_reaches "$s"; then continue; fi
-  TREE_SUITE_NOT_REACHABLE+=("$s")
-done
-if [ "${#TREE_SUITE_NOT_REACHABLE[@]}" -gt 0 ]; then
-  for s in "${TREE_SUITE_NOT_REACHABLE[@]}"; do echo "fast-gate: unmapped-suite: $s"; done
-  echo "fast-gate: FAIL - ${#TREE_SUITE_NOT_REACHABLE[@]} suite(s) in the tree are not reachable from" >&2
-  echo "fast-gate: tools/suite-map.tsv, so changes to the files they cover would never select them." >&2
-  echo "fast-gate: add a row naming the suite (every suite needs one, e.g. its own self-row), or an" >&2
-  echo "fast-gate: '!<suite>' exemption with a reason if it genuinely must not run in this gate." >&2
-  exit 1
-fi
+# --- the reverse check is GONE, deliberately (airhorn-xh81) -------------------------------------------
+# It used to fail any suite present in the tree that no row named, with the advice "every suite needs
+# one, e.g. its own self-row". That made ~45 tautological rows (`tests/x.test.mjs -> tests/x.test.mjs`)
+# the most-edited, most-mistyped part of the map (airhorn-ahxh was rows spelled test/ instead of
+# tests/), and it bought only one thing: a change to a suite ran the suite. suites_for() already gives
+# that for free - the `case` at its top maps every tests/|test/*.test.{js,mjs,ts} spelling (at any
+# depth: `case` patterns are not path-component bounded) to itself - so the loop's condition was true
+# by construction and its failure mode was a map edit, not a coverage answer.
+# Removing it does NOT soften what the gate refuses; the loud inverses are unchanged and each has its
+# own pin: a changed NON-suite path with no row is `unmapped:` (exit 1), a plain row naming a suite
+# that does not exist is `missing:` (exit 1), a selection that runs nothing is `zero-suite` (exit 1),
+# and every tool//tests file still has to be mapped because those ARE the changed paths.
+# What the loop did buy was a suite file's TIER check, so that did not go with it:
+# tests/gate-map.test.js now derives the tier pin from the TREE as well as the rows (airhorn-xh81).
 
 fg_filter 'selected-suite' "$(printf '%s\n' ${SELECTED[@]+"${SELECTED[@]}"})"
 SELECTED=()
