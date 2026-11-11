@@ -160,7 +160,8 @@
  ],
  "tools/resilience-audit.mjs": [
   "tests/resilience-probe.test.js",
-  "tests/resilience-report.test.js"
+  "tests/resilience-report.test.js",
+  "tests/scenario-id-drift.test.js"
  ],
  "public/sw.js": [
   "tests/sw-offline.test.mjs",

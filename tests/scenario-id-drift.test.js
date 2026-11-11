@@ -40,3 +40,15 @@ test('olju: the tool runs clean when the two copies agree (wiring exists and pas
   assert.equal(run.status, 0, `the two copies agree today (got ${run.status}):\n${run.stderr}`);
   assert.doesNotMatch(run.stderr + run.stdout, /scenario-id drift/);
 });
+
+test('olju: the drift rule is WIRED into the audit, not merely exported', () => {
+  // The residual this closes: deleting the inline call in runAudit greened every other case here, because
+  // the pure rule and the spawn both still pass with the check removed. The wiring is read out of the tool:
+  // the rule must be applied to the LIVE KNOWN_SCENARIOS and the selectors the want() sites actually
+  // evaluated, and a drift must ABORT the run rather than be reported as an ordinary row.
+  const source = fs.readFileSync(tool, 'utf8');
+  assert.match(source, /scenarioIdDrift\(\s*KNOWN_SCENARIOS\s*,\s*\[\.\.\.seenSelectors\]\s*\)/,
+    'runAudit must apply the drift rule to the live selector set, not to a copy of it');
+  assert.match(source, /if \(drift\) throw new Error\(`resilience-audit: \$\{drift\}`\)/,
+    'and a drift must abort the audit - a row would let the run report OK over a selector no scenario answers');
+});
