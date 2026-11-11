@@ -126,6 +126,26 @@ test('the drained-but-not-quiet path keeps its short, specific failure', async (
   );
 });
 
+test('the app-state attribution is reachable with a NORMAL stateTimeoutMs, not only when the grace is disabled (airhorn-eznc)', async () => {
+  // The docstring used to say this branch was "reachable only with stateTimeoutMs = 0", which made it
+  // read as nearly-dead code and hid the fact that it is the honest attribution for the common case.
+  // It fires whenever the CEILING lands on a drained-but-not-quiet sample: here the page drains on the
+  // first sample and the quiet condition never holds, so the in-loop grace throw (5 s) cannot run before
+  // the 300 ms ceiling - exactly the case the review's repro showed, with a normal grace period.
+  const drainedFalse = () => sender(5, () => ({ ...quiet, quietCondition: false }));
+  await assert.rejects(
+    () => waitForQuiescence(drainedFalse(), { timeoutMs: 300, pollMs: 40, stateTimeoutMs: 5000 }),
+    (error) => {
+      assert.match(error.message, /ceiling \(checked between samples/, 'the CEILING is what fired, not the grace period');
+      assert.match(error.message,
+        /the page's work had drained but the quiet condition never held, and the state grace period did not fire/,
+        'and it attributes the failure to app state that never became true - not to pending work');
+      assert.doesNotMatch(error.message, /work is still pending/, 'not the old catch-all');
+      return true;
+    },
+  );
+});
+
 test('a missing probe is still a hard error rather than a silent pass', async () => {
   await assert.rejects(
     () => waitForQuiescence(sender(0, () => ({ probe: 'missing' }))),
