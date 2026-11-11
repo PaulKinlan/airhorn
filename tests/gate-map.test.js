@@ -453,6 +453,46 @@ test('the gate script parses (bash -n)', () => {
   execFileSync('bash', ['-n', gate]);
 });
 
+test('every suite the map can select has a declared tier, so the gate can run what the map promises (airhorn-w1ow)', () => {
+  // tests/acceptance.mjs was mapped to itself - the map promising "changing this file runs the
+  // acceptance flow" - while tools/gate.conf SUITE_TIERS had no entry for it, so every change to
+  // that file failed the gate with "no runner for tier 'undeclared'". The map is the gate, so a
+  // row the gate cannot run is a false promise. Derived here from the ROWS (not from the derived
+  // contract, which excludes self-rows by design - that exclusion is exactly why this went unseen),
+  // so the failure names the suites that have no tier instead of relying on someone noticing.
+  const gateConf = fs.readFileSync(path.join(root, 'tools', 'gate.conf'), 'utf8');
+  const block = gateConf.slice(gateConf.indexOf('SUITE_TIERS="') + 'SUITE_TIERS="'.length);
+  const declared = new Set(block.slice(0, block.indexOf('"')).split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#') && line.includes('='))
+    .map((line) => line.slice(0, line.indexOf('='))));
+  const tsv = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
+  const suites = new Set();
+  for (const raw of tsv.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || line.startsWith('!') || line.startsWith('~')) continue;
+    const tab = line.indexOf('\t');
+    if (tab < 0) continue;
+    const pattern = line.slice(0, tab);
+    const tokens = line.slice(tab + 1).trim().split(/\s+/).filter(Boolean);
+    const except = tokens.filter((tok) => tok.startsWith('except=')).map((tok) => tok.slice('except='.length));
+    const selected = tokens.includes('@importers')
+      ? importersOf(pattern, { root, tsvText: tsv }).filter((s) => !except.includes(s))
+      : tokens;
+    for (const suite of selected) suites.add(suite);
+  }
+  // Only suites that EXIST are in scope: the map also carries a handful of pre-move `test/...`
+  // paths that name nothing in this tree (a separate defect - a row naming a ghost - filed as
+  // its own bead). Those cannot be run by anything, so requiring a tier for them would fail this
+  // pin for a reason that is not about what the gate promises.
+  const undeclared = [...suites]
+    .filter((suite) => fs.existsSync(path.join(root, suite)))
+    .filter((suite) => !declared.has(suite)).sort();
+  assert.deepEqual(undeclared, [],
+    'every suite the map selects must be declared in tools/gate.conf SUITE_TIERS, or the gate fails that '
+    + `change as 'undeclared tier' instead of running it: ${JSON.stringify(undeclared)}`);
+});
+
 test('every script-tier suite is gated by a tests/support change (airhorn-dco)', () => {
   // The report hook is runner-injected into EVERY script-tier (*.test.mjs)
   // suite, so a hook edit can break any of them; the support row must name all
