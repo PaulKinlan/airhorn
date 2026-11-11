@@ -156,6 +156,8 @@ export function startServer() {
       // still declared the old build while the audit reported a successful stamp).
       const declarations = original.match(/const version = "[^"]*";/g) || [];
       if (declarations.length !== 1) {
+        state.swStampFailure = `the served sw.js carries ${declarations.length} 'const version = "...";' declarations, `
+          + 'so the version stamp would land in the wrong one and the update scenario would compare the same build twice';
         res.writeHead(500, { 'content-type': 'text/plain' }).end(
           `resilience-audit: the served sw.js carries ${declarations.length} 'const version = "...";' declarations, `
           + 'so the version stamp would land in the wrong one and the update scenario would compare the same build '
@@ -168,11 +170,14 @@ export function startServer() {
       // report OK (airhorn-7fol).
       const declared = (text.match(/const version = "([^"]*)";/) || [])[1];
       if (declared !== state.version) {
+        state.swStampFailure = `the sw.js stamp did not land in the served worker - it declares "${declared ?? '(none)'}" `
+          + `but the audit bumped to "${state.version}"`;
         res.writeHead(500, { 'content-type': 'text/plain' }).end(
           `resilience-audit: the sw.js stamp did not land in the served worker - it declares "${declared ?? '(none)'}" `
           + `but the audit bumped to "${state.version}", so the update scenario would measure nothing`);
         return;
       }
+      state.swStampFailure = null;
       body = Buffer.from(state.swShim ? state.swShim + '\n' + text : text);
     }
     fs.closeSync(served.fd);
@@ -655,11 +660,24 @@ export async function waitForSw(cdp, sessionId, attempts = 40, sleepFn = sleep) 
   };
 }
 
-export function assertSwActive(sw, scenarioName) {
+/**
+ * The harness cause that a scenario failure must carry (airhorn-7fol, airhorn-mgsz).
+ *
+ * When the harness cannot serve a stamped sw.js it answers 500 with a named cause - but that body goes to the
+ * BROWSER, so the operator used to read 'service worker never activated ... unregistered' and chase a browser
+ * fault for what is a source drift in the served worker. Pure and exported so the pin drives the real text.
+ */
+export function stampFailureNote(state) {
+  const failure = state && state.swStampFailure;
+  return failure ? ` - the harness could not serve a stamped sw.js: ${failure}` : '';
+}
+
+export function assertSwActive(sw, scenarioName, state) {
   if (!sw || !sw.active) {
     const reason = sw ? sw.reason : 'unknown';
     const detail = sw ? sw.detail : 'waitForSw returned nullish';
-    throw new Error(`cannot score ${scenarioName} scenario: service worker failed to activate (${reason}): ${detail}`);
+    throw new Error(`cannot score ${scenarioName} scenario: service worker failed to activate (${reason}): ${detail}`
+      + stampFailureNote(state));
   }
 }
 
@@ -928,7 +946,7 @@ async function runAudit() {
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
       const sw = await waitForSw(cdp, sessionId);
-      assertSwActive(sw, 'offline');
+      assertSwActive(sw, 'offline', state);
       await cdp.send('Network.emulateNetworkConditions', {
         offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0,
       }, sessionId);
@@ -954,7 +972,7 @@ async function runAudit() {
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
       const sw = await waitForSw(cdp, sessionId);
-      assertSwActive(sw, 'liefi');
+      assertSwActive(sw, 'liefi', state);
 
       // The connection answers, then dies without a response: the classic lie-fi.
       state.lieFi = { match: () => true, delayMs: 9000, mode: 'destroy' };
@@ -1039,7 +1057,7 @@ async function runAudit() {
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
       const sw = await waitForSw(cdp, sessionId);
-      assertSwActive(sw, 'update');
+      assertSwActive(sw, 'update', state);
       const before = await readState(cdp, sessionId);
 
       // Count real document swaps, not markers: a reload replaces the document and
@@ -1121,7 +1139,7 @@ async function runAudit() {
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
       const sw = await waitForSw(cdp, sessionId);
-      assertSwActive(sw, 'quota');
+      assertSwActive(sw, 'quota', state);
 
       // (a) install-time precache is denied: the new worker's addAll rejects.
       state.swShim = `Cache.prototype.addAll = () => Promise.reject(
@@ -1258,7 +1276,7 @@ async function runAudit() {
       const { sessionId } = await openPage(cdp);
       await navigate(cdp, sessionId, `${origin}/`);
       const sw = await waitForSw(cdp, sessionId);
-      assertSwActive(sw, 'corrupt');
+      assertSwActive(sw, 'corrupt', state);
 
       // Mutation seam (airhorn-nxuv.7): under test mode, delete every cache so
       // the scenario must FAIL naming the missing cache - the proof that this

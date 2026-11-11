@@ -246,3 +246,48 @@ test('the SW version stamp proves the SERVED worker declares the bumped version 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a stamp the harness could not serve reaches the operator with the scenario error (airhorn-mgsz)', async () => {
+  // The 500 body goes to the BROWSER, so the operator used to read "service worker never activated (timed_out) ...
+  // unregistered" and chase an SW/browser fault for what is really a drift in the served worker. The named cause
+  // must travel with the ERROR, which is what these three worlds check.
+  const { stampFailureNote, assertSwActive } = await import('../tools/resilience-audit.mjs');
+  const swFailed = { active: false, reason: 'timed_out', detail: 'service worker never activated within 6000ms' };
+
+  assert.equal(stampFailureNote({}), '', 'no stamp failure means no note - the scenario message stays as it was');
+  assert.equal(stampFailureNote(null), '', 'and a missing state cannot invent one');
+  assert.throws(() => assertSwActive(swFailed, 'update', { swStampFailure: 'the sw.js stamp did not land in the served worker' }),
+    (error) => {
+      assert.match(error.message, /failed to activate \(timed_out\)/, 'the activation failure is still named');
+      assert.match(error.message, /the harness could not serve a stamped sw.js: the sw\.js stamp did not land/,
+        `the harness cause must ride along with the scenario error: ${error.message}`);
+      return true;
+    });
+
+  // The live wiring: a real serve of a decoy worker records the failure on the state the scenarios read, and a
+  // good serve clears it (a stale note must not be attached to a later, unrelated failure).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mgsz-dist-'));
+  const swPath = path.join(dir, 'sw.js');
+  const clean = 'const version = "__BUILD_HASH__";\n';
+  fs.writeFileSync(swPath, clean);
+  process.env.RESILIENCE_AUDIT_DIST = dir;
+  try {
+    const { startServer } = await import(`../tools/resilience-audit.mjs?mgsz=${Date.now()}`);
+    const { server, port, state } = await startServer();
+    try {
+      assert.equal(stampFailureNote(state), '', 'a coherent worker leaves no note');
+      fs.writeFileSync(swPath, `// was const version = "0.9.0-legacy";\n${clean}`);
+      assert.equal(statusOf(await rawGet(port, '/sw.js')), 500);
+      assert.match(stampFailureNote(state), /the harness could not serve a stamped sw\.js: the served sw\.js carries 2/,
+        'the refusal is recorded where the scenarios can read it');
+      fs.writeFileSync(swPath, clean);
+      assert.equal(statusOf(await rawGet(port, '/sw.js')), 200);
+      assert.equal(stampFailureNote(state), '', 'and a good serve clears it');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    delete process.env.RESILIENCE_AUDIT_DIST;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
