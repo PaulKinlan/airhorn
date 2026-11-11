@@ -116,6 +116,7 @@ tests/support/signal-exit.mjs	@importers except=tests/acceptance.mjs
 tests/support/report-hook.mjs	tests/a11y.test.mjs tests/csp-boot.test.mjs tests/csp-enforced.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/reflow-zoom.test.mjs tests/resilience-ui.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/webmcp.test.mjs
 tests/support/poll.mjs	@importers
 tests/support/quiescence.mjs	@importers
+tests/support/offline-asset-verdict.mjs	tests/offline-asset-verdict.test.js tests/sw-offline.test.mjs
 tests/support/lost-upgrade-copy.mjs	@importers
 tests/support/nav-guard.mjs	@importers
 tests/support/press-guard.mjs	@importers

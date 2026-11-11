@@ -310,6 +310,10 @@
   "tests/quiescence-bound.test.js",
   "tests/sw-offline.test.mjs"
  ],
+ "tests/support/offline-asset-verdict.mjs": [
+  "tests/offline-asset-verdict.test.js",
+  "tests/sw-offline.test.mjs"
+ ],
  "tests/support/lost-upgrade-copy.mjs": [
   "tests/lost-upgrade-copy.test.mjs",
   "tests/resilience-ui.test.mjs"
