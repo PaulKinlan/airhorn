@@ -10,29 +10,29 @@
 #   node tools/merge-suite-map.mjs --tiers-union /tmp/ours.conf /tmp/theirs.conf --write tools/gate.conf
 # `git config merge.suite-map-union.driver "node tools/merge-suite-map.mjs --driver %O %A %B"` makes git do the
 # union for you (.gitattributes has the entry); the tool refuses a disagreement by name instead of choosing.
-src/horn.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/shortcuts.test.mjs
+src/horn.js	tests/horn.test.js tests/a11y.test.mjs tests/shortcuts.test.mjs
 # why: docs/coverage-map.md#src-main-js
-src/main.js	tests/modules.test.js tests/resilience-ui.test.mjs test/resilience-ui.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
+src/main.js	tests/modules.test.js tests/resilience-ui.test.mjs tests/webmcp-browser.test.mjs
 # why: docs/coverage-map.md#src-airhorn-js
-src/airhorn.js	tests/modules.test.js tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/reflow-zoom.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs
+src/airhorn.js	tests/modules.test.js tests/horn.test.js tests/a11y.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/reflow-zoom.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs
 # why: docs/coverage-map.md#src-input-js
-src/input.js	tests/modules.test.js tests/horn.test.js tests/keyboard.test.mjs tests/a11y.test.mjs test/a11y.test.mjs tests/screenreader.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs
+src/input.js	tests/modules.test.js tests/horn.test.js tests/keyboard.test.mjs tests/a11y.test.mjs tests/screenreader.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs
 # why: docs/coverage-map.md#src-badge-js
-src/badge.js	tests/badge-count.test.js tests/modules.test.js tests/multitab.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
+src/badge.js	tests/badge-count.test.js tests/modules.test.js tests/multitab.test.mjs tests/webmcp-browser.test.mjs
 # why: docs/coverage-map.md#src-install-js
-src/install.js	tests/modules.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/keyboard.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs tests/reflow-zoom.test.mjs
+src/install.js	tests/modules.test.js tests/a11y.test.mjs tests/keyboard.test.mjs tests/resilience-ui.test.mjs tests/reflow-zoom.test.mjs
 # why: docs/coverage-map.md#src-launch-js
 src/launch.js	tests/modules.test.js tests/shortcuts.test.mjs tests/multitab.test.mjs
 # why: docs/coverage-map.md#src-status-js
-src/status.js	tests/modules.test.js tests/screenreader.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs tests/visual-overrides.test.mjs
+src/status.js	tests/modules.test.js tests/screenreader.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/resilience-ui.test.mjs tests/visual-overrides.test.mjs
 # why: docs/coverage-map.md#src-analytics-js
 src/analytics.js	tests/modules.test.js
-src/webmcp.js	tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
+src/webmcp.js	tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs
 # why: docs/coverage-map.md#index-html
-index.html	tests/preload-priority.test.js tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs tests/resilience-ui.test.mjs test/resilience-ui.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs
-vite.config.js	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
-package.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
-package-lock.json	tests/horn.test.js tests/a11y.test.mjs test/a11y.test.mjs tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/webmcp.test.mjs test/webmcp.test.mjs tests/webmcp-browser.test.mjs test/webmcp-browser.test.mjs
+index.html	tests/preload-priority.test.js tests/horn.test.js tests/a11y.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs
+vite.config.js	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs tests/webmcp-browser.test.mjs
+package.json	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs tests/webmcp.test.mjs tests/webmcp-browser.test.mjs
+package-lock.json	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs tests/webmcp.test.mjs tests/webmcp-browser.test.mjs
 # why: docs/coverage-map.md#server-ts
 server.ts	tests/gate-smoke.test.js tests/health.test.mjs
 # why: docs/coverage-map.md#deno-lock
@@ -75,9 +75,9 @@ tests/tool-verdicts.test.js	tests/tool-verdicts.test.js
 tests/resilience-report.test.js	tests/resilience-report.test.js
 tools/resilience-audit.mjs	tests/resilience-probe.test.js tests/resilience-report.test.js
 # why: docs/coverage-map.md#public-sw-js
-public/sw.js	tests/sw-offline.test.mjs test/sw-offline.test.mjs tests/sw-failover.test.mjs tests/sw-redirect.test.mjs
-public/manifest.json	tests/sw-offline.test.mjs test/sw-offline.test.mjs
-public/sounds/**	tests/sw-offline.test.mjs test/sw-offline.test.mjs
+public/sw.js	tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/sw-redirect.test.mjs
+public/manifest.json	tests/sw-offline.test.mjs
+public/sounds/**	tests/sw-offline.test.mjs
 # why: docs/coverage-map.md#public-styles
 public/styles/**	tests/a11y.test.mjs tests/keyboard.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs
 # why: docs/coverage-map.md#fleet-coverage-contract-json
@@ -123,11 +123,6 @@ tests/multitab.test.mjs	tests/multitab.test.mjs
 tests/docs-recipe.test.mjs	tests/docs-recipe.test.mjs
 # why: docs/coverage-map.md#tests-modules-test-js
 tests/modules.test.js	tests/modules.test.js
-~test/a11y.test.mjs	test/a11y.test.mjs
-~test/sw-offline.test.mjs	test/sw-offline.test.mjs
-~test/webmcp.test.mjs	test/webmcp.test.mjs
-~test/webmcp-browser.test.mjs	test/webmcp-browser.test.mjs
-~test/resilience-ui.test.mjs	test/resilience-ui.test.mjs
 # why: docs/coverage-map.md#readme-md
 README.md	tests/docs-recipe.test.mjs
 # why: docs/coverage-map.md#docs-runbooks-deploy-md

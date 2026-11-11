@@ -22,8 +22,10 @@ still selects tests/test-support.test.js, and rows are additive, so the union is
 
 tools/suite-map.tsv — the changed-path -> suite map. THE MAP IS THE GATE.
 Format: <glob pattern><TAB><space-separated suites covering it>. Rows are ADDITIVE: name EVERY suite
-that covers a file, at EVERY root spelling it can appear at (tests/ and test/) — a tree may carry
-either. Lines starting with # are comments. `!` rows are exemptions (files with no suite) — add one
+that covers a file. (The singular test/ spellings were removed in airhorn-92mp: they came from a
+side branch's layout, test/ never existed on any tracked ref, and the tokens sat behind pending
+self-rows doing nothing - vestigial, so gone. If a tree ever carries test/ again, re-add the
+spellings THEN, with the pending rows.) Lines starting with # are comments. `!` rows are exemptions (files with no suite) — add one
 only with a reason. `~` rows are PENDING suites: declared, possibly arriving with a sibling branch;
 while the suite file is absent, selecting it SKIPS with 'fast-gate: pending:' instead of failing,
 and once it lands it runs like any other suite. A PLAIN row naming a missing suite is a stale map
@@ -237,7 +239,7 @@ the !public/** exemption meant a focus-ring change landed with zero coverage.
 ## `.fleet/coverage-contract.json`
 
 Suite self-rows: the reverse check (every tree suite reachable from the map) reads these.
-Plural-spelling suites exist on master; the singular test/ spellings are declared pending.
+Plural-spelling suites exist on master; the singular test/ spellings are declared pending - REMOVED in airhorn-92mp (never existed on any ref; vestigial).
 .fleet/coverage-contract.json is derived from this file via tools/derive-coverage-contract.mjs
 for the fleet's independent coverage oracle, which cannot read this tsv (airhorn-pwe, airhorn-y7mx).
 The two are kept in step by tests/gate-smoke.test.js, which requires the committed contract
