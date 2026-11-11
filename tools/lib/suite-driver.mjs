@@ -1,181 +1,181 @@
 /*
- * tools/lib/suite-driver.mjs — the file the test runner is pointed at, for mutation-check.
+ * tools/lib/suite-driver.mjs — the file the OUTER test runner is pointed at, for mutation-check.
  *
- * It exists because "did this suite ever run?" cannot be answered from names. The previous
- * attempt compared the file-level test event's name to the suite's basename; node names that
- * event with the path AS PASSED, so `--suite sub/suite.mjs` made a crashing import look like a
- * failed test - a false "mutant-caught" (airhorn-lnme, review of airhorn-u1v2). Any answer built
- * from spellings, comments or import syntax is defeatable by text.
+ * It exists because "did this suite ever run?" cannot be answered from names: node names the
+ * file-level event with the path AS PASSED, so `--suite sub/suite.mjs` once made a crashing import
+ * look like a failed test - a false "mutant-caught" (airhorn-lnme). Any answer built from spellings,
+ * comments or import syntax is defeatable by text, so the answer comes from execution.
  *
- * So the answer is produced by an event that only EXECUTION can cause: this driver imports the
- * suite and records whether the import threw. A throw means no test ever ran; a clean import
- * means the suite's own tests were registered and the runner will run them, and their failures
- * (counted by tools/lib/suite-mode-reporter.mjs) are the suite's real verdict.
+ * WHY THERE ARE NOW TWO PROCESSES (airhorn-14ht, the successor to airhorn-dzsi).
  *
- * Written before the tests run, so the record is never confused with a test outcome.
+ * This file used to IMPORT the suite into its own process and write its records on stdout. Measured
+ * consequence: the suite shares that stdout, so it could write record lines too, and every defence
+ * came down to a GRAMMAR - a list of shapes. A grammar is only ever a shape a forger can imitate;
+ * on the unlanded fleet/812k-guard one forged `yieldedToHarness` line plus process.abort() scored
+ * "mutant-caught" rc 0. A nonce does not fix it either: MUTATION_RUN_NONCE was readable from
+ * /proc/self/environ (proved by a reviewer and reproduced here), because proc shows the EXEC-TIME
+ * environment, so an environment secret is provenance theatre.
+ *
+ * So the writer and the code under test are now in DIFFERENT processes:
+ *
+ *   outer runner  ->  THIS DRIVER (supervisor)  ->  child runner  ->  the suite
+ *
+ *   * This driver spawns the suite as a child, run by its own test runner whose reporter sends the
+ *     event facts back on a PIPE THIS PROCESS OWNS (fd 3 of the child runner). The suite executes in
+ *     that runner's WORKER, which does not inherit that fd (measured: a suite's fs.writeSync(3, ...)
+ *     dies EINVAL), so the suite cannot write the facts.
+ *   * Every byte the child emits on stdout/stderr is QUOTED with QUOTE_PREFIX before it reaches this
+ *     process's stdout, which is the only stream the outer reporter reads records from. A line
+ *     starting at column 0 with RECORD_PREFIX can therefore only have been written by THIS file.
+ *
+ * TRUST STATEMENT (airhorn-14ht) — what a record means and who can write it:
+ *   A record is this supervisor's CLAIM about the child it spawned: whether the suite loaded, and
+ *   the event facts the child's own runner reported. Only this process can write one, because the
+ *   child's output is quoted and the fact pipe is not inherited by the suite.
+ *   A forged line (any route: env, argv, a file, /proc, the child's stdout) reaches the outer
+ *   reporter only inside QUOTE_PREFIX, where it is DATA and never a record. KNOWN-LIMIT: this file
+ *   itself runs in the worker that hosts nothing but this supervisor - if the suite could execute
+ *   code in THIS process it could write records, and it cannot: it has its own process.
  */
 import fs from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const RECORD_PREFIX = 'MUTATION-DRIVER-RECORD ';
+// Quoted child bytes start with this. The outer reporter treats a line carrying it as DATA: the
+// suite can print any record shape it likes and it will never be read as a record.
+export const QUOTE_PREFIX = '  | ';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const REPORTER = path.join(here, 'suite-mode-reporter.mjs');
 
 const suite = process.env.MUTATION_SUITE_FILE;
-// The report CHANNEL to the parent is fd 3, a pipe the parent is the only reader of (airhorn-
-// gwcm) - but this process is the runner's GRANDCHILD and does not inherit it (measured: fd 3
-// closed here, writeSync EINVAL). The record therefore travels over this process's STDOUT:
-// the runner forwards it to the reporter as test:stdout events, and the reporter relays it on
-// the pipe (measured: pre-test and post-test top-level writes both arrive).
-//
-// There is NO FILE any more (airhorn-y3d6, both rounds). The old record file's path sat in this
-// process's environment - readable by the suite directly, and via /proc/<pid>/environ even after
-// the env was scrubbed, because proc shows the EXEC-TIME environment - and a rewrite or atomic
-// rename of the file turned a named refusal into 'fix-does-not-close'. Same process and same
-// uid mean NO secret can be kept from the suite at all: env leaks via /proc, files are
-// same-uid readable, and the grandchild inherits no extra fds. So the design keeps no secret:
-// forgery is DETECTED, not prevented - and the PIPE does not prevent suppression either: a suite that patches the write path
-// can stop a line being written (the writer is captured at load time, so it cannot stop a line already owed, but it can stop
-// the crash line - airhorn-39yh shape (a)). The honest sequence is a grammar the reporter validates:
-//   IMPORT            (one line: { importFailed } - the only line when the import decides it)
-//   IMPORT, CRASH     (a clean import followed by a crash outside any test, airhorn-so88)
-// Any other sequence - a forged line before, between or after - is tampering, and the parent
-// refuses by name. A forgery cannot SUPPRESS the real line (the suite shares the stdout but
-// cannot unwrite it), so a forged record always makes the sequence invalid.
-const DRIVER_RECORD_PREFIX = 'MUTATION-DRIVER-RECORD ';
+const nonce = process.env.MUTATION_RUN_NONCE || null;
 
-// CAPTURED AT LOAD TIME (airhorn-39yh): the driver is imported before the suite, so binding the writer now means a suite that
-// patches fs.writeSync later - the reviewer's shape (a) - cannot suppress a record. Patching cannot UNWRITE a line already in
-// the pipe, but it could stop the next one being written, and the crash line is exactly the next one.
+// CAPTURED AT LOAD TIME, before anything else runs in this process, so a later patch cannot stop a
+// record being written (the supervisor has no untrusted imports, but the habit is cheap).
 const writeRecordSync = fs.writeSync;
 const record = (value) => {
   try {
-    // Sync write to fd 1: an async console.log can be truncated by the crash handler's exit.
-    writeRecordSync.call(fs, 1, `${DRIVER_RECORD_PREFIX}${JSON.stringify(value)}\n`);
+    writeRecordSync.call(fs, 1, `${RECORD_PREFIX}${JSON.stringify(value)}\n`);
   } catch {
     /* the parent reports a missing record as a named refusal, never as a verdict */
   }
 };
 
-/*
- * A failure that happens AFTER a clean import - a module-level setTimeout that throws, a rejected
- * promise nobody awaited - is not a test failing: no test ever ran (airhorn-so88). node's runner
- * reports it as a failure of the DRIVER file, which the reporter would otherwise count as a caught
- * mutant. These handlers are installed before the import so they are first in line, and they turn
- * the failure into a record instead of a verdict.
- */
-let exitingForCrash = false;
-const markCrash = (kind) => (error) => {
-  // A `once` handler is removed by node as it fires, which trips our own removeListener watcher. That artifact used to be
-  // disambiguated in the reporter's grammar (airhorn-p0dg); with the monitor it would land AFTER the CRASH line, so it is
-  // suppressed at the source instead - a removal we caused by firing is not the suite stripping anything.
-  exitingForCrash = true;
-  const detail = error && error.stack ? error.stack.split('\n')[0] : String(error);
-  // The grammar's CRASH line: valid only AFTER a clean-import line, which the reporter checks.
-  record({ crashedOutsideTest: true, reason: `${kind} after the suite loaded: ${detail}` });
-  process.exit(0);
-};
-const onUncaught = markCrash('uncaught exception');
-const onRejection = markCrash('unhandled rejection');
-// UNCAUGHT EXCEPTIONS GO THROUGH THE MONITOR, not an 'uncaughtException' listener (airhorn-5qdd). Node emits
-// 'uncaughtExceptionMonitor' BEFORE any 'uncaughtException' listener and before a capture callback, so listener ORDER stops
-// mattering: prependListener, prependOnceListener (which node unwraps before invoking, so an exit-time position check sees
-// nothing) and a listener that removes itself all sit downstream of the monitor. Measured: monitor -> prepended-once ->
-// plain, and monitor -> capture when a capture callback is installed. Rejections have no monitor, so they are installed
-// as plain listeners too - a plain listener being invoked emits no 'removeListener' event (measured), so neither path
-// produces a self-removal artifact any more (airhorn-co4h; the once() note below is history).
-process.on('uncaughtExceptionMonitor', onUncaught);
-process.on('unhandledRejection', onRejection);
-
-// SUPPRESSION detection (airhorn-p0dg, corrected after the first fix FAILed review): a suite
-// can strip these two handlers, install a swallow that exits 0, and then crash - the CRASH
-// line is never written and a named refusal became 'fix-does-not-close' (measured: rc 2).
-// The report is SYNCHRONOUS at strip time: stdout cannot be unwritten, and the swallow's
-// exit(0) cannot pre-empt a line already written. The first attempt deferred the write to a
-// microtask to dodge the once() self-removal false positive - and the one-timer attack (strip
-// AND swallow AND throw in ONE timer callback) exits before any microtask runs (measured by
-// the reviewer: still rc 2). That false positive has since disappeared at the source: both
-// handlers are PLAIN listeners, and a plain listener firing emits no 'removeListener' event
-// (measured), so every strip line is a REAL removal - which is why a strip beside a CRASH line
-// is now reported as both (airhorn-co4h) instead of being explained away as an artifact.
-// Residual, stated plainly: a suite that first removes THIS watcher (removeAllListeners
-// ('removeListener') or a full strip) strips silently; nothing in-process is unremovable at
-// the same uid. The tool prints this boundary once per run (airhorn-p0dg).
-process.on('removeListener', (name, fn) => {
-  if (exitingForCrash) return;
-  // Our 'exit' listeners are instrumentation too: removing one means the check it performs never runs (airhorn-39yh shape
-  // (b) - the rejection position check was bypassed exactly that way).
-  if ((name === 'uncaughtExceptionMonitor' && fn === onUncaught)
-      || (name === 'unhandledRejection' && fn === onRejection)
-      || (name === 'exit' && fn === onExitCheck)) {
-    // Name the instrument that was removed and what its loss hides (airhorn-co4h): 'the crash handlers' is right for
-    // the two crash paths and wrong for the exit-time rejection check, which hides a different thing.
-    const reason = name === 'exit'
-      ? "the suite removed the driver's exit-time rejection position check - a rejected promise swallowed by an earlier listener would now pass as a clean run (suppression, not a measurement)"
-      : "the suite removed the driver's crash handlers - a crash outside any test would now be invisible (suppression, not a measurement)";
-    record({ handlersStripped: true, reason });
-  }
-});
-
-// UNHANDLED REJECTIONS have no monitor - node exposes none - so precedence cannot be claimed for them. What can be said is
-// narrower and it is checked: our rejection handler is registered first, so a suite can only run ahead of it by PREPENDING,
-// and a prepended listener is still in the list at exit. That covers the plain shape; it cannot cover a prepended `once`
-// (node unwraps and removes it before invoking) or a listener that removes itself, because neither is in the list by then.
-// Measured before writing this: a prepended rejection swallow laundered an out-of-test rejection into "the suite passed"
-// (rc 2, no refusal), so this check is the difference between the common shape and none at all.
-const onExitCheck = () => {
-  const listeners = process.listeners('unhandledRejection');
-  const index = listeners.indexOf(onRejection);
-  if (index > 0) {
-    record({ handlersPreceded: true, reason: `the suite installed ${index} unhandledRejection listener(s) AHEAD of the driver's - a rejection it hid cannot be told from a pass (suppression, not a measurement)` });
-  }
-};
-process.on('exit', onExitCheck);
-
-/*
- * SELF-CHECK, recorded once, before the suite is imported (airhorn-co4h).
- *
- * Every defence in this file rests on the instrument being INSTALLED and on the strip watcher being able to
- * RECOGNISE it by identity. Measured on master 191d5ded, a regression in this file breaks both silently: with
- * the monitor install deleted, a suite that swallows its own out-of-test crash produced `verdict:
- * fix-does-not-close` (a verdict, not a refusal); with the monitor installed through a wrapper, the strip
- * watcher's identity comparison never matched and a suite that stripped it and swallowed scored the same
- * verdict. Nothing downstream could tell those runs from an honest suite, so the driver reports what it
- * actually installed and the parent refuses BY NAME instead of judging (airhorn-co4h).
- *
- * Sampled at INSTALL time, not at import time, on purpose: a suite that deliberately removes a handler
- * (`--expect-strip`) must be a suite-level event, not a driver defect.
- */
-const instruments = {
-  monitor: process.listeners('uncaughtExceptionMonitor').includes(onUncaught),
-  rejection: process.listeners('unhandledRejection').includes(onRejection),
-  exitCheck: process.listeners('exit').includes(onExitCheck),
-};
-
-// Two evasions that the monitor closes, recorded here because I shipped the weaker instrument first (airhorn-rnj5, then
-// airhorn-5qdd from the review of it): a suite that PREPENDS a swallow ahead of the driver's listener, and one that prepends a
-// ONCE listener - node unwraps a `once` wrapper before invoking it, and a self-removing listener is gone by the time anything
-// could look at the list. An exit-time POSITION check therefore cannot see either of them, which is exactly what the second
-// reviewer measured (rc 2, "fix-does-not-close"). Precedence is the answer, not position: the monitor runs before every
-// listener and before a capture callback, so a crash is recorded before any suite code can act. Nothing needs to be checked
-// at exit for these shapes, and the check that remains is for what the monitor cannot cover.
-//
-// Residual, stated rather than implied: a suite that removes THIS monitor first (removeListener/removeAllListeners trips the
-// strip watcher above, so it is reported, not silent), and a crash that runs no JS at all - process.abort, OOM, a hard kill -
-// where nothing in-process can record anything. Closing the latter needs the suite run in a child the driver owns.
-//
-// Scrub the driver machinery's variables BEFORE the suite loads (airhorn-y3d6): the suite
-// shares this process and inherits this environment. Stated plainly: /proc/<pid>/environ shows
-// the EXEC-TIME environment, so this scrub does not hide anything from a suite that reads proc -
-// its value is narrower: the suite's own process.env and anything it SPAWNS carry none of the
-// machinery. The forgery defence is the sequence grammar above, not secrecy.
-for (const name of ['MUTATION_RUN_NONCE', 'MUTATION_SUITE_CHANNEL', 'MUTATION_SUITE_FILE', 'MUTATION_DRIVER_FILE']) {
+// Scrub the machinery from this process's environment (narrow value: this process's own children
+// inherit it, so the CHILD env is built explicitly below rather than inherited).
+for (const name of ['MUTATION_RUN_NONCE', 'MUTATION_SUITE_CHANNEL', 'MUTATION_SUITE_FILE', 'MUTATION_DRIVER_FILE', 'NODE_TEST_CONTEXT', 'NODE_TEST_WORKER_ID']) {
   delete process.env[name];
 }
 
+/** Forward the child's bytes quoted, one prefix per line, so nothing reaches column 0 unquoted. */
+function quotingForwarder(stream) {
+  let partial = '';
+  const emit = (text) => {
+    if (!text) return;
+    // Split on newlines and prefix every line, including a trailing fragment.
+    const lines = text.split('\n');
+    let out = '';
+    for (let i = 0; i < lines.length; i += 1) {
+      const isLast = i === lines.length - 1;
+      if (!isLast) out += `${QUOTE_PREFIX}${lines[i]}\n`;
+      else if (lines[i].length > 0) out += `${QUOTE_PREFIX}${lines[i]}`;
+    }
+    if (out) {
+      try { writeRecordSync.call(fs, 1, out); } catch { /* the verdict never rests on log text */ }
+    }
+  };
+  stream.setEncoding('utf8');
+  stream.on('data', (chunk) => {
+    partial += chunk;
+    const cut = partial.lastIndexOf('\n');
+    if (cut === -1) return;
+    emit(partial.slice(0, cut + 1));
+    partial = partial.slice(cut + 1);
+  });
+  stream.on('end', () => { emit(partial); partial = ''; });
+}
+
 if (!suite) {
-  record({ importFailed: true, reason: 'MUTATION_SUITE_FILE was not set, so no suite was loaded', instruments });
+  record({ importFailed: true, reason: 'MUTATION_SUITE_FILE was not set, so no suite was loaded' });
 } else {
-  try {
-    await import(pathToFileURL(suite).href);
-    record({ importFailed: false, suite, instruments });
-  } catch (error) {
-    record({ importFailed: true, reason: error && error.message ? error.message : String(error), instruments });
+  const child = spawn(process.execPath, ['--test', '--test-reporter', REPORTER, suite], {
+    stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+    // The child runner's reporter writes its facts on fd 3, a pipe THIS process owns. NODE_TEST_*
+    // must be absent or the nested runner skips the child entirely (it refuses to run recursively).
+    env: {
+      ...process.env,
+      MUTATION_SUITE_CHANNEL: '3',
+      MUTATION_RUN_NONCE: nonce === null ? '' : nonce,
+      // The suite IS the child's wrapper file: telling the reporter that keeps the file-level
+      // failure of the suite separate from the suite's own tests, exactly as when this driver
+      // imported it (airhorn-a6ch attribution).
+      MUTATION_DRIVER_FILE: suite,
+      // ...and by NAME, because in the child the wrapper and the tests share a file (measured: a
+      // passing suite reported realTests 0 until the file-level entry was identified by its name).
+      MUTATION_WRAPPER_BY_NAME: '1',
+    },
+    cwd: process.cwd(),
+  });
+  quotingForwarder(child.stdout);
+  quotingForwarder(child.stderr);
+
+  const facts = child.stdio[3];
+  let channel = '';
+  if (facts) {
+    facts.setEncoding('utf8');
+    facts.on('data', (chunk) => { channel += chunk; });
   }
+
+  const closed = await new Promise((resolve) => {
+    child.on('close', (code, signal) => resolve({ code, signal }));
+    child.on('error', (error) => resolve({ code: null, signal: null, error }));
+  });
+
+  // The last nonce-bearing final line is the child reporter's report. A line without this run's
+  // nonce is not evidence (and cannot come from the suite: the suite has no handle on this pipe).
+  let childReport = null;
+  let nonceMismatch = false;
+  for (const line of channel.split('\n')) {
+    if (!line.trim()) continue;
+    let parsed;
+    try { parsed = JSON.parse(line); } catch { continue; }
+    if (!parsed || parsed.kind !== 'final') continue;
+    if (nonce !== null && parsed.nonce !== nonce) { nonceMismatch = true; continue; }
+    childReport = parsed;
+  }
+
+  const exitCode = closed.code === null ? 1 : closed.code;
+  const how = closed.signal ? `killed by ${closed.signal}` : `exited ${exitCode}`;
+  if (nonceMismatch) {
+    // The child's facts did not carry this run's nonce. Refused by name rather than judged.
+    record({ importFailed: true, reason: 'the child report did not carry this run\'s nonce', nonceMismatch: true });
+  } else if (!childReport) {
+    // No facts at all: the child never reached its reporter (it died before the runner started, or
+    // it was killed). Nothing about the mutant can be claimed.
+    record({ importFailed: true, reason: `the child runner produced no report (${how}${closed.error ? `, ${closed.error.message}` : ''})` });
+  } else {
+    // The child's reporter reports the suite file as the wrapper: a file-level failure with no real
+    // test means the suite never loaded. Everything else is the suite's own verdict.
+    const importFailed = childReport.fileLevelFailed === true && (childReport.realTests || 0) === 0;
+    // A file-level failure means something failed OUTSIDE any test. It is refused whether or not a test
+    // also failed: when the crash lands while a test is in flight, node marks that test failed too, and
+    // reading that as a catch is the false-green direction (measured: an indirect async throw at 5 ms
+    // scored 'mutant-caught' rc 0 in one run and refused rc 3 in another - a race, depending only on
+    // whether the throw beat the test's completion). Under-claiming here costs a re-run; over-claiming
+    // ships a hole as caught.
+    const crashedOutsideTest = !importFailed && exitCode !== 0 && childReport.fileLevelFailed === true;
+    record({
+      importFailed,
+      ...(importFailed ? { reason: `the suite file failed to load or threw before registering a test (${how})` } : {}),
+      ...(crashedOutsideTest ? { crashedOutsideTest: true, reason: `the suite run failed outside its tests and ${how}${(childReport.realFailed || 0) > 0 ? ' (a test was in flight when it failed, which is not the same as a test asserting about the mutant)' : ''}` } : {}),
+      childReport,
+    });
+  }
+  // The outer run's exit code carries the child's, so classifyRun's "non-zero with no failing test"
+  // refusal (the plain-abort shape) still fires without any in-process handler.
+  if (closed.signal) process.kill(process.pid, closed.signal);
+  else process.exitCode = exitCode;
 }
