@@ -1570,6 +1570,144 @@ test('a suite that builds ../dist with path.join counts as dist-dependent (airho
   }
 });
 
+test('a tests-only change SKIPS the build and names the paths that allowed it (airhorn-aeu0)', () => {
+  // The receipt: a keep that cannot say why it skipped is a guess with a stamp on it,
+  // and a later wrong verdict cannot be traced to the decision that permitted it. The
+  // skip must name the changed paths it judged irrelevant. The build is also really not
+  // run: the probe's build script touches a marker, and a forced control run proves the
+  // canary works.
+  const probe = buildGateProbe();
+  try {
+    fs.writeFileSync(path.join(probe.probe, 'package.json'),
+      JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'touch built.marker' } }));
+    for (const args of [['add', 'package.json'], ['commit', '-m', 'marker build']]) {
+      const g = spawnSync('git', ['-C', probe.probe, ...args], { encoding: 'utf8' });
+      assert.equal(g.status, 0, `probe git ${args[0]} failed: ${g.stderr}`);
+    }
+    const distFile = path.join(probe.probe, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'BUILT-NOW');
+    stampProbeDist(probe);
+
+    const marker = path.join(probe.probe, 'built.marker');
+    const kept = probe.run(['--changed', 'tests/pass.test.js']);
+    assert.equal(kept.status, 0, kept.stderr);
+    assert.match(kept.stdout, /keeping dist\/ \(dist\/ is stamped for these inputs/,
+      `a stamped dist must be reused on the real path too: ${kept.stdout}`);
+    assert.match(kept.stdout, /SKIPPED build: changed paths outside the build inputs: tests\/pass\.test\.js/,
+      `the skip must name the paths that allowed it: ${kept.stdout}`);
+    assert.ok(!fs.existsSync(marker), `a skipped gate must not have built: ${kept.stdout}`);
+
+    // Control: the same gate forced to build proves the marker canary can fire.
+    const forced = probe.run(['--changed', 'tests/pass.test.js'], { FAST_GATE_FORCE_BUILD: '1' });
+    assert.match(forced.stdout, /building dist /, `the control must build: ${forced.stdout}`);
+    assert.ok(fs.existsSync(marker), 'the forced control must prove the marker canary fires');
+  } finally { fs.rmSync(probe.probe, { recursive: true, force: true }); }
+});
+
+test('a tools-only change that is not a build input skips, with the path named (airhorn-aeu0)', () => {
+  // tools/ is the gate's own machinery; the build reads only the files the config
+  // imports (derived, next pin). A tools file outside that set must skip - and the
+  // receipt must name it, so the classification is inspectable rather than silent.
+  // The dist-reading suite is selected alongside so the classifier (not the
+  // suites_need_dist early skip) is the arm under test.
+  const probe = buildGateProbe();
+  try {
+    const distFile = path.join(probe.probe, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'BUILT-NOW');
+    fs.appendFileSync(path.join(probe.probe, 'tools', 'suite-map.tsv'),
+      'tests/pass.test.js\ttests/pass.test.js\n');
+    stampProbeDist(probe);
+
+    fs.writeFileSync(path.join(probe.probe, 'tools', 'extra.js'), '// not imported by the config\n');
+    const kept = probe.run(['--build-plan', '--changed', 'tools/extra.js', '--changed', 'tests/pass.test.js']);
+    assert.equal(kept.status, 0, kept.stderr);
+    assert.match(kept.stdout, /build-plan: keep \(dist\/ is stamped for these inputs/,
+      `a non-input tools change must keep: ${kept.stdout}`);
+    assert.match(kept.stdout, /SKIPPED build: changed paths outside the build inputs: tools\/extra\.js tests\/pass\.test\.js/,
+      `the tools skip must name the path: ${kept.stdout}`);
+  } finally { fs.rmSync(probe.probe, { recursive: true, force: true }); }
+});
+
+test('a build input the config IMPORTS is derived into the input set - editing it rebuilds (airhorn-aeu0)', () => {
+  // vite.config.js imports tools/lib/sw-integrity.mjs and the build EXECUTES its code
+  // (it rewrites dist/sw.js with the precache list and integrity digests). A hand list
+  // that omits it leaves the stamp 'matching' while dist would build differently - the
+  // stale-dist class through an input the stamp could not see. The input set is now
+  // DERIVED from the config's import graph, so this probe's config import makes the
+  // lib file a first-class input: editing it must rebuild. Pre-fix this answers keep
+  // (RED by name).
+  const probe = buildGateProbe();
+  try {
+    fs.writeFileSync(path.join(probe.probe, 'vite.config.mjs'),
+      "import { injectIntegrity } from './tools/lib/sw-integrity.mjs';\nexport default {};\n");
+    fs.mkdirSync(path.join(probe.probe, 'tools', 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(probe.probe, 'tools', 'lib', 'sw-integrity.mjs'),
+      "export const injectIntegrity = () => '';\n");
+    const distFile = path.join(probe.probe, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'BUILT-NOW');
+    stampProbeDist(probe);
+
+    fs.writeFileSync(path.join(probe.probe, 'tools', 'lib', 'sw-integrity.mjs'),
+      "export const injectIntegrity = () => 'CHANGED';\n");
+    // Select a dist-reading suite alongside, so the decision reaches the input digest
+    // (the suites_need_dist early skip cannot answer for a selection that reads dist).
+    fs.appendFileSync(path.join(probe.probe, 'tools', 'suite-map.tsv'),
+      'tests/pass.test.js\ttests/pass.test.js\n');
+    const after = probe.run(['--build-plan', '--changed', 'tools/lib/sw-integrity.mjs', '--changed', 'tests/pass.test.js']);
+    assert.equal(after.status, 0, after.stderr);
+    assert.match(after.stdout, /build-plan: build .*working-tree build inputs changed/,
+      `an imported tools file must be a build input: ${after.stdout}`);
+  } finally { fs.rmSync(probe.probe, { recursive: true, force: true }); }
+});
+
+test('a changed path that is neither a build input nor provably irrelevant rebuilds, named (airhorn-aeu0)', () => {
+  // Fail-closed is the point: a skip that guesses reintroduces the stale-dist defect
+  // with extra confidence. A path outside both the build inputs and the irrelevant
+  // prefixes is not proven anything, so the decision rebuilds and names the path. The
+  // dist-reading suite is selected alongside so the classifier (not the
+  // suites_need_dist early skip) is the arm under test.
+  const probe = buildGateProbe();
+  try {
+    const distFile = path.join(probe.probe, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'BUILT-NOW');
+    fs.appendFileSync(path.join(probe.probe, 'tools', 'suite-map.tsv'),
+      'tests/pass.test.js\ttests/pass.test.js\n');
+    stampProbeDist(probe);
+
+    fs.writeFileSync(path.join(probe.probe, 'misc'), 'unclassified file');
+    const after = probe.run(['--build-plan', '--changed', 'misc', '--changed', 'tests/pass.test.js']);
+    assert.equal(after.status, 0, after.stderr);
+    assert.match(after.stdout, /build-plan: build \(changed path misc is not a build input and not provably irrelevant/,
+      `an unclassified changed path must rebuild, named: ${after.stdout}`);
+  } finally { fs.rmSync(probe.probe, { recursive: true, force: true }); }
+});
+
+test('a stamp from a different toolchain rebuilds (airhorn-aeu0)', () => {
+  // The build runs under the node on PATH; the same inputs under a different runtime
+  // can emit different bytes. The stamp carries the toolchain that produced the
+  // outputs and the decision demands the same one; a stamp without the field (older
+  // gate) is no stamp at all.
+  const probe = buildGateProbe();
+  try {
+    const distFile = path.join(probe.probe, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'BUILT-NOW');
+    stampProbeDist(probe);
+
+    const stampFile = path.join(probe.probe, 'dist', '.fast-gate-stamp');
+    fs.writeFileSync(stampFile,
+      fs.readFileSync(stampFile, 'utf8').replace(/^toolchain .*$/m, 'toolchain v0.0.0-bogus'));
+    const after = probe.run(['--build-plan', '--changed', 'tests/pass.test.js']);
+    assert.equal(after.status, 0, after.stderr);
+    assert.match(after.stdout, /build-plan: build .*the toolchain changed/,
+      `a foreign-toolchain stamp must rebuild: ${after.stdout}`);
+  } finally { fs.rmSync(probe.probe, { recursive: true, force: true }); }
+});
+
 test('waitForSw distinguishes active, redundant, unsupported, evaluate error, and timeout (airhorn-nxuv.1)', async () => {
   const noopSleep = () => Promise.resolve();
 

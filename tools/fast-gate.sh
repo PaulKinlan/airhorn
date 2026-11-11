@@ -353,13 +353,44 @@ FP_FILE_NAME='.fast-gate-stamp'
 # change what is built only through the env the gate itself runs with (an ambient VITE_* that changes
 # the bundle would not be seen here). If a .env* file ever lands, add it to the list below or the
 # stamp will describe a tree that was not the one built. Deliberate, not an oversight.
-input_paths() { # existing build-input paths, relative to ROOT
-  local p
+input_paths() { # existing build-input paths, relative to ROOT.
+  # The fixed entries are what vite reads by convention (entry document, source and
+  # public trees, manifests/lockfiles) plus the config itself. The CONFIG'S OWN local
+  # imports are added by DERIVATION, not by hand (airhorn-aeu0): vite.config.js
+  # imports tools/lib/sw-integrity.mjs, whose code the build EXECUTES to rewrite
+  # dist/sw.js - a hand list that omits it leaves the stamp 'matching' over an input
+  # the build reads, which is the k8sd stale-dist class through an input the stamp
+  # could not see. Walking the config's import graph keeps the set attached to the
+  # build definition: a new local import enters the set automatically, and nothing
+  # else does. The walk is bounded by a visited set; a specifier that does not
+  # resolve to a file here (bare module, directory import) is simply not an input
+  # file of its own.
+  local p spec rel pending next visited guard=0
   for p in src public index.html package.json package-lock.json deno.lock; do
     [ -e "$ROOT/$p" ] && printf '%s\n' "$p"
   done
+  pending=""
   for p in "$ROOT"/vite.config.*; do
-    [ -e "$p" ] && printf '%s\n' "${p#"$ROOT"/}"
+    [ -e "$p" ] && pending="$pending ${p#"$ROOT"/}"
+  done
+  visited=" "
+  while [ -n "${pending# }" ] && [ "$guard" -lt 10 ]; do
+    guard=$((guard + 1))
+    next=""
+    for p in $pending; do
+      case "$visited" in *" $p "*) continue ;; esac
+      visited="$visited$p "
+      [ -f "$ROOT/$p" ] || continue
+      printf '%s\n' "$p"
+      while IFS= read -r spec; do
+        rel=${spec#*./}          # shortest prefix up to the first './': keep the path
+        rel=${rel%%[\"\) ]*}    # cut the closing quote / paren the grep left on
+        [ -n "$rel" ] || continue
+        case "$visited" in *" $rel "*) continue ;; esac
+        [ -f "$ROOT/$rel" ] && next="$next $rel"
+      done < <(grep -hoE "(from|import)[[:space:]]*['\"]\./[^'\"]+|import\\([[:space:]]*['\"]\./[^'\"]+" "$ROOT/$p" 2>/dev/null)
+    done
+    pending=$next
   done
 }
 
@@ -424,12 +455,18 @@ outputs_digest() { # everything in dist/ except the stamp itself
   printf '%s\n' "$out"
 }
 
-read_stamp() { # prints "inputs=<h> outputs=<h>" from the stamp, or nothing
-  local f="$ROOT/dist/$FP_FILE_NAME" i='' o=''
+read_stamp() { # prints "inputs=<h> outputs=<h> toolchain=<v>" from the stamp, or nothing
+  # toolchain is REQUIRED (airhorn-aeu0): the build runs under the node on PATH, so a
+  # runtime change can alter the bytes vite/esbuild emit. A stamp without the field
+  # (written by an older gate) describes a tree measured under an unknown toolchain,
+  # so it is treated as no stamp: the next run rebuilds, once, and re-stamps with the
+  # field. Fail-closed by construction.
+  local f="$ROOT/dist/$FP_FILE_NAME" i='' o='' t=''
   [ -f "$f" ] || return 0
   i=$(awk -F' ' '$1=="inputs"{print $2; exit}' "$f" 2>/dev/null)
   o=$(awk -F' ' '$1=="outputs"{print $2; exit}' "$f" 2>/dev/null)
-  [ -n "$i" ] && [ -n "$o" ] && echo "inputs=$i outputs=$o"
+  t=$(awk -F' ' '$1=="toolchain"{print $2; exit}' "$f" 2>/dev/null)
+  [ -n "$i" ] && [ -n "$o" ] && [ -n "$t" ] && echo "inputs=$i outputs=$o toolchain=$t"
   return 0
 }
 
@@ -442,7 +479,12 @@ write_stamp() { # [$1 = the PRE-build inputs digest]; without it, digest the inp
   mkdir -p "$ROOT/dist"
   local want_out
   want_out=$(outputs_digest) || return 1
-  { echo "inputs $want_in"; echo "outputs $want_out"; } > "$ROOT/dist/$FP_FILE_NAME"
+  # toolchain binds the stamp to the runtime that produced these outputs (airhorn-aeu0):
+  # the same inputs under a different node can build differently, so a stamp without it
+  # does not describe what it was built BY.
+  local toolchain
+  toolchain=$(node --version 2>/dev/null || echo node-unavailable)
+  { echo "inputs $want_in"; echo "outputs $want_out"; echo "toolchain $toolchain"; } > "$ROOT/dist/$FP_FILE_NAME"
 }
 
 # --stamp-dist is TEST/REPAIR ONLY (airhorn-bt55 (c)): it stamps whatever is in dist/ as if a build
@@ -661,7 +703,36 @@ build_decision() { # [suite...]; prints "<build|keep> <reason>"; never builds, n
   if [[ " $stamp " != *" outputs=$want_out "* ]]; then
     echo "build the bytes in dist/ changed since the stamp (now outputs=$want_out)"; return
   fi
-  echo "keep dist/ is stamped for these inputs and these output bytes (inputs=$want_in)"
+  # The toolchain is part of what the build READS (airhorn-aeu0): the same inputs under
+  # a different node can emit different bytes, so the stamp must name the runtime that
+  # produced the outputs and the decision must demand the same one.
+  local want_tc stamp_tc
+  want_tc=$(node --version 2>/dev/null || echo node-unavailable)
+  stamp_tc=$(printf '%s' "$stamp" | sed -n 's/.*toolchain=\([^ ]*\).*/\1/p')
+  if [ "$stamp_tc" != "$want_tc" ]; then
+    echo "build the toolchain changed (stamp: ${stamp_tc:-none}, now: $want_tc)"; return
+  fi
+  # --- the skip receipt (airhorn-aeu0): a keep that cannot say WHY it skipped is a
+  # guess with a stamp on it. Every changed path must be PROVABLY outside the build
+  # inputs at this point: anything in input_paths that changed already failed the
+  # inputs digest above (the digest is computed from the TREE, so --changed narrowing
+  # cannot hide it), and tools/ files the config does not import are proven not-build
+  # by that same derivation. So the classifier only answers for paths the digest
+  # cannot see - and its default is REBUILD, named. A skip that guesses
+  # reintroduces the stale-dist defect with extra confidence.
+  local p skipped=""
+  for p in ${CHANGED[@]+"${CHANGED[@]}"}; do
+    case "$p" in
+      tools/*|tests/*|docs/*|preview/*|.github/*|.beads/*|*.md) skipped="$skipped $p" ;;
+      *)
+        echo "build changed path $p is not a build input and not provably irrelevant - fail-closed rebuild"; return ;;
+    esac
+  done
+  if [ -n "$skipped" ]; then
+    echo "keep dist/ is stamped for these inputs and these output bytes (inputs=$want_in); SKIPPED build: changed paths outside the build inputs:$skipped"
+  else
+    echo "keep dist/ is stamped for these inputs and these output bytes (inputs=$want_in); SKIPPED build: no changed paths to consider"
+  fi
 }
 # --- `--build-plan` is a QUERY, not a verdict: answer BEFORE any verdict exit (airhorn-ocqw) ---------
 # It used to sit at the bottom of the script, after the unmapped and zero-suite exits, so the two
