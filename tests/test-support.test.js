@@ -2047,3 +2047,30 @@ test('CHROME_BIN reaches chrome as an argv, never as shell text (airhorn-7jqv)',
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/*
+ * tools/lib/chrome.mjs sleepSync (airhorn-nxuv.36): its catch RETURNED when SharedArrayBuffer is
+ * unavailable, so the steal probe's window was a no-op - the two /proc/stat readings came back
+ * to back, too few ticks advanced, and the only verdict the probe could ever answer was 'unknown'.
+ * The preflight then degraded silently to "cannot tell", which is a check that cannot fail.
+ */
+test('the steal probe window still spans real time without SharedArrayBuffer (airhorn-nxuv.36)', async () => {
+  // Driven through the REAL default sleep (the probe's `sleep` is injectable - deliberately NOT
+  // injected here), the real /proc/stat reader, and one 120 ms window: at 100 Hz that is ~12 ticks
+  // per CPU, over the probe's minimum even on a loaded host.
+  const { createStealProbe } = await import('../tools/lib/chrome.mjs');
+  const saved = Object.getOwnPropertyDescriptor(globalThis, 'SharedArrayBuffer');
+  Object.defineProperty(globalThis, 'SharedArrayBuffer', { value: undefined, configurable: true, writable: true });
+  try {
+    const started = Date.now();
+    const probe = createStealProbe({ windowMs: 120, windows: 1, maxAttempts: 1 });
+    const rate = probe.rate();
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 110,
+      `the no-SAB window must span REAL time - a no-op sleep finishes instantly, got ${elapsed}ms`);
+    assert.notEqual(rate, null,
+      `a real 120ms window advances enough ticks for a verdict; got unknown: ${probe.reason()}`);
+  } finally {
+    if (saved) Object.defineProperty(globalThis, 'SharedArrayBuffer', saved);
+  }
+});
