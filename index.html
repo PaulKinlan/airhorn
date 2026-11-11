@@ -261,9 +261,18 @@
       }
     </style>
     <!-- Async stylesheet: fetched at low priority, swapped to screen media
-         on load. No JS (noscript) keeps the classic blocking link, since
-         without JS this inline critical block is all there is either way. -->
-    <link rel='stylesheet' href='/styles/main.css' media='print' onload="this.media='all'" onerror="document.documentElement.classList.add('stylesheet-failed')">
+         by /async-css.js. The handlers used to be inline attributes on this
+         link; under script-src 'self' those are blocked silently, which left
+         media at 'print' forever (airhorn-xnd1). The loader is DEFERRED: the
+         fetch starts during parse but it runs after it, so it adds no round
+         trip in front of first paint (a parser-blocking tag here would). The
+         load/error race the inline attribute never had is closed inside the
+         loader instead - it checks link.sheet for a load that already
+         happened, and window load for a sheet that never arrived. No JS
+         (noscript) keeps the classic blocking link, since without JS this
+         inline critical block is all there is either way. -->
+    <link id='main-css' rel='stylesheet' href='/styles/main.css' media='print'>
+    <script src='/async-css.js' defer></script>
     <noscript><link rel='stylesheet' href='/styles/main.css'></noscript>
     <link rel='preload' href='/sounds/airhorn.mp3' as='fetch' crossorigin fetchpriority='low'>
   </head>
@@ -287,9 +296,9 @@
       <button type='button' class='button' disabled>Install</button>
     </div>
     <!-- One polite live region for status while the app runs: offline and
-         back-online, a service worker update. Filled by the announcer in the
-         inline script below (window.__airhornAnnounce) from both main.js and
-         the SW registration, so both surfaces share one voice. Empty it is
+         back-online, a service worker update. Filled by the announcer
+         (window.__airhornAnnounce, defined in /boot-watchdog.js) from both
+         main.js and the SW registration, so both surfaces share one voice. Empty it is
          rendered but visually hidden, so nothing shows or is announced in
          the normal case. -->
     <div id='app-status' role='status'></div>
@@ -307,150 +316,16 @@
       </div>
     </noscript>
     <script type='module' src='/src/main.js'></script>
-    <script>
-      // Boot watchdog. The static HTML paints a complete horn, so when the
-      // module bundle never executes - or executes and then fails during
-      // setup - the page looks alive but is inert and silent. This notices,
-      // and says so. src/main.js calls window.__airhornBooted() only once the
-      // app is actually usable, so 'booted' means the horn works.
-      (function () {
-        var booted = false;
-        var banner = document.getElementById('boot-failure');
-        var retry = document.getElementById('boot-retry');
-
-        function show() {
-          if (booted || !banner || !banner.hidden) return;
-          banner.hidden = false;
-          if (retry) retry.focus();
-        }
-
-        // Booting cancels every pending watchdog timer, so a healthy page is
-        // left with none: a permanently pending timer would keep the page
-        // from ever reading as quiescent (a11y and sw-offline suites wait
-        // for observed quiescence).
-        var backstop = 0;
-        window.__airhornBooted = function () {
-          booted = true;
-          clearTimeout(backstop);
-          // A late bundle retires the notice: the page was wrong to claim the
-          // horn was dead, so take it back (airhorn-duj). The banner took focus
-          // when it appeared, so it has to hand focus on when it goes - a bare
-          // retry.blur() dropped focus to <body> and left a keyboard user who
-          // was waiting on "Try again" with no focus position at all, their
-          // next Tab restarting from the top of the document (airhorn-bjk1).
-          // Same rule the installer's focus restoration already follows: hand
-          // it to the control that now works, and only if the banner still had
-          // it (never steal focus the user has already moved).
-          if (banner && !banner.hidden) {
-            banner.hidden = true;
-            if (retry) {
-              var horn = document.querySelector('.horn');
-              if (document.activeElement === retry && horn) horn.focus();
-              else retry.blur();
-            }
-          }
-        };
-
-        // Fast path: the module element fires `error` when its fetch fails
-        // (blocked) or its source fails to compile (corrupt cache body).
-        var moduleScript = document.querySelector('script[type=module]');
-        if (moduleScript) moduleScript.addEventListener('error', show);
-
-        // Slow path, for a hung fetch that fires neither `error` nor `load`:
-        // arm on load - the module always boots before load when it runs -
-        // with a short grace, plus a hard backstop measured from parse. The
-        // backstop is effectively ~14s: the timer calls arm() at 12s and arm
-        // schedules the reveal 2s later.
-        var armed = false;
-        function arm() {
-          if (armed || booted) return;
-          armed = true;
-          setTimeout(show, 2000);
-        }
-        window.addEventListener('load', arm);
-        backstop = setTimeout(arm, 12000);
-
-        if (retry) retry.addEventListener('click', function () { window.location.reload(); });
-
-        // The one polite voice (see #app-status above). Intentionally no
-        // timers: a message stays until the next one replaces it, so a
-        // healthy page schedules nothing and reads as quiescent.
-        var statusRegion = document.getElementById('app-status');
-        window.__airhornAnnounce = function (message) {
-          if (statusRegion) statusRegion.textContent = message;
-        };
-      })();
-    </script>
-    <script>
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(reg => {
-          reg.addEventListener('updatefound', () => {
-            const newWorker = reg.installing;
-            if (newWorker) {
-              // At updatefound the worker is already 'installing', so that
-              // state never reaches the statechange listener below (airhorn-
-              // d5q): announce the update now, not from a branch that cannot
-              // run.
-              if (navigator.serviceWorker.controller) {
-                window.__airhornAnnounce?.('Updating the Air Horner to a new version...');
-              }
-              // 'redundant' means this worker was replaced or dropped; only a
-              // worker that never reached 'installed' is a lost upgrade. A
-              // replaced worker - like the current controller superseded by
-              // the next update - fires 'redundant' on every SUCCESSFUL
-              // update, and announcing failure there lied on the happy path
-              // (airhorn-swq).
-              let reachedInstalled = false;
-              newWorker.addEventListener('statechange', () => {
-                // Update notices (airhorn-8nz): only when an update arrives
-                // over an existing controller - a first install is silent.
-                // The message is transient by design: with a controller the
-                // page reloads itself via controllerchange right after;
-                // mechanics (skipWaiting + reload) are unchanged.
-                if (newWorker.state === 'installed') {
-                  // Record the transition for every worker: a first-install
-                  // worker reaches 'installed' without a controller, and it
-                  // is exactly that worker whose later 'redundant' must stay
-                  // silent (airhorn-swq). Only the ANNOUNCE is gated on an
-                  // update context.
-                  reachedInstalled = true;
-                  if (navigator.serviceWorker.controller) {
-                    window.__airhornAnnounce?.('A new version is ready - reloading...');
-                    // This tab has now said why it is about to reload; the
-                    // controllerchange handler below must not say it a
-                    // second time (airhorn-56j).
-                    announcedReady = true;
-                    newWorker.postMessage('skipWaiting');
-                  }
-                } else if (newWorker.state === 'redundant' && !reachedInstalled && navigator.serviceWorker.controller) {
-                  // The upgrade was dropped - a denied cache write during precache is the
-                  // common cause. Say so: silently staying on the previous build is the
-                  // failure the user cannot see (airhorn-nv9). Through the one polite
-                  // voice (airhorn-8nz), not a second channel.
-                  window.__airhornAnnounce?.('The app could not update - you are still on the previous version.');
-                }
-              });
-            }
-          });
-        });
-
-        const hadController = !!navigator.serviceWorker.controller;
-        let announcedReady = false;
-        let refreshing = false;
-        navigator.serviceWorker.addEventListener('controllerchange', () => {
-          if (hadController && !refreshing) {
-            refreshing = true;
-            // A tab that opened mid-install never saw updatefound, so nothing
-            // has told it why the page is about to reload on its own
-            // (airhorn-56j). The tab that reloads says why - and only once:
-            // a tab that announced the ready line above stays silent here.
-            if (!announcedReady) {
-              window.__airhornAnnounce?.('A new version is ready - reloading...');
-            }
-            window.location.reload();
-          }
-        });
-      }
-    </script>
+    <!-- Boot watchdog: external so the policy can stay script-src
+         'self' (airhorn-xnd1). Classic and non-async on purpose - it runs
+         during body parse, before the deferred module executes, which is
+         the ordering its module-error listener depends on. Do not make it
+         a module and do not defer it. -->
+    <script src='/boot-watchdog.js'></script>
+    <!-- Service worker registration, update notices and the one polite
+         announcer (window.__airhornAnnounce): external so the policy can
+         stay script-src 'self' (airhorn-xnd1). Same position and same
+         classic, non-async ordering as the inline block it replaces. -->
+    <script src='/sw-register.js'></script>
   </body>
 </html>

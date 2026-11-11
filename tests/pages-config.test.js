@@ -240,8 +240,9 @@ test('the no-secret path fails by name, before anything is built or deployed', (
 
 test('public/_headers carries the five no-risk security headers verbatim (airhorn-kv7m)', () => {
   // The deployed origin serves none of these; Cloudflare Pages applies public/_headers
-  // to every response once the Pages deploy is the live origin. The CSP is deliberately
-  // absent (two inline scripts + one inline style would break under script-src 'self').
+  // to every response once the Pages deploy is the live origin. The CSP now ships
+  // beside them (airhorn-xnd1) and is pinned, value and hash, by tests/csp.test.js -
+  // one owner for the policy, so it is not restated here.
   const headers = fs.readFileSync(path.join(root, 'public', '_headers'), 'utf8');
   for (const line of [
     'Strict-Transport-Security: max-age=63072000; includeSubDomains; preload',
@@ -252,8 +253,8 @@ test('public/_headers carries the five no-risk security headers verbatim (airhor
   ]) {
     assert.ok(headers.includes(line), `public/_headers must carry: ${line}`);
   }
-  assert.ok(!/^\s*Content-Security-Policy:/m.test(headers),
-    'CSP must NOT ship in this file until the inline-script decision lands (boot watchdog + SW registration are inline by design)');
+  assert.match(headers, /^\s*Content-Security-Policy:/m,
+    'the CSP must ship from public/_headers now that the inline content is external (airhorn-xnd1); tests/csp.test.js pins it');
   // And the file must reach the artifact: Vite copies publicDir verbatim into dist/.
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.ok(!pkg.vite || !pkg.vite.publicDir || pkg.vite.publicDir === 'public',

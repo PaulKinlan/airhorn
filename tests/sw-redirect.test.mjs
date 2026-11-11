@@ -33,6 +33,24 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SW_SOURCE = fs.readFileSync(path.join(root, 'public', 'sw.js'), 'utf8');
 const ORIGIN = 'http://127.0.0.1:8080';
 
+// The worker's statically precached paths, read from the SHIPPED worker rather
+// than copied here (airhorn-xnd1). A built worker REFUSES a statically precached
+// path its manifest does not cover (airhorn-lu8a, pinned below), so every case
+// that injects a manifest must cover all of these - and deriving the list means
+// the page growing a file does not turn this suite red for the wrong reason.
+const STATIC_PRECACHE = (() => {
+  const list = SW_SOURCE.match(/const precacheUrls = \[([\s\S]*?)\];/)?.[1];
+  assert.ok(list, 'could not read precacheUrls from public/sw.js: the worker changed shape');
+  const stripped = list.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  return [...stripped.matchAll(/[`'"](\/[^`'"]*)[`'"]/g)].map((match) => match[1]);
+})();
+
+/** A build manifest that covers every static precache path; `overrides` wins. */
+const manifestFor = (overrides = {}) => ({
+  ...Object.fromEntries(STATIC_PRECACHE.map((p) => [p, crypto.createHash('sha256').update(`good ${p}`).digest('hex')])),
+  ...overrides,
+});
+
 // A Map-backed Cache. put/match/delete/keys are all the worker uses, and the
 // key is the pathname because every request the worker builds is same-origin.
 function fakeCache(name) {
@@ -225,8 +243,16 @@ test('putVerified refuses a redirected response for the SAME pathname, named, an
   // precache survives a worker that never activated).
   const content = worker.instances.find((c) => c.name === 'airhorner-__BUILD_HASH__');
   assert.ok(content, 'precache opened the content cache');
-  assert.deepEqual(content.writes, ['/', '/index.html', '/styles/main.css'],
-    'the same-URL entries before the redirect store, and the redirected one does not');
+  // Every static entry BEFORE the refused one was stored, and the refused one was
+  // not. Read from the worker's own list rather than spelled out (airhorn-xnd1):
+  // the precache pool runs concurrently, so pinning the exact order of `writes`
+  // would pin the scheduler, not the behaviour.
+  const beforeRefused = STATIC_PRECACHE.slice(0, STATIC_PRECACHE.indexOf(MP3));
+  for (const pathname of beforeRefused) {
+    assert.ok(content.writes.includes(pathname),
+      `${pathname} precedes the refused URL and must have been stored; writes: ${JSON.stringify(content.writes)}`);
+  }
+  assert.ok(!content.writes.includes(MP3), 'the redirected body must not be stored under the requested path');
   const meta = worker.instances.find((c) => c.name === 'horn-integrity-__BUILD_HASH__');
   assert.equal(meta?.writes.includes(MP3) ?? false, false, 'no integrity record may be written for a redirected body');
   assert.equal(worker.caches.has('airhorner-__BUILD_HASH__'), false,
@@ -414,11 +440,7 @@ test('integrity baseline: a first fetch that disagrees with the build is refused
   const POISON = 'POISONED-BYTES';
   const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
   // The build says every precache URL is the good bytes; the network serves poison for one of them.
-  const honest = '/sounds/airhorn.mp3';
-  const digests = {};
-  for (const url of ['/', '/index.html', '/styles/main.css', honest]) digests[url] = sha(`good ${url}`);
-  digests[honest] = sha('good /sounds/airhorn.mp3');
-  digests['/styles/main.css'] = sha('DEFINITELY-NOT-THE-SERVED-CSS');
+  const digests = manifestFor({ '/styles/main.css': sha('DEFINITELY-NOT-THE-SERVED-CSS') });
   const worker = loadWorker({
     digests,
     fetchImpl: async (req) => {
@@ -443,8 +465,7 @@ test('integrity baseline: a first fetch that disagrees with the build is refused
 
 test('integrity baseline: bytes that DO match the build still install and record (airhorn-oybq)', async () => {
   const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
-  const urls = ['/', '/index.html', '/styles/main.css', '/sounds/airhorn.mp3'];
-  const digests = Object.fromEntries(urls.map((u) => [u, sha(`good ${u}`)]));
+  const digests = manifestFor();
   const worker = loadWorker({
     digests,
     fetchImpl: async (req) => {
@@ -548,8 +569,7 @@ test('integrity record: an UNVERIFIED baseline is labelled tofu, not left lookin
  */
 test('runtime re-store: after an eviction, bytes that disagree with the build are NOT cached or recorded (airhorn-5km4)', async () => {
   const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
-  const urls = ['/', '/index.html', '/styles/main.css', '/sounds/airhorn.mp3'];
-  const digests = Object.fromEntries(urls.map((u) => [u, sha(`good ${u}`)]));
+  const digests = manifestFor();
   const POISON = 'POISONED-CSS';
   let servePoison = false;
   const worker = loadWorker({
@@ -608,9 +628,7 @@ test('provenance: a bound hashed asset and a bound runtime re-store are labelled
   const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
   const ASSET = '/assets/app-abc123.js';
   const HTML = '<script type="module" src="/assets/app-abc123.js"></script>';
-  const urls = ['/', '/styles/main.css', '/sounds/airhorn.mp3', ASSET];
-  const digests = Object.fromEntries(urls.map((u) => [u, sha(`good ${u}`)]));
-  digests['/index.html'] = sha(HTML);
+  const digests = manifestFor({ [ASSET]: sha(`good ${ASSET}`), '/index.html': sha(HTML) });
   const worker = loadWorker({
     digests,
     fetchImpl: async (req) => {
@@ -653,12 +671,7 @@ test('manifest covers both shell spellings, so a poisoned /index.html cannot ins
   const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
   const HTML = 'the one document, under two spellings';
   // A real build's manifest now carries both keys; the network poisons the NON-canonical spelling.
-  const digests = {
-    '/': sha(HTML),
-    '/index.html': sha(HTML),
-    '/styles/main.css': sha('good /styles/main.css'),
-    '/sounds/airhorn.mp3': sha('good /sounds/airhorn.mp3'),
-  };
+  const digests = manifestFor({ '/': sha(HTML), '/index.html': sha(HTML) });
   const worker = loadWorker({
     digests,
     fetchImpl: async (req) => {
@@ -685,12 +698,11 @@ test('a BUILT worker REFUSES a statically precached path the manifest does not c
   // must fail by name. Silently recording TOFU for a static path is precisely how lu8a went unnoticed - the record looked
   // fine and the gap was in what the manifest omitted.
   const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
-  const digests = {
-    '/': sha('doc'),
-    '/styles/main.css': sha('good /styles/main.css'),
-    '/sounds/airhorn.mp3': sha('good /sounds/airhorn.mp3'),
-    // '/index.html' deliberately missing, which is exactly the real build's behaviour before this fix.
-  };
+  const digests = manifestFor({ '/': sha('doc') });
+  // '/index.html' deliberately missing, which is exactly the real build's
+  // behaviour before this fix - and the ONLY gap, so the refusal names lu8a's
+  // path rather than some other uncovered entry.
+  delete digests['/index.html'];
   const worker = loadWorker({ digests, fetchImpl: async (req) => sameUrlResponse(ORIGIN + new URL(typeof req === 'string' ? req : req.url, ORIGIN).pathname, 'doc') });
   let waited;
   for (const listener of worker.listeners.install) listener({ waitUntil: (promise) => { waited = promise; } });

@@ -100,16 +100,18 @@ function readHostname(): string {
  * tests/health.test.mjs compares the served responses against that file, so the two cannot
  * drift apart.
  *
- * The CSP is deliberately NOT here, exactly as it is not in _headers: index.html carries two
- * deliberate inline scripts (the boot watchdog and the SW registration) plus an inline
- * critical stylesheet, so script-src 'self' would break the boot. It arrives with
- * airhorn-xnd1, and the parity test will demand it here on the same day it lands there. */
+ * The CSP is here because it is in _headers (airhorn-xnd1): the two inline scripts became
+ * public/boot-watchdog.js and public/sw-register.js, the sheet link's inline handlers became
+ * public/async-css.js, and the one remaining inline <style> is allowed by its sha256. The
+ * parity test compares every value against public/_headers, so this copy cannot drift from the
+ * Pages one - and if the style hash changes, that test is what says so. */
 const POLICY_HEADERS: Record<string, string> = {
   "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
   "x-content-type-options": "nosniff",
   "referrer-policy": "strict-origin-when-cross-origin",
   "permissions-policy": "geolocation=(), camera=(), microphone=(), payment=(), usb=()",
   "x-frame-options": "DENY",
+  "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'sha256-SzoBGjTyngQ/zkIpaFY/vwl8+X1140qzc/vw8t+tq5g='; img-src 'self' data:; media-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'",
 };
 
 const [version, commit] = await Promise.all([resolveVersion(), resolveCommit()]);

@@ -302,8 +302,10 @@ test('HEAD answers like GET (empty body), other methods get 405, and the app sti
  * Pages origin gets from public/_headers (airhorn-kv7m). The fix is a constant in server.ts,
  * so the pin that matters is PARITY: every header public/_headers declares must come back on
  * the wire from this server, with the same value, on both a static file and /health. Parsing
- * the file rather than restating its values means the CSP (airhorn-xnd1) cannot land in
- * _headers and be forgotten here: on that day this test starts demanding it from server.ts. */
+ * the file rather than restating its values means the CSP (airhorn-xnd1) could not land in
+ * _headers and be forgotten here - it did land, and this test is what made server.ts carry it
+ * (the absence assertion that used to sit below flipped with the same commit, exactly as
+ * tests/pages-config.test.js's kv7m one did). */
 test('the self-host origin sends exactly the policy headers public/_headers declares', async (t) => {
   if (!deno) return t.skip('deno is not installed on this machine; the headers are served by server.ts');
   const { parsePagesHeaders } = await import('../tools/lib/static-server.mjs');
@@ -322,8 +324,6 @@ test('the self-host origin sends exactly the policy headers public/_headers decl
         assert.equal(res.headers.get(name), value,
           `${label} must send ${name}: ${value} exactly as public/_headers does (airhorn-bs19)`);
       }
-      assert.equal(res.headers.get('content-security-policy'), null,
-        'the CSP is a documented deferral (airhorn-xnd1) and must stay absent from both origins until then');
     }
 
     // A 404 from the static path is still a response from this server: the policy must not
