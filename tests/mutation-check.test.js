@@ -1032,9 +1032,11 @@ test('no gate surface invokes mutation-check as a harness (airhorn-zach)', () =>
   for (const line of map.split('\n')) {
     if (/^\s*#/.test(line) || !line.trim()) continue;
     const cells = line.split('\t');
-    // airhorn-vqgp: normalise the './' spelling - an exact match let './tools/...' bypass.
-    const tokens = cells.slice(1).join(' ').split(/\s+/).map((t) => t.replace(/^\.\//, ''));
+    // airhorn-vqgp + airhorn-huud: compare PATH-NORMALISED tokens - exact match let
+    // './tools/...' bypass, and stripping one './' still let './/' and 'tests/../tools/...'
+    // through. path.posix.normalize resolves the whole resolve-but-string-differs class.
+    const tokens = cells.slice(1).join(' ').split(/\s+/).map((t) => path.posix.normalize(t));
     assert.ok(!tokens.includes('tools/mutation-check.mjs'),
-      `the tool must never be a map's SUITE column (right-hand side): ${line}`);
+      `the tool must never be a map's SUITE column (right-hand side, any spelling): ${line}`);
   }
 });
