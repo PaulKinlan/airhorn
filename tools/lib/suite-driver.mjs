@@ -170,7 +170,7 @@ if (!suite) {
     record({
       importFailed,
       ...(importFailed ? { reason: `the suite file failed to load or threw before registering a test (${how})` } : {}),
-      ...(crashedOutsideTest ? { crashedOutsideTest: true, reason: `the suite run failed outside its tests and ${how}${(childReport.realFailed || 0) > 0 ? ' (a test was in flight when it failed, which is not the same as a test asserting about the mutant)' : ''}, so NO test asserted anything about the mutant` } : {}),
+      ...(crashedOutsideTest ? { crashedOutsideTest: true, reason: `the suite run failed outside its tests and ${how}${(childReport.realFailed || 0) > 0 ? ' (a test was in flight when it failed, which is not the same as a test asserting about the mutant)' : ''}` } : {}),
       childReport,
     });
   }
