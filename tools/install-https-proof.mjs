@@ -336,6 +336,21 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
     const cy = rect.top + rect.height / 2;
     const topAtCentre = rect.width > 0 && rect.height > 0
       ? (document.elementsFromPoint(cx, cy)[0] || null) : null;
+    // airhorn-iqrz (gap 1): opacity is NOT inherited, so the button's own computed opacity
+    // stays '1' under a parent whose opacity is 0 - and the app hides #installer with
+    // exactly that property one level up. Multiply the ANCESTOR chain above the button:
+    // the product is the subtree's real paint alpha (one zero zeroes the whole subtree).
+    let ancestorProduct = 1;
+    for (let n = b.parentElement; n; n = n.parentElement) {
+      ancestorProduct *= Number(getComputedStyle(n).opacity);
+      if (ancestorProduct === 0) break;
+    }
+    // airhorn-iqrz (gap 2): coveredBy below answers 'an overlay covers the centre', but it
+    // conflates 'the button itself was hit' with 'NOTHING was hit' - both leave it null
+    // (measured: a wrap shrunk by .visually-hidden empties elementsFromPoint at the
+    // button's centre while its own rect still claims 75x40). Record the boolean
+    // separately so the verdict can name the empty-hit case instead of passing it.
+    const hitIsButtonOrChild = !!topAtCentre && (topAtCentre === b || b.contains(topAtCentre));
     return {
       disabled: b.disabled,
       hasAvailableClass: wrap.classList.contains('available'),
@@ -344,12 +359,14 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
       pointerEvents: cs.pointerEvents,
       rect: { width: rect.width, height: rect.height },
       opacity: cs.opacity,
+      ancestorOpacity: String(ancestorProduct),
       filter: cs.filter,
       color: cs.color,
       backgroundColor: cs.backgroundColor,
       borderColor: cs.borderColor,
       coveredBy: topAtCentre && topAtCentre !== b && !b.contains(topAtCentre)
         ? (topAtCentre.id ? '#' + topAtCentre.id : topAtCentre.tagName.toLowerCase()) : null,
+      hitIsButtonOrChild,
       text: b.textContent.trim(),
     };
   })()`);
@@ -505,10 +522,13 @@ export function classifyPaintAlpha(c) {
 /* airhorn-0u67: what this proof owes is 'the user could see and click it'. The enumeration
  * below is the contract, one clause per way a laid-out button is not an affordance; each is
  * pinned BY NAME in tests/test-support.test.js. Known limits (recorded in
- * docs/runbooks/EVIDENCE-LIMITS.md): clip-path shaping, mix-blend-mode, an offscreen-but-
- * scrollable rect, and aria-hidden are not consulted - the first two are paint trickery the
- * screenshot exists to catch by eye, the third is a layout fact the rect alone cannot judge,
- * the fourth is an AT contract, not a visual one. */
+ * docs/runbooks/EVIDENCE-LIMITS.md): mix-blend-mode, an offscreen-but-
+ * scrollable rect, and aria-hidden are not consulted - the first is paint trickery the
+ * screenshot exists to catch by eye, the second is a layout fact the rect alone cannot judge,
+ * the third is an AT contract, not a visual one. airhorn-iqrz closed the two gaps that
+ * remained: an ANCESTOR's opacity (read as the product of the chain above the button) and a
+ * centre hit-test that comes back EMPTY (a clip/shrink that removes the button from hit
+ * testing while its rect still claims a box). */
 export function affordanceProblem(btn) {
   if (btn.display === 'none') return 'display is none, so nothing is painted';
   if (btn.visibility !== 'visible') return `visibility is ${btn.visibility}`;
@@ -519,6 +539,14 @@ export function affordanceProblem(btn) {
   }
   // Paint-level invisibility: a laid-out, clickable box that paints NOTHING.
   if (btn.opacity !== undefined && Number(btn.opacity) === 0) return 'opacity is 0, so nothing is painted';
+  // airhorn-iqrz: opacity is not inherited, so the clause above cannot see an ancestor that
+  // fades the whole subtree - the app hides #installer with exactly that property one level
+  // up. The collector multiplies the chain above the button; at or below the same 0.05
+  // floor resilience-audit.mjs treats as invisible, nothing of the button meaningfully
+  // shows, so this is the opacity-0 defect by another road.
+  if (btn.ancestorOpacity !== undefined && Number(btn.ancestorOpacity) <= 0.05) {
+    return `an ancestor's opacity is ${btn.ancestorOpacity}, so the button's whole subtree paints (almost) nothing`;
+  }
   if (typeof btn.filter === 'string' && /\bopacity\(0(\.0+)?\)/.test(btn.filter)) {
     return `filter zeroes the opacity ('${btn.filter}') - checkVisibility does not consult filters`;
   }
@@ -537,6 +565,13 @@ export function affordanceProblem(btn) {
     }
   }
   if (btn.coveredBy) return `covered at its centre by ${btn.coveredBy} - a click would hit the overlay, not the button`;
+  // airhorn-iqrz: the other way a centre hit-test says 'not an affordance' is when NOTHING
+  // is hittable there. The collector's coveredBy cannot express that (it is null both when
+  // the button was hit and when the stack was empty), so it rides on this boolean - strict
+  // === false so legacy evidence without the field still passes.
+  if (btn.hitIsButtonOrChild === false) {
+    return `nothing is hittable at the button's centre (rect ${JSON.stringify(btn.rect || {})} claims a box there, but the engine returns no hit target) - clipped, shrunk or moved away, not an affordance`;
+  }
   return null;
 }
 
