@@ -687,6 +687,35 @@ test('install-https-proof asserts the Install button, not just the prompt (airho
     /the contrast is invalid/, 'if the prompt fired over HTTP the contrast measured nothing');
 });
 
+test('install-https-proof refuses paint-level invisibility and coverage, by name (airhorn-0u67)', async () => {
+  // The enumeration is the contract: every way a laid-out, clickable button is not an
+  // affordance, each with its expected verdict. Driven as data so a dropped clause fails
+  // BY NAME, and so the reviewer can see the whole table at once.
+  const { affordanceProblem } = await import(`${pathToFileURL(INSTALL_TOOL).href}?0u67=${Date.now()}`);
+  const healthy = { disabled: false, hasAvailableClass: true, display: 'block', visibility: 'visible',
+    pointerEvents: 'auto', rect: { width: 120, height: 40 }, opacity: '1', filter: 'none',
+    color: 'rgb(0, 0, 0)', backgroundColor: 'rgb(255, 255, 255)', borderColor: 'rgb(0, 0, 0)', coveredBy: null };
+  const TABLE = [
+    ['healthy control', {}, null],
+    ['opacity: 0 paints nothing', { opacity: '0' }, /opacity is 0/],
+    ['filter zeroes opacity (the bead\'s repro)', { filter: 'opacity(0)' }, /filter zeroes the opacity/],
+    ['filter: opacity(0.0) is the same trick', { filter: 'opacity(0.0)' }, /filter zeroes the opacity/],
+    ['a real filter is fine', { filter: 'blur(2px)' }, null],
+    ['fully transparent paint', { color: 'rgba(0, 0, 0, 0)', backgroundColor: 'rgba(0, 0, 0, 0)', borderColor: 'rgba(0, 0, 0, 0)' }, /nothing to see/],
+    ['ONE opaque channel still paints', { color: 'rgba(0, 0, 0, 0)', backgroundColor: 'rgb(255, 255, 255)', borderColor: 'rgba(0, 0, 0, 0)' }, null],
+    ['covered at the centre by an overlay', { coveredBy: '#consent' }, /covered at its centre by #consent/],
+    ['legacy evidence without paint fields still passes (no regression)', { opacity: undefined, filter: undefined, color: undefined, backgroundColor: undefined, borderColor: undefined, coveredBy: undefined }, null],
+  ];
+  for (const [name, over, expected] of TABLE) {
+    const problem = affordanceProblem({ ...healthy, ...over });
+    if (expected === null) {
+      assert.equal(problem, null, `${name}: must PASS (got '${problem}')`);
+    } else {
+      assert.match(String(problem), expected, `${name} must fail by name`);
+    }
+  }
+});
+
 test('an unreadable /proc/stat is UNKNOWN, and UNKNOWN refuses the launch (airhorn-w1wh review)', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w1wh-stat-'));
   const stat = path.join(dir, 'stat');

@@ -328,6 +328,14 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
     // read as fine. The rect is the only evidence that the thing would actually be painted where a user can hit it.
     const cs = getComputedStyle(b);
     const rect = b.getBoundingClientRect();
+    // airhorn-0u67: paint-level evidence. The style properties above answer 'laid out and
+    // clickable'; they say nothing about whether anything is PAINTED (opacity 0, a filter
+    // that zeroes opacity, fully transparent colour) or whether the button is what a click
+    // at its centre would actually hit (an overlay). Collect those too.
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const topAtCentre = rect.width > 0 && rect.height > 0
+      ? (document.elementsFromPoint(cx, cy)[0] || null) : null;
     return {
       disabled: b.disabled,
       hasAvailableClass: wrap.classList.contains('available'),
@@ -335,6 +343,13 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
       visibility: cs.visibility,
       pointerEvents: cs.pointerEvents,
       rect: { width: rect.width, height: rect.height },
+      opacity: cs.opacity,
+      filter: cs.filter,
+      color: cs.color,
+      backgroundColor: cs.backgroundColor,
+      borderColor: cs.borderColor,
+      coveredBy: topAtCentre && topAtCentre !== b && !b.contains(topAtCentre)
+        ? (topAtCentre.id ? '#' + topAtCentre.id : topAtCentre.tagName.toLowerCase()) : null,
       text: b.textContent.trim(),
     };
   })()`);
@@ -456,6 +471,13 @@ async function main() {
  * property notices that the element has no painted box at all. Both legs use this one function so the two halves of
  * the contrast cannot drift into asking different questions again.
  */
+/* airhorn-0u67: what this proof owes is 'the user could see and click it'. The enumeration
+ * below is the contract, one clause per way a laid-out button is not an affordance; each is
+ * pinned BY NAME in tests/test-support.test.js. Known limits (recorded in
+ * docs/runbooks/EVIDENCE-LIMITS.md): clip-path shaping, mix-blend-mode, an offscreen-but-
+ * scrollable rect, and aria-hidden are not consulted - the first two are paint trickery the
+ * screenshot exists to catch by eye, the third is a layout fact the rect alone cannot judge,
+ * the fourth is an AT contract, not a visual one. */
 export function affordanceProblem(btn) {
   if (btn.display === 'none') return 'display is none, so nothing is painted';
   if (btn.visibility !== 'visible') return `visibility is ${btn.visibility}`;
@@ -464,6 +486,16 @@ export function affordanceProblem(btn) {
   if (!(Number(rect.width) > 0 && Number(rect.height) > 0)) {
     return `it has no painted box (rect ${JSON.stringify(rect)}) - zero pixels cannot be clicked`;
   }
+  // Paint-level invisibility: a laid-out, clickable box that paints NOTHING.
+  if (btn.opacity !== undefined && Number(btn.opacity) === 0) return 'opacity is 0, so nothing is painted';
+  if (typeof btn.filter === 'string' && /\bopacity\(0(\.0+)?\)/.test(btn.filter)) {
+    return `filter zeroes the opacity ('${btn.filter}') - checkVisibility does not consult filters`;
+  }
+  const transparent = (c) => typeof c === 'string' && /rgba\([^)]*,\s*0\s*\)$/.test(c) || c === 'transparent';
+  if ([btn.color, btn.backgroundColor, btn.borderColor].every((c) => c !== undefined && transparent(c))) {
+    return 'colour, background and border are all fully transparent - there is nothing to see';
+  }
+  if (btn.coveredBy) return `covered at its centre by ${btn.coveredBy} - a click would hit the overlay, not the button`;
   return null;
 }
 

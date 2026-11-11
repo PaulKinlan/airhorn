@@ -20,6 +20,11 @@ All automated test passes and performance benchmarks in this repository were pro
 - **What Closes the Gap:** Deploy `dist/` to a public staging origin with a trusted certificate (Cloudflare Pages or Firebase) and verify installation on a physical Android phone.
 - **Estimated Cost:** ~1 hour setup; $0 (free-tier static hosting).
 
+## 3a. Install Button Perceptibility: Property Clauses vs Arbitrary Paint Trickery
+
+- **What the proof checks (airhorn-0u67):** layout (`display`, `visibility`, rect size), click-through (`pointer-events`, coverage at the rect's centre via `elementsFromPoint`), and paint (`opacity`, `filter: opacity(0)`, fully transparent colour/background/border) - each a named clause in `affordanceProblem`, pinned as a data table in `tests/test-support.test.js`.
+- **What it does NOT check:** `clip-path` shaping, `mix-blend-mode`, an offscreen-but-scrollable rect (the rect alone cannot judge reachability), and `aria-hidden` (an AT contract, not a visual one). The per-origin screenshot the tool already captures is the residual eyeball for those.
+
 ## 4. Performance: Emulated Mobile and Desktop Headless vs Physical Mid-Tier Mobile
 - **The Gap:** Two different setups produced the performance numbers in this repository, and they are not comparable:
   - The `airhorn-df1` campaign numbers (median first paint ~1.4-1.7 s across the recorded runs, INP 144 ms cold / 56 ms warm) came from an ad-hoc CDP setup used by that campaign: Slow 4G (1.6 Mbps down / 150 ms RTT), 4x CPU throttling, a 412x915 @2.625 DPR mobile+touch viewport, a fresh isolated browser context per run, against `vite preview` on loopback.
