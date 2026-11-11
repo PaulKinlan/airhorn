@@ -1423,15 +1423,17 @@ test('perf-metrics: an absent LCP is unmeasured, and the run says so instead of 
   assert.equal(isMeasured(8204), true);
 
   const measuredRun = [
-    { label: 'cold load', metrics: { lcp: 820, lcpEntriesCount: 1, cls: 0, rawEvents: [] } },
-    { label: 'repeat load', metrics: { lcp: 610, lcpEntriesCount: 1, cls: 0, rawEvents: [] } },
+    // fp/paintEntries belong to the printed row (airhorn-nxuv.30): First Paint is one of the
+    // metrics this report claims, so a fully measured run pins it too.
+    { label: 'cold load', metrics: { fp: 120, paintEntries: 2, lcp: 820, lcpEntriesCount: 1, cls: 0, rawEvents: [] } },
+    { label: 'repeat load', metrics: { fp: 90, paintEntries: 2, lcp: 610, lcpEntriesCount: 1, cls: 0, rawEvents: [] } },
   ];
   assert.deepEqual(unmeasured(measuredRun), [], 'a fully measured run reports nothing');
   assert.equal(measurementExitCode(unmeasured(measuredRun)), 0);
 
   const starvedRun = [
-    { label: 'cold load', metrics: { lcp: null, lcpEntriesCount: 0, cls: 0, rawEvents: [] } },
-    { label: 'repeat load', metrics: { lcp: null, lcpEntriesCount: 0, cls: 0, rawEvents: [] } },
+    { label: 'cold load', metrics: { fp: 120, paintEntries: 2, lcp: null, lcpEntriesCount: 0, cls: 0, rawEvents: [] } },
+    { label: 'repeat load', metrics: { fp: 120, paintEntries: 2, lcp: null, lcpEntriesCount: 0, cls: 0, rawEvents: [] } },
   ];
   const findings = unmeasured(starvedRun);
   assert.equal(findings.length, 2, 'one finding per load, so an operator can see which run failed to paint');
@@ -1439,13 +1441,13 @@ test('perf-metrics: an absent LCP is unmeasured, and the run says so instead of 
   assert.equal(measurementExitCode(findings), 2, 'unmeasured exits 2 - distinct from 1, which means the harness crashed');
 
   // CLS of 0 is a real measurement (a page with no layout shift), not an absent one.
-  const noShift = [{ label: 'cold load', metrics: { lcp: 800, lcpEntriesCount: 1, cls: 0, rawEvents: [] } }];
+  const noShift = [{ label: 'cold load', metrics: { fp: 120, paintEntries: 2, lcp: 800, lcpEntriesCount: 1, cls: 0, rawEvents: [] } }];
   assert.deepEqual(unmeasured(noShift), []);
 
   // A missing metrics object and a missing event buffer are named, never thrown on.
   const broken = unmeasured([
     { label: 'cold load', metrics: null },
-    { label: 'repeat load', metrics: { lcp: 500, lcpEntriesCount: 1, cls: 0 } },
+    { label: 'repeat load', metrics: { fp: 120, paintEntries: 2, lcp: 500, lcpEntriesCount: 1, cls: 0 } },
   ]);
   assert.match(broken.join(' | '), /cold load: no metrics object/);
   assert.match(broken.join(' | '), /repeat load: the interaction events for INP were not collected/);
