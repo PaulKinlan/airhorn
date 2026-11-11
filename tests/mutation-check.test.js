@@ -1207,6 +1207,46 @@ setTimeout(() => { throw new Error('honest crash outside a test'); }, 30);
   assert.match(run.stderr, /threw-outside-a-test/);
 });
 
+test('the EVENT stream is the suite self-report and cannot be authenticated: a forged v8 frame is caught, and that is a documented limit (airhorn-yvwo/86wl)', () => {
+  // Measured, and stated rather than papered over. node's test runner reads test events as
+  // v8-serializer frames on the WORKER stdout; the code under test runs in that worker, so it can
+  // write the frames itself and claim a failure that never happened. Nothing in this harness can
+  // tell those frames from node's own, so the design cannot authenticate "a test failed" - only the
+  // RECORD stream is authenticated. What defends the verdict is corroboration: --suite-old runs the
+  // same suite against the original file and a forgery fires there too, so it cannot prove a hole.
+  // This case pins BOTH halves so the claim can never quietly grow back.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-yvwo-'));
+  fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+  fs.writeFileSync(path.join(tmp, 'suite.test.js'), `
+import fs from 'node:fs';
+import v8 from 'node:v8';
+import { test } from 'node:test';
+// node's frame protocol: header, a 4-byte length, then the serialized value - this is the shape the
+// runner decodes from the worker stdout, reproduced here so the limit is measured against the real
+// protocol rather than a guess at it.
+const frame = (item) => {
+  const s = new v8.DefaultSerializer(); s.writeHeader(); const hl = s.releaseBuffer().length;
+  s.writeHeader(); s.writeRawBytes(Buffer.alloc(4)); s.writeHeader(); s.writeValue(item);
+  const b = s.releaseBuffer(); const len = b.length - (4 + hl);
+  b.set([(len >> 24) & 255, (len >> 16) & 255, (len >> 8) & 255, len & 255], hl); return b;
+};
+const data = { name: 'forged', nesting: 0, file: '/tmp/never-registered.test.js', testId: 999, line: 1, column: 1, details: { type: 'test', duration_ms: 1 } };
+fs.writeSync(1, frame({ type: 'test:start', data }));
+fs.writeSync(1, frame({ type: 'test:fail', data: { ...data, testNumber: 1 } }));
+test('passes and asserts nothing about the mutant', () => {});
+`);
+  const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+  assert.equal(run.status, 0,
+    `the forged frame IS counted as a failing test - this case exists so the limit is measured, not assumed - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  assert.match(run.stdout, /verdict: mutant-caught/);
+
+  // The defence: the SAME forger fails on the original file too, so --suite-old refuses to call the
+  // hole proven. That is what makes the limit survivable: a forged catch cannot be claimed as one.
+  const withOld = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js', '--suite-old', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+  assert.notEqual(withOld.status, 0, `a suite that fails on the ORIGINAL too must not be called hole-proven - rc=${withOld.status}\nstdout:\n${withOld.stdout}\nstderr:\n${withOld.stderr}`);
+});
+
 test('the tool prints its trust boundary, including the KNOWN-LIMIT it now carries (airhorn-p0dg, airhorn-14ht)', () => {
   // Printed and not just commented: an operator reading the output must be able to see where the line is.
   // The boundary itself changed with airhorn-14ht (two processes, quoted child bytes, a parent-owned fact
