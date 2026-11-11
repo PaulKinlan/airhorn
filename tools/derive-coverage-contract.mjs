@@ -573,8 +573,11 @@ export function importersOf(modulePath, { root = DEFAULT_ROOT, tsvText, except =
     let text;
     try {
       text = fs.readFileSync(path.join(root, suite), 'utf8');
-    } catch {
-      continue;
+    } catch (err) {
+      // A LISTED suite that cannot be read is a broken tree, not a skippable row (tools/ sweep row 4):
+      // the silent continue produced an @importers row that quietly dropped the suite, so the contract
+      // claimed coverage it never scanned - a green derivation with a hole in it.
+      throw new Error(`@importers scan of '${target}' could not read listed suite '${suite}': ${String((err && err.message) || err)} - a suite the map names must be readable, or the derivation reports coverage it never scanned`);
     }
     if (reference.test(codeOnly(text))) found.push(suite);
   }

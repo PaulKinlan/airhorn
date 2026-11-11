@@ -14,7 +14,8 @@ import {
   validateSuiteMap,
   globToRegex,
   globMatchesAny,
-  suiteFiles, normalizeSuiteToken
+  suiteFiles, normalizeSuiteToken,
+  importersOf,
 } from '../tools/derive-coverage-contract.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -519,4 +520,24 @@ test('the map validator refuses an escape-spelled path BY NAME (airhorn-huud)', 
   const escapes = violations.filter((v) => v.type === 'escape');
   assert.equal(escapes.length, 1, 'in-tree .. is a variant (normalises); only the true escape is refused: ' + JSON.stringify(violations));
   assert.match(escapes[0].message, /escapes the tree.*outside\.mjs/, 'the refusal names the escaping path');
+});
+
+test('an unreadable LISTED suite fails the @importers derivation, named (tools/ sweep row 4)', () => {
+  // The silent continue used to drop the suite from the row and report coverage it never scanned.
+  // The reachable shape is the walk finding the file (it exists and is regular) while the READ fails
+  // (a permission flip or a transient IO error), so that pair is injected directly in a temp root.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'imp-scan-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'tests'));
+    fs.writeFileSync(path.join(tmp, 'tests', 'unreadable.test.js'), '// present but unreadable\n');
+    fs.chmodSync(path.join(tmp, 'tests', 'unreadable.test.js'), 0o000);
+    const tsv = 'src/horn.js\ttests/unreadable.test.js\n';
+    assert.throws(
+      () => importersOf('src/horn.js', { root: tmp, tsvText: tsv }),
+      /could not read listed suite 'tests\/unreadable\.test\.js'/,
+      'an unreadable listed suite must fail the derivation naming it, not vanish from the scan');
+  } finally {
+    fs.chmodSync(path.join(tmp, 'tests', 'unreadable.test.js'), 0o600);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
