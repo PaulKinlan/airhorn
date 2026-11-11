@@ -124,3 +124,63 @@ test('MUTATION: the pre-airhorn-l2c3 fold reads an unread instrument as host con
   assert.equal(classifyPressTimeout(await mutantRead(absent)), 'dropped',
     'and an absent instrument takes the same wrong verdict');
 });
+
+// ---------------------------------------------------------------------------
+// airhorn-fl70: the WIRING, not just the rule.
+//
+// The cases above pin the three verdicts, but a suite can hold a correct
+// classifier and still retry every attempt - which was the defect itself: a
+// 3-attempt loop accepted ANY attempt as proof that the unstyled horn responds,
+// so an app that RECEIVED press 1 and ignored it passed on attempt 3, where the
+// pre-change single-press code could not pass it at all. These checks pin the
+// CALL SITE in resilience-ui Case 7: the timeout is classified by the shipped
+// guard (never by a collapsed length), every non-retryable verdict is decided
+// BEFORE the one retry line, the app's verdict names the product bug, and there
+// is exactly one retry line in the suite. Browser-free on purpose; the
+// end-to-end proof that an ignores-press-1 app reds on ATTEMPT 1 is the mutant
+// run recorded on airhorn-fl70.
+const suitePath = path.join(here, 'resilience-ui.test.mjs');
+
+const case7RetriesOnlyDropped = (source, label) => {
+  const needles = {
+    callSite: 'const shape = classifyPressTimeout(await readInputLog(evaluate))',
+    unreadable: "if (shape === 'unreadable')",
+    delivered: "if (shape === 'delivered-unpressed')",
+    retryLine: 'no pointer event reached the page (delivery dropped); retrying press',
+    productMsg: 'pointer events delivered but the horn stayed unpressed',
+  };
+  const at = {};
+  for (const [name, needle] of Object.entries(needles)) {
+    at[name] = source.indexOf(needle);
+    assert.ok(at[name] > 0, `${label}: the Case 7 shape this check exists for is not in the source (${name}) - `
+      + 'without every anchor this check silently passes for the wrong reason');
+  }
+  assert.ok(at.unreadable > at.callSite && at.delivered > at.callSite,
+    `${label}: the timeout must be classified with classifyPressTimeout(readInputLog(...)) BEFORE either verdict is taken`);
+  assert.ok(at.unreadable < at.retryLine && at.delivered < at.retryLine,
+    `${label}: a broken instrument and an app-ignored press must both be refused BEFORE the retry line - `
+    + 'a retry reachable from either lets an app that ignores a trusted press pass on a later attempt (airhorn-fl70)');
+  assert.ok(at.productMsg > at.delivered,
+    `${label}: the delivered-unpressed branch must name the product bug it is refusing`);
+  assert.equal((source.match(/retrying press/g) || []).length, 1,
+    `${label}: Case 7 must have exactly one retry line, on the dropped-delivery path only`);
+};
+
+test('resilience-ui Case 7 may retry ONLY a dropped press (airhorn-fl70)', () => {
+  case7RetriesOnlyDropped(fs.readFileSync(suitePath, 'utf8'), 'shipped');
+});
+
+test('MUTATION: with the delivered-unpressed refusal removed, the wiring check fails (airhorn-fl70)', () => {
+  // The pre-fl70 shape: delivered-but-unpressed falls through to the retry
+  // line. If this mutant ever passes the check above, the check has stopped
+  // testing the call site.
+  const source = fs.readFileSync(suitePath, 'utf8');
+  const refusal = /\s*if \(shape === 'delivered-unpressed'\) \{\n\s*throw new Error\(`unstyled horn failed[\s\S]*?\n\s*\}/;
+  assert.match(source, refusal,
+    'the mutation anchor must still be the delivered-unpressed refusal: without it this check silently mutates nothing');
+  const mutant = source.replace(refusal, '\n        // MUTANT: delivered-but-unpressed falls through to the retry');
+  assert.notEqual(mutant, source, 'the mutation must actually differ from the shipped source');
+  assert.throws(() => case7RetriesOnlyDropped(mutant, 'mutant'),
+    /not in the source|must both be refused|name the product bug/,
+    'a blanket retry - the airhorn-fl70 defect - must be caught by the wiring check');
+});
