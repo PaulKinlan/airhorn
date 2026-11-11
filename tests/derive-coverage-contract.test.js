@@ -14,7 +14,7 @@ import {
   validateSuiteMap,
   globToRegex,
   globMatchesAny,
-  suiteFiles,
+  suiteFiles, normalizeSuiteToken
 } from '../tools/derive-coverage-contract.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -483,4 +483,27 @@ test('an unreadable DIRECTORY fails the suite scan naming it; a MISSING one is l
     fs.chmodSync(path.join(tmp, 'tests', 'nested'), 0o700);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+
+/* airhorn-huud: the ONE spelling rule. The enumeration table below is the DELIVERABLE -
+ * every spelling fs resolves to the same file normalises; every spelling that climbs out
+ * is refused. Pinned as data so a future 'simplification' of the normaliser fails by name. */
+test('normalizeSuiteToken: variants normalise, escapes refuse (airhorn-huud)', () => {
+  const VARIANTS = ['tools/x.mjs', './tools/x.mjs', './/tools/x.mjs', 'tools/./x.mjs', 'tools//x.mjs', 'tools/x.mjs/', 'tests/../tools/x.mjs'];
+  for (const v of VARIANTS) {
+    assert.deepEqual(normalizeSuiteToken(v), { path: 'tools/x.mjs' }, `${v} is a naming variant and must normalise`);
+  }
+  const ESCAPES = ['../tools/x.mjs', './../x.mjs', 'tools/../../etc/x', '..'];
+  for (const e of ESCAPES) {
+    assert.equal(normalizeSuiteToken(e).escape, true, `${e} climbs out of the tree and must be REFUSED, not normalised`);
+  }
+});
+
+test('the map validator refuses an escape-spelled path BY NAME (airhorn-huud)', () => {
+  const tsv = 'tests/../tools/real.mjs\ttests/real.test.js\n../outside.mjs\ttests/real.test.js\n';
+  const violations = validateSuiteMap(tsv, { existsFn: () => true });
+  const escapes = violations.filter((v) => v.type === 'escape');
+  assert.equal(escapes.length, 1, 'in-tree .. is a variant (normalises); only the true escape is refused: ' + JSON.stringify(violations));
+  assert.match(escapes[0].message, /escapes the tree.*outside\.mjs/, 'the refusal names the escaping path');
 });
