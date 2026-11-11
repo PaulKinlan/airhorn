@@ -498,6 +498,19 @@ test('normalizeSuiteToken: variants normalise, escapes refuse (airhorn-huud)', (
   for (const e of ESCAPES) {
     assert.equal(normalizeSuiteToken(e).escape, true, `${e} climbs out of the tree and must be REFUSED, not normalised`);
   }
+  // airhorn-eff1: absolute spellings are a third refused class - posix.normalize keeps them
+  // absolute, and the gate would run them via double-slash tolerance.
+  for (const a of ['/tools/x.mjs', '//tools/x.mjs']) {
+    assert.equal(normalizeSuiteToken(a).absolute, true, `${a} is absolute and must be REFUSED, not normalised`);
+  }
+});
+
+test('the map validator refuses an absolute-spelled path BY NAME (airhorn-eff1)', () => {
+  const tsv = '/tools/real.mjs\ttests/real.test.js\n';
+  const violations = validateSuiteMap(tsv, { existsFn: () => true });
+  const absolutes = violations.filter((v) => v.type === 'absolute');
+  assert.equal(absolutes.length, 1, 'the absolute spelling is refused: ' + JSON.stringify(violations));
+  assert.match(absolutes[0].message, /path is absolute.*real\.mjs/, 'the refusal names the path');
 });
 
 test('the map validator refuses an escape-spelled path BY NAME (airhorn-huud)', () => {

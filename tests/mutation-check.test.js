@@ -1038,9 +1038,13 @@ test('no gate surface invokes mutation-check as a harness (airhorn-zach)', () =>
     // refused by the validator (they can never name this tool, but they die loudly there).
     const tokens = cells.slice(1).join(' ').split(/\s+/).map((t) => {
       const n = normalizeSuiteToken(t);
-      return n.escape ? n.raw : n.path;
+      return (n.escape || n.absolute) ? n.raw : n.path;
     });
     assert.ok(!tokens.includes('tools/mutation-check.mjs'),
       `the tool must never be a map's SUITE column (right-hand side, any spelling): ${line}`);
+    // airhorn-eff1: an absolute spelling resolves for the gate (double-slash tolerance) -
+    // the pin fails on it directly; the validator also refuses it by name.
+    const absolutes = cells.slice(1).join(' ').split(/\s+/).filter((t) => t.startsWith('/'));
+    assert.deepEqual(absolutes, [], `absolute spellings are refused (airhorn-eff1): ${line}`);
   }
 });
