@@ -256,7 +256,7 @@ export function killRunTree(signal = 'SIGKILL') {
  * exactly how a hanging suite became a 120-minute process. The result carries `timedOut`, and a
  * timed-out run is a named refusal - never a verdict.
  */
-function run(command, shellArgs, cwd, { captureStderr = false, env = process.env, reportPipe = false, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+function run(command, shellArgs, cwd, { captureStderr = false, quiet = false, env = process.env, reportPipe = false, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   return new Promise((resolve) => {
     const child = spawn(command, shellArgs, {
       cwd,
@@ -264,7 +264,10 @@ function run(command, shellArgs, cwd, { captureStderr = false, env = process.env
       // fd 3 is a PIPE, not a path (airhorn-gwcm): the suite is handed a channel it can only write
       // to, never a filename it or a sibling it spawns can poll and rewrite after the reporter's
       // final write. The parent is the only reader.
-      stdio: reportPipe ? ['ignore', 'inherit', 'pipe', 'pipe'] : captureStderr ? ['ignore', 'inherit', 'pipe'] : 'inherit',
+      // quiet = the CORROBORATION run (airhorn-uk28): its stdout is DISCARDED, never inherited. The
+      // suite's raw bytes must not reach this tool's own stdout, where an operator (or a future
+      // scanner) could mistake them for records - the same rule the supervisor enforces one level up.
+      stdio: reportPipe ? ['ignore', 'inherit', 'pipe', 'pipe'] : quiet ? ['ignore', 'pipe', 'pipe'] : captureStderr ? ['ignore', 'inherit', 'pipe'] : 'inherit',
       // Its own process group, so killRunTree reaches node's per-file child as well.
       detached: true,
     });
@@ -273,22 +276,26 @@ function run(command, shellArgs, cwd, { captureStderr = false, env = process.env
     let channel = '';
     let timedOut = false;
     let settled = false;
-    const finish = (rc) => {
+    const finish = (rc, signal = null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (activeChild === child) activeChild = null;
       if (captureStderr && stderr) process.stderr.write(stderr);
-      resolve({ rc, stderr, channel, timedOut });
+      resolve({ rc, stderr, channel, timedOut, signal });
     };
     const timer = setTimeout(() => {
       timedOut = true;
       killRunTree('SIGKILL');
     }, timeoutMs);
     if (child.stderr) child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    if (quiet && child.stdout) child.stdout.on('data', () => { /* discarded on purpose */ });
     if (reportPipe && child.stdio[3]) child.stdio[3].on('data', (chunk) => { channel += String(chunk); });
     child.on('error', () => finish(1));
-    child.on('close', (code) => finish(code === null ? 1 : code));
+    // The SIGNAL matters as much as the code for the corroboration run (airhorn-uk28): a process that
+    // died of SIGABRT proves nothing about an assertion, and reading its non-zero status as one would
+    // re-open the very class this closes.
+    child.on('close', (code, signal) => finish(code === null ? 1 : code, signal));
   });
 }
 
@@ -467,7 +474,15 @@ const DRIVER = path.join(path.dirname(SELF), 'lib', 'suite-driver.mjs');
  * producing no report - which would read as never-ran for every case when the mutation checker is
  * itself under test.
  */
-function childEnv(suitePath, nonce) {
+function childEnv(suitePath, nonce, { plain = false } = {}) {
+  if (plain) {
+    // The CORROBORATION run (airhorn-uk28): a direct `node <suite>`, so there is no runner and nothing
+    // decodes frames. The suite must not be told it is a mutation run at all - no channel, no nonce,
+    // no paths - because this run's only job is to fail honestly.
+    const env = { ...process.env };
+    for (const name of ['MUTATION_SUITE_CHANNEL', 'MUTATION_RUN_NONCE', 'MUTATION_SUITE_FILE', 'MUTATION_DRIVER_FILE', 'NODE_TEST_CONTEXT', 'NODE_TEST_ISOLATION', 'NODE_TEST_WORKER_ID']) delete env[name];
+    return env;
+  }
   const env = {
     ...process.env,
     // A channel the child can only write to (fd 3) plus this run's nonce - NOT a path. The suite
@@ -547,6 +562,29 @@ async function runSuite(suite, cwd, label, suiteMode, timeoutMs = DEFAULT_TIMEOU
   // The state is NAMED in the refusal, not just implied by the exit code (airhorn-so88): a reader
   // must be able to tell "never-ran" from "threw-outside-a-test" without reading prose.
   if (classified.problem) return { problem: `${label} [${classified.mode}] ${classified.problem}` };
+  // CORROBORATION (airhorn-uk28, closing airhorn-yvwo's forged-runner-event class). A 'caught' verdict
+  // rests on the runner's counters, and those are the code under test's own report: node's runner reads
+  // test events as v8-serializer frames on the WORKER's stdout, and the suite runs in that worker, so a
+  // suite that writes the frames itself states a failure that never happened (measured: rc 0
+  // mutant-caught with no test asserting anything). Nothing inside node --test can authenticate that
+  // report, so the claim is CORROBORATED on a channel with no frames: the same suite is run again as a
+  // PLAIN node process, where nothing decodes frames, and node:test's own failing assertion still sets
+  // a non-zero exit status. 'caught' requires that direct run to fail NORMALLY (an exit code, not a
+  // signal - an aborted or killed process proves nothing about an assertion). Cost: one extra process,
+  // and only when a catch is claimed - never on the refusal or passing paths.
+  if (classified.mode === 'caught') {
+    const plainArgs = [path.resolve(cwd, suite)];
+    const direct = await run(contained.length ? contained[0] : process.execPath, contained.length ? [...contained.slice(1), process.execPath, ...plainArgs] : plainArgs, cwd, { captureStderr: true, quiet: true, timeoutMs, env: childEnv(path.resolve(cwd, suite), null, { plain: true }) });
+    if (direct.timedOut) {
+      return { problem: `${label} [caught-unconfirmed] the runner reported a failing test, but the same suite run directly did not finish within ${timeoutMs}ms, so the failure cannot be checked against anything` };
+    }
+    if (direct.signal) {
+      return { problem: `${label} [caught-unconfirmed] the runner reported a failing test, but running the suite directly ended on signal ${direct.signal} rather than failing an assertion, so the reported failure is not corroborated` };
+    }
+    if (direct.rc === 0) {
+      return { problem: `${label} [caught-unconfirmed] the runner reported a failing test, but the same suite run directly (no test runner, nothing to forge) passed: the failure exists only as runner events, which the code under test can write itself (airhorn-yvwo/uk28)` };
+    }
+  }
   return { rc: classified.rc, note: classified.note };
 }
 
@@ -621,7 +659,7 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     // THE TRUST STATEMENT (airhorn-14ht). What a record means, who can write it, and what a forged line
     // can and cannot achieve - printed once per invocation so an operator never has to read the source
     // to know where the line is. The full channel enumeration is docs/trust-boundary.md.
-    console.log('trust: the suite runs in a CHILD that the supervisor (tools/lib/suite-driver.mjs) spawns, so there are two processes - the supervisor writes every MUTATION-DRIVER-RECORD line, and every byte the code under test emits is QUOTED with a marker before it reaches the stream those records are read from, so a forged record arrives as DATA and is ignored whatever shape it imitates and whatever it reads from /proc. The facts that decide the verdict (did the suite load, did a test start, did one fail) are RELAYED from the child runner on a pipe the suite does not inherit (measured: a suite writeSync to that fd dies EINVAL) - but they are the decode of the worker own report, so they inherit the worker trust level: the node runner reads test events as v8-serializer frames on the WORKER stdout, and the code under test runs in that worker, so a suite that writes forged frames can state a failure that never happened (measured: rc 0 mutant-caught, airhorn-yvwo/86wl). That is the same class as a suite whose assertions lie, and the answer to it is corroboration, not authentication: --suite-old runs the same suite against the ORIGINAL file, and a forgery fires there too. KNOWN-LIMIT: with no shared process there is no in-process monitor, so a suite that installs its own uncaughtException/unhandledRejection handler and exits 0 is indistinguishable from a passing suite - it scores fix-does-not-close (rc 2), never mutant-caught: a refusal to call the check working, not a false catch. Seen from OUTSIDE and named: a crash outside any test (including process.abort, OOM and hard kills, which the in-process design could not record at all), a suite that never loaded, a suite that registered no test, and a supervisor wiring defect.');
+    console.log('trust: the suite runs in a CHILD that the supervisor (tools/lib/suite-driver.mjs) spawns, so there are two processes - the supervisor writes every MUTATION-DRIVER-RECORD line, and every byte the code under test emits is QUOTED with a marker before it reaches the stream those records are read from, so a forged record arrives as DATA and is ignored whatever shape it imitates and whatever it reads from /proc. The facts that decide the verdict (did the suite load, did a test start, did one fail) are RELAYED from the child runner on a pipe the suite does not inherit (measured: a suite writeSync to that fd dies EINVAL) - but they are the decode of the worker own report, so they inherit the worker trust level: the node runner reads test events as v8-serializer frames on the WORKER stdout, and the code under test runs in that worker, so a suite that writes forged frames can state a failure that never happened (measured: rc 0 mutant-caught, airhorn-yvwo/86wl). That is the same class as a suite whose assertions lie, and the answer to it is corroboration, not authentication: a claimed catch is CONFIRMED by running the same suite again as a plain node process, where nothing decodes frames and a real failing assertion still exits non-zero (a frame-only forgery is refused as caught-unconfirmed, airhorn-uk28), and --suite-old additionally refuses to call it proven when the suite also fails on the ORIGINAL file. KNOWN-LIMIT: with no shared process there is no in-process monitor, so a suite that installs its own uncaughtException/unhandledRejection handler and exits 0 is indistinguishable from a passing suite - it scores fix-does-not-close (rc 2), never mutant-caught: a refusal to call the check working, not a false catch. Seen from OUTSIDE and named: a crash outside any test (including process.abort, OOM and hard kills, which the in-process design could not record at all), a suite that never loaded, a suite that registered no test, and a supervisor wiring defect.');
     console.log('policy: --expect-strip remains the caller\'s statement that a deliberate strip is the subject of the suite; with the suite in its own process there is nothing of the harness in it to strip, so a strip is a no-op and the verdict rests on the tests that ran (airhorn-14ht).');
 
     if (args.build) {

@@ -34,7 +34,7 @@ mutation-check  --fd3 pipe-->  DRIVER (supervisor, test file for the outer runne
 | channel | reachable by the suite? | measurement | what a forged value achieves |
 |---|---|---|---|
 | the RECORD stream (supervisor records) | yes (it can print the shape) | trivially | **nothing**: every line the child emits is quoted by the supervisor before it reaches the record stream; a record shape arrives as data (pinned by *"a record line written by the code under test is INERT"*) |
-| the EVENT stream (node's runner counting tests) | **YES - and this is forgeable** | measured: a suite writing v8-serializer `test:start`/`test:fail` frames on its own stdout scores `verdict: mutant-caught` rc 0 with no test ever asserting about the mutant (airhorn-yvwo / airhorn-86wl). node's runner reads test events as frames on the **worker's** stdout, and the suite runs in that worker | a FALSE CATCH: the suite can state that a test failed when none did. This is the same class as a suite whose assertions lie, and it is **not** authenticated by anything in this harness - the worker always owns the frame channel. The answer is corroboration: `--suite-old` runs the same suite against the ORIGINAL file, where a forgery fires too, so it cannot prove a hole |
+| the EVENT stream (node's runner counting tests) | **YES - it is the suite's own report** | measured: a suite writing v8-serializer `test:start`/`test:fail` frames on its own stdout was counted as a failing test (airhorn-yvwo / airhorn-86wl). node's runner reads test events as frames on the **worker's** stdout, and the suite runs in that worker | **a false catch - which is why a claimed catch must now be CORROBORATED**: the same suite is run again as a PLAIN node process, where nothing decodes frames and a real failing assertion still exits non-zero. A frame-only forgery passes that direct run and is refused as `caught-unconfirmed` (airhorn-uk28, pinned). A signal (abort/kill) does not corroborate either. Residual, stated: a suite that prints frames AND exits non-zero without asserting anything is indistinguishable from one that asserts and fails - `--suite-old` is what refuses to call that proven |
 | its environment (`process.env`) | yes | a suite dumping it sees `NODE_TEST_*` and the run's `MUTATION_*` values | **nothing**: nothing is decided from the environment. The nonce in `MUTATION_RUN_NONCE` only labels the supervisor→parent line; the suite cannot write that line |
 | its **exec-time** environment (`/proc/self/environ`) | yes | reviewer proof on 471b2ab1 + reproduced here: a suite read `MUTATION_RUN_NONCE` and `MUTATION_SUITE_CHANNEL` out of proc **after** `process.env` was scrubbed | **nothing any more**: knowing the nonce and the fd number buys no write access (next row). This is why no design here may rest on an environment secret |
 | the facts pipe (child runner fd 3) | **no** | a suite writing to `Number(process.env.MUTATION_SUITE_CHANNEL)` dies `EINVAL` — the worker does not inherit the runner's extra fds | the whole design rests here: verdict facts cannot be stated by the code under test |
@@ -49,12 +49,13 @@ mutation-check  --fd3 pipe-->  DRIVER (supervisor, test file for the outer runne
 
 ## KNOWN-LIMITS, stated rather than implied
 
-1. **The event stream is the suite's own self-report and can be forged.** See the row above: v8-serializer
-   frames on the worker's stdout become "test events". What the supervisor makes unforgeable is the
-   RECORD stream and the identity of the writer; what it cannot authenticate is the truth of what the
-   suite says about its own execution. A first version of this document claimed otherwise and was
-   measured false within the hour (airhorn-yvwo, airhorn-86wl). Treat `mutant-caught` as "the suite
-   reported a failure on the mutant", and use `--suite-old` when the difference matters.
+1. **The event stream is the suite's own self-report.** v8-serializer frames on the worker's stdout
+   become "test events", and nothing inside `node --test` can tell them from node's own. What the
+   supervisor makes unforgeable is the RECORD stream and the identity of the writer; the answer to a
+   forgeable EVENT stream is corroboration, which now happens on every claimed catch (`caught-unconfirmed`,
+   airhorn-uk28). A first version of this document claimed the event channel achieved nothing and was
+   measured false within the hour (airhorn-yvwo, airhorn-86wl); it then claimed the limit was unavoidable,
+   which the corroboration run removed for every forger that does not also lie about its exit status.
 2. **An in-process swallow is invisible.** With the suite in its own process there is no in-process
    monitor to see an `uncaughtException`/`unhandledRejection` before the suite's own handler exits 0.
    Such a run is indistinguishable from a passing suite: it scores `fix-does-not-close` (rc 2), never

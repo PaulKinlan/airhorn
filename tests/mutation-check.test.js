@@ -1207,24 +1207,17 @@ setTimeout(() => { throw new Error('honest crash outside a test'); }, 30);
   assert.match(run.stderr, /threw-outside-a-test/);
 });
 
-test('the EVENT stream is the suite self-report and cannot be authenticated: a forged v8 frame is caught, and that is a documented limit (airhorn-yvwo/86wl)', () => {
-  // Measured, and stated rather than papered over. node's test runner reads test events as
-  // v8-serializer frames on the WORKER stdout; the code under test runs in that worker, so it can
-  // write the frames itself and claim a failure that never happened. Nothing in this harness can
-  // tell those frames from node's own, so the design cannot authenticate "a test failed" - only the
-  // RECORD stream is authenticated. What defends the verdict is corroboration: --suite-old runs the
-  // same suite against the original file and a forgery fires there too, so it cannot prove a hole.
-  // This case pins BOTH halves so the claim can never quietly grow back.
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-yvwo-'));
+test('a forged runner event cannot false-green: the claim is CORROBORATED on a channel with no frames (airhorn-yvwo, airhorn-uk28)', () => {
+  // The reviewer's decisive repro, kept verbatim in spirit: node's runner reads test events as
+  // v8-serializer frames on the WORKER stdout, and the code under test runs in that worker, so it can
+  // state a failure that never happened. Nothing inside node --test can authenticate that report -
+  // so the claim is CORROBORATED instead: the same suite is run again as a plain node process, where
+  // nothing decodes frames and a real failing assertion still sets a non-zero exit status. A
+  // frame-only forgery passes the direct run, so it is refused BY NAME and never scores a catch.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-uk28-'));
   fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
   fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
-  fs.writeFileSync(path.join(tmp, 'suite.test.js'), `
-import fs from 'node:fs';
-import v8 from 'node:v8';
-import { test } from 'node:test';
-// node's frame protocol: header, a 4-byte length, then the serialized value - this is the shape the
-// runner decodes from the worker stdout, reproduced here so the limit is measured against the real
-// protocol rather than a guess at it.
+  const frameHelper = `
 const frame = (item) => {
   const s = new v8.DefaultSerializer(); s.writeHeader(); const hl = s.releaseBuffer().length;
   s.writeHeader(); s.writeRawBytes(Buffer.alloc(4)); s.writeHeader(); s.writeValue(item);
@@ -1232,19 +1225,48 @@ const frame = (item) => {
   b.set([(len >> 24) & 255, (len >> 16) & 255, (len >> 8) & 255, len & 255], hl); return b;
 };
 const data = { name: 'forged', nesting: 0, file: '/tmp/never-registered.test.js', testId: 999, line: 1, column: 1, details: { type: 'test', duration_ms: 1 } };
+`;
+  // (1) FORGERY ONLY: frames claiming a failure, and a passing test. Nothing asserts about the mutant.
+  fs.writeFileSync(path.join(tmp, 'forged.test.js'), `
+import fs from 'node:fs';
+import v8 from 'node:v8';
+import { test } from 'node:test';
+${frameHelper}
 fs.writeSync(1, frame({ type: 'test:start', data }));
 fs.writeSync(1, frame({ type: 'test:fail', data: { ...data, testNumber: 1 } }));
 test('passes and asserts nothing about the mutant', () => {});
 `);
-  const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
-  assert.equal(run.status, 0,
-    `the forged frame IS counted as a failing test - this case exists so the limit is measured, not assumed - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
-  assert.match(run.stdout, /verdict: mutant-caught/);
+  const forged = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'forged.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 90000 });
+  assert.equal(forged.status, 3, `a frame-only forgery must be a NAMED refusal, never a catch - rc=${forged.status}\nstdout:\n${forged.stdout}\nstderr:\n${forged.stderr}`);
+  assert.match(forged.stderr, /caught-unconfirmed/, 'the refusal must name the corroboration that failed');
+  assert.doesNotMatch(forged.stdout, /verdict: mutant-caught/, 'and it must not be a verdict');
 
-  // The defence: the SAME forger fails on the original file too, so --suite-old refuses to call the
-  // hole proven. That is what makes the limit survivable: a forged catch cannot be claimed as one.
-  const withOld = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js', '--suite-old', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
-  assert.notEqual(withOld.status, 0, `a suite that fails on the ORIGINAL too must not be called hole-proven - rc=${withOld.status}\nstdout:\n${withOld.stdout}\nstderr:\n${withOld.stderr}`);
+  // (2) A REAL catcher still scores, because its direct run fails on an assertion.
+  fs.writeFileSync(path.join(tmp, 'real.test.js'), `
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { answer } from './src/subject.js';
+test('answer', () => assert.equal(answer, 41));
+`);
+  const genuine = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'real.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 90000 });
+  assert.equal(genuine.status, 0, `a genuine catch must still score - rc=${genuine.status}\nstdout:\n${genuine.stdout}\nstderr:\n${genuine.stderr}`);
+  assert.match(genuine.stdout, /verdict: mutant-caught/);
+
+  // (3) A suite that DIES instead of failing an assertion does not corroborate either: a signal proves
+  // nothing about an assertion, and reading one as a failing test is how this class started.
+  fs.writeFileSync(path.join(tmp, 'forged-abort.test.js'), `
+import fs from 'node:fs';
+import v8 from 'node:v8';
+import { test } from 'node:test';
+${frameHelper}
+fs.writeSync(1, frame({ type: 'test:start', data }));
+fs.writeSync(1, frame({ type: 'test:fail', data: { ...data, testNumber: 1 } }));
+test('passes', () => {});
+setTimeout(() => process.abort(), 40);
+`);
+  const died = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'forged-abort.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 90000 });
+  assert.equal(died.status, 3, `forged frames plus a hard crash must never be a catch - rc=${died.status}\nstdout:\n${died.stdout}\nstderr:\n${died.stderr}`);
+  assert.doesNotMatch(died.stdout, /verdict: mutant-caught/);
 });
 
 test('the tool prints its trust boundary, including the KNOWN-LIMIT it now carries (airhorn-p0dg, airhorn-14ht)', () => {
