@@ -124,3 +124,4 @@ tests/support/axe.min.js	@importers
 public/_headers	tests/pages-config.test.js tests/csp-boot.test.mjs tests/csp.test.js tests/csp-enforced.test.mjs
 wrangler.jsonc	tests/pages-config.test.js
 .github/workflows/deploy-pages.yml	tests/pages-config.test.js
+tests/support/webmcp-refusals.mjs	@importers

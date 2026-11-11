@@ -786,7 +786,10 @@ test('every coverage-map pointer in suite-map.tsv resolves to a section in the d
   const doc = fs.readFileSync(path.join(root, 'docs', 'coverage-map.md'), 'utf8');
   // The check lives in the derive tool (airhorn-1pdt) so the fast gate's unconditional
   // preflight and this pin share ONE implementation.
-  assert.ok((map.match(/^# why: /gm) || []).length > 10, 'the map must carry the pointers (sanity: the move happened)');
+  // The sanity must count POINTER-SHAPED lines, not any '# why:' comment (airhorn-8yaj):
+  // a map that lost the docs/coverage-map.md# shape would otherwise pass vacuously.
+  const pointers = [...map.matchAll(/^# why: docs\/coverage-map\.md#([a-z0-9-]+)$/gm)].map((m) => m[1]);
+  assert.ok(pointers.length > 10, 'the map must carry the pointers (sanity: the move happened)');
   const dead = checkCoverageMapPointers(map, doc);
   assert.deepEqual(dead, [], 'every pointer must resolve to a doc section; dead: ' + dead.join(', '));
 });

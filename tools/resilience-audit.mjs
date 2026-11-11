@@ -1467,7 +1467,9 @@ export const applyCoreFieldGate = (row, mustBeTrue = []) => {
     if (value === false) {
       return { ...row, status: 'FAILED', error: `measured failure: ${field} is false - the scenario's own claim failed (the row used to stay OK and the audit exit 0)` };
     }
-    if (value === undefined) {
+    // airhorn-hkll: null is a fourth unmeasured shape - the .catch(() => null) family
+    // (waitForSw/readState) yields exactly this, and it is not a measurement.
+    if (value === undefined || value === null) {
       return { ...row, status: 'FAILED', error: `unmeasured: this scenario declares ${field} as its claim but never produced it` };
     }
     if (typeof value === 'string' && value.startsWith('unmeasurable')) {

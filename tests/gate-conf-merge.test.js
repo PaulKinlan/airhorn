@@ -119,10 +119,11 @@ test('everything outside the block survives a union verbatim (comments, the runn
  *   ENUMERATION - reproducible, not absolute (airhorn-in2k, third iteration of
  *     the same lesson): the scanned set is whatever THIS TEST's derivation yields
  *     at the tip it runs on - computed at test time, never authored. At bb8ca46
- *     the derivation yielded 21 real tools of the 23 .mjs files under tools/, with
- *     zero phantom specifiers (a no-phantom pin below keeps it so; earlier counts
- *     of 22-at-503df37 and 26-at-tip were falsified by review because 5 specifiers
- *     resolved to no file - comment text and fixture strings spelling import shapes).
+ *     the derivation yielded 21 real tools of the 23 .mjs files under tools/, but
+ *     5 of its 26 raw specifiers were phantoms (comment text and fixture strings
+ *     spelling import shapes); those are removed at the tip (677f4a8), where the
+ *     same derivation yields zero phantoms - a no-phantom pin below keeps it so
+ *     (airhorn-z90x: 'zero phantoms' scoped to the tip, not bb8ca46).
  *     What the enumeration found, by the method named:
  *     1. column-0 fs-write grep over the derivation's set: exactly two module-scope
  *        fs.mkdirSync(OUT) - tools/resilience-audit.mjs and tools/rollback-rehearsal.mjs.
