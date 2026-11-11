@@ -714,7 +714,8 @@ test('install-https-proof refuses paint-level invisibility and coverage, by name
   const { affordanceProblem } = await import(`${pathToFileURL(INSTALL_TOOL).href}?0u67=${Date.now()}`);
   const healthy = { disabled: false, hasAvailableClass: true, display: 'block', visibility: 'visible',
     pointerEvents: 'auto', rect: { width: 120, height: 40 }, opacity: '1', filter: 'none',
-    color: 'rgb(0, 0, 0)', backgroundColor: 'rgb(255, 255, 255)', borderColor: 'rgb(0, 0, 0)', coveredBy: null };
+    color: 'rgb(0, 0, 0)', backgroundColor: 'rgb(255, 255, 255)', borderColor: 'rgb(0, 0, 0)', coveredBy: null,
+    ancestorOpacity: '1', hitIsButtonOrChild: true };
   const TABLE = [
     ['healthy control', {}, null],
     ['opacity: 0 paints nothing', { opacity: '0' }, /opacity is 0/],
@@ -724,7 +725,16 @@ test('install-https-proof refuses paint-level invisibility and coverage, by name
     ['fully transparent paint', { color: 'rgba(0, 0, 0, 0)', backgroundColor: 'rgba(0, 0, 0, 0)', borderColor: 'rgba(0, 0, 0, 0)' }, /nothing to see/],
     ['ONE opaque channel still paints', { color: 'rgba(0, 0, 0, 0)', backgroundColor: 'rgb(255, 255, 255)', borderColor: 'rgba(0, 0, 0, 0)' }, null],
     ['covered at the centre by an overlay', { coveredBy: '#consent' }, /covered at its centre by #consent/],
-    ['legacy evidence without paint fields still passes (no regression)', { opacity: undefined, filter: undefined, color: undefined, backgroundColor: undefined, borderColor: undefined, coveredBy: undefined }, null],
+    // airhorn-iqrz: the two shapes the 0u67 table could not see, measured in real Chrome
+    // before the fix - a wrap at opacity 0 leaves EVERY button field healthy (opacity is
+    // not inherited), and a wrap shrunk by .visually-hidden empties the centre hit stack
+    // (coveredBy is null there too: it cannot tell 'button hit' from 'nothing hit').
+    ['an ANCESTOR opacity:0 paints nothing', { ancestorOpacity: '0' }, /ancestor's opacity is 0/],
+    ['a near-zero ancestor opacity paints (almost) nothing', { ancestorOpacity: '0.02' }, /ancestor's opacity is 0\.02/],
+    ['a 0.9 ancestor still paints (control)', { ancestorOpacity: '0.9' }, null],
+    ['nothing hittable at the centre: clipped or shrunk away', { hitIsButtonOrChild: false, coveredBy: null }, /nothing is hittable at the button's centre/],
+    ['an overlay still names itself first when the hit also misses', { hitIsButtonOrChild: false, coveredBy: '#consent' }, /covered at its centre by #consent/],
+    ['legacy evidence without paint fields still passes (no regression)', { opacity: undefined, filter: undefined, color: undefined, backgroundColor: undefined, borderColor: undefined, coveredBy: undefined, ancestorOpacity: undefined, hitIsButtonOrChild: undefined }, null],
     // airhorn-qpac: the alpha-spelling enumeration. Every row was run against the pre-fix
     // predicate at e35b71bb: rgba/transparent caught, EVERYTHING ELSE greened an invisible
     // button. Now each zero-alpha spelling fails by name, the controls pass, and a spelling
