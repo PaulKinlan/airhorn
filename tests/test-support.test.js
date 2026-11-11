@@ -685,6 +685,16 @@ test('install-https-proof asserts the Install button, not just the prompt (airho
     'the RECT is what decides paintability, not the display keyword');
   assert.throws(() => assertInstallEvidence({ installPrompt: { fired: true }, installButton: httpEv().installButton }, httpsEv()),
     /the contrast is invalid/, 'if the prompt fired over HTTP the contrast measured nothing');
+
+  // airhorn-kmvu: the HTTPS half needs its own worlds. No pair above has a disabled or class-less HTTPS button, so
+  // deleting the throw at tools/install-https-proof.mjs:475 left this test green - a pin that cannot go red for the
+  // half it exists to protect. These three fail BY NAME through that exact branch.
+  assert.throws(() => assertInstallEvidence(httpEv(), httpsEv({ disabled: true })),
+    /Install button not enabled over HTTPS/, 'a disabled Install button over HTTPS is the state beforeinstallprompt should have cleared');
+  assert.throws(() => assertInstallEvidence(httpEv(), httpsEv({ hasAvailableClass: false })),
+    /Install button not enabled over HTTPS/, 'and so is an enabled button without the available class - src/install.js sets both together');
+  assert.throws(() => assertInstallEvidence(httpEv(), httpsEv({ disabled: null })),
+    /unmeasurable over HTTPS/, 'an unreadable HTTPS button cannot prove the affordance either');
 });
 
 test('an unreadable /proc/stat is UNKNOWN, and UNKNOWN refuses the launch (airhorn-w1wh review)', async () => {
