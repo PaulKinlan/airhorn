@@ -209,3 +209,40 @@ test('the harness origin refuses a request that resolves outside the served root
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('the SW version stamp proves the SERVED worker declares the bumped version (airhorn-7fol)', async () => {
+  // The stamp's guard used to be "the text changed" (some replace() happened), which is a weaker property than
+  // "the new build is a DIFFERENT build": the reviewer's repro put 'const version = "0.9.0-legacy";' in a COMMENT,
+  // the substitution rewrote the comment, the served worker still declared the old build, and the run reported a
+  // successful stamp while the update scenario compared the same build twice. The served bytes are now checked
+  // per request: exactly one declaration, and it must read the version the audit bumped to.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), '7fol-dist-'));
+  const swPath = path.join(dir, 'sw.js');
+  const clean = 'const CACHE = "airhorn";\nconst version = "__BUILD_HASH__";\n';
+  fs.writeFileSync(swPath, clean);
+  process.env.RESILIENCE_AUDIT_DIST = dir;
+  try {
+    // A fresh module instance: distDir is read at import time, so the query string is what points it here.
+    const { startServer } = await import(`../tools/resilience-audit.mjs?7fol=${Date.now()}`);
+    const { server, port } = await startServer();
+    try {
+      const ok = await rawGet(port, '/sw.js');
+      assert.equal(statusOf(ok), 200, `a coherent sw.js must be served: ${ok.slice(0, 300)}`);
+      assert.match(ok, /const version = "2\.0\.0-audit-base";/, 'the served worker declares the bumped version');
+      assert.doesNotMatch(ok, /__BUILD_HASH__/, 'and never the build placeholder');
+
+      // The decoy appears AFTER start() validated the file, which is the reviewer's exact sequence.
+      fs.writeFileSync(swPath, `// migrated: was const version = "0.9.0-legacy";\n${clean}`);
+      const decoy = await rawGet(port, '/sw.js');
+      assert.equal(statusOf(decoy), 500, `an ambiguous stamp must refuse to serve: ${decoy.slice(0, 300)}`);
+      assert.match(decoy, /2 'const version = "\.\.\.";' declarations/, 'and name how many declarations it found');
+      assert.doesNotMatch(decoy, /const version = "2\.0\.0-audit-base";/, 'nothing may be served as a stamped worker');
+      assert.doesNotMatch(decoy, /new build/, 'the run must not be told the update was stamped');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    delete process.env.RESILIENCE_AUDIT_DIST;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

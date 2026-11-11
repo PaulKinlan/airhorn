@@ -40,7 +40,9 @@ import { fileURLToPath } from 'node:url';
 import { makeRenderModel } from './render-model.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const distDir = path.join(__dirname, '../dist');
+// Overridable so a test can drive the REAL server against a throwaway tree (airhorn-7fol): the stamp's
+// post-condition is about the bytes actually served, and proving it needs a dist/ the test owns.
+const distDir = process.env.RESILIENCE_AUDIT_DIST || path.join(__dirname, '../dist');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const MIME = {
@@ -146,8 +148,31 @@ export function startServer() {
     }
     let body = fs.readFileSync(served.fd);
     if (rel === '/sw.js') {
-      const text = body.toString()
-        .replace(/const version = "[^"]*";/, `const version = "${state.version}";`);
+      const original = body.toString();
+      // The stamp is validated at start() AND here, on the bytes we are about to serve (airhorn-7fol): the
+      // start-time check reads the file once, so a file that changes afterwards - or any ambiguity the pattern
+      // would hit - used to have the substitution land in the wrong literal (the reviewer's repro put
+      // 'was const version = "0.9.0-legacy";' in a comment, the stamp rewrote the COMMENT, and the served worker
+      // still declared the old build while the audit reported a successful stamp).
+      const declarations = original.match(/const version = "[^"]*";/g) || [];
+      if (declarations.length !== 1) {
+        res.writeHead(500, { 'content-type': 'text/plain' }).end(
+          `resilience-audit: the served sw.js carries ${declarations.length} 'const version = "...";' declarations, `
+          + 'so the version stamp would land in the wrong one and the update scenario would compare the same build '
+          + 'twice - refusing to serve it');
+        return;
+      }
+      const text = original.replace(/const version = "[^"]*";/, `const version = "${state.version}";`);
+      // ...and the POST-CONDITION: what we serve must DECLARE the version we claim. 'the text changed' is a weaker
+      // property than 'the new build is a different build', and that weaker property is what let the run above
+      // report OK (airhorn-7fol).
+      const declared = (text.match(/const version = "([^"]*)";/) || [])[1];
+      if (declared !== state.version) {
+        res.writeHead(500, { 'content-type': 'text/plain' }).end(
+          `resilience-audit: the sw.js stamp did not land in the served worker - it declares "${declared ?? '(none)'}" `
+          + `but the audit bumped to "${state.version}", so the update scenario would measure nothing`);
+        return;
+      }
       body = Buffer.from(state.swShim ? state.swShim + '\n' + text : text);
     }
     fs.closeSync(served.fd);
