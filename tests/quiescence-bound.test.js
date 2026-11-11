@@ -31,10 +31,23 @@ const sender = (ms, page) => {
 };
 
 test('a QUIET page passes on the sample count, not on a clock', async () => {
-  const started = Date.now();
   const settled = await waitForQuiescence(sender(10, () => quiet));
   assert.equal(settled.samples, 4, 'four consecutive quiet samples is the criterion');
-  assert.ok(Date.now() - started < 1000, 'and it does not wait for anything else');
+  assert.equal(settled.pending.pendingTimers, 0, 'and it passes on a page whose probe says nothing is pending');
+  assert.equal(settled.pending.quietCondition, true, 'with the quiet condition actually true, not merely unexamined');
+  // "it does not wait for anything else" is a claim about the WAIT, not about this host's clock
+  // (airhorn-uxjo). It used to be `Date.now() - started < 1000`: a ~5x machine-speed margin on a
+  // case whose only measured quantity was the sampler's own 4 x 10 ms cost. On the 24x-slow host
+  // modelled in the bead the sampling still satisfied the criterion and only the clock failed -
+  // i.e. the suite that exists to stop a starved host reddening suites was itself red on a starved
+  // host. The shape pinned instead is RELATIVE, so host speed cancels out of both sides: a sampler
+  // that costs 4x more per round-trip must make the wait proportionally longer, because the wait IS
+  // the sampling and nothing else is added to it.
+  const fast = await waitForQuiescence(sender(10, () => quiet));
+  const slow = await waitForQuiescence(sender(40, () => quiet));
+  assert.equal(slow.samples, 4, 'a slower sampler does not change the criterion');
+  assert.ok(slow.waitedMs - fast.waitedMs >= 4 * 20,
+    `the 30ms-per-sample difference must show up in the wait (fast ${fast.waitedMs}ms, slow ${slow.waitedMs}ms): the wait is the sampling it did, not a fixed margin around it`);
 });
 
 test('a STARVED host still reaches quiescence when the ceiling allows it - the same sampler, two ceilings', async () => {
