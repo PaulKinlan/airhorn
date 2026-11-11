@@ -1058,9 +1058,74 @@ test('a signal during the mutant window RESTORES the file instead of leaving the
     assert.notEqual(code, 'timeout', 'the tool must exit after the signal, not hang');
     assert.equal(fs.readFileSync(subject, 'utf8'), originalText, 'the signal path must restore the file, not just report');
     assert.match(said, /restored and verified/, `the interrupted run must say what it did to the file: ${said}`);
+    // The exit code is part of the contract (airhorn-da6c): a handler that restored the file but let
+    // the refusal path exit 3 instead of 143 would pass every other assertion here.
+    assert.equal(code, 143, `SIGTERM must exit 143, not ${code}`);
     assert.doesNotMatch(said, /verdict:/, 'an interrupted run scores no verdict');
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a TEST file is refused by every spelling AND by identity - symlink and hardlink included (airhorn-29nt, airhorn-7rer)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-target-'));
+  const testFile = path.join(tmp, 'tests', 'answer.test.mjs');
+  const body = "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from '../src/subject.js';\ntest('x', () => assert.equal(answer, 41));\n";
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.mkdirSync(path.join(tmp, 'tests'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    fs.writeFileSync(testFile, body);
+    const runIt = (file, from = 'answer, 41', to = 'answer, 42', ...extra) => spawnSync(process.execPath, [tool, '--file', file, '--from', from, '--to', to, '--suite', 'tests/answer.test.mjs', ...extra], { cwd: tmp, encoding: 'utf8', timeout: 40000 });
+
+    // Absolute spelling was the one that slipped through the old prefix check.
+    const absolute = runIt(testFile);
+    assert.equal(absolute.status, 3, absolute.stdout + absolute.stderr);
+    assert.match(absolute.stdout + absolute.stderr, /is a TEST file/);
+    assert.doesNotMatch(absolute.stdout, /mutant applied/, 'the guard must refuse before writing');
+    assert.equal(fs.readFileSync(testFile, 'utf8'), body, 'the test file must be untouched');
+
+    // The relative spelling keeps being refused, and a product file is still allowed through.
+    const relative = runIt('tests/answer.test.mjs');
+    assert.equal(relative.status, 3, relative.stdout + relative.stderr);
+    assert.match(relative.stdout + relative.stderr, /is a TEST file/);
+    const product = runIt(path.join(tmp, 'src', 'subject.js'), '41', '42');
+    assert.match(product.stdout, /mutant applied/, `a product file must not be refused: ${product.stdout}${product.stderr}`);
+
+    // A tests/ directory ANYWHERE in the resolved path, even one outside the working directory:
+    // the relative form is `../tests/...` there, so only the path-SEGMENT check refuses it, and
+    // that is the spelling a wrapper script outside the checkout naturally produces (airhorn-29nt).
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-outside-'));
+    try {
+      fs.mkdirSync(path.join(outsideDir, 'tests'));
+      fs.writeFileSync(path.join(outsideDir, 'tests', 'outside.test.mjs'), body);
+      const outside = runIt(path.join(outsideDir, 'tests', 'outside.test.mjs'));
+      assert.equal(outside.status, 3, `an outside-cwd tests/ target must be refused: ${outside.stdout}${outside.stderr}`);
+      assert.match(outside.stdout + outside.stderr, /is a TEST file/);
+      assert.doesNotMatch(outside.stdout, /mutant applied/, 'the guard must refuse before writing');
+      assert.equal(fs.readFileSync(path.join(outsideDir, 'tests', 'outside.test.mjs'), 'utf8'), body, 'the outside test file is untouched');
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+
+    // Neither of these NAMES looks like a test file, and path.resolve cannot see that they are one
+    // (airhorn-7rer): a symlink to it, and a hardlink of it under a product-looking name.
+    fs.symlinkSync(path.join('tests', 'answer.test.mjs'), path.join(tmp, 'link.mjs'));
+    fs.linkSync(testFile, path.join(tmp, 'src', 'sneaky.js'));
+    for (const spelling of ['link.mjs', 'src/sneaky.js']) {
+      const linked = runIt(spelling);
+      assert.equal(linked.status, 3, `${spelling} must be refused: ${linked.stdout}${linked.stderr}`);
+      assert.match(linked.stdout + linked.stderr, /is a TEST file|same inode/);
+      assert.doesNotMatch(linked.stdout, /mutant applied/, `${spelling} must be refused before writing`);
+    }
+    assert.equal(fs.readFileSync(testFile, 'utf8'), body, 'the test file is untouched by any refused spelling');
+
+    // The flag still overrides: the test file CAN be the subject of the experiment.
+    const allowed = runIt(testFile, 'answer, 41', 'answer, 42', '--allow-test-mutation');
+    assert.match(allowed.stdout, /mutant applied/, allowed.stdout + allowed.stderr);
+    assert.equal(fs.readFileSync(testFile, 'utf8'), body, 'the file is restored either way');
+  } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
