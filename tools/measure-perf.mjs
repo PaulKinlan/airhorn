@@ -6,7 +6,7 @@ import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
 import { openRequestUrl } from './lib/request-path.mjs';
-import { measurementExitCode, unmeasured } from './lib/perf-metrics.mjs';
+import { measurementExitCode, observerFailures, unmeasured } from './lib/perf-metrics.mjs';
 
 // The teardown below lives in a try/finally, which a bound-kill (fleet-gate's
 // SIGTERM, a job-tree reaper, Ctrl-C) never reaches - so the chrome tree and its
@@ -160,9 +160,21 @@ async function main() {
         lcp: null,
         lcpEntriesCount: 0,
         cls: 0,
-        rawEvents: []
+        rawEvents: [],
+        // A REFUSED registration was silently swallowed here (airhorn-nxuv.30): the column
+        // then sat at its default inside a table that read as a complete set of
+        // measurements. Record it; the report names it and the exit code fails.
+        observerErrors: []
       };
 
+      // One recorder for all four observers, so a refusal always lands in the SAME array the
+      // verdict reads - a registration that fails without being recorded is the bug.
+      const recordObserverFailure = (type, e) => {
+        window.__perfMetrics.observerErrors.push({
+          type,
+          message: String((e && e.message) || e)
+        });
+      };
       try {
         new PerformanceObserver((entryList) => {
           for (const entry of entryList.getEntries()) {
@@ -173,7 +185,9 @@ async function main() {
             }
           }
         }).observe({ type: 'paint', buffered: true });
-      } catch (e) {}
+      } catch (e) {
+        recordObserverFailure('paint', e);
+      }
 
       try {
         new PerformanceObserver((entryList) => {
@@ -183,7 +197,9 @@ async function main() {
             window.__perfMetrics.lcp = entries[entries.length - 1].startTime;
           }
         }).observe({ type: 'largest-contentful-paint', buffered: true });
-      } catch (e) {}
+      } catch (e) {
+        recordObserverFailure('largest-contentful-paint', e);
+      }
 
       try {
         new PerformanceObserver((entryList) => {
@@ -193,7 +209,9 @@ async function main() {
             }
           }
         }).observe({ type: 'layout-shift', buffered: true });
-      } catch (e) {}
+      } catch (e) {
+        recordObserverFailure('layout-shift', e);
+      }
 
       try {
         new PerformanceObserver((entryList) => {
@@ -206,7 +224,9 @@ async function main() {
             });
           }
         }).observe({ type: 'event', durationThreshold: 0, buffered: true });
-      } catch (e) {}
+      } catch (e) {
+        recordObserverFailure('event', e);
+      }
     `;
 
     await send('Page.addScriptToEvaluateOnNewDocument', { source: observerScript });
@@ -390,18 +410,28 @@ async function main() {
     // observer registered but never fired, the table said "None (0 entries recorded)"
     // and the tool STILL exited 0, so a CWV report could be quoted for a field it
     // never measured. The row already told the truth; the exit code now agrees with it.
-    const notMeasured = unmeasured([
+    // The two loads the verdict is computed over, named once: unmeasured() and
+    // observerFailures() must judge the SAME rows the table printed.
+    const loads = [
       { label: 'cold load', metrics: coldMetrics },
       { label: 'repeat (SW-cached) load', metrics: repeatMetrics },
-    ]);
+    ];
+    const notMeasured = unmeasured(loads);
     if (notMeasured.length > 0) {
       console.log('\nNOT MEASURED (this run is not evidence for these fields):');
       for (const finding of notMeasured) console.log(`  - ${finding}`);
       console.log('Exiting nonzero so an unmeasured report cannot be read as a green one.');
     }
+    // A refused observer is not a slow page (airhorn-nxuv.30): the column it feeds was never
+    // wired up, so it is listed here BY NAME and fails the run the same way an absent entry does.
+    const observerProblems = observerFailures(loads);
+    if (observerProblems.length > 0) {
+      console.log(`\nOBSERVER REGISTRATION FAILURES: ${observerProblems.length} (these fields were never measured)`);
+      for (const problem of observerProblems) console.log(`  - ${problem}`);
+    }
     const structuralProblems = measurePerfProblems({ swActive, interactionDispatched });
     for (const problem of structuralProblems) console.log(`  - ${problem}`);
-    process.exitCode = measurementExitCode([...notMeasured, ...structuralProblems]);
+    process.exitCode = measurementExitCode([...notMeasured, ...observerProblems, ...structuralProblems]);
 
   } finally {
     try { ws.close(); } catch { /* already closed */ }

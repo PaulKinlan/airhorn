@@ -122,6 +122,9 @@
  "tools/audio-parity.mjs": [
   "tests/audio-parity-verdict.test.js"
  ],
+ "tools/measure-perf.mjs": [
+  "tests/tool-verdicts.test.js"
+ ],
  "tools/cache-growth.mjs": [
   "tests/soak-verdict.test.js",
   "tests/tool-bound-kill.test.mjs"
@@ -153,6 +156,9 @@
  ],
  "tools/lib/update-outcome.mjs": [
   "tests/update-outcome.test.js"
+ ],
+ "tools/lib/perf-metrics.mjs": [
+  "tests/tool-verdicts.test.js"
  ],
  "tools/install-https-proof.mjs": [
   "tests/gate-smoke.test.js",

@@ -42,6 +42,51 @@ export function unmeasured(loads) {
   return findings;
 }
 
+/** Which column each PerformanceObserver feeds, so a refusal names what is missing. */
+const OBSERVER_FIELDS = {
+  'paint': 'First Paint / First Contentful Paint',
+  'largest-contentful-paint': 'LCP',
+  'layout-shift': 'CLS',
+  'event': 'INP',
+};
+
+/**
+ * PerformanceObserver registration failures per load (airhorn-nxuv.30).
+ *
+ * tools/measure-perf.mjs used to register all four observers inside `catch {}`, so a browser
+ * that REFUSED an observe() left that column at its default - LCP `None (0 entries recorded)`,
+ * CLS `0.0000` - in a table that still read as a complete set of measurements, and the run
+ * still exited 0. A refused observer is not a slow page and not an absent entry: the field was
+ * never wired up, so it is unmeasured and the run must say so by name.
+ *
+ * `loads` is [{ label, metrics }] - the same shape `unmeasured()` takes. A metrics object with
+ * no `observerErrors` array at all is ALSO a finding: this tool cannot then show that its
+ * numbers came from live observers, which is exactly the fail-open shape being removed.
+ */
+export function observerFailures(loads) {
+  const findings = [];
+  for (const { label, metrics } of loads || []) {
+    // A missing metrics object is already named by unmeasured(); do not report it twice.
+    if (!metrics) continue;
+    const errors = metrics.observerErrors;
+    if (!Array.isArray(errors)) {
+      findings.push(
+        `${label}: whether its PerformanceObservers registered was not recorded - the observer registration failures must be captured, so this report cannot show its metrics came from live observers`,
+      );
+      continue;
+    }
+    for (const error of errors) {
+      const type = (error && error.type) || 'unknown';
+      const message = (error && error.message) || 'no message';
+      const feeds = OBSERVER_FIELDS[type] || 'a metric';
+      findings.push(
+        `${label}: the ${type} PerformanceObserver was REFUSED (${message}) - ${feeds} was never measured, so this is not a measured value`,
+      );
+    }
+  }
+  return findings;
+}
+
 /**
  * The tool's exit code: 0 only when every field it reports was measured. A run that
  * measured nothing is a failed measurement, not a clean report, so it exits 2 - 1 stays
