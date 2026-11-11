@@ -1032,7 +1032,9 @@ test('no gate surface invokes mutation-check as a harness (airhorn-zach)', () =>
   for (const line of map.split('\n')) {
     if (/^\s*#/.test(line) || !line.trim()) continue;
     const cells = line.split('\t');
-    assert.ok(!cells.slice(1).join(' ').split(/\s+/).includes('tools/mutation-check.mjs'),
+    // airhorn-vqgp: normalise the './' spelling - an exact match let './tools/...' bypass.
+    const tokens = cells.slice(1).join(' ').split(/\s+/).map((t) => t.replace(/^\.\//, ''));
+    assert.ok(!tokens.includes('tools/mutation-check.mjs'),
       `the tool must never be a map's SUITE column (right-hand side): ${line}`);
   }
 });

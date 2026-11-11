@@ -38,7 +38,13 @@ test('s68m: the console echo prints EVERY scenario row, including the last (airh
   }
 });
 
-test('o7ad: an unknown RESILIENCE_ONLY selector refuses by name, rc 1, before any browser (airhorn-o7ad)', () => {
+// airhorn-6oug: both spawned invocations go through startServer(), which reads
+// dist/sw.js BEFORE selector validation - in a tree without a build they fail
+// naming the shim, not the missing build. Skip with the real cause named.
+const distSw = path.join(root, 'dist', 'sw.js');
+const needsBuild = { skip: !fs.existsSync(distSw) && 'needs a built dist/ (npm run build) - the tool reads dist/sw.js before selector validation' };
+
+test('o7ad: an unknown RESILIENCE_ONLY selector refuses by name, rc 1, before any browser (airhorn-o7ad)', needsBuild, () => {
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'o7ad-'));
   const run = spawnSync(process.execPath, [tool], {
     env: { ...process.env, RESILIENCE_ONLY: 'offlien', RESILIENCE_OUT: out, CHROME_BIN: '/nonexistent-chrome' },
@@ -48,7 +54,7 @@ test('o7ad: an unknown RESILIENCE_ONLY selector refuses by name, rc 1, before an
   assert.match(run.stderr, /RESILIENCE_ONLY names unknown scenario\(s\): offlien/, `stderr must name the unknown selector:\n${run.stderr}`);
 });
 
-test('hovu: a seam set to a truthy non-1 value WITH test mode is dropped LOUDLY (airhorn-hovu)', () => {
+test('hovu: a seam set to a truthy non-1 value WITH test mode is dropped LOUDLY (airhorn-hovu)', needsBuild, () => {
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'hovu-'));
   const run = spawnSync(process.execPath, [tool], {
     env: { ...process.env, RESILIENCE_TEST_MODE: '1', RESILIENCE_START_THROWS: 'true', RESILIENCE_ONLY: 'none', RESILIENCE_OUT: out, CHROME_BIN: '/nonexistent-chrome' },

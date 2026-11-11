@@ -833,7 +833,10 @@ async function main() {
 // 10-deploy measurement, or call process.exit - at import time that exit code OVERRIDES the
 // importing test file's own result (airhorn-fc98, airhorn-u5qj: three failing assertions,
 // exit 0). soak.mjs has carried the same guard; mirror it.
-const invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+// airhorn-nqnt: argv[1] can be unreadable ('-' on stdin import, eval) - that is
+// not-invoked-as-script, not a crash before exports load.
+let invokedAsScript = false;
+try { invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch {}
 if (invokedAsScript) {
 main().then((code) => {
   // Hard exit on the success path too (airhorn-s1wy): a peer that swallows the

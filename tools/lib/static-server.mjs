@@ -71,13 +71,15 @@ export function parsePagesHeaders(text) {
     if (line === '' || line.startsWith('#')) continue;
     if (!inBlock) {
       if (line === '/*') {
-        if (seenBlock) throw new Error(`_headers: a second path block is outside the supported subset: ${raw}`);
         inBlock = true;
         seenBlock = true;
         continue;
       }
       throw new Error(`_headers: only a /* path block is supported (Pages semantics need real paths otherwise); got: ${raw}`);
     }
+    // airhorn-4630: the second-block refusal lives HERE - inBlock never resets, so a second
+    // path-block line would otherwise die on the generic 'Key: value' message below.
+    if (seenBlock && line === '/*') throw new Error(`_headers: a second path block is outside the supported subset: ${raw}`);
     const m = line.match(/^([A-Za-z-]+):\s+(.+)$/);
     if (!m) throw new Error(`_headers: expected 'Key: value' inside the /* block, got: ${raw}`);
     out[m[1]] = m[2];

@@ -1226,7 +1226,10 @@ async function main() {
 // Only a direct `node tools/soak.mjs` runs the soak: importing the module (the
 // mutation harness replays samples through audioNodesReleased) must not launch
 // a browser.
-const invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+// airhorn-nqnt: argv[1] can be unreadable ('-' on stdin import, eval) - that is
+// not-invoked-as-script, not a crash before exports load.
+let invokedAsScript = false;
+try { invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch {}
 if (invokedAsScript) {
   main().then((code) => {
   // Same drain the catch has: even a PASSING soak against a peer that
