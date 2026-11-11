@@ -43,8 +43,10 @@ row, comment or blank line one side DELETED stays deleted (airhorn-famo):
   git add tools/suite-map.tsv .fleet/coverage-contract.json   # or the merge cannot continue (airhorn-nn8g)
 With the base the merge is ordinary THREE-WAY: removed on one side and untouched on the other is a
 deletion and is respected; removed on one side and CHANGED on the other is refused by name. Without a base
-nothing can tell an addition from a deletion, so the tool keeps one-side-only rows (and reports them), and
-REFUSES a one-side-only SELF-ROW outright - keeping one was how 47 deleted self-rows came back (airhorn-xh81).
+nothing can tell an addition from a deletion, so the tool REFUSES any one-side-only row by name instead of
+handing back a resurrection - keeping one was how 47 deleted self-rows came back (airhorn-xh81).
+--allow-one-sided opts into the additive union deliberately, and the report names every row it could not
+classify.
 The one thing still over-approximated is a TOKEN inside a row both sides keep: an extra suite costs gate time
 and can never false-green, and the report names every restored token.
 tools/gate.conf's SUITE_TIERS block has the SAME treatment (airhorn-09dr): union with

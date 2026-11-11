@@ -20,12 +20,13 @@
  *   node tools/merge-suite-map.mjs --check [<file>]
  *       Writes nothing; exits 1 if the file is not canonical, naming the command to fix it.
  *
- *   node tools/merge-suite-map.mjs --union <ours> <theirs> [base] [--write <file>]
- *       Union two variants by key, sorted by key, and print (or write) the result. Suite lists are unioned
+ *   node tools/merge-suite-map.mjs --union <ours> <theirs> [base] [--write <file>] [--allow-one-sided]
+ *       Merge two variants by key, sorted by key, and print (or write) the result. Suite lists are unioned
  *       with ours' order first. Give the merge BASE too (`git show :1:<file>`) and the merge is THREE-WAY: a
- *       row - or a comment, or a blank line - the base has and one side removed is DELETED. Without a base
- *       nothing can tell an addition from a deletion, so a one-side-only row is kept and REPORTED, and a
- *       one-side-only SELF-ROW refuses outright rather than resurrecting it (airhorn-famo).
+ *       row - or a comment, or a blank line - the base has and one side removed is DELETED. WITHOUT a base, a
+ *       row on one side only REFUSES, because keeping it resurrects whatever the other side deleted and that
+ *       must not pass silently (airhorn-famo); --allow-one-sided opts into the additive union and the report
+ *       names every row it could not classify.
  *
  *   node tools/merge-suite-map.mjs --driver <base> <ours> <theirs>
  *       Git merge-driver shape (the %O %A %B arguments): merges three-way into <ours> and exits 0. On
@@ -63,14 +64,23 @@
  * whitespace, a non-comment line with no TAB, the same key twice inside one file, or a row DELETED on one side
  * and CHANGED on the other all FAIL LOUDLY with file:line and the key. Gate semantics are untouched: this only
  * writes the map, and only ever writes what the gate already unions at run time.
+ *
+ * WHY NOT THE ALTERNATIVES (airhorn-famo). (a) TOMBSTONE rows - a deleted key kept with a marker the driver
+ * preserves and every reader skips - would work, but it adds a second row syntax to the hottest file and every
+ * consumer would have to learn it (fast-gate.sh selection, derive-coverage-contract, the map validator, the
+ * no-self-row pin), the file would grow monotonically, and the gate would have to keep proving the marker is
+ * inert. (c) NO DELETIONS AT ALL - add-only + deprecation - removes the class at the cost of a map that only
+ * grows, and it outlaws work that has already landed: airhorn-xh81 deleted 47 self-rows and airhorn-m85h moved
+ * the prose out of the map, both on master. (b) REFUSE EVERY DELETION was the other safe answer, and it is what
+ * this tool does wherever it cannot see the intent: a row deleted on one side and CHANGED on the other refuses
+ * by name, and a `--union` with no base refuses rather than guess. Where the base shows an unambiguous deletion
+ * (removed on one side, untouched on the other) the deletion is the branch's intent, so it is applied and
+ * reported - same rule git's own three-way merge uses, minus the text churn.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-// The map's ONE spelling rule (airhorn-huud): naming variants normalise, escapes are refused. Imported rather
-// than copied so a delete/add decision cannot disagree with the gate about what a row names.
-import { normalizeSuiteToken } from './derive-coverage-contract.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MAP = path.join(HERE, 'suite-map.tsv');
@@ -169,8 +179,8 @@ const normalise = (rows) => rows.map((row) => {
 //   deletedRaw   a comment/blank line the same way: DELETED (reported by name)
 //   addedRows    a row not in BASE and on one side only: kept - an addition, which is what a union is for
 // and a row DELETED on one side and CHANGED on the other refuses by name: that is a disagreement, not a union.
-// Without a base nothing can tell an addition from a deletion, so one-side-only rows are kept and REPORTED,
-// and a one-side-only self-row is reported as the hazard it is (--union refuses it outright).
+// Without a base nothing can tell an addition from a deletion, so --union REFUSES any one-side-only row unless
+// --allow-one-sided asks for the additive union anyway, and either way every such row is REPORTED by name.
 //
 // The report is part of the contract, not a nicety (airhorn-gdtr): a union that quietly keeps a suite token one
 // side deleted is doing exactly what a coverage map should do - over-approximate, never false-green - but the lane
@@ -191,15 +201,11 @@ const sameRow = (a, b) => {
 };
 
 // A row that names only its own suite is a tautology the gate derives from the tree (airhorn-xh81), so a
-// one-side-only self-row is far more likely to be a DELETION than an addition - and without a BASE that is
-// precisely what this tool cannot tell apart. Spelled through the map's shared naming rule, so a variant
-// spelling ('.//x', 'tests/../x') is recognised as the same row.
-const isSelfRow = (row) => {
-  if (row.kind !== 'mapped' || row.tokens.length !== 1) return false;
-  const pattern = normalizeSuiteToken(patternOf(row.key));
-  const suite = normalizeSuiteToken(row.tokens[0]);
-  return !pattern.escape && !suite.escape && pattern.path === suite.path;
-};
+// one-side-only self-row is almost certainly a DELETION - the exact shape that came back 47 times. This is used
+// to LABEL such a row in the refusal/report, never to decide safety: any one-side-only row refuses without a
+// base. Plain string comparison on purpose - a merge driver must not import another module to stay runnable in
+// a half-merged tree (a driver that dies on an import leaves the conflict it was meant to prevent).
+const isSelfRow = (row) => row.kind === 'mapped' && row.tokens.length === 1 && row.tokens[0] === patternOf(row.key);
 
 const describeRaw = (line) => {
   const text = line.trim();
@@ -330,8 +336,8 @@ const printReport = (report, label) => {
   say(report.deletedRows, 'DELETED rows (in the base, removed on one side and untouched on the other - the merge RESPECTS the deletion, airhorn-famo):');
   say(report.deletedRaw, 'deleted comment/blank lines (removed by one side, respected - a union would put them back, airhorn-tcdb):');
   say(report.addedRows, 'added rows (not in the base and on one side only - kept):');
-  say(report.onlyOneSide, 'rows on ONE side only and no base to tell an addition from a deletion - kept:');
-  say(report.selfRowOnly, 'SELF-ROWS on one side only - keeping one REVERTS a branch that deleted it, so pass the merge base (airhorn-famo):');
+  say(report.onlyOneSide, 'rows on ONE side only and no base to say whether they were added or deleted - kept only because --allow-one-sided was given:');
+  say(report.selfRowOnly, 'SELF-ROWS among them - a branch that DELETED one had it put back this way, 47 times on airhorn-xh81:');
   say(report.rawDiffering, 'comment/blank lines BOTH sides changed differently - kept the larger count, settle by hand if it matters:');
   say(report.added, 'added suites (named on one side only - the union keeps them):');
   say(report.restored, 'RESTORED (deleted on one side, kept by the union - over-approximation, extra suites will run):');
@@ -468,6 +474,7 @@ if (mode === '--union') {
   const writeAt = rest.indexOf('--write');
   const write = writeAt === -1 ? null : rest[writeAt + 1];
   const skip = writeAt === -1 ? -1 : writeAt + 1;   // --write's value is not a positional file
+  const allowOneSided = rest.includes('--allow-one-sided');
   const values = rest.filter((arg, index) => !arg.startsWith('--') && index !== skip);
   const [oursFile, theirsFile, baseFile] = values;
   if (!oursFile || !theirsFile) die('--union needs <ours-file> <theirs-file> [base-file] (optionally --write <file>)');
@@ -477,12 +484,17 @@ if (mode === '--union') {
     baseFile ? parse(readMap(baseFile), baseFile) : null,
   );
   printReport(report, 'union');
-  // Without a base this tool cannot tell "one side added this row" from "one side deleted it", and a self-row
-  // is by far the likeliest deletion (a tautology the gate derives anyway, airhorn-xh81): refuse rather than
-  // hand back a map with the deletion silently reversed. Nothing is written, so the conflict stays for the
-  // lane - which now has the exact fix in the message (airhorn-famo).
-  if (!baseFile && report.selfRowOnly.length > 0) {
-    die(`no merge base given, and one side carries a self-row the other lacks (${report.selfRowOnly.join(', ')}) - keeping it silently REVERTS the branch that deleted it, which is how 47 deleted self-rows came back (airhorn-xh81, airhorn-famo). Nothing was written. Pass the base:\n  git show :1:tools/suite-map.tsv > /tmp/base.tsv\n  node tools/merge-suite-map.mjs --union <ours> <theirs> /tmp/base.tsv --write tools/suite-map.tsv\nor rebuild the map from the other side and re-apply the deletion, and say so on the bead`);
+  // A RESURRECTED ROW MUST NOT PASS SILENTLY (airhorn-famo). Without a base, "one side added this row" and "one
+  // side deleted it" are the same picture, and keeping it puts the deletion back - the defect that resurrected
+  // 47 self-rows twice in one day. So the no-base path REFUSES as soon as any row is one-sided, and the lane has
+  // two honest ways forward: supply the base (one `git show :1:`), or say --allow-one-sided and accept an
+  // additive union whose report names every row it could not classify. A refusal writes nothing, so the
+  // conflicted file stays exactly as git left it.
+  if (!baseFile && report.onlyOneSide.length > 0 && !allowOneSided) {
+    const selfRows = report.selfRowOnly.length > 0
+      ? ` ${report.selfRowOnly.length} of them ${report.selfRowOnly.length === 1 ? 'is a SELF-ROW' : 'are SELF-ROWS'}, the exact shape that came back 47 times (airhorn-xh81).`
+      : '';
+    die(`no merge base given, and ${report.onlyOneSide.length} row(s) exist on one side only (${report.onlyOneSide.join(', ')}) - keeping them is a union's over-approximation, and it silently REVERTS the branch that deleted one.${selfRows} Nothing was written.\n  git show :1:tools/suite-map.tsv > /tmp/base.tsv\n  node tools/merge-suite-map.mjs --union <ours> <theirs> /tmp/base.tsv --write tools/suite-map.tsv\nor pass --allow-one-sided if an additive union is what you want and you have read the report`);
   }
   const out = render(rows);
   if (write) fs.writeFileSync(write, out);

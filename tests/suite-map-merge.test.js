@@ -83,9 +83,9 @@ test('two conflicting variants union to the full set, sorted by key and byte-sta
       '',
     ].join('\n'));
 
-    const first = run(['--union', ours, theirs]);
+    const first = run(['--union', ours, theirs, '--allow-one-sided']);
     assert.equal(first.status, 0, first.stderr);
-    const second = run(['--union', ours, theirs]);
+    const second = run(['--union', ours, theirs, '--allow-one-sided']);
     assert.equal(second.stdout, first.stdout, 'the same inputs must produce the same bytes every run');
 
     const rows = first.stdout.split('\n').filter((line) => line !== '' && !line.startsWith('#'));
@@ -99,7 +99,7 @@ test('two conflicting variants union to the full set, sorted by key and byte-sta
     ], 'every row from both sides survives, sorted by the PATTERN (the key a merge is about), so the order does not depend on the !/~ prefix');
 
     // Swapping which side is "ours" must not change the ROWS (comment order may follow ours).
-    const swapped = run(['--union', theirs, ours]);
+    const swapped = run(['--union', theirs, ours, '--allow-one-sided']);
     assert.equal(swapped.status, 0, swapped.stderr);
     const swappedRows = swapped.stdout.split('\n').filter((line) => line !== '' && !line.startsWith('#'));
     assert.deepEqual(swappedRows, rows, 'the union of rows is independent of merge order');
@@ -113,7 +113,7 @@ test('a key both sides add is unioned, not chosen between', () => {
   try {
     const ours = write(dir, 'ours.tsv', 'tools/shared.mjs\ttests/a.test.js\n');
     const theirs = write(dir, 'theirs.tsv', 'tools/shared.mjs\ttests/b.test.js\n');
-    const result = run(['--union', ours, theirs]);
+    const result = run(['--union', ours, theirs, '--allow-one-sided']);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^tools\/shared\.mjs\ttests\/a\.test\.js tests\/b\.test\.js$/m,
       'both suites cover the path, so both are in the row');
@@ -146,7 +146,7 @@ test('@importers, ~ pending, ! exemption and the report-hook tier row survive a 
   try {
     const ours = write(dir, 'ours.tsv', `${wanted.slice(0, 2).join('\n')}\n`);
     const theirs = write(dir, 'theirs.tsv', `${wanted.slice(2).join('\n')}\n`);
-    const result = run(['--union', ours, theirs]);
+    const result = run(['--union', ours, theirs, '--allow-one-sided']);
     assert.equal(result.status, 0, result.stderr);
     for (const row of wanted) {
       assert.ok(result.stdout.split('\n').includes(row), `the union must keep this row verbatim: ${row}`);
@@ -213,7 +213,7 @@ test('the driver mode writes the union into the ours file and exits 0', () => {
 
     const oursCopy = write(dir, 'ours-original.tsv', oursText);
     const theirsCopy = write(dir, 'theirs-original.tsv', theirsText);
-    const expected = run(['--union', oursCopy, theirsCopy]).stdout;
+    const expected = run(['--union', oursCopy, theirsCopy, '--allow-one-sided']).stdout;
     assert.equal(merged, expected, 'the driver must write exactly the union of the two sides into the ours file');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -416,45 +416,53 @@ test('a row deleted on one side and CHANGED on the other refuses by name and wri
   }
 });
 
-test('--union without a base keeps one-side-only rows but REFUSES a one-side-only self-row', () => {
-  // Without the common ancestor an addition and a deletion are the same picture, so the tool keeps the row and
-  // says so - but a self-row is the airhorn-xh81 trap, and there it refuses instead of handing back a map with a
-  // branch's deletion silently reversed. With the base it deletes the row, which is the manual recipe.
+test('--union without a base REFUSES any one-side-only row - a resurrection must not pass silently', () => {
+  // The airhorn-famo rule (coord): a resurrected row must never pass quietly. Without the common ancestor an
+  // addition and a deletion are the same picture, so the no-base path refuses as soon as a row is one-sided and
+  // points at the base - the self-row case (airhorn-xh81's 47) is called out by name, but ANY row refuses,
+  // because any row could be the deletion. With the base the same inputs delete the row: that is the recipe.
   const dir = tmpdir();
   try {
     const selfRow = 'tests/zz.test.mjs\ttests/zz.test.mjs\n';
-    const ours = write(dir, 'ours.tsv', `${selfRow}tools/x.mjs\ttests/x.test.js\n`);
+    const ours = write(dir, 'ours.tsv', `${selfRow}tools/x.mjs\ttests/x.test.js\ntools/only-ours.mjs\ttests/o.test.js\n`);
     const theirs = write(dir, 'theirs.tsv', 'tools/x.mjs\ttests/x.test.js\n');
     const out = path.join(dir, 'out.tsv');
+
     const refused = run(['--union', ours, theirs, '--write', out]);
-    assert.notEqual(refused.status, 0, 'a one-side-only self-row without a base must refuse');
-    assert.match(refused.stderr, /self-row the other lacks[^\n]*tests\/zz\.test\.mjs/, refused.stderr);
+    assert.notEqual(refused.status, 0, 'one-side-only rows without a base must refuse');
+    assert.match(refused.stderr, /2 row\(s\) exist on one side only[^\n]*tests\/zz\.test\.mjs/, refused.stderr);
+    assert.match(refused.stderr, /SELF-ROW/, 'the self-row shape must be called out by name, not just counted');
     assert.match(refused.stderr, /git show :1:/, 'and it must say how to supply the base');
+    assert.match(refused.stderr, /--allow-one-sided/, 'and how to opt into an additive union deliberately');
     assert.equal(fs.existsSync(out), false, 'nothing may be written when it refuses');
 
+    // The explicit opt-in: additive union, and the report names every row it could not classify.
+    const opted = run(['--union', ours, theirs, '--allow-one-sided', '--write', out]);
+    assert.equal(opted.status, 0, opted.stderr);
+    assert.match(fs.readFileSync(out, 'utf8'), /^tests\/zz\.test\.mjs\ttests\/zz\.test\.mjs$/m, 'the opt-in keeps the row');
+    assert.match(opted.stderr, /rows on ONE side only[^\n]*tests\/zz\.test\.mjs[^\n]*tools\/only-ours\.mjs/, opted.stderr);
+
+    // The recipe: with the base the retired self-row is DELETED by the manual path too.
     const base = write(dir, 'base.tsv', `${selfRow}tools/x.mjs\ttests/x.test.js\n`);
     const resolved = run(['--union', ours, theirs, base, '--write', out]);
     assert.equal(resolved.status, 0, resolved.stderr);
-    assert.equal(fs.readFileSync(out, 'utf8'), 'tools/x.mjs\ttests/x.test.js\n',
-      'with the base the retired self-row is deleted by the manual path too');
+    assert.doesNotMatch(fs.readFileSync(out, 'utf8'), /zz\.test\.mjs/, 'with the base the deleted self-row is gone');
+    assert.match(fs.readFileSync(out, 'utf8'), /^tools\/only-ours\.mjs/m, 'and the genuine addition survives');
     assert.match(resolved.stderr, /DELETED rows[^\n]*tests\/zz\.test\.mjs/, 'and the deletion is reported');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('--union without a base keeps both sides new rows and names them as one-side-only', () => {
-  // The ordinary collision is two branches adding rows for different files: both are right, the union keeps
-  // both, and the report says which rows it could not classify so a lane reviewing the merge can see them.
+test('--union without a base still merges two identical-row-sets, and refuses only on an actual difference', () => {
+  // The refusal is about ambiguity, not about having no base at all: two sides that agree row-for-row merge fine.
   const dir = tmpdir();
   try {
-    const ours = write(dir, 'ours.tsv', 'tools/x.mjs\ttests/x.test.js\ntools/new-a.mjs\ttests/a.test.js\n');
-    const theirs = write(dir, 'theirs.tsv', 'tools/x.mjs\ttests/x.test.js\ntools/new-b.mjs\ttests/b.test.js\n');
-    const result = run(['--union', ours, theirs]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^tools\/new-a\.mjs\ttests\/a\.test\.js$/m, 'a row only ours has is kept');
-    assert.match(result.stdout, /^tools\/new-b\.mjs\ttests\/b\.test\.js$/m, 'and so is one only theirs has');
-    assert.match(result.stderr, /rows on ONE side only[^\n]*tools\/new-a\.mjs[^\n]*tools\/new-b\.mjs/, result.stderr);
+    const ours = write(dir, 'ours.tsv', 'tools/x.mjs\ttests/x.test.js\n');
+    const theirs = write(dir, 'theirs.tsv', 'tools/x.mjs\ttests/x.test.js\n');
+    const same = run(['--union', ours, theirs]);
+    assert.equal(same.status, 0, same.stderr);
+    assert.equal(same.stdout, 'tools/x.mjs\ttests/x.test.js\n');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

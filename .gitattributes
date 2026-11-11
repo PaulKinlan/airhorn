@@ -14,8 +14,9 @@
 # The manual path needs no configuration at all and always works mid-conflict. Pass the merge BASE (:1:) as
 # the third file: with it the merge is THREE-WAY, so a row - or a comment block - that one side DELETED is
 # deleted, instead of being put back by an additive union (airhorn-famo: 47 deleted self-rows came back that
-# way, exit 0, looking like a clean merge). Without a base the tool keeps every row either side has and REFUSES
-# a one-side-only self-row by name, because there it cannot tell "added" from "deleted".
+# way, exit 0, looking like a clean merge). Without a base it REFUSES as soon as a row is one-sided, because
+# keeping one is exactly that resurrection; pass `git show :1: > /tmp/base.tsv` as the third file, or say
+# --allow-one-sided to accept an additive union deliberately (the report names every row it could not classify).
 #
 #   git show :1:tools/suite-map.tsv > /tmp/base.tsv
 #   git show :2:tools/suite-map.tsv > /tmp/ours.tsv
