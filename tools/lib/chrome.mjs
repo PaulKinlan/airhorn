@@ -118,7 +118,15 @@ const TEST_CONTEXT_ENV = 'AIRHORN_TEST_CONTEXT';
 // A synchronous, bounded sleep: the preflight runs before the launch and cannot
 // await, and the only thing it needs is a window wide enough to measure.
 function sleepSync(ms) {
-  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no SAB: skip */ }
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch {
+    // No SAB (airhorn-nxuv.36): returning here made the steal probe's window a no-op - two
+    // /proc/stat readings taken back-to-back advance too few ticks, so the probe could only
+    // ever answer 'unknown' and the preflight degraded to 'cannot tell'. A bounded spin keeps
+    // the window spanning REAL time on a runtime without shared memory; Node with SAB never
+    // reaches this branch, so the normal path pays nothing.
+    const end = Date.now() + ms;
+    while (Date.now() < end) { /* bounded spin, no-SAB path only */ }
+  }
 }
 
 const CPU_STAT_FIELDS = 8;   // user nice system idle iowait irq softirq steal
@@ -609,7 +617,11 @@ export async function launchChrome({
         throw new Error(`DevTools discovery timeout (${discoveryBound}ms) (${label}): /json/list never answered on port ${port}${why}`);
       }
       pageTarget = targets.find((t) => t.type === 'page');
-      if (!pageTarget) throw new Error(`no page target in /json/list (${label}): ${JSON.stringify(targets.map((t) => t.type))}`);
+      // No second 'no page target' throw here (airhorn-nxuv.36): the async block above only
+      // returns a LIST once it contains a page, and both other outcomes - an answered list
+      // without a page, and an exhausted deadline - already threw by name before this line.
+      // A guard here could therefore never fire, and dead failure paths are what this bead is
+      // about: the live owner of 'no page target' is the noPageTarget throw above (airhorn-9nea).
     }
   } catch (err) {
     reap();
