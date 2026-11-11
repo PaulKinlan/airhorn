@@ -20,19 +20,35 @@
  *   node tools/merge-suite-map.mjs --check [<file>]
  *       Writes nothing; exits 1 if the file is not canonical, naming the command to fix it.
  *
- *   node tools/merge-suite-map.mjs --union <ours> <theirs> [--write <file>]
+ *   node tools/merge-suite-map.mjs --union <ours> <theirs> [base] [--write <file>]
  *       Union two variants by key, sorted by key, and print (or write) the result. Suite lists are unioned
- *       with ours' order first; a key present in one side only is kept as-is, so no row is ever dropped.
+ *       with ours' order first. Give the merge BASE too (`git show :1:<file>`) and the merge is THREE-WAY: a
+ *       row - or a comment, or a blank line - the base has and one side removed is DELETED. Without a base
+ *       nothing can tell an addition from a deletion, so a one-side-only row is kept and REPORTED, and a
+ *       one-side-only SELF-ROW refuses outright rather than resurrecting it (airhorn-famo).
  *
  *   node tools/merge-suite-map.mjs --driver <base> <ours> <theirs>
- *       Git merge-driver shape (the %O %A %B arguments): writes the union into <ours> and exits 0. On
- *       malformed input it exits 1 with a named message and writes nothing, which leaves the conflict in
- *       place for a human - a loud conflict, never a quiet wrong answer.
+ *       Git merge-driver shape (the %O %A %B arguments): merges three-way into <ours> and exits 0. On
+ *       malformed input, or on a delete/modify disagreement, it exits 1 with a named message and writes
+ *       nothing, which leaves the conflict in place for a human - a loud conflict, never a quiet wrong answer.
+ *
+ * WHERE A UNION IS RIGHT AND WHERE IT IS NOT (airhorn-famo). The map is a SET the gate unions at run time, so
+ * a union is right for ADDITIONS: two branches adding rows for different files are both right and only the
+ * text merge fails. It is WRONG for a DELETION: "ours still has the row, theirs removed it" is
+ * indistinguishable from "theirs never had it", so a union silently puts back a row a branch meant to retire.
+ * That is how 47 tautological self-rows a branch had deleted came back on a rebase, exit 0, while looking like
+ * a clean merge (airhorn-xh81), and how 207 prose comment lines a landing had moved into docs/coverage-map.md
+ * came back too (airhorn-tcdb). So with a BASE this tool is ordinary three-way: a row or a raw line present in
+ * the base and absent from one side, unchanged on the other, is deleted; deleted on one side and CHANGED on
+ * the other is a disagreement it refuses by name. The one thing still over-approximated is a TOKEN inside a
+ * row both sides keep: a coverage claim, where the union's extra suites cost time but can never false-green,
+ * and the report names every restored token.
  *
  * RESOLVING A CONFLICT without configuring anything (the primary path - works in every clone):
+ *   git show :1:tools/suite-map.tsv > /tmp/base.tsv     # the merge base - what a DELETION needs
  *   git show :2:tools/suite-map.tsv > /tmp/ours.tsv     # our side of the conflict
  *   git show :3:tools/suite-map.tsv > /tmp/theirs.tsv   # their side
- *   node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv --write tools/suite-map.tsv
+ *   node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv /tmp/base.tsv --write tools/suite-map.tsv
  *   node tools/derive-coverage-contract.mjs      # the contract is derived: regenerate, never merge
  *   git add tools/suite-map.tsv .fleet/coverage-contract.json
  *
@@ -44,14 +60,17 @@
  *
  * WHAT IT WILL NOT DO. It never chooses between two different meanings for one key: a key that is an `!`
  * exemption on one side and a real row on the other, a row with no suite list, a pattern containing
- * whitespace, a non-comment line with no TAB, or the same key twice inside one file all FAIL LOUDLY with
- * file:line and the key. Gate semantics are untouched: this only writes the map, and only ever writes what
- * the gate already unions at run time.
+ * whitespace, a non-comment line with no TAB, the same key twice inside one file, or a row DELETED on one side
+ * and CHANGED on the other all FAIL LOUDLY with file:line and the key. Gate semantics are untouched: this only
+ * writes the map, and only ever writes what the gate already unions at run time.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// The map's ONE spelling rule (airhorn-huud): naming variants normalise, escapes are refused. Imported rather
+// than copied so a delete/add decision cannot disagree with the gate about what a row names.
+import { normalizeSuiteToken } from './derive-coverage-contract.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MAP = path.join(HERE, 'suite-map.tsv');
@@ -61,6 +80,12 @@ const die = (message) => {
   process.exit(1);
 };
 
+// A row's key is `<prefix?><pattern>`: `!` is an exemption and `~` a pending suite, and both name the same
+// PATTERN for merge purposes (two sides must never end up with different meanings for one pattern).
+const kindOf = (key) => (key.startsWith('!') ? 'exemption' : key.startsWith('~') ? 'pending' : 'mapped');
+const patternOf = (key) => key.replace(/^[!~]/, '');
+const byString = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
 // One row: raw (comment/blank, kept verbatim), exemption (`!pattern`, no TAB, no suites), or a keyed row
 // (`pattern<TAB>tokens...`). `tokens` keeps file order.
 const parse = (text, label) => {
@@ -68,8 +93,6 @@ const parse = (text, label) => {
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();   // the trailing newline is re-emitted
   const rows = [];
   const seen = new Map();   // pattern -> { kind, line, text }  (a pattern has ONE meaning in one file)
-  const kindOf = (key) => (key.startsWith('!') ? 'exemption' : key.startsWith('~') ? 'pending' : 'mapped');
-  const patternOf = (key) => key.replace(/^[!~]/, '');
   // A pattern may appear more than once only as a byte-identical row: that resolves nothing by preference and
   // loses nothing, and today's map has such a pair (`!preview/**` twice under two comment blocks, which
   // normalise must reproduce byte-for-byte). Two meanings for one pattern - different suites, or an exemption
@@ -135,21 +158,60 @@ const normalise = (rows) => rows.map((row) => {
   return { ...row, tokens: row.tokens.filter((token) => (seen.has(token) ? false : seen.add(token))) };
 });
 
-// Union two variants BY KEY. Comments come from ours first, then any comment line theirs has that ours does
-// not, so a comment block from the other branch is neither lost nor duplicated. Keyed rows are sorted by key,
-// which makes the rows independent of merge order.
+// Merge two variants BY KEY. Keyed rows are sorted by key, which makes the rows independent of merge order.
+// Raw lines (comments, blank lines) come from ours first, then any line theirs has that ours does not, so a
+// comment block from the other branch is neither lost nor duplicated.
+//
+// WITH A BASE THE MERGE IS THREE-WAY (airhorn-famo). A union cannot say "removed": a row the base has, that one
+// side deleted and the other left untouched, is kept by a plain union - so a branch retiring rows (or prose,
+// airhorn-tcdb) is silently reverted by an exit-0 merge. So when the base is supplied:
+//   deletedRows  a row in BASE, removed on one side, untouched on the other: DELETED (reported by name)
+//   deletedRaw   a comment/blank line the same way: DELETED (reported by name)
+//   addedRows    a row not in BASE and on one side only: kept - an addition, which is what a union is for
+// and a row DELETED on one side and CHANGED on the other refuses by name: that is a disagreement, not a union.
+// Without a base nothing can tell an addition from a deletion, so one-side-only rows are kept and REPORTED,
+// and a one-side-only self-row is reported as the hazard it is (--union refuses it outright).
 //
 // The report is part of the contract, not a nicety (airhorn-gdtr): a union that quietly keeps a suite token one
 // side deleted is doing exactly what a coverage map should do - over-approximate, never false-green - but the lane
 // reviewing the merge has to SEE it. So:
 //   added       a token one side names and the other does not, and BASE does not: a genuine addition
 //   restored    a token present in BASE and on one side only, i.e. the other side deleted it and the union kept it
-//   resurrected a whole row present in BASE and on one side only
+//     (the ONE over-approximation left: a token is a coverage claim, where an extra suite costs time and cannot
+//     false-green - unlike a whole row or a whole comment, whose deletion is the branch's actual intent)
 // and "no shared patterns" is printed only when the two sides truly share none.
+
+// A row's MEANING is its kind plus its suite SET: a token reorder is not a change, so whether a side "touched" a
+// row does not depend on the order it happened to spell the suites in.
+const sameRow = (a, b) => {
+  if (!a || !b || a.kind !== b.kind) return false;
+  const mine = [...a.tokens].sort();
+  const other = [...b.tokens].sort();
+  return mine.length === other.length && mine.every((token, index) => token === other[index]);
+};
+
+// A row that names only its own suite is a tautology the gate derives from the tree (airhorn-xh81), so a
+// one-side-only self-row is far more likely to be a DELETION than an addition - and without a BASE that is
+// precisely what this tool cannot tell apart. Spelled through the map's shared naming rule, so a variant
+// spelling ('.//x', 'tests/../x') is recognised as the same row.
+const isSelfRow = (row) => {
+  if (row.kind !== 'mapped' || row.tokens.length !== 1) return false;
+  const pattern = normalizeSuiteToken(patternOf(row.key));
+  const suite = normalizeSuiteToken(row.tokens[0]);
+  return !pattern.escape && !suite.escape && pattern.path === suite.path;
+};
+
+const describeRaw = (line) => {
+  const text = line.trim();
+  if (text === '') return 'blank line';
+  return `"${text.length > 60 ? `${text.slice(0, 57)}...` : text}"`;
+};
+
 const union = (ours, theirs, base = null) => {
-  const report = { added: [], restored: [], resurrected: [], shared: 0 };
-  const kindOf = (key) => (key.startsWith('!') ? 'exemption' : key.startsWith('~') ? 'pending' : 'mapped');
-  const patternOf = (key) => key.replace(/^[!~]/, '');
+  const report = {
+    added: [], restored: [], addedRows: [], deletedRows: [], deletedRaw: [], rawDiffering: [],
+    onlyOneSide: [], selfRowOnly: [], shared: 0,
+  };
   const rowMap = (rows) => {
     const map = new Map();
     for (const row of rows) {
@@ -163,12 +225,29 @@ const union = (ours, theirs, base = null) => {
   const theirsMap = rowMap(theirs);
   const baseMap = base ? rowMap(base) : null;
   const byKey = new Map();
-  for (const pattern of [...new Set([...oursMap.keys(), ...theirsMap.keys()])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+  const patterns = [...new Set([...oursMap.keys(), ...theirsMap.keys(), ...(baseMap ? [...baseMap.keys()] : [])])];
+  for (const pattern of patterns.sort(byString)) {
     const mine = oursMap.get(pattern);
     const other = theirsMap.get(pattern);
+    const was = baseMap ? baseMap.get(pattern) ?? null : null;
     if (!mine || !other) {
       const only = mine ?? other;
-      byKey.set(pattern, { kind: 'row', key: only.key, tokens: [...only.tokens] });
+      const side = mine ? 'ours' : 'theirs';
+      if (!only) continue;   // both sides deleted it: nothing to keep and nothing to prefer
+      if (!was) {
+        // Neither the base nor the other side has this row: an ADDITION, which a union is the right answer for.
+        byKey.set(pattern, { kind: 'row', key: only.key, tokens: [...only.tokens] });
+        report.addedRows.push(`${pattern} (${side})`);
+        if (!baseMap) report.onlyOneSide.push(`${pattern} (${side})`);
+        if (isSelfRow(only)) report.selfRowOnly.push(`${pattern} (${side})`);
+        continue;
+      }
+      if (!sameRow(only, was)) {
+        const kept = only.tokens.length > 0 ? only.tokens.join(' ') : 'an "!" exemption';
+        die(`${pattern} was DELETED on one side and CHANGED on the other (${side} still declares ${kept}) - delete/modify is a disagreement to settle by hand, not a union`);
+      }
+      // The base has it, one side kept it as it was, the other removed it: a DELETION, and the branch meant it.
+      report.deletedRows.push(`${pattern} (deleted by ${side === 'ours' ? 'theirs' : 'ours'})`);
       continue;
     }
     report.shared += 1;
@@ -189,33 +268,79 @@ const union = (ours, theirs, base = null) => {
     if (restored.length > 0) report.restored.push(`${pattern} (${restored.join(' ')})`);
     if (added.length > 0) report.added.push(`${pattern} (${added.join(' ')})`);
   }
-  // A whole row one branch DELETED and the other kept is resurrected by a union. Same direction of safety, same
-  // requirement to say it (the hazard named in airhorn-tp3g).
-  if (baseMap) {
-    for (const pattern of baseMap.keys()) {
-      const deletedByUs = !oursMap.has(pattern);
-      const deletedByThem = !theirsMap.has(pattern);
-      if (deletedByUs !== deletedByThem) report.resurrected.push(pattern);
+  // Raw lines are three-way too, because prose is a deletion like any other (airhorn-tcdb). A raw line has no
+  // key, so its identity is its text plus the number of copies of that text: a line the base has and the side
+  // that changed it removed stays removed. Without a base the old over-approximation stands - ours' lines, then
+  // any line of theirs ours does not have - because nothing there can tell a deletion from an addition.
+  const oursRaw = ours.filter((row) => row.kind === 'raw');
+  const theirsRaw = theirs.filter((row) => row.kind === 'raw');
+  let keptRaw;
+  if (!base) {
+    const oursLines = new Set(oursRaw.map((row) => row.line));
+    keptRaw = [...oursRaw, ...theirsRaw.filter((row) => !oursLines.has(row.line))];
+  } else {
+    const rawCounts = (rows) => {
+      const counts = new Map();
+      for (const row of rows) if (row.kind === 'raw') counts.set(row.line, (counts.get(row.line) ?? 0) + 1);
+      return counts;
+    };
+    const oursCounts = rawCounts(oursRaw);
+    const theirsCounts = rawCounts(theirsRaw);
+    const baseCounts = rawCounts(base);
+    const keepCount = new Map();
+    for (const line of new Set([...oursCounts.keys(), ...theirsCounts.keys(), ...baseCounts.keys()])) {
+      const mineCount = oursCounts.get(line) ?? 0;
+      const otherCount = theirsCounts.get(line) ?? 0;
+      const was = baseCounts.get(line) ?? 0;
+      let keep;
+      if (mineCount === otherCount) keep = mineCount;                 // both sides agree (including both deleted)
+      else if (mineCount === was) keep = otherCount;                  // only THEIRS changed it: their edit wins
+      else if (otherCount === was) keep = mineCount;                  // only OURS changed it: ours wins
+      else {
+        keep = Math.max(mineCount, otherCount);                       // both changed: keep the larger, and say so
+        report.rawDiffering.push(`${describeRaw(line)} (ours ${mineCount}, theirs ${otherCount}, base ${was})`);
+      }
+      keepCount.set(line, keep);
+      if (keep < was) report.deletedRaw.push(`${describeRaw(line)} (base ${was}, kept ${keep})`);
     }
+    keptRaw = [];
+    const emitted = new Map();
+    const keepLine = (row) => {
+      const kept = keepCount.get(row.line) ?? 0;
+      const used = emitted.get(row.line) ?? 0;
+      if (used >= kept) return;
+      emitted.set(row.line, used + 1);
+      keptRaw.push(row);
+    };
+    for (const row of oursRaw) keepLine(row);
+    for (const row of theirsRaw) keepLine(row);
   }
-  const oursComments = ours.filter((row) => row.kind === 'raw');
-  const theirsOnlyComments = theirs.filter((row) => row.kind === 'raw' && !oursComments.some((mine) => mine.line === row.line));
-  const rows = [...oursComments, ...theirsOnlyComments, ...[...byKey.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).map((key) => byKey.get(key))];
+  const rows = [...keptRaw, ...[...byKey.keys()].sort(byString).map((key) => byKey.get(key))];
   return { rows, report };
 };
 
-// The union is only reviewable if it says what it did: a silently broadened row is the failure mode this tool
-// exists to make impossible, so every unioned and every resurrected pattern is printed.
+// The merge is only reviewable if it says what it did: a silently broadened row is the failure mode this tool
+// exists to make impossible, so every unioned, every RESTORED token, every deleted row/line and every
+// one-side-only self-row is printed. A deletion is a verdict too, not a stderr footnote (airhorn-famo).
 const printReport = (report, label) => {
   const say = (list, what) => {
-    if (list.length > 0) process.stderr.write(`merge-suite-map: ${label}: ${what} ${list.join(', ')}\n`);
+    if (list.length > 0) process.stderr.write(`merge-suite-map: ${label}: ${what} ${list.join(', ')}`);
+    if (list.length > 0) process.stderr.write('\n');
   };
+  say(report.deletedRows, 'DELETED rows (in the base, removed on one side and untouched on the other - the merge RESPECTS the deletion, airhorn-famo):');
+  say(report.deletedRaw, 'deleted comment/blank lines (removed by one side, respected - a union would put them back, airhorn-tcdb):');
+  say(report.addedRows, 'added rows (not in the base and on one side only - kept):');
+  say(report.onlyOneSide, 'rows on ONE side only and no base to tell an addition from a deletion - kept:');
+  say(report.selfRowOnly, 'SELF-ROWS on one side only - keeping one REVERTS a branch that deleted it, so pass the merge base (airhorn-famo):');
+  say(report.rawDiffering, 'comment/blank lines BOTH sides changed differently - kept the larger count, settle by hand if it matters:');
   say(report.added, 'added suites (named on one side only - the union keeps them):');
   say(report.restored, 'RESTORED (deleted on one side, kept by the union - over-approximation, extra suites will run):');
-  say(report.resurrected, 'RESURRECTED rows (deleted on one side, kept by the union - over-approximation):');
+  const quiet = report.added.length === 0 && report.restored.length === 0 && report.addedRows.length === 0
+    && report.deletedRows.length === 0 && report.deletedRaw.length === 0 && report.onlyOneSide.length === 0
+    && report.selfRowOnly.length === 0 && report.rawDiffering.length === 0;
   if (report.shared === 0) {
     process.stderr.write(`merge-suite-map: ${label}: no pattern appears on both sides - a straight union of both sides\n`);
-  } else if (report.added.length === 0 && report.restored.length === 0 && report.resurrected.length === 0) {
+  } else if (quiet) {
     process.stderr.write(`merge-suite-map: ${label}: ${report.shared} shared pattern(s), all identical - only new rows were added\n`);
   }
 };
@@ -324,23 +449,41 @@ const [mode, ...rest] = process.argv.slice(2);
 if (mode === '--driver') {
   const [base, ours, theirs] = rest.filter((arg) => !arg.startsWith('--'));
   if (!ours || !theirs) die('--driver needs <base> <ours> <theirs> (the git %O %A %B arguments)');
-  // The union is OURS + THEIRS: the map's rows are additive, so a 3-way base contributes nothing that is not
-  // already in one of the two sides - and using base instead of ours would silently drop this branch's rows.
+  // THREE-WAY, and the base is the whole point (airhorn-famo): "ours still has the row" and "theirs never had
+  // it" are only distinguishable with the common ancestor, and a union that cannot express a deletion puts
+  // back the rows a branch retired. Additions are still unioned - both sides' new rows survive.
   const { rows, report } = union(parse(readMap(ours), ours), parse(readMap(theirs), theirs), base ? parse(readMap(base), base) : null);
   printReport(report, 'driver');
   fs.writeFileSync(ours, render(rows));
-  process.stdout.write(`merge-suite-map: merged by key into ${ours} (${rows.filter((row) => row.kind === 'row').length} rows)\n`);
+  const counted = rows.filter((row) => row.kind === 'row').length;
+  const changes = [];
+  if (report.deletedRows.length > 0) changes.push(`${report.deletedRows.length} row(s) deleted`);
+  if (report.addedRows.length > 0) changes.push(`${report.addedRows.length} row(s) added`);
+  if (report.deletedRaw.length > 0) changes.push(`${report.deletedRaw.length} comment/blank line kind(s) deleted`);
+  process.stdout.write(`merge-suite-map: merged by key into ${ours} (${counted} rows${changes.length > 0 ? `; ${changes.join(', ')}` : ''})\n`);
   process.exit(0);
 }
 
 if (mode === '--union') {
-  const values = rest.filter((arg) => !arg.startsWith('--'));
   const writeAt = rest.indexOf('--write');
   const write = writeAt === -1 ? null : rest[writeAt + 1];
-  const [oursFile, theirsFile] = values;
-  if (!oursFile || !theirsFile) die('--union needs <ours-file> <theirs-file> (optionally --write <file>)');
-  const { rows, report } = union(parse(readMap(oursFile), oursFile), parse(readMap(theirsFile), theirsFile));
+  const skip = writeAt === -1 ? -1 : writeAt + 1;   // --write's value is not a positional file
+  const values = rest.filter((arg, index) => !arg.startsWith('--') && index !== skip);
+  const [oursFile, theirsFile, baseFile] = values;
+  if (!oursFile || !theirsFile) die('--union needs <ours-file> <theirs-file> [base-file] (optionally --write <file>)');
+  const { rows, report } = union(
+    parse(readMap(oursFile), oursFile),
+    parse(readMap(theirsFile), theirsFile),
+    baseFile ? parse(readMap(baseFile), baseFile) : null,
+  );
   printReport(report, 'union');
+  // Without a base this tool cannot tell "one side added this row" from "one side deleted it", and a self-row
+  // is by far the likeliest deletion (a tautology the gate derives anyway, airhorn-xh81): refuse rather than
+  // hand back a map with the deletion silently reversed. Nothing is written, so the conflict stays for the
+  // lane - which now has the exact fix in the message (airhorn-famo).
+  if (!baseFile && report.selfRowOnly.length > 0) {
+    die(`no merge base given, and one side carries a self-row the other lacks (${report.selfRowOnly.join(', ')}) - keeping it silently REVERTS the branch that deleted it, which is how 47 deleted self-rows came back (airhorn-xh81, airhorn-famo). Nothing was written. Pass the base:\n  git show :1:tools/suite-map.tsv > /tmp/base.tsv\n  node tools/merge-suite-map.mjs --union <ours> <theirs> /tmp/base.tsv --write tools/suite-map.tsv\nor rebuild the map from the other side and re-apply the deletion, and say so on the bead`);
+  }
   const out = render(rows);
   if (write) fs.writeFileSync(write, out);
   else process.stdout.write(out);
@@ -407,4 +550,4 @@ if (mode === '--tiers-normalise' || mode === '--tiers-check') {
   process.exit(0);
 }
 
-die('nothing to do - pass --normalise [file], --check [file], --union <ours> <theirs> [--write out], --driver <base> <ours> <theirs>, or the tier-block forms --tiers-normalise/--tiers-check/--tiers-union/--tiers-driver (airhorn-09dr)');
+die('nothing to do - pass --normalise [file], --check [file], --union <ours> <theirs> [base] [--write out], --driver <base> <ours> <theirs>, or the tier-block forms --tiers-normalise/--tiers-check/--tiers-union/--tiers-driver (airhorn-09dr)');

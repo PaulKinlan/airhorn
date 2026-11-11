@@ -11,11 +11,16 @@
 #   git config merge.suite-map-union.driver "node tools/merge-suite-map.mjs --driver %O %A %B"
 #   git config merge.suite-map-union.name "union tools/suite-map.tsv by key"
 #
-# The manual path needs no configuration at all and always works mid-conflict:
+# The manual path needs no configuration at all and always works mid-conflict. Pass the merge BASE (:1:) as
+# the third file: with it the merge is THREE-WAY, so a row - or a comment block - that one side DELETED is
+# deleted, instead of being put back by an additive union (airhorn-famo: 47 deleted self-rows came back that
+# way, exit 0, looking like a clean merge). Without a base the tool keeps every row either side has and REFUSES
+# a one-side-only self-row by name, because there it cannot tell "added" from "deleted".
 #
+#   git show :1:tools/suite-map.tsv > /tmp/base.tsv
 #   git show :2:tools/suite-map.tsv > /tmp/ours.tsv
 #   git show :3:tools/suite-map.tsv > /tmp/theirs.tsv
-#   node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv --write tools/suite-map.tsv
+#   node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv /tmp/base.tsv --write tools/suite-map.tsv
 #   node tools/derive-coverage-contract.mjs          # the contract is DERIVED: never merge it, regenerate it
 #   git add tools/suite-map.tsv .fleet/coverage-contract.json
 #
@@ -24,7 +29,8 @@
 # fails tests/gate-map.test.js on a stale contract - loudly, which is the point, but do it in one go.
 #
 # Either way a disagreement (an "!" exemption on one side and a real row on the other, a truncated row, a
-# malformed line) FAILS LOUDLY rather than being resolved by preference. tests/suite-map-merge.test.js pins
-# this file, the driver's union, and the loud failures.
+# malformed line, a row deleted on one side and changed on the other) FAILS LOUDLY rather than being resolved
+# by preference. tests/suite-map-merge.test.js pins this file, the driver's three-way merge, and the loud
+# failures.
 
 tools/suite-map.tsv merge=suite-map-union

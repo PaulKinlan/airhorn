@@ -35,11 +35,18 @@ at any depth) - airhorn-xh81. The map only places suites over OTHER files. A cha
 with no row is still 'unmapped:' and fails, and a selection that runs nothing still fails, so the
 loud direction is the same as it always was.
 CONFLICT HERE? Do not hand-merge it (airhorn-tp3g, airhorn-fp5q). The map is a SET the gate unions at run
-time, so a collision is resolved by key, mechanically:
-  git show :2:tools/suite-map.tsv > /tmp/ours.tsv; git show :3:tools/suite-map.tsv > /tmp/theirs.tsv
-  node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv --write tools/suite-map.tsv
+time, so a collision is resolved by key, mechanically - and the merge BASE goes in as the third file so a
+row, comment or blank line one side DELETED stays deleted (airhorn-famo):
+  git show :1:tools/suite-map.tsv > /tmp/base.tsv; git show :2:tools/suite-map.tsv > /tmp/ours.tsv; git show :3:tools/suite-map.tsv > /tmp/theirs.tsv
+  node tools/merge-suite-map.mjs --union /tmp/ours.tsv /tmp/theirs.tsv /tmp/base.tsv --write tools/suite-map.tsv
   node tools/derive-coverage-contract.mjs   # the contract is DERIVED: regenerate it, never merge it
   git add tools/suite-map.tsv .fleet/coverage-contract.json   # or the merge cannot continue (airhorn-nn8g)
+With the base the merge is ordinary THREE-WAY: removed on one side and untouched on the other is a
+deletion and is respected; removed on one side and CHANGED on the other is refused by name. Without a base
+nothing can tell an addition from a deletion, so the tool keeps one-side-only rows (and reports them), and
+REFUSES a one-side-only SELF-ROW outright - keeping one was how 47 deleted self-rows came back (airhorn-xh81).
+The one thing still over-approximated is a TOKEN inside a row both sides keep: an extra suite costs gate time
+and can never false-green, and the report names every restored token.
 tools/gate.conf's SUITE_TIERS block has the SAME treatment (airhorn-09dr): union with
   node tools/merge-suite-map.mjs --tiers-union /tmp/ours.conf /tmp/theirs.conf --write tools/gate.conf
 `git config merge.suite-map-union.driver "node tools/merge-suite-map.mjs --driver %O %A %B"` makes git do the
