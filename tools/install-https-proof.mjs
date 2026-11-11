@@ -471,6 +471,37 @@ async function main() {
  * property notices that the element has no painted box at all. Both legs use this one function so the two halves of
  * the contrast cannot drift into asking different questions again.
  */
+/* airhorn-qpac: classify a computed colour's alpha. Spellings the proof supports:
+ * 'transparent'; hex with an alpha channel (#RGBA / #RRGGBBAA - defensive: getComputedStyle
+ * never emits hex, but the classifier must not guess); every CSS colour FUNCTION
+ * (rgb/rgba, hsl/hsla, oklch, oklab, lab, lch, color(...), color-mix(...)) whose alpha is
+ * the trailing '/ a' segment or last comma argument. Alpha exactly 0 -> 'transparent';
+ * present and non-zero, or absent -> 'opaque'; anything else -> 'unknown' (refused by the
+ * caller, never greened). Pinned per spelling in tests/test-support.test.js. */
+export function classifyPaintAlpha(c) {
+  if (typeof c !== 'string' || c === '') return 'unknown';
+  if (c === 'transparent') return 'transparent';
+  const hex = c.match(/^#([0-9a-fA-F]+)$/);
+  if (hex) {
+    const h = hex[1];
+    if (h.length === 4 || h.length === 8) {
+      const alpha = h.length === 4 ? h[3] + h[3] : h.slice(6, 8);
+      return parseInt(alpha, 16) === 0 ? 'transparent' : 'opaque';
+    }
+    return h.length === 3 || h.length === 6 ? 'opaque' : 'unknown';
+  }
+  const fn = c.match(/^([a-z-]+)\((.*)\)$/s);
+  if (!fn) return 'unknown';
+  if (!/^(rgba?|hsla?|hwb|oklch|oklab|lab|lch|color|color-mix)$/.test(fn[1])) return 'unknown';
+  const body = fn[2].trim();
+  const slashAlpha = body.match(/\/\s*([0-9.]+%?)\s*$/);
+  if (slashAlpha) return parseFloat(slashAlpha[1]) === 0 ? 'transparent' : 'opaque';
+  const commaParts = body.split(',').map((x) => x.trim());
+  if (commaParts.length === 4) return parseFloat(commaParts[3]) === 0 ? 'transparent' : 'opaque';
+  if (commaParts.length >= 2) return 'opaque'; // comma form with no alpha channel
+  return 'opaque'; // space-separated with no '/' means no alpha channel
+}
+
 /* airhorn-0u67: what this proof owes is 'the user could see and click it'. The enumeration
  * below is the contract, one clause per way a laid-out button is not an affordance; each is
  * pinned BY NAME in tests/test-support.test.js. Known limits (recorded in
@@ -491,9 +522,19 @@ export function affordanceProblem(btn) {
   if (typeof btn.filter === 'string' && /\bopacity\(0(\.0+)?\)/.test(btn.filter)) {
     return `filter zeroes the opacity ('${btn.filter}') - checkVisibility does not consult filters`;
   }
-  const transparent = (c) => typeof c === 'string' && /rgba\([^)]*,\s*0\s*\)$/.test(c) || c === 'transparent';
-  if ([btn.color, btn.backgroundColor, btn.borderColor].every((c) => c !== undefined && transparent(c))) {
-    return 'colour, background and border are all fully transparent - there is nothing to see';
+  // airhorn-qpac: the transparency verdict comes from ONE classifier over the computed
+  // colour string. What it cannot classify is 'unknown' - and unknown FAILS NAMED, because
+  // a proof that greens a spelling it cannot read is exactly the defect this bead closed.
+  const channels = [btn.color, btn.backgroundColor, btn.borderColor].filter((c) => c !== undefined);
+  if (channels.length === 3) {
+    const verdicts = channels.map(classifyPaintAlpha);
+    if (verdicts.every((v) => v === 'transparent')) {
+      return 'colour, background and border are all fully transparent - there is nothing to see';
+    }
+    const unknownIdx = verdicts.findIndex((v) => v === 'unknown');
+    if (unknownIdx !== -1 && !verdicts.includes('opaque')) {
+      return `cannot evaluate the paint spelling '${channels[unknownIdx]}' - the proof refuses to green a colour it cannot read`;
+    }
   }
   if (btn.coveredBy) return `covered at its centre by ${btn.coveredBy} - a click would hit the overlay, not the button`;
   return null;

@@ -24,6 +24,7 @@ All automated test passes and performance benchmarks in this repository were pro
 
 - **What the proof checks (airhorn-0u67):** layout (`display`, `visibility`, rect size), click-through (`pointer-events`, coverage at the rect's centre via `elementsFromPoint`), and paint (`opacity`, `filter: opacity(0)`, fully transparent colour/background/border) - each a named clause in `affordanceProblem`, pinned as a data table in `tests/test-support.test.js`.
 - **What it does NOT check:** `clip-path` shaping, `mix-blend-mode`, an offscreen-but-scrollable rect (the rect alone cannot judge reachability), and `aria-hidden` (an AT contract, not a visual one). The per-origin screenshot the tool already captures is the residual eyeball for those.
+- **Alpha spellings (airhorn-qpac):** the transparency clause classifies `transparent`, hex-with-alpha, and the colour functions (`rgb/rgba`, `hsl/hsla`, `hwb`, `oklch/oklab/lab/lch`, `color(...)`, `color-mix(...)`) by their trailing alpha. A spelling outside that set is not greened - the proof fails NAMED ('cannot evaluate the paint spelling'), so a future colour syntax surfaces as a loud refusal, not a silent pass.
 
 ## 4. Performance: Emulated Mobile and Desktop Headless vs Physical Mid-Tier Mobile
 - **The Gap:** Two different setups produced the performance numbers in this repository, and they are not comparable:

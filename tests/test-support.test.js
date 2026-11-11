@@ -705,6 +705,17 @@ test('install-https-proof refuses paint-level invisibility and coverage, by name
     ['ONE opaque channel still paints', { color: 'rgba(0, 0, 0, 0)', backgroundColor: 'rgb(255, 255, 255)', borderColor: 'rgba(0, 0, 0, 0)' }, null],
     ['covered at the centre by an overlay', { coveredBy: '#consent' }, /covered at its centre by #consent/],
     ['legacy evidence without paint fields still passes (no regression)', { opacity: undefined, filter: undefined, color: undefined, backgroundColor: undefined, borderColor: undefined, coveredBy: undefined }, null],
+    // airhorn-qpac: the alpha-spelling enumeration. Every row was run against the pre-fix
+    // predicate at e35b71bb: rgba/transparent caught, EVERYTHING ELSE greened an invisible
+    // button. Now each zero-alpha spelling fails by name, the controls pass, and a spelling
+    // the classifier cannot read FAILS rather than greens.
+    ['hsla alpha zero', { color: 'hsla(0, 0%, 0%, 0)', backgroundColor: 'hsla(0, 0%, 0%, 0)', borderColor: 'hsla(0, 0%, 0%, 0)' }, /nothing to see/],
+    ['oklch alpha zero (the bead\'s repro)', { color: 'oklch(0 0 0 / 0)', backgroundColor: 'oklch(0 0 0 / 0)', borderColor: 'oklch(0 0 0 / 0)' }, /nothing to see/],
+    ['lab alpha zero', { color: 'lab(0 0 0 / 0)', backgroundColor: 'lab(0 0 0 / 0)', borderColor: 'lab(0 0 0 / 0)' }, /nothing to see/],
+    ['display-p3 alpha zero', { color: 'color(display-p3 0 0 0 / 0)', backgroundColor: 'color(display-p3 0 0 0 / 0)', borderColor: 'color(display-p3 0 0 0 / 0)' }, /nothing to see/],
+    ['hex alpha zero (defensive: computed style never emits hex)', { color: '#0000', backgroundColor: '#00000000', borderColor: '#0000' }, /nothing to see/],
+    ['non-zero alpha CONTROL passes', { color: 'rgba(0, 0, 0, 0.5)', backgroundColor: 'oklch(0.5 0.1 200 / 0.8)', borderColor: 'rgb(10, 10, 10)' }, null],
+    ['a spelling the classifier cannot read REFUSES, never greens', { color: 'currentColor', backgroundColor: 'currentColor', borderColor: 'currentColor' }, /cannot evaluate the paint spelling/],
   ];
   for (const [name, over, expected] of TABLE) {
     const problem = affordanceProblem({ ...healthy, ...over });
