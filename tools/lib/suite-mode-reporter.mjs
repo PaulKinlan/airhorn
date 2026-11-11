@@ -86,7 +86,17 @@ export default async function* suiteModeReporter(source) {
    * "wrapper", which under-claims, and under-claiming is the safe direction for this tool.
    */
   const sameFile = exportedSameFile;
-  const isDriverEvent = (data) => Boolean(driverFile) && sameFile(data.file, driverFile);
+  // In CHILD mode the runner is pointed at the suite itself, so the suite's own tests and its
+  // file-level entry share data.file - attribution by file alone cannot separate them, and the whole
+  // suite used to collapse into "one wrapper event, no real tests" (measured: a passing two-line
+  // suite reported realTests 0). The event's NAME is what separates them: node names the file-level
+  // entry with the file (measured: name "suite-loadfail.test.js" for a load failure, name
+  // "the subject" for a test inside it). A suite test deliberately named after its own path is
+  // read as the wrapper, which under-claims - the safe direction, as everywhere else here.
+  const wrapperByName = process.env.MUTATION_WRAPPER_BY_NAME === '1';
+  const CHILD_MODE = wrapperByName;
+  const isDriverEvent = (data) => Boolean(driverFile) && sameFile(data.file, driverFile)
+    && (!wrapperByName || sameFile(data.name, driverFile));
   /**
    * A describe() block is a CONTAINER, not a test: it starts, passes and fails without any
    * assertion, and a suite whose only node is a container used to answer "a test started" with no
@@ -121,12 +131,27 @@ export default async function* suiteModeReporter(source) {
   // a forgery always makes the sequence invalid - DETECTED, then refused by the parent.
   const driverLines = [];
   const DRIVER_RECORD_PREFIX = 'MUTATION-DRIVER-RECORD ';
+  // The supervisor's quoting marker (tools/lib/suite-driver.mjs, QUOTE_PREFIX). Duplicated rather
+  // than imported on purpose: this reporter is loaded by the runner as a module path, and a record
+  // parser that could not start because of an import would report nothing at all.
+  const QUOTED_PREFIX = '  | ';
 
   for await (const event of source) {
     if (event.type === 'test:stdout') {
       const data = event.data || {};
       const message = typeof data.message === 'string' ? data.message : '';
       for (const line of message.split('\n')) {
+        // QUOTED child bytes are DATA, never records (airhorn-14ht): the supervisor prefixes every
+        // line the code under test emits, so a record shape the suite prints arrives carrying this
+        // marker and is ignored here. That is the whole boundary - the suite's bytes can say
+        // anything and none of it is a record.
+        if (line.startsWith(QUOTED_PREFIX)) continue;
+        // In CHILD mode the suite IS the runner's file and there is no driver in this process, so no
+        // line here can be a record: the supervisor's records are written one level up. Parsing them
+        // would let the code under test shape this report (measured: a suite writing four record lines
+        // marked the child report 'tampered' with a forged strip reason). They are ignored, not
+        // trusted and not refused - they are simply not this process's business.
+        if (CHILD_MODE) continue;
         if (line.startsWith(DRIVER_RECORD_PREFIX)) {
           try {
             driverLines.push(JSON.parse(line.slice(DRIVER_RECORD_PREFIX.length)));
@@ -202,7 +227,13 @@ export default async function* suiteModeReporter(source) {
   const crashes = driverLines.filter((line) => line && line.crashedOutsideTest === true);
   const strips = driverLines.filter((line) => line && line.handlersStripped === true);
   const precededs = driverLines.filter((line) => line && line.handlersPreceded === true);
-  const knownLines = imports.length + crashes.length + strips.length + precededs.length;
+  // Counted PER LINE, not by summing the kind arrays: the supervisor writes ONE line that carries
+  // both its import verdict and its crash verdict, and summing kinds made that correct line read as
+  // "a line was not a driver record at all" (measured: a plain abort was refused with the forgery
+  // message instead of the crash reason).
+  const knownLines = driverLines.filter((line) => line && typeof line === 'object'
+    && (typeof line.importFailed === 'boolean' || line.crashedOutsideTest === true
+      || line.handlersStripped === true || line.handlersPreceded === true)).length;
   const stripFields = strips.length > 0
     ? {
       handlersStripped: true,
@@ -254,6 +285,24 @@ export default async function* suiteModeReporter(source) {
   startedTests = startsWithoutId === 0 && containersWithoutId === 0
     ? starts.filter((id) => !containerIds.has(id)).length
     : starts.length;
+  // THE SUPERVISOR'S FACTS WIN (airhorn-14ht): with the suite in its own process, this reporter's own
+  // event counters describe only the supervisor file, so the counts come from the child runner's
+  // report, which travelled on a pipe the suite cannot write. A record that claims counters without
+  // the supervisor's shape (no childReport) is not believed: nothing here is adopted from a bare
+  // claim, only from the structured facts the supervisor relays.
+  const carried = driver && driver.childReport && typeof driver.childReport === 'object' && typeof driver.childReport.realTests === 'number'
+    ? driver.childReport
+    : null;
+  if (carried) {
+    startedTests = typeof carried.startedTests === 'number' ? carried.startedTests : startedTests;
+    realTests = carried.realTests;
+    realPassed = typeof carried.realPassed === 'number' ? carried.realPassed : realPassed;
+    realFailed = typeof carried.realFailed === 'number' ? carried.realFailed : realFailed;
+    fileLevelFailed = carried.fileLevelFailed === true;
+    unattributed = typeof carried.unattributed === 'number' ? carried.unattributed : unattributed;
+    failing.length = 0;
+    if (Array.isArray(carried.failing)) for (const name of carried.failing.slice(0, 10)) failing.push(String(name));
+  }
   const report = { driver, startedTests, realTests, realPassed, realFailed, fileLevelFailed, wrapperEvents: wrapperEventsCount, unattributed, failing: failing.slice(0, 10) };
   const channelFd = Number(process.env.MUTATION_SUITE_CHANNEL);
   if (Number.isInteger(channelFd)) {

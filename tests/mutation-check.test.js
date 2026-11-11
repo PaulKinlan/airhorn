@@ -419,11 +419,17 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     // the second is recorded here as the known residual so nobody reads the trust line as covering it.
     write('k-prepend-rejection-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { process.prependListener('unhandledRejection', () => process.exit(0)); Promise.reject(new Error('swallowed rejection')); }, 5);\n");
 
+    // airhorn-14ht CHANGED THE ANSWER HERE, and the pin says the new one out loud rather than deleting the
+    // case. With the suite in its own process there is no in-process monitor to see a swallow before it
+    // exits 0, so these three shapes are now indistinguishable from an honest passing suite. The SAFE
+    // direction is kept: they can never be reported as a catch - the run is 'fix-does-not-close' (rc 2),
+    // which claims nothing about the mutant. That is the documented KNOWN-LIMIT in the driver and in the
+    // printed trust line, and a forger gains nothing from it: rc 2 is a refusal to call the check working.
     for (const world of ['k-prepend-swallow.mjs', 'k-prepend-once-swallow.mjs', 'k-self-removing-swallow.mjs']) {
       const laundered = runWorld(['--suite', world]);
-      assert.equal(laundered.status, 3, `${world} must be a named refusal, got ${laundered.status}: ${laundered.stdout}${laundered.stderr}`);
-      assert.match(laundered.stderr + laundered.stdout, /threw-outside-a-test|uncaught exception after the suite loaded/,
-        `${world} must be reported as the crash it is (the monitor sees it first), not as a pass`);
+      assert.equal(laundered.status, 2, `${world} must never be a catch and never a false refusal, got ${laundered.status}: ${laundered.stdout}${laundered.stderr}`);
+      assert.match(laundered.stdout, /verdict: fix-does-not-close/,
+        `${world}: an in-process swallow is invisible from outside, so the honest verdict is that the check does not close the hole`);
     }
 
     // airhorn-39yh, the two shapes this change closes: (a) patch the record channel so the crash line is never written, and
@@ -431,17 +437,23 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     write('k-patch-channel-swallow.mjs', "import test from 'node:test';\nimport fs from 'node:fs';\ntest('one', () => {});\nsetTimeout(() => { const real = fs.writeSync; fs.writeSync = (...args) => (String(args[1]).includes('crashedOutsideTest') ? 0 : real.apply(fs, args)); process.prependListener('uncaughtException', () => process.exit(0)); throw new Error('swallowed after patching the channel'); }, 5);\n");
     write('k-strip-exit-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { for (const fn of process.listeners('exit')) process.removeListener('exit', fn); process.prependListener('unhandledRejection', () => process.exit(0)); Promise.reject(new Error('swallowed after stripping exit listeners')); }, 5);\n");
 
-    for (const world of ['k-patch-channel-swallow.mjs', 'k-strip-exit-swallow.mjs']) {
+    // airhorn-14ht: patching fs.writeSync and stripping 'exit' listeners reach nothing of the supervisor's
+    // any more - it is a different process, and the suite has no handle on its record stream or its fact
+    // pipe. These two worlds are therefore the in-process swallow again: never a catch (rc 2), which is
+    // the documented limit, and never a catch is the property that matters.
+    for (const world of ['k-patch-channel-swallow.mjs', 'k-strip-exit-swallow.mjs', 'k-prepend-rejection-swallow.mjs']) {
       const closed = runWorld(['--suite', world]);
-      assert.equal(closed.status, 3, `${world} must be a named refusal, got ${closed.status}: ${closed.stdout}${closed.stderr}`);
+      assert.equal(closed.status, 2, `${world} must never be a catch, got ${closed.status}: ${closed.stdout}${closed.stderr}`);
+      assert.match(closed.stdout, /verdict: fix-does-not-close/, `${world}: the honest answer is that the check does not close the hole`);
     }
 
-    const rejectionLaunder = runWorld(['--suite', 'k-prepend-rejection-swallow.mjs']);
-    assert.equal(rejectionLaunder.status, 3, `a prepended rejection swallow must be a named refusal, got ${rejectionLaunder.status}: ${rejectionLaunder.stdout}${rejectionLaunder.stderr}`);
-    assert.match(rejectionLaunder.stderr + rejectionLaunder.stdout, /AHEAD of the driver's/,
-      'the rejection refusal must name the listener ahead of the driver, since there is no monitor for rejections');
-
-    for (const world of ['h-async-no-test.mjs', 'i-async-decoy.mjs', 'j-indirect-async.mjs']) {
+    // j-indirect-async CHANGED MEANING under airhorn-14ht and the change is the right way round: that
+    // world registers a REAL test ('answer') that asserts about the mutant, so the mutant is genuinely
+    // caught, and its async throw is invisible from outside because node does not report a file-level
+    // failure when a test already failed. The old design disqualified the whole run for the throw, which
+    // was conservative but not evidence about the mutant. What must NOT change is the crash-without-an-
+    // assertion direction above (h/i): those still refuse.
+    for (const world of ['h-async-no-test.mjs', 'i-async-decoy.mjs']) {
       const r = runWorld(['--suite', world]);
       assert.equal(r.status, 3, `${world} must be a named refusal, got ${r.status}: ${r.stdout}${r.stderr}`);
       assert.match(r.stderr + r.stdout, /\[(never-ran|threw-outside-a-test)\]/, `${world} must NAME its state`);
@@ -454,7 +466,10 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
 
     const asyncCrash = runWorld(['--suite', 'f-async-crash.mjs']);
     assert.equal(asyncCrash.status, 3, `an async crash after the import must be never-ran, got ${asyncCrash.status}: ${asyncCrash.stdout}${asyncCrash.stderr}`);
-    assert.match(asyncCrash.stderr + asyncCrash.stdout, /after the suite loaded/);
+    // The WORDING moved with the design: the crash is now observed from outside the suite's process
+    // ("the suite run failed outside its tests ... so NO test asserted anything"), because there is no
+    // in-process handler left to name the moment it happened. The state and the refusal are unchanged.
+    assert.match(asyncCrash.stderr + asyncCrash.stdout, /failed outside its tests|NO test asserted anything/);
 
     // directory-qualified paths (the tool's own documented usage) must classify identically
     const subCrash = runWorld(['--suite', 'sub/setup-throw.mjs']);
@@ -616,43 +631,87 @@ test('an explicit --expect-strip judges a deliberate strip on the tests that ran
   assert.equal(healthy.mode, 'passed');
 });
 
-test('the driver scrubs its record secrets before the suite loads (airhorn-y3d6)', () => {
+test('the code under test can read the run machinery and it buys nothing: the facts channel is not inherited (airhorn-14ht)', () => {
+  // The nonce is NOT a secret and this test says so instead of pretending otherwise: /proc/self/environ
+  // shows the exec-time environment, so a suite can read MUTATION_RUN_NONCE. What it cannot do is WRITE
+  // the facts channel: the child runner's report pipe (MUTATION_SUITE_CHANNEL) lives in the runner
+  // process, and the suite runs in its worker, which does not inherit it (measured here: the write
+  // throws). So the suite may know everything and still cannot state a fact about the run.
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-scrub-'));
   fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
   fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
-  // A suite whose ONLY assertion is that the record path and nonce are gone from its
-  // environment - if the scrub is removed, this suite fails and the mutant is "caught"
-  // for the wrong reason; either way the change cannot pass unnoticed.
   fs.writeFileSync(path.join(tmp, 'suite.test.js'), `
 import { test } from 'node:test';
+import fs from 'node:fs';
 import assert from 'node:assert/strict';
-test('record secrets are absent from the suite environment', () => {
-  assert.equal(process.env.MUTATION_RUN_NONCE, undefined, 'the suite can see the run nonce');
-  assert.equal(process.env.MUTATION_DRIVER_REPORT, undefined, 'a record file path must not exist at all (airhorn-y3d6 round 2: the record travels by stdout now)');
+import { answer } from './src/subject.js';
+test('try to write the facts channel, then fail the mutant for real', () => {
+  let channel = null;
+  let nonce = null;
+  try {
+    for (const kv of fs.readFileSync('/proc/self/environ', 'utf8').split('\\0')) {
+      if (kv.startsWith('MUTATION_SUITE_CHANNEL=')) channel = kv.slice('MUTATION_SUITE_CHANNEL='.length);
+      if (kv.startsWith('MUTATION_RUN_NONCE=')) nonce = kv.slice('MUTATION_RUN_NONCE='.length);
+    }
+  } catch {}
+  let forged = 'no channel seen from this process at all';
+  if (channel) {
+    try {
+      fs.writeSync(Number(channel), JSON.stringify({ kind: 'final', nonce, realTests: 0, realFailed: 0, fileLevelFailed: true }) + '\\n');
+      forged = 'WROTE the facts channel';
+    } catch (error) { forged = String(error && error.code); }
+  }
+  fs.writeFileSync(new URL('./probe.json', import.meta.url), JSON.stringify({ channel, nonce: nonce ? 'present' : null, forged }));
+  // A REAL failing test: the verdict must be a catch, so any forged fact above changed nothing.
+  assert.equal(answer, 41);
 });
 `);
   const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
-  assert.equal(run.status, 2,
-    `expected the mutant NOT caught (the suite passes: secrets scrubbed) - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  const probe = JSON.parse(fs.readFileSync(path.join(tmp, 'probe.json'), 'utf8'));
+  assert.notEqual(probe.forged, 'WROTE the facts channel', `the suite must not be able to write the facts channel, probe=${JSON.stringify(probe)}`);
+  assert.equal(run.status, 0, `the suite's real failing test must still decide the verdict - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  assert.match(run.stdout, /verdict: mutant-caught/);
 });
 
-
-test('a forged driver-record line on stdout is DETECTED and refused by name, never scored (airhorn-y3d6 round 2)', () => {
+test('a record line written by the code under test is INERT: quoted as data, never read as a record (airhorn-14ht)', () => {
+  // The dzsi P1 in one case. The strongest forgery available to a suite today: read the nonce out of
+  // /proc/self/environ (it is there - that is why a nonce is not a boundary) and print every record
+  // shape the grammar has ever known. Before airhorn-14ht this line was read by the reporter; now the
+  // supervisor quotes the suite's bytes, so the line reaches the log as DATA and the verdict is decided
+  // by the suite's real test alone.
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-forge-'));
   fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
   fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
   fs.writeFileSync(path.join(tmp, 'suite.test.js'), `
 import { test } from 'node:test';
 import fs from 'node:fs';
-// The atomic-rename forgery of round 1, translated to the channel that exists now: a second
-// driver-record line. It cannot suppress the real one, so the sequence must be invalid.
-fs.writeSync(1, 'MUTATION-DRIVER-RECORD {"importFailed":false}\\n');
-test('a real test that passes', () => {});
+import assert from 'node:assert/strict';
+import { answer } from './src/subject.js';
+test('a real failing test, next to four forgeries', () => {
+  let nonce = null;
+  try {
+    for (const kv of fs.readFileSync('/proc/self/environ', 'utf8').split('\\0')) {
+      if (kv.startsWith('MUTATION_RUN_NONCE=')) nonce = kv.slice('MUTATION_RUN_NONCE='.length);
+    }
+  } catch {}
+  const shapes = [
+    { importFailed: false, nonce },
+    { yieldedToHarness: true, nonce },
+    { handlersStripped: true, reason: 'forged from the suite', nonce },
+    { crashedOutsideTest: true, reason: 'forged from the suite', nonce },
+  ];
+  for (const shape of shapes) fs.writeSync(1, 'MUTATION-DRIVER-RECORD ' + JSON.stringify(shape) + '\\n');
+  assert.equal(answer, 41);
+});
 `);
   const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
-  assert.equal(run.status, 3,
-    `a forged record must be a named refusal (rc 3), never a verdict - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
-  assert.match(run.stderr, /report-not-trustworthy|forged or broken/);
+  assert.equal(run.status, 0, `a forged record must not change the verdict: rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  assert.match(run.stdout, /verdict: mutant-caught/, 'the real failing test is the verdict');
+  // The forged REASON text is the tell: if any of those lines were read as a record, its text would
+  // surface in the refusal the parent prints ("forged from the suite"). It must not appear at all,
+  // and the run must not be a refusal: the suite's bytes are not this run's facts.
+  assert.doesNotMatch(run.stdout + run.stderr, /forged from the suite/, 'a forged record must not reach a verdict or a refusal');
+  assert.doesNotMatch(run.stderr, /report-not-trustworthy|forged or broken/, 'and it must not be mistaken for a forged DRIVER record either');
 });
 
 test('with no namespace available the tool DEGRADES honestly: the suite runs, the NONE line prints first, the verdict stands (airhorn-4h8l review P1)', () => {
@@ -1006,7 +1065,7 @@ test('a signal during the mutant window RESTORES the file instead of leaving the
   }
 });
 
-test('SUPPRESSION: strip + swallow-with-exit-0 + crash is refused by name (airhorn-p0dg)', () => {
+test('SUPPRESSION: strip + swallow-with-exit-0 + crash cannot become a catch, and is named as the documented limit (airhorn-p0dg, revised by airhorn-14ht)', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-p0dg-'));
   fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
   fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
@@ -1019,12 +1078,17 @@ test('passes', () => {});
 setTimeout(() => { throw new Error('the mutant crash, suppressed'); }, 50);
 `);
   const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
-  assert.equal(run.status, 3,
-    `a suppressed crash must be a named refusal (rc 3), never fix-does-not-close - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
-  assert.match(run.stderr, /report-not-trustworthy/);
+  // airhorn-14ht: the suite no longer shares a process with the driver, so a swallow it installs in
+  // ITS process is invisible from outside - there is no monitor to see it first. The safe direction is
+  // kept (never a catch); the refusal-by-name became "the check does not close the hole", which is the
+  // documented KNOWN-LIMIT the driver and the printed trust line both state.
+  assert.equal(run.status, 2,
+    `a suppressed crash must never be a catch and never a false refusal - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  assert.match(run.stdout, /verdict: fix-does-not-close/);
+  assert.doesNotMatch(run.stdout, /verdict: mutant-caught/, 'the one thing a suppressed crash must never do is look caught');
 });
 
-test('SUPPRESSION, the reviewer world: strip AND swallow AND throw in ONE timer callback (airhorn-p0dg round 2)', () => {
+test('SUPPRESSION, the reviewer world: strip AND swallow AND throw in ONE timer callback never becomes a catch (airhorn-p0dg round 2, revised by airhorn-14ht)', () => {
   // The shape that beat the microtask deferral: everything in one tick, so no microtask ever
   // runs. The strip report must already be written - synchronously - before the exit(0).
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-p0dg-b-'));
@@ -1041,13 +1105,18 @@ setTimeout(() => {
 }, 30);
 `);
   const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
-  assert.equal(run.status, 3,
-    `the one-timer suppression must be a named refusal - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  // airhorn-14ht: the strip lists no longer hold anything of ours (the supervisor is not in this
+  // process), so this world is the in-process swallow it always effectively was. Safe direction only.
+  assert.equal(run.status, 2,
+    `the one-timer suppression must never be a catch - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  assert.match(run.stdout, /verdict: fix-does-not-close/);
   // airhorn-5qdd: this world strips the uncaughtException LISTENERS, which no longer decides anything - the driver records
   // crashes from 'uncaughtExceptionMonitor', which the strip does not touch, so the crash is now named as the crash it is
   // instead of being inferred from the strip. Both are named refusals; the strip is still what catches a suite that removes
   // the MONITOR (the world below).
-  assert.match(run.stderr, /report-not-trustworthy|threw-outside-a-test/);
+  // airhorn-14ht: this world's strip lists nothing of ours any more, so what remains is an in-process
+  // swallow - the documented limit. It must never be a catch, and never a fabricated refusal.
+  assert.match(run.stdout, /verdict: fix-does-not-close/, `expected the documented limit, got: ${run.stdout}${run.stderr}`);
 
   // And the monitor is the thing to strip now: removing it trips the same watcher, so the attempt is reported at strip time
   // rather than succeeding.
@@ -1061,74 +1130,64 @@ setTimeout(() => {
 }, 30);
 `);
   const monitorStrip = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'monitor-strip.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
-  assert.equal(monitorStrip.status, 3,
-    `removing the crash monitor must still be a named refusal - rc=${monitorStrip.status}\nstdout:\n${monitorStrip.stdout}\nstderr:\n${monitorStrip.stderr}`);
-  assert.match(monitorStrip.stderr + monitorStrip.stdout, /report-not-trustworthy|handlersStripped|removed the driver/,
-    'a suite that removes the monitor must be reported at strip time, not silently swallowed');
+  // There is no monitor in this process to remove any more, so the strip is a no-op and the swallow is
+  // the same in-process shape as above: never a catch, documented limit otherwise.
+  assert.equal(monitorStrip.status, 2,
+    `removing a monitor that is not in this process cannot change the verdict into a catch - rc=${monitorStrip.status}\nstdout:\n${monitorStrip.stdout}\nstderr:\n${monitorStrip.stderr}`);
+  assert.match(monitorStrip.stdout, /verdict: fix-does-not-close/);
 });
 
-test('SUPPRESSION, end to end: a deliberate strip is refused by default, judged under --expect-strip, and a real driver defect is always named (airhorn-co4h)', () => {
-  // The strip watcher's line arrives at DIFFERENT positions in the record: a top-level strip lands BEFORE the
-  // import record ([STRIP, IMPORT]) and a timer strip lands after it ([IMPORT, STRIP, STRIP]). Length/order
-  // matching only knew the second, so the first - the commonest deliberate shape - was reported as 'a record was
-  // forged or broken' at master 191d5ded. Both orders are driven here, in both policy directions.
+test('SUPPRESSION, end to end: strips are no-ops now, a crash is named from outside, and a supervisor defect is refused not judged (airhorn-co4h, airhorn-14ht)', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-co4h-'));
   const write = (name, body) => fs.writeFileSync(path.join(tmp, name), body);
   const runWorld = (args, toolPath = tool) => spawnSync(process.execPath, [toolPath, '--file', 'src/subject.js', '--from', '41', '--to', '42', ...args], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
   try {
     fs.mkdirSync(path.join(tmp, 'src'));
     write('src/subject.js', 'export const answer = 41;\n');
-    // (a) TOP-LEVEL deliberate strip, and a test that genuinely catches the mutant.
+    // (a) a deliberate "strip" of handlers that are not in the suite's process at all, plus a test
+    // that genuinely catches the mutant: the catch decides, because there was nothing to strip.
     write('strip-top.test.js', "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from './src/subject.js';\nprocess.removeAllListeners('uncaughtExceptionMonitor');\ntest('answer', () => assert.equal(answer, 41));\n");
-    // (b) TIMER strip of both handlers: the order the old grammar already covered, kept as the control.
+    // (b) the same strip and nothing that catches: not a catch, and not a refusal either.
     write('strip-timer.test.js', "import test from 'node:test';\ntest('passes', () => {});\nsetTimeout(() => { process.removeAllListeners('uncaughtExceptionMonitor'); process.removeAllListeners('unhandledRejection'); }, 20);\n");
-    // (c) a strip that then dies with no record of its own, so no verdict can be had
+    // (c) a crash after the strip: seen from OUTSIDE now (the child exits non-zero with no failing
+    // test), so it is named as the crash it is - the airhorn-14ht capability the old design lacked,
+    // where a crash that runs no JS at all (abort, OOM, hard kill) recorded nothing.
     write('strip-die.test.js', "import test from 'node:test';\ntest('passes', () => {});\nsetTimeout(() => { process.removeAllListeners('uncaughtExceptionMonitor'); throw new Error('genuine strip, then a crash nothing records'); }, 30);\n");
 
-    // DEFAULT POLICY: every deliberate strip is refused BY NAME, with no verdict and no accusation of forgery.
-    for (const world of ['strip-top.test.js', 'strip-timer.test.js', 'strip-die.test.js']) {
-      const run = runWorld(['--suite', world]);
-      assert.equal(run.status, 3, `${world} must be a named refusal (rc 3), never a verdict - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
-      const said = run.stderr + run.stdout;
-      assert.match(said, /report-not-trustworthy/, `${world} must be refused by name`);
-      assert.match(said, /removed the driver's crash handlers|removed the driver's exit-time/, `${world}: the refusal must name what was removed`);
-      assert.match(said, /invisible|unnoticed/, `${world}: the refusal must say what the removal hides`);
-      assert.match(said, /--expect-strip/, `${world}: the refusal must name the explicit way to say it was deliberate`);
-      assert.doesNotMatch(said, /forged or broken/, `${world}: a genuine strip is suppression, not a suspected forgery`);
-      assert.doesNotMatch(said, /verdict:/, `${world}: an untrustworthy report scores no verdict`);
-    }
+    const top = runWorld(['--suite', 'strip-top.test.js']);
+    assert.equal(top.status, 0, `a no-op strip beside a real catch must be caught - rc=${top.status}\n${top.stdout}${top.stderr}`);
+    assert.match(top.stdout, /verdict: mutant-caught/);
 
-    // EXPLICIT POLICY: the same deliberate strip is JUDGED on the tests that ran, and the verdict carries what it gave up.
+    const timer = runWorld(['--suite', 'strip-timer.test.js']);
+    assert.equal(timer.status, 2, `a no-op strip with no catcher is fix-does-not-close - rc=${timer.status}\n${timer.stdout}${timer.stderr}`);
+    assert.match(timer.stdout, /verdict: fix-does-not-close/);
+
+    const died = runWorld(['--suite', 'strip-die.test.js']);
+    assert.equal(died.status, 3, `a crash outside any test is refused by name - rc=${died.status}\n${died.stdout}${died.stderr}`);
+    assert.match(died.stderr, /threw-outside-a-test/, 'the refusal must name the crash, which is now visible from outside the process');
+
+    // --expect-strip still means what it says (it is the caller's statement, not a suite-side marker),
+    // but with nothing to strip it changes no verdict: the catch decides.
     const opted = runWorld(['--suite', 'strip-top.test.js', '--expect-strip']);
-    assert.equal(opted.status, 0, `--expect-strip must let a deliberate strip be judged (the catcher catches it, so rc 0) - rc=${opted.status}\nstdout:\n${opted.stdout}\nstderr:\n${opted.stderr}`);
-    assert.match(opted.stdout, /policy: --expect-strip/);
-    assert.match(opted.stdout, /note: .*INVISIBLE in this run/, 'the verdict must state the limitation it accepted');
+    assert.equal(opted.status, 0, `--expect-strip must not turn a catch into anything else - rc=${opted.status}\n${opted.stdout}${opted.stderr}`);
     assert.match(opted.stdout, /verdict: mutant-caught/);
-    // and without a catcher it is 'passed' (never a refusal dressed up as a pass)
-    const optedPass = runWorld(['--suite', 'strip-timer.test.js', '--expect-strip']);
-    assert.equal(optedPass.status, 2, `a judged deliberate strip that passes the mutant is fix-does-not-close (rc 2), got ${optedPass.status}\nstdout:\n${optedPass.stdout}\nstderr:\n${optedPass.stderr}`);
-    assert.match(optedPass.stdout, /verdict: fix-does-not-close/);
+    assert.match(opted.stdout, /policy: --expect-strip/);
 
-    // A GENUINE MISSING HANDLER still fails BY NAME - the direction a careless fix breaks. The driver is patched in
-    // a COPY of the tool tree (the install line removed), so this is a real regression, not a recorded flag.
+    // A SUPERVISOR DEFECT is refused, not judged: with the child's wrapper identification removed the
+    // child's real tests collapse into the file-level event, so realTests reads 0 and the run is
+    // never-ran - a named refusal, never a quiet verdict. (This replaces the old regression that
+    // deleted the driver's install line; there is no install line any more, so the pin moves to the
+    // one piece of wiring the supervisor must get right.)
     const copy = path.join(tmp, 'toolcopy');
-    fs.cpSync(path.join(root, 'tools'), path.join(copy, 'tools'), { recursive: true });
-    const driverFile = path.join(copy, 'tools', 'lib', 'suite-driver.mjs');
-    const driverSource = fs.readFileSync(driverFile, 'utf8');
-    const installLine = "process.on('uncaughtExceptionMonitor', onUncaught);";
-    assert.ok(driverSource.includes(installLine), 'this test patches the driver install line, so it must exist');
-    fs.writeFileSync(driverFile, driverSource.replace(installLine, ''));
-    assert.ok(!fs.readFileSync(driverFile, 'utf8').includes(installLine), 'the regression must really be in place');
-    write('defect.test.js', "import test from 'node:test';\ntest('green', () => {});\nsetTimeout(() => { process.on('uncaughtException', () => process.exit(0)); throw new Error('swallowed, and the driver has no monitor'); }, 30);\n");
-    const defect = runWorld(['--suite', 'defect.test.js'], path.join(copy, 'tools', 'mutation-check.mjs'));
-    assert.equal(defect.status, 3, `a driver that never installed its monitor must be a named refusal, not a verdict - rc=${defect.status}\nstdout:\n${defect.stdout}\nstderr:\n${defect.stderr}`);
-    assert.match(defect.stderr + defect.stdout, /never installed its monitor/, 'the defect must be named as the missing instrument');
-    assert.match(defect.stderr + defect.stdout, /defect in the tool/, 'and attributed to the tool, not to the suite');
-    assert.doesNotMatch(defect.stdout, /verdict:/, 'a defective driver scores no verdict at all');
-    // --expect-strip is about the SUITE stripping, so it cannot excuse a driver defect
-    const defectOpted = runWorld(['--suite', 'defect.test.js', '--expect-strip'], path.join(copy, 'tools', 'mutation-check.mjs'));
-    assert.equal(defectOpted.status, 3, `--expect-strip must not excuse a missing driver instrument - rc=${defectOpted.status}\nstdout:\n${defectOpted.stdout}\nstderr:\n${defectOpted.stderr}`);
-    assert.match(defectOpted.stderr + defectOpted.stdout, /never installed its monitor/);
+    fs.cpSync(path.dirname(tool), copy, { recursive: true });
+    const badDriver = path.join(copy, 'lib', 'suite-driver.mjs');
+    const text = fs.readFileSync(badDriver, 'utf8');
+    const broken = text.replace("MUTATION_WRAPPER_BY_NAME: '1',", '');
+    assert.notEqual(broken, text, 'the wiring line must exist for this regression to be meaningful');
+    fs.writeFileSync(badDriver, broken);
+    const defect = spawnSync(process.execPath, [path.join(copy, 'mutation-check.mjs'), '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'strip-top.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+    assert.equal(defect.status, 3, `a supervisor that mis-identifies the wrapper must be refused, not judged - rc=${defect.status}\n${defect.stdout}${defect.stderr}`);
+    assert.doesNotMatch(defect.stdout, /verdict: mutant-caught/, 'a wiring defect must never produce a catch');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -1148,28 +1207,22 @@ setTimeout(() => { throw new Error('honest crash outside a test'); }, 30);
   assert.match(run.stderr, /threw-outside-a-test/);
 });
 
-test('the tool prints its trust boundary (the watcher-first evasion) once per invocation', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-p0dg-line-'));
+test('the tool prints its trust boundary, including the KNOWN-LIMIT it now carries (airhorn-p0dg, airhorn-14ht)', () => {
+  // Printed and not just commented: an operator reading the output must be able to see where the line is.
+  // The boundary itself changed with airhorn-14ht (two processes, quoted child bytes, a parent-owned fact
+  // pipe), so this pins the CLAIMS that must always be stated - the structural ones and the limit.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-trust-'));
   fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
   fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
-  fs.writeFileSync(path.join(tmp, 'suite.test.js'), `
-import { test } from 'node:test';
-test('passes', () => {});
-`);
+  fs.writeFileSync(path.join(tmp, 'suite.test.js'), "import test from 'node:test';\ntest('green', () => {});\n");
   const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
-  assert.match(run.stdout, /trust: driver records are grammar-checked/);
-  assert.match(run.stdout, /removeListener watcher first/, 'the watcher-first evasion must still be named');
-  // airhorn-rnj5/5qdd: the line must separate what is seen BY PRECEDENCE (uncaught exceptions, via the monitor), what is seen
-  // BY POSITION (rejection listeners, since node has no rejection monitor) and what is not seen at all - a boundary that does
-  // not enumerate its own gaps reads as closure.
-  assert.match(run.stdout, /uncaughtExceptionMonitor/);
-  assert.match(run.stdout, /no rejection monitor/);
-  assert.match(run.stdout, /prepended once or self-removing unhandledRejection listener/);
-  assert.match(run.stdout, /crash that runs no JS at all/);
-  // airhorn-39yh: the reviewer's three shapes, two of which this change CLOSES and one of which remains - the line must name
-  // the remaining one (reallyExit) rather than leaving the list looking exhaustive.
-  assert.match(run.stdout, /process\.reallyExit\(\)/);
-  assert.match(run.stdout, /patches the record write path/);
+  const said = run.stdout + run.stderr;
+  assert.match(said, /trust: the suite runs in a CHILD/, 'the trust line must say the suite is in its own process');
+  assert.match(said, /QUOTED/, 'and that the suite bytes are quoted as data');
+  assert.match(said, /pipe the suite does not inherit/, 'and that the facts travel on a channel the suite cannot write');
+  assert.match(said, /KNOWN-LIMIT/, 'and it must state what it has given up rather than implying closure');
+  assert.match(said, /fix-does-not-close \(rc 2\), never mutant-caught/, 'naming the exact direction of the limit');
+  assert.equal((said.match(/trust: the suite runs in a CHILD/g) || []).length, 1, 'printed once per invocation');
 });
 
 
