@@ -713,7 +713,7 @@ fi
 # --- the reverse check is GONE, deliberately (airhorn-xh81) -------------------------------------------
 # It used to fail any suite present in the tree that no row named, with the advice "every suite needs
 # one, e.g. its own self-row". That made ~45 tautological rows (`tests/x.test.mjs -> tests/x.test.mjs`)
-# the most-edited, most-mistyped part of the map (airhorn-ahxh was rows spelled test/ instead of
+# the most-edited, most-mistyped part of the map - 47 at airhorn-xh81, airhorn-ahxh was rows spelled test/ instead of
 # tests/), and it bought only one thing: a change to a suite ran the suite. suites_for() already gives
 # that for free - the `case` at its top maps every tests/|test/*.test.{js,mjs,ts} spelling (at any
 # depth: `case` patterns are not path-component bounded) to itself - so the loop's condition was true

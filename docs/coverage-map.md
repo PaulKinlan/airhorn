@@ -45,7 +45,8 @@ tools/gate.conf's SUITE_TIERS block has the SAME treatment (airhorn-09dr): union
 `git config merge.suite-map-union.driver "node tools/merge-suite-map.mjs --driver %O %A %B"` makes git do the
 union for you (.gitattributes has the entry); the tool refuses a disagreement by name instead of choosing.
 A row that names ONLY ITSELF (`tests/x.test.mjs -> tests/x.test.mjs`) used to exist to satisfy the
-reverse check; since airhorn-xh81 it is a TAUTOLOGY and 45 of them were deleted from the map. Do not
+reverse check; since airhorn-xh81 it is a TAUTOLOGY and 47 of them were deleted from the map (the
+CSP-era rows included). Do not
 add one: the self-mapping is implicit. The single exception is `tests/acceptance.mjs`, whose row stays
 because it is not spelled `*.test.*` - the row is what makes it a suite at all, and it is
 explicit-only by design (airhorn-i8i, airhorn-w1ow). Such a row is deliberately NOT restated in
