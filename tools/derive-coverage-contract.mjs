@@ -233,6 +233,10 @@ export const describeNonFile = (root, relPath) => {
  * because normalising '../' could silently point a suite at a file outside the intended tree.
  * Note: path.posix.normalize PRESERVES a trailing '/', so it is stripped explicitly. */
 export function normalizeSuiteToken(token) {
+  // airhorn-eff1: an ABSOLUTE spelling is a third class - not a variant (posix.normalize
+  // keeps it absolute, so it never equals the repo-relative target) and not an escape;
+  // the gate would still run it ($ROOT/$token tolerates the double slash), so refuse it.
+  if (token.startsWith('/')) return { absolute: true, raw: token };
   const n = path.posix.normalize(token);
   if (n === '..' || n.startsWith('../')) return { escape: true, raw: token };
   return { path: n.endsWith('/') && n.length > 1 ? n.slice(0, -1) : n };
@@ -271,6 +275,14 @@ export function validateSuiteMap(tsvText, { root = DEFAULT_ROOT, existsFn, fileE
           token: tok,
           pattern,
           message: `path escapes the tree ('${tok}' normalises to '${path.posix.normalize(tok)}') - a row may not point outside the repo; refuse, never normalise`,
+        });
+      }
+      if (n.absolute) {
+        violations.push({
+          type: 'absolute',
+          token: tok,
+          pattern,
+          message: `path is absolute ('${tok}') - map paths are repo-relative; the gate would still run it (double-slash tolerance), so refuse, never normalise (airhorn-eff1)`,
         });
       }
     }
