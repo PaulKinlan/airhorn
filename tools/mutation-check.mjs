@@ -39,11 +39,18 @@
  * Usage:
  *   node tools/mutation-check.mjs --file src/badge.js --from "a" --to "b" \
  *     --suite tests/multitab.test.mjs [--suite-old /tmp/old-suite.mjs] \
- *     [--build "npx --no-install vite build"] [--allow-test-mutation] [--dry-run]
+ *     [--build "npx --no-install vite build"] [--allow-test-mutation] [--dry-run] [--expect-strip]
  *
  * --dry-run does everything that can be refused before the file is touched (the target guard, the unique-occurrence
  * check) and then prints the plan - which file would be mutated with which replacement, which suite would run, and that
  * the file would be restored and verified - and exits 0 having written nothing and run nothing (airhorn-lpgh).
+ *
+ * --expect-strip is the ONLY way to say a suite deliberately removes the driver's crash handlers (airhorn-co4h).
+ * Detection is unchanged - the strip is still recorded and named - but instead of refusing the report the run is
+ * judged on the runner's in-test evidence, and the verdict carries the limitation it accepted (a crash outside any
+ * test is invisible). The opt-in is a CALLER flag rather than a suite-side marker because the suite is the untrusted
+ * side: a marker it can write is a marker an adversarial suite can write. Without the flag a strip still refuses
+ * (rc 3, report-not-trustworthy), which is the safe direction.
  *
  * Exit: 0 hole-proven (or a clean dry run), 1 not-reproducible, 2 fix-does-not-close, 3 refused/error.
  */
@@ -175,6 +182,7 @@ function parseArgs(argv) {
     if (flag === '--allow-test-mutation') { args.allowTestMutation = true; continue; }
     if (flag === '--suite-mode') { args.suiteMode = argv[++i]; continue; }
     if (flag === '--dry-run') { args.dryRun = true; continue; }
+    if (flag === '--expect-strip') { args.expectStrip = true; continue; }
     const value = argv[i + 1];
     if (value === undefined) throw new Error(`${flag} needs a value`);
     i += 1;
@@ -352,7 +360,7 @@ export function readChannel(text, nonce) {
  * A declared script suite (--suite-mode script) is judged by its exit code, because for a script
  * the top-level assertion IS the failure and there is no runner to report anything.
  */
-export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
+export function classifyRun({ report, exitCode, suiteMode = 'node-test', expectStrip = false }) {
   if (suiteMode === 'script') {
     return exitCode === 0 ? { mode: 'passed', rc: 0 } : { mode: 'caught', rc: exitCode };
   }
@@ -362,8 +370,46 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
   if (report.driver.handlersPreceded) {
     return { mode: 'report-not-trustworthy', problem: `${report.driver.precededReason || 'the suite installed a rejection listener ahead of the driver\'s'} - a rejection it hid cannot be told from a pass, so nothing here is evidence either way (exit ${exitCode}) (airhorn-rnj5)` };
   }
+  if (report.driver.handlersStripped && !expectStrip) {
+    // airhorn-co4h: a suite that removed the driver's crash handlers is a SUPPRESSION report, not a forgery.
+    // The reporter names the shape (IMPORT, STRIP[, STRIP]) and carries the strip line's own reason, so
+    // the operator is told what actually happened. The safe direction is unchanged - rc 3, report-not-trustworthy,
+    // never a verdict - which is also why a forged strip line can buy nothing (see the reporter).
+    //
+    // --expect-strip is the EXPLICIT way to say the strip is the point of the suite: detection is untouched
+    // (the strip is still recorded and still named), only the policy response changes - the run is then judged
+    // on the runner's in-test evidence, which the suite cannot share or forge. That is why the opt-in lives on
+    // the CALLER's command line and not in a suite-side marker: the suite is the untrusted side, and anything
+    // it can write to excuse itself an adversarial suite can write too.
+    const sequenceNote = report.driver.tampered
+      ? ` (the record sequence also carried ${report.driver.lines || 0} line(s) and did not fit the grammar)`
+      : '';
+    // A crash recorded by the monitor alongside the strip is still real evidence, so it is named rather than hidden - but
+    // the strip is what decides the report's trustworthiness, so the refusal stands (airhorn-co4h).
+    const crashNote = report.driver.crashedOutsideTest
+      ? `, and this run ALSO recorded a crash outside any test (${report.driver.reason || 'no reason recorded'}), which the monitor still caught`
+      : '';
+    return {
+      mode: 'report-not-trustworthy',
+      problem: `${report.driver.strippedReason || "the suite removed the driver's crash handlers, so a crash outside any test would be invisible"}${crashNote} - nothing here is evidence either way (exit ${exitCode}); pass --expect-strip if the strip is deliberate${sequenceNote} (airhorn-co4h)`,
+    };
+  }
+  // A DRIVER DEFECT, refused by name (airhorn-co4h): every defence rests on these instruments existing and on
+  // the strip watcher recognising them by identity. Sampled by the driver at install time, so a suite's own
+  // strip cannot trip it, and --expect-strip cannot excuse it. This is the one branch that must stay red for a
+  // genuinely missing handler, whatever a careless fix does to the strip policy.
+  const instruments = report.driver.instruments;
+  if (instruments && typeof instruments === 'object') {
+    const missing = ['monitor', 'rejection', 'exitCheck'].filter((name) => instruments[name] === false);
+    if (missing.length > 0) {
+      return { mode: 'report-not-trustworthy', problem: `the driver never installed its ${missing.join(', ')} instrument(s) as its own function, so a crash outside any test would be invisible and the strip watcher could not recognise a removal - that is a defect in the tool, not a measurement of the suite (exit ${exitCode}) (airhorn-co4h)` };
+    }
+  }
   if (report.driver.tampered || report.driver.nonceMismatch) {
-    return { mode: 'report-not-trustworthy', problem: `the driver record sequence was invalid (${report.driver.lines || 0} record line(s), or a nonce that was not this run's) - a record was forged or broken, so nothing it says is evidence either way (exit ${exitCode}) (airhorn-y3d6)` };
+    // The reporter now says WHICH rule the sequence broke (airhorn-co4h) - an operator reading "forged or broken"
+    // about a malformed record needs the reason to tell a bug from an attack.
+    const why = typeof report.driver.why === 'string' && report.driver.why ? ` [${report.driver.why}]` : '';
+    return { mode: 'report-not-trustworthy', problem: `the driver record sequence was invalid (${report.driver.lines || 0} record line(s), or a nonce that was not this run's) - a record was forged or broken, so nothing it says is evidence either way (exit ${exitCode})${why} (airhorn-y3d6)` };
   }
   if (report.driver.importFailed) {
     return { mode: 'never-ran', problem: `threw while loading (${report.driver.reason || 'no reason reported'}), so NO test ever ran and this is not a caught mutant (exit ${exitCode}, ${report.realTests} test event(s) seen). If this is a script suite whose top-level assertion failed, say so with --suite-mode script` };
@@ -390,12 +436,21 @@ export function classifyRun({ report, exitCode, suiteMode = 'node-test' }) {
     if (typeof report.startedTests === 'number' && report.startedTests === 0) {
       return { mode: 'threw-outside-a-test', problem: `reported ${report.realFailed} failing event(s) but no test ever STARTED in the suite, so nothing asserted anything about the mutant (exit ${exitCode})` };
     }
-    return { mode: 'caught', rc: 1, failing: report.failing };
+    return { mode: 'caught', rc: 1, failing: report.failing, ...stripNote(report) };
   }
   if (exitCode !== 0) {
     return { mode: 'threw-outside-a-test', problem: `the run exited ${exitCode} with no failing test (${report.wrapperEvents || 0} driver-level event(s)), so something failed outside the tests and nothing about the mutant was measured` };
   }
-  return { mode: 'passed', rc: 0 };
+  return { mode: 'passed', rc: 0, ...stripNote(report) };
+}
+
+/**
+ * The limitation a run accepted when the caller declared the strip deliberate. The verdict is then real, but
+ * what it rests on changed: a crash outside any test is invisible, so only the tests that actually ran speak.
+ */
+function stripNote(report) {
+  if (!report.driver || !report.driver.handlersStripped) return {};
+  return { note: "the suite removed the driver's crash handlers and --expect-strip accepted it - a crash outside any test is INVISIBLE in this run, so the verdict rests only on the tests that ran (airhorn-co4h)" };
 }
 
 // Real paths, so an invocation through a symlink (tool-link/mutation-check.mjs) still finds its own
@@ -456,7 +511,7 @@ export function containmentGuaranteeLine() {
     : 'containment: NONE - PID namespaces are unavailable here, so a detached child of a suite run SURVIVES the verdict; the verdict is still honest about the mutant, but the host is not cleaned (airhorn-4h8l)';
 }
 
-async function runSuite(suite, cwd, label, suiteMode, timeoutMs = DEFAULT_TIMEOUT_MS) {
+async function runSuite(suite, cwd, label, suiteMode, timeoutMs = DEFAULT_TIMEOUT_MS, expectStrip = false) {
   const presence = suitePresenceProblem(suite, cwd);
   if (presence) return { problem: presence };
   // Containment and the bound are separate guarantees: a contained run can still hang, and a
@@ -488,11 +543,11 @@ async function runSuite(suite, cwd, label, suiteMode, timeoutMs = DEFAULT_TIMEOU
   const channel = readChannel(ran.channel, nonce);
   const report = channel.records;
   if (channel.problem) return { problem: `${label} [report-not-trustworthy] ${channel.problem}` };
-  const classified = classifyRun({ report, exitCode: ran.rc, suiteMode });
+  const classified = classifyRun({ report, exitCode: ran.rc, suiteMode, expectStrip });
   // The state is NAMED in the refusal, not just implied by the exit code (airhorn-so88): a reader
   // must be able to tell "never-ran" from "threw-outside-a-test" without reading prose.
   if (classified.problem) return { problem: `${label} [${classified.mode}] ${classified.problem}` };
-  return { rc: classified.rc };
+  return { rc: classified.rc, note: classified.note };
 }
 
 export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
@@ -564,6 +619,10 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     // channel CANNOT see. A tool that states its own limit is honest; one that implies
     // closure is not.
     console.log('trust: driver records are grammar-checked, and crash laundering is refused by name where it can be seen - uncaught exceptions from the uncaughtExceptionMonitor (which runs before every listener and before a capture callback, so prepend/prependOnce/self-removing listeners cannot get ahead of it), strips reported synchronously at strip time, and a rejection listener installed ahead of the driver\'s (position, because node has no rejection monitor). What CANNOT be seen: a prepended once or self-removing unhandledRejection listener, a suite that removes the driver\'s own removeListener watcher first, a process.reallyExit() that skips exit listeners, a suite that patches the record write path before the crash line is owed, and a crash that runs no JS at all (abort, OOM, hard kill) - closing those needs the suite run in a child the driver owns');
+    // The strip policy is stated up front, so the output says which question this run asked (airhorn-co4h).
+    console.log(args.expectStrip
+      ? 'policy: --expect-strip - a recorded strip of the driver\'s crash handlers is judged on the tests that ran instead of refusing the report; a crash outside any test is INVISIBLE in this run, and the verdict will say so'
+      : 'policy: a suite that removes the driver\'s crash handlers is refused by name (rc 3), because a crash outside any test would be invisible - pass --expect-strip only when the strip IS the subject of the suite');
 
     if (args.build) {
       console.log(`building: ${args.build}`);
@@ -585,20 +644,22 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
 
     // A suite that could not run is UNMEASURED, never "caught the mutant" (airhorn-cmr1).
     if (args.suiteOld) {
-      const baseline = await runSuite(args.suiteOld, cwd, 'the OLD suite', args.suiteMode || 'node-test', args.timeoutMs);
+      const baseline = await runSuite(args.suiteOld, cwd, 'the OLD suite', args.suiteMode || 'node-test', args.timeoutMs, args.expectStrip);
       if (baseline.problem) {
         console.error(`mutation-check: refusing: ${baseline.problem}`);
         mutantRc = 3;
         return 3;
       }
+      if (baseline.note) console.log(`note: ${baseline.note}`);
       baselineRc = baseline.rc;
     }
-    const judged = await runSuite(args.suite, cwd, 'the suite', args.suiteMode || 'node-test', args.timeoutMs);
+    const judged = await runSuite(args.suite, cwd, 'the suite', args.suiteMode || 'node-test', args.timeoutMs, args.expectStrip);
     if (judged.problem) {
       console.error(`mutation-check: refusing: ${judged.problem}`);
       mutantRc = 3;
       return 3;
     }
+    if (judged.note) console.log(`note: ${judged.note}`);
     mutantRc = judged.rc;
   } finally {
     fs.writeFileSync(absolute, original);

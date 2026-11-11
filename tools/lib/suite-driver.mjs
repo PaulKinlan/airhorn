@@ -77,7 +77,9 @@ const onRejection = markCrash('unhandled rejection');
 // 'uncaughtExceptionMonitor' BEFORE any 'uncaughtException' listener and before a capture callback, so listener ORDER stops
 // mattering: prependListener, prependOnceListener (which node unwraps before invoking, so an exit-time position check sees
 // nothing) and a listener that removes itself all sit downstream of the monitor. Measured: monitor -> prepended-once ->
-// plain, and monitor -> capture when a capture callback is installed. Rejections have no monitor, so they keep once().
+// plain, and monitor -> capture when a capture callback is installed. Rejections have no monitor, so they are installed
+// as plain listeners too - a plain listener being invoked emits no 'removeListener' event (measured), so neither path
+// produces a self-removal artifact any more (airhorn-co4h; the once() note below is history).
 process.on('uncaughtExceptionMonitor', onUncaught);
 process.on('unhandledRejection', onRejection);
 
@@ -88,9 +90,10 @@ process.on('unhandledRejection', onRejection);
 // exit(0) cannot pre-empt a line already written. The first attempt deferred the write to a
 // microtask to dodge the once() self-removal false positive - and the one-timer attack (strip
 // AND swallow AND throw in ONE timer callback) exits before any microtask runs (measured by
-// the reviewer: still rc 2). The false positive is instead solved in the GRAMMAR: a strip
-// line followed by a CRASH line is the once() artifact - after a REAL strip the driver holds
-// no handler that could write CRASH, so that sequence cannot come from suppression.
+// the reviewer: still rc 2). That false positive has since disappeared at the source: both
+// handlers are PLAIN listeners, and a plain listener firing emits no 'removeListener' event
+// (measured), so every strip line is a REAL removal - which is why a strip beside a CRASH line
+// is now reported as both (airhorn-co4h) instead of being explained away as an artifact.
 // Residual, stated plainly: a suite that first removes THIS watcher (removeAllListeners
 // ('removeListener') or a full strip) strips silently; nothing in-process is unremovable at
 // the same uid. The tool prints this boundary once per run (airhorn-p0dg).
@@ -101,7 +104,12 @@ process.on('removeListener', (name, fn) => {
   if ((name === 'uncaughtExceptionMonitor' && fn === onUncaught)
       || (name === 'unhandledRejection' && fn === onRejection)
       || (name === 'exit' && fn === onExitCheck)) {
-    record({ handlersStripped: true, reason: "the suite removed the driver's crash handlers - a crash outside any test would now be invisible (suppression, not a measurement)" });
+    // Name the instrument that was removed and what its loss hides (airhorn-co4h): 'the crash handlers' is right for
+    // the two crash paths and wrong for the exit-time rejection check, which hides a different thing.
+    const reason = name === 'exit'
+      ? "the suite removed the driver's exit-time rejection position check - a rejected promise swallowed by an earlier listener would now pass as a clean run (suppression, not a measurement)"
+      : "the suite removed the driver's crash handlers - a crash outside any test would now be invisible (suppression, not a measurement)";
+    record({ handlersStripped: true, reason });
   }
 });
 
@@ -119,6 +127,26 @@ const onExitCheck = () => {
   }
 };
 process.on('exit', onExitCheck);
+
+/*
+ * SELF-CHECK, recorded once, before the suite is imported (airhorn-co4h).
+ *
+ * Every defence in this file rests on the instrument being INSTALLED and on the strip watcher being able to
+ * RECOGNISE it by identity. Measured on master 191d5ded, a regression in this file breaks both silently: with
+ * the monitor install deleted, a suite that swallows its own out-of-test crash produced `verdict:
+ * fix-does-not-close` (a verdict, not a refusal); with the monitor installed through a wrapper, the strip
+ * watcher's identity comparison never matched and a suite that stripped it and swallowed scored the same
+ * verdict. Nothing downstream could tell those runs from an honest suite, so the driver reports what it
+ * actually installed and the parent refuses BY NAME instead of judging (airhorn-co4h).
+ *
+ * Sampled at INSTALL time, not at import time, on purpose: a suite that deliberately removes a handler
+ * (`--expect-strip`) must be a suite-level event, not a driver defect.
+ */
+const instruments = {
+  monitor: process.listeners('uncaughtExceptionMonitor').includes(onUncaught),
+  rejection: process.listeners('unhandledRejection').includes(onRejection),
+  exitCheck: process.listeners('exit').includes(onExitCheck),
+};
 
 // Two evasions that the monitor closes, recorded here because I shipped the weaker instrument first (airhorn-rnj5, then
 // airhorn-5qdd from the review of it): a suite that PREPENDS a swallow ahead of the driver's listener, and one that prepends a
@@ -142,12 +170,12 @@ for (const name of ['MUTATION_RUN_NONCE', 'MUTATION_SUITE_CHANNEL', 'MUTATION_SU
 }
 
 if (!suite) {
-  record({ importFailed: true, reason: 'MUTATION_SUITE_FILE was not set, so no suite was loaded' });
+  record({ importFailed: true, reason: 'MUTATION_SUITE_FILE was not set, so no suite was loaded', instruments });
 } else {
   try {
     await import(pathToFileURL(suite).href);
-    record({ importFailed: false, suite });
+    record({ importFailed: false, suite, instruments });
   } catch (error) {
-    record({ importFailed: true, reason: error && error.message ? error.message : String(error) });
+    record({ importFailed: true, reason: error && error.message ? error.message : String(error), instruments });
   }
 }
