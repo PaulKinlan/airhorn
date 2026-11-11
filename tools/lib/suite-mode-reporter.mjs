@@ -112,8 +112,11 @@ export default async function* suiteModeReporter(source) {
 
   // The driver's record arrives as stdout lines from the driver FILE's process (airhorn-y3d6,
   // second round - there is no record file any more). The honest sequence is a grammar:
-  //   IMPORT          one line { importFailed: ... }
-  //   IMPORT, CRASH   a clean import followed by { crashedOutsideTest: true } (airhorn-so88)
+  //   IMPORT                one line { importFailed: ... }
+  //   IMPORT, CRASH         a clean import followed by { crashedOutsideTest: true } (airhorn-so88)
+  //   IMPORT, STRIP[, STRIP]  a clean import followed by the strip watcher's { handlersStripped: true }
+  //                         line(s) and NO crash line - named SUPPRESSION, not a broken record (airhorn-co4h)
+  //   IMPORT, STRIP, CRASH  the once() self-removal artifact, which is a real crash (airhorn-p0dg)
   // A forged line from the suite cannot suppress the real one (stdout cannot be unwritten), so
   // a forgery always makes the sequence invalid - DETECTED, then refused by the parent.
   const driverLines = [];
@@ -180,35 +183,66 @@ export default async function* suiteModeReporter(source) {
   // counts that decide "caught" are unaffected either way - they are read from the runner's events
   // in THIS process, which the suite does not share.
 
+  // THE GRAMMAR, as a total classification of the record SET rather than a list of line spellings
+  // (airhorn-co4h). The strip watcher writes its line WHENEVER the suite removes an instrument - at the top
+  // of the suite (BEFORE the import record is written), in a timer (after it), or twice - so an honest run's
+  // line ORDER varies in ways length/order matching cannot express. Measured on master 191d5ded: a top-level
+  // strip produced [STRIP, IMPORT] and the operator was told "a record was forged or broken" about their own
+  // deliberate strip. The rules are a set, with only the orders that mean something:
+  //
+  //   STRIP*     strip lines, in any position (one per removed instrument; a forgery of one buys nothing, it
+  //              can only produce a refusal - see classifyRun)
+  //   IMPORT     exactly one { importFailed: boolean }
+  //   CRASH      at most one { crashedOutsideTest: true }, and it must be LAST: the handler writes it and
+  //              exits, so a record line after it can only be forged
+  //   PRECEDED   at most one { handlersPreceded: true }, written by the exit-time rejection position check
+  //
+  // Anything else - an unknown line, a duplicate IMPORT/CRASH/PRECEDED, a line after a CRASH - is tampering.
+  const imports = driverLines.filter((line) => line && typeof line.importFailed === 'boolean');
+  const crashes = driverLines.filter((line) => line && line.crashedOutsideTest === true);
+  const strips = driverLines.filter((line) => line && line.handlersStripped === true);
+  const precededs = driverLines.filter((line) => line && line.handlersPreceded === true);
+  const knownLines = imports.length + crashes.length + strips.length + precededs.length;
+  const stripFields = strips.length > 0
+    ? {
+      handlersStripped: true,
+      strippedLines: strips.length,
+      strippedReason: strips.map((line) => (typeof line.reason === 'string' && line.reason ? line.reason : null)).find(Boolean) || null,
+    }
+    : {};
+  // A tampered record still CARRIES the strip (airhorn-co4h): the sequence is invalid either way, but the
+  // operator is told the crash handlers were removed as well instead of only that something was forged.
+  const invalid = (why) => ({ tampered: true, lines: driverLines.length, why, ...stripFields });
+
   let driver = null;
-  if (driverLines.length === 1 && typeof driverLines[0].importFailed === 'boolean' && !driverLines[0].crashedOutsideTest) {
-    driver = driverLines[0];                                    // IMPORT
-  } else if (driverLines.length === 1 && driverLines[0].crashedOutsideTest === true) {
-    // CRASH BEFORE THE IMPORT LINE (airhorn-5qdd): the monitor records the crash the instant it happens, which can be
-    // BEFORE the driver has finished importing the suite. The crash is real either way, and refusing it as "forged or
-    // broken" would report a genuine out-of-test crash as a tampered record, so it reads as the crash it is.
-    driver = { importFailed: false, ...driverLines[0] };
-  } else if (driverLines.length === 2
-      && typeof driverLines[0].importFailed === 'boolean' && driverLines[0].importFailed === false
-      && driverLines[1].crashedOutsideTest === true) {
-    driver = { ...driverLines[0], ...driverLines[1] };          // IMPORT, CRASH
-  } else if (driverLines.length === 3
-      && typeof driverLines[0].importFailed === 'boolean' && driverLines[0].importFailed === false
-      && driverLines[1].handlersStripped === true
-      && driverLines[2].crashedOutsideTest === true) {
-    // IMPORT, STRIP, CRASH (airhorn-p0dg): the strip line is a once() self-removal artifact - the handler fired, node removed
-    // it, and the CRASH line follows. After a REAL strip the driver holds no handler that could write CRASH, so this
-    // sequence cannot come from suppression: accept it as a crash. (I deleted this branch when removing a dead sibling in
-    // airhorn-5qdd and the honest-crash world caught it - the grammar is load-bearing, not decoration.)
-    driver = { ...driverLines[0], ...driverLines[2] };
-  } else if (driverLines.length === 2
-      && typeof driverLines[0].importFailed === 'boolean' && driverLines[0].importFailed === false
-      && driverLines[1].handlersPreceded === true) {
-    // IMPORT, A REJECTION LISTENER AHEAD OF OURS (airhorn-rnj5/5qdd): rejections have no monitor, so this is the one place a
-    // position check still earns its keep. Refused as untrustworthy rather than read as a pass.
-    driver = { ...driverLines[0], handlersPreceded: true, precededReason: driverLines[1].reason };
-  } else if (driverLines.length > 0) {
-    driver = { tampered: true, lines: driverLines.length };     // any other sequence: forged or broken
+  if (driverLines.length === 0) {
+    driver = null;                                            // nothing recorded: the parent names never-ran
+  } else if (knownLines !== driverLines.length) {
+    driver = invalid('a line was not a driver record at all');
+  } else if (imports.length > 1 || crashes.length > 1 || precededs.length > 1) {
+    driver = invalid('a record kind appeared twice');
+  } else if (crashes.length === 1) {
+    // CRASH (airhorn-so88/5qdd): the crash is real. The CRASH line must be LAST - the handler writes it and exits, so a
+    // record line after it can only be forged. Strip lines BESIDE it are carried, because they are real removals: the
+    // once() self-removal artifact the p0dg branch was written for NO LONGER EXISTS (measured: the driver installs plain
+    // process.on listeners, and a plain listener firing emits no 'removeListener' event), so dropping them would hide a
+    // genuine suppression that happened alongside a crash the monitor still caught. classifyRun names both.
+    if (driverLines[driverLines.length - 1] !== crashes[0]) driver = invalid('a record line arrived after the crash');
+    else driver = { importFailed: imports.length === 1 ? imports[0].importFailed : false, ...crashes[0], ...stripFields };
+  } else if (precededs.length === 1 && imports.length === 1) {
+    // IMPORT + PRECEDED (airhorn-rnj5/5qdd): a rejection listener ahead of ours. Rejections have no monitor, so
+    // this exit-time position check is the one place a position check still earns its keep. Refused as
+    // untrustworthy rather than read as a pass.
+    driver = { ...imports[0], handlersPreceded: true, precededReason: precededs[0].reason, ...stripFields };
+  } else if (imports.length === 1) {
+    // IMPORT, with strip lines before it (a top-level strip), after it (a timer), or both: the honest shapes.
+    driver = { ...imports[0], ...stripFields };
+  } else if (strips.length > 0) {
+    // STRIP lines and NO import record: the suite removed an instrument and the process ended before the import
+    // finished. That is a suppression report, not a forgery - there is nothing here that was forged.
+    driver = { ...stripFields };
+  } else {
+    driver = invalid('the sequence fitted no honest shape');
   }
   // A start only counts if the entry was a TEST: everything the runner later reported as a suite
   // container is subtracted here, because the start event itself carries no type. By id where the

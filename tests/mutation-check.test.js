@@ -545,6 +545,77 @@ test('classifyRun refuses a tampered driver record by name (airhorn-y3d6 round 2
   assert.match(judged.problem, /forged or broken/);
 });
 
+test('classifyRun words a genuine crash-handler strip as SUPPRESSION, not forgery (airhorn-co4h)', () => {
+  // The strip watcher writes a handlersStripped line at strip time, and the reporter now names that
+  // shape ([IMPORT, STRIP] / [IMPORT, STRIP, STRIP]) instead of letting it fall into the tampered
+  // fallback. Before this, a suite that removed the driver's crash handlers was reported to the
+  // operator as a suspected FORGERY, which is the wrong cause and the wrong suspicion.
+  const judged = classifyRun({
+    report: {
+      driver: {
+        importFailed: false,
+        handlersStripped: true,
+        strippedLines: 1,
+        strippedReason: "the suite removed the driver's crash handlers - a crash outside any test would now be invisible (suppression, not a measurement)",
+      },
+      startedTests: 1, realTests: 1, realPassed: 1, realFailed: 0, fileLevelFailed: true, wrapperEvents: 1, unattributed: 0,
+    },
+    exitCode: 1,
+  });
+  assert.equal(judged.mode, 'report-not-trustworthy', 'a strip is still a refusal, never a verdict');
+  assert.notEqual(judged.rc, 0);
+  assert.match(judged.problem, /removed the driver's crash handlers/);
+  assert.match(judged.problem, /invisible/);
+  assert.doesNotMatch(judged.problem, /forged or broken/, 'the honest cause is suppression, not a suspected forgery');
+
+  // A strip carried by a sequence that is ALSO invalid says both things rather than dropping the strip.
+  const mixed = classifyRun({ report: { driver: { tampered: true, lines: 3, handlersStripped: true, strippedReason: null } }, exitCode: 1 });
+  assert.equal(mixed.mode, 'report-not-trustworthy');
+  assert.match(mixed.problem, /crash handlers/);
+  assert.match(mixed.problem, /did not fit the grammar/);
+
+  // The control: an unknown sequence with NO strip line keeps the forgery wording.
+  const forged = classifyRun({ report: { driver: { tampered: true, lines: 2, handlersStripped: false } }, exitCode: 1 });
+  assert.equal(forged.mode, 'report-not-trustworthy');
+  assert.match(forged.problem, /forged or broken/);
+  assert.doesNotMatch(forged.problem, /crash handlers/, 'a plain forgery must not be excused as suppression');
+});
+
+test('an explicit --expect-strip judges a deliberate strip on the tests that ran, and a driver DEFECT is not excusable (airhorn-co4h)', () => {
+  const stripDriver = {
+    importFailed: false,
+    handlersStripped: true,
+    strippedLines: 1,
+    strippedReason: "the suite removed the driver's crash handlers - a crash outside any test would now be invisible (suppression, not a measurement)",
+  };
+  // The same run under two policies: refused by default, judged when the CALLER says the strip is deliberate.
+  const refused = classifyRun({ report: { driver: stripDriver, startedTests: 1, realTests: 1, realPassed: 0, realFailed: 1, failing: ['answer'], wrapperEvents: 1, unattributed: 0 }, exitCode: 1 });
+  assert.equal(refused.mode, 'report-not-trustworthy');
+  assert.match(refused.problem, /--expect-strip/, 'a refusal must name the way to say the strip is deliberate');
+  const opted = classifyRun({ report: { driver: stripDriver, startedTests: 1, realTests: 1, realPassed: 0, realFailed: 1, failing: ['answer'], wrapperEvents: 1, unattributed: 0 }, exitCode: 1, expectStrip: true });
+  assert.equal(opted.mode, 'caught', 'with --expect-strip the runner\'s in-test evidence decides');
+  assert.equal(opted.rc, 1);
+  assert.match(opted.note, /INVISIBLE in this run/, 'the verdict must carry the limitation it accepted');
+  // the other judged direction: a deliberate strip plus passing tests is 'passed', not a refusal
+  const passing = classifyRun({ report: { driver: stripDriver, startedTests: 1, realTests: 1, realPassed: 1, realFailed: 0, wrapperEvents: 0, unattributed: 0 }, exitCode: 0, expectStrip: true });
+  assert.equal(passing.mode, 'passed');
+  assert.match(passing.note, /--expect-strip/);
+
+  // A DRIVER DEFECT is refused BY NAME, and --expect-strip cannot excuse it. This is the direction a careless fix
+  // breaks: touching only the strip policy turns a missing instrument back into a green verdict (measured on
+  // master 191d5ded: a missing monitor + a swallowed crash produced `verdict: fix-does-not-close`).
+  const defective = { importFailed: false, instruments: { monitor: false, rejection: true, exitCheck: true } };
+  const named = classifyRun({ report: { driver: defective, startedTests: 1, realTests: 1, realPassed: 1, realFailed: 0 }, exitCode: 0 });
+  assert.equal(named.mode, 'report-not-trustworthy');
+  assert.match(named.problem, /never installed its monitor/);
+  assert.match(named.problem, /defect in the tool/);
+  const stillNamed = classifyRun({ report: { driver: defective, startedTests: 1, realTests: 1, realPassed: 1, realFailed: 0 }, exitCode: 0, expectStrip: true });
+  assert.equal(stillNamed.mode, 'report-not-trustworthy', '--expect-strip is about the SUITE stripping, never about the driver failing to install');
+  // control: a complete instrument set changes nothing about an honest run
+  const healthy = classifyRun({ report: { driver: { importFailed: false, instruments: { monitor: true, rejection: true, exitCheck: true } }, startedTests: 1, realTests: 1, realPassed: 1, realFailed: 0 }, exitCode: 0 });
+  assert.equal(healthy.mode, 'passed');
+});
+
 test('the driver scrubs its record secrets before the suite loads (airhorn-y3d6)', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-scrub-'));
   fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
@@ -994,6 +1065,73 @@ setTimeout(() => {
     `removing the crash monitor must still be a named refusal - rc=${monitorStrip.status}\nstdout:\n${monitorStrip.stdout}\nstderr:\n${monitorStrip.stderr}`);
   assert.match(monitorStrip.stderr + monitorStrip.stdout, /report-not-trustworthy|handlersStripped|removed the driver/,
     'a suite that removes the monitor must be reported at strip time, not silently swallowed');
+});
+
+test('SUPPRESSION, end to end: a deliberate strip is refused by default, judged under --expect-strip, and a real driver defect is always named (airhorn-co4h)', () => {
+  // The strip watcher's line arrives at DIFFERENT positions in the record: a top-level strip lands BEFORE the
+  // import record ([STRIP, IMPORT]) and a timer strip lands after it ([IMPORT, STRIP, STRIP]). Length/order
+  // matching only knew the second, so the first - the commonest deliberate shape - was reported as 'a record was
+  // forged or broken' at master 191d5ded. Both orders are driven here, in both policy directions.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-co4h-'));
+  const write = (name, body) => fs.writeFileSync(path.join(tmp, name), body);
+  const runWorld = (args, toolPath = tool) => spawnSync(process.execPath, [toolPath, '--file', 'src/subject.js', '--from', '41', '--to', '42', ...args], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    write('src/subject.js', 'export const answer = 41;\n');
+    // (a) TOP-LEVEL deliberate strip, and a test that genuinely catches the mutant.
+    write('strip-top.test.js', "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from './src/subject.js';\nprocess.removeAllListeners('uncaughtExceptionMonitor');\ntest('answer', () => assert.equal(answer, 41));\n");
+    // (b) TIMER strip of both handlers: the order the old grammar already covered, kept as the control.
+    write('strip-timer.test.js', "import test from 'node:test';\ntest('passes', () => {});\nsetTimeout(() => { process.removeAllListeners('uncaughtExceptionMonitor'); process.removeAllListeners('unhandledRejection'); }, 20);\n");
+    // (c) a strip that then dies with no record of its own, so no verdict can be had
+    write('strip-die.test.js', "import test from 'node:test';\ntest('passes', () => {});\nsetTimeout(() => { process.removeAllListeners('uncaughtExceptionMonitor'); throw new Error('genuine strip, then a crash nothing records'); }, 30);\n");
+
+    // DEFAULT POLICY: every deliberate strip is refused BY NAME, with no verdict and no accusation of forgery.
+    for (const world of ['strip-top.test.js', 'strip-timer.test.js', 'strip-die.test.js']) {
+      const run = runWorld(['--suite', world]);
+      assert.equal(run.status, 3, `${world} must be a named refusal (rc 3), never a verdict - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+      const said = run.stderr + run.stdout;
+      assert.match(said, /report-not-trustworthy/, `${world} must be refused by name`);
+      assert.match(said, /removed the driver's crash handlers|removed the driver's exit-time/, `${world}: the refusal must name what was removed`);
+      assert.match(said, /invisible|unnoticed/, `${world}: the refusal must say what the removal hides`);
+      assert.match(said, /--expect-strip/, `${world}: the refusal must name the explicit way to say it was deliberate`);
+      assert.doesNotMatch(said, /forged or broken/, `${world}: a genuine strip is suppression, not a suspected forgery`);
+      assert.doesNotMatch(said, /verdict:/, `${world}: an untrustworthy report scores no verdict`);
+    }
+
+    // EXPLICIT POLICY: the same deliberate strip is JUDGED on the tests that ran, and the verdict carries what it gave up.
+    const opted = runWorld(['--suite', 'strip-top.test.js', '--expect-strip']);
+    assert.equal(opted.status, 0, `--expect-strip must let a deliberate strip be judged (the catcher catches it, so rc 0) - rc=${opted.status}\nstdout:\n${opted.stdout}\nstderr:\n${opted.stderr}`);
+    assert.match(opted.stdout, /policy: --expect-strip/);
+    assert.match(opted.stdout, /note: .*INVISIBLE in this run/, 'the verdict must state the limitation it accepted');
+    assert.match(opted.stdout, /verdict: mutant-caught/);
+    // and without a catcher it is 'passed' (never a refusal dressed up as a pass)
+    const optedPass = runWorld(['--suite', 'strip-timer.test.js', '--expect-strip']);
+    assert.equal(optedPass.status, 2, `a judged deliberate strip that passes the mutant is fix-does-not-close (rc 2), got ${optedPass.status}\nstdout:\n${optedPass.stdout}\nstderr:\n${optedPass.stderr}`);
+    assert.match(optedPass.stdout, /verdict: fix-does-not-close/);
+
+    // A GENUINE MISSING HANDLER still fails BY NAME - the direction a careless fix breaks. The driver is patched in
+    // a COPY of the tool tree (the install line removed), so this is a real regression, not a recorded flag.
+    const copy = path.join(tmp, 'toolcopy');
+    fs.cpSync(path.join(root, 'tools'), path.join(copy, 'tools'), { recursive: true });
+    const driverFile = path.join(copy, 'tools', 'lib', 'suite-driver.mjs');
+    const driverSource = fs.readFileSync(driverFile, 'utf8');
+    const installLine = "process.on('uncaughtExceptionMonitor', onUncaught);";
+    assert.ok(driverSource.includes(installLine), 'this test patches the driver install line, so it must exist');
+    fs.writeFileSync(driverFile, driverSource.replace(installLine, ''));
+    assert.ok(!fs.readFileSync(driverFile, 'utf8').includes(installLine), 'the regression must really be in place');
+    write('defect.test.js', "import test from 'node:test';\ntest('green', () => {});\nsetTimeout(() => { process.on('uncaughtException', () => process.exit(0)); throw new Error('swallowed, and the driver has no monitor'); }, 30);\n");
+    const defect = runWorld(['--suite', 'defect.test.js'], path.join(copy, 'tools', 'mutation-check.mjs'));
+    assert.equal(defect.status, 3, `a driver that never installed its monitor must be a named refusal, not a verdict - rc=${defect.status}\nstdout:\n${defect.stdout}\nstderr:\n${defect.stderr}`);
+    assert.match(defect.stderr + defect.stdout, /never installed its monitor/, 'the defect must be named as the missing instrument');
+    assert.match(defect.stderr + defect.stdout, /defect in the tool/, 'and attributed to the tool, not to the suite');
+    assert.doesNotMatch(defect.stdout, /verdict:/, 'a defective driver scores no verdict at all');
+    // --expect-strip is about the SUITE stripping, so it cannot excuse a driver defect
+    const defectOpted = runWorld(['--suite', 'defect.test.js', '--expect-strip'], path.join(copy, 'tools', 'mutation-check.mjs'));
+    assert.equal(defectOpted.status, 3, `--expect-strip must not excuse a missing driver instrument - rc=${defectOpted.status}\nstdout:\n${defectOpted.stdout}\nstderr:\n${defectOpted.stderr}`);
+    assert.match(defectOpted.stderr + defectOpted.stdout, /never installed its monitor/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('an honest crash outside any test is still threw-outside-a-test, even with the strip watcher live (the once() artifact must not read as tamper)', () => {
