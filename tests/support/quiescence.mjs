@@ -266,14 +266,21 @@ export async function waitForQuiescence(send, {
     await sleep(pollMs);
   }
 
-  // The ceiling is a backstop, so the message must not invent a cause. Three
-  // distinguishable situations, named rather than merged into "still pending":
+  // The ceiling is a backstop, so the message must not invent a cause. Four
+  // distinguishable situations, named rather than merged into "still pending"
+  // (airhorn-3a0k added the flapping case: a drained page whose quiet condition
+  // changes every sample was being called "a starved host" on the strength of ONE
+  // historical quiet sample, an attribution the probe contradicts).
   const probe = JSON.stringify(last);
   const pending = last && last.pendingTimers === 0 && last.pendingIntervals === 0 && last.pendingFetches === 0;
   const why = pending
     ? sawQuietSample
-      ? `the page WAS quiet but the sampler only completed ${samples} round-trip(s) (${noProgressSamples} with no change) ` +
-        `before the ceiling - a starved host, not a busy page; raise timeoutMs or lower stableSamples/pollMs`
+      ? noProgressSamples > 0
+        ? `the page WAS quiet but the sampler only completed ${samples} round-trip(s) (${noProgressSamples} with no change) ` +
+          `before the ceiling - a starved host, not a busy page; raise timeoutMs or lower stableSamples/pollMs`
+        : `the page's work had drained and its quiet condition held on ${samples - noProgressSamples} of ${samples} sample(s), ` +
+          `but never on ${stableSamples} in a row, and the page's state kept changing (${noProgressSamples} with no change) - ` +
+          `the QUIET CONDITION is flapping, not the host starving`
       : `the page's work had drained but the quiet condition never held, and the state grace period did not fire`
     : noProgressSamples >= stableSamples
       ? `nothing the page reports changed across ${noProgressSamples + 1} consecutive samples, so this is a page that is not progressing rather than a host that is merely slow`

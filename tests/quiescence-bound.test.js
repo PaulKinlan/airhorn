@@ -167,3 +167,35 @@ test('ynvv: the ceiling is BETWEEN samples - one slow sample completes, then the
   assert.ok(elapsed >= 1900, `the slow sample ran to completion before the ceiling fired (${elapsed}ms) - the ceiling is not absolute`);
   assert.ok(elapsed < 3000, `but it fired at the next loop check, not never (${elapsed}ms)`);
 });
+
+test('a FLAPPING quiet condition on a drained page is named as flapping, never as a starved host (airhorn-3a0k)', async () => {
+  // The repro from the review: pending work is zero on every sample and the quiet condition alternates
+  // true/false, so nothing changed the page is waiting on - the OBSERVATION keeps changing. The old
+  // message said "a starved host, not a busy page" because it fired on ONE historical quiet sample,
+  // contradicting its own probe (0 consecutive samples with no change). Never report a cause the probe
+  // did not measure: this must say the condition is flapping.
+  const flap = () => sender(5, (n) => ({ ...quiet, quietCondition: n % 2 === 0 }));
+  await assert.rejects(
+    () => waitForQuiescence(flap(), { timeoutMs: 400, pollMs: 10 }),
+    (error) => {
+      assert.match(error.message, /QUIET CONDITION is flapping, not the host starving/,
+        `a condition that changes every sample must be named as flapping: ${error.message}`);
+      assert.doesNotMatch(error.message, /starved host, not a busy page/,
+        'and must not claim a starved host on the strength of one historical quiet sample');
+      assert.doesNotMatch(error.message, /never held, and the state grace period did not fire/,
+        'nor claim the condition never held - it held on every other sample');
+      return true;
+    },
+  );
+  // The control: an identical signature (the page's own state does not change between samples) is still
+  // called a starved host when the ceiling cut the sampling short - so the new label is discriminating,
+  // not just "every failing case is now flapping".
+  await assert.rejects(
+    () => waitForQuiescence(sender(200, () => ({ ...quiet })), { timeoutMs: 400, pollMs: 10 }),
+    (error) => {
+      assert.match(error.message, /a starved host, not a busy page/, 'an unchanging quiet page keeps its starved-host label');
+      assert.doesNotMatch(error.message, /QUIET CONDITION is flapping/, 'and is not called flapping');
+      return true;
+    },
+  );
+});
