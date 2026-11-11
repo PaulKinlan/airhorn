@@ -49,6 +49,12 @@ export const QUOTE_PREFIX = '  | ';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const REPORTER = path.join(here, 'suite-mode-reporter.mjs');
+// The suite-process sentinel (airhorn-5wns, the re-target of airhorn-5qdd onto this design):
+// loaded via --import, which node --test propagates into the per-file process it spawns
+// (measured: the guard's argv is the suite's path, and nothing else in the chain imports it).
+// It watches the suite's own listener lists and refuses by dying non-clean, because a fact
+// written from the suite's process would arrive here as quoted data. See suite-guard.mjs.
+const GUARD = path.join(here, 'suite-guard.mjs');
 
 const suite = process.env.MUTATION_SUITE_FILE;
 const nonce = process.env.MUTATION_RUN_NONCE || null;
@@ -101,7 +107,7 @@ function quotingForwarder(stream) {
 if (!suite) {
   record({ importFailed: true, reason: 'MUTATION_SUITE_FILE was not set, so no suite was loaded' });
 } else {
-  const child = spawn(process.execPath, ['--test', '--test-reporter', REPORTER, suite], {
+  const child = spawn(process.execPath, ['--import', GUARD, '--test', '--test-reporter', REPORTER, suite], {
     stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
     // The child runner's reporter writes its facts on fd 3, a pipe THIS process owns. NODE_TEST_*
     // must be absent or the nested runner skips the child entirely (it refuses to run recursively).

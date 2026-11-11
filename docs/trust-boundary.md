@@ -56,11 +56,18 @@ mutation-check  --fd3 pipe-->  DRIVER (supervisor, test file for the outer runne
    airhorn-uk28). A first version of this document claimed the event channel achieved nothing and was
    measured false within the hour (airhorn-yvwo, airhorn-86wl); it then claimed the limit was unavoidable,
    which the corroboration run removed for every forger that does not also lie about its exit status.
-2. **An in-process swallow is invisible.** With the suite in its own process there is no in-process
-   monitor to see an `uncaughtException`/`unhandledRejection` before the suite's own handler exits 0.
-   Such a run is indistinguishable from a passing suite: it scores `fix-does-not-close` (rc 2), never
-   `mutant-caught`. That is a refusal to call the check working — not a false catch — and a forger
-   gains nothing from it.
+2. **An in-process swallow is now watched, by the sentinel that lives in the suite's process.** The
+   supervisor loads `tools/lib/suite-guard.mjs` into the suite's own process via `--import` (node
+   `--test` propagates execArgv to the per-file process; measured). The sentinel holds FIRST position
+   on the rejection channel and owns the `uncaughtExceptionMonitor`, so the airhorn-5qdd shapes - a
+   prepended, prepended-once or self-removing `unhandledRejection` swallow, sampled one captured
+   nextTick after registration (before any microtask can deliver the rejection), and any uncaught
+   exception at all - end the suite process by SIGKILL. Nothing written from the suite's process is a
+   fact the parent can trust (it arrives quoted), so the sentinel's one unforgeable statement is that
+   death, and the parent classifies a non-clean suite death as a refusal (rc 3), never a verdict. The
+   remaining boundary is load-order, not secrecy: the sentinel runs at the same uid and loads before
+   the suite, and its references are captured at load, so there is no suite-reachable route to patch
+   it - but a suite that SIGKILLs itself scores the same refusal it would earn by manipulation.
 3. **A crash that lands while a test is in flight is refused rather than counted.** If the child
    runner reports a file-level failure, the run is `threw-outside-a-test` even when a test also
    failed, because whether the in-flight test "asserted about the mutant" or merely died with the run

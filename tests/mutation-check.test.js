@@ -408,28 +408,30 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     assert.match(d.stdout, /verdict: fix-does-not-close/);
 
     const stripped = runWorld(['--suite', 'g-strip-handlers.mjs']);
-    assert.equal(stripped.status, 3, `a suite that strips the handlers then crashes must be never-ran, got ${stripped.status}: ${stripped.stdout}${stripped.stderr}`);
-    // Named either way: with the airhorn-p0dg watcher the strip itself is reported at strip
-    // time, so this world refuses as report-not-trustworthy (the strip is named) rather than
-    // only via the crash's exit code.
-    assert.match(stripped.stderr + stripped.stdout, /report-not-trustworthy|exited 1 with no failing test|registered no tests|crashed/i);
+    assert.equal(stripped.status, 3, `a suite that strips the handlers then crashes must be refused, got ${stripped.status}: ${stripped.stdout}${stripped.stderr}`);
+    // airhorn-5wns: the sentinel (tools/lib/suite-guard.mjs) lives in the suite's process now, so a
+    // removeAllListeners of its rejection sentinel is a strip it REFUSES - the run dies non-clean and
+    // is named from outside as a suite that never finished loading cleanly.
+    assert.match(stripped.stderr + stripped.stdout, /threw while loading|registered no tests|crashed/i);
 
-    // The rejection path has no monitor, so it is checked by POSITION at exit - which covers the plain prepend and cannot
-    // cover a prepended once or a self-removing listener. That boundary is asserted, not glossed: the first is refused, and
-    // the second is recorded here as the known residual so nobody reads the trust line as covering it.
+    // airhorn-5wns (re-targeting airhorn-5qdd onto the supervisor design): the suite process is not
+    // unwatched after all. The supervisor loads a sentinel (tools/lib/suite-guard.mjs) into the
+    // suite's own process via --import, which node --test propagates to the per-file process
+    // (measured). The sentinel owns FIRST position on the rejection channel and the
+    // uncaughtExceptionMonitor, so all three shapes below - which the pre-14ht driver closed and
+    // which 14ht had to re-declare as an rc 2 KNOWN-LIMIT - are refused again, by death: a swallow
+    // registered AHEAD of the sentinel is sampled one nextTick later (before any microtask can
+    // deliver the rejection), and an uncaught exception fires the monitor before any swallow can
+    // exit 0. Nothing written from the suite's process is a fact the parent can trust, so the
+    // sentinel's only unforgeable statement is a non-clean death, which the parent classifies as a
+    // refusal (rc 3), never a verdict.
     write('k-prepend-rejection-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { process.prependListener('unhandledRejection', () => process.exit(0)); Promise.reject(new Error('swallowed rejection')); }, 5);\n");
 
-    // airhorn-14ht CHANGED THE ANSWER HERE, and the pin says the new one out loud rather than deleting the
-    // case. With the suite in its own process there is no in-process monitor to see a swallow before it
-    // exits 0, so these three shapes are now indistinguishable from an honest passing suite. The SAFE
-    // direction is kept: they can never be reported as a catch - the run is 'fix-does-not-close' (rc 2),
-    // which claims nothing about the mutant. That is the documented KNOWN-LIMIT in the driver and in the
-    // printed trust line, and a forger gains nothing from it: rc 2 is a refusal to call the check working.
     for (const world of ['k-prepend-swallow.mjs', 'k-prepend-once-swallow.mjs', 'k-self-removing-swallow.mjs']) {
       const laundered = runWorld(['--suite', world]);
-      assert.equal(laundered.status, 2, `${world} must never be a catch and never a false refusal, got ${laundered.status}: ${laundered.stdout}${laundered.stderr}`);
-      assert.match(laundered.stdout, /verdict: fix-does-not-close/,
-        `${world}: an in-process swallow is invisible from outside, so the honest verdict is that the check does not close the hole`);
+      assert.equal(laundered.status, 3, `${world} must be a named refusal (the sentinel refuses an uncaught exception), got ${laundered.status}: ${laundered.stdout}${laundered.stderr}`);
+      assert.match(laundered.stderr + laundered.stdout, /threw-outside-a-test/,
+        `${world}: the refusal must name the crash it now catches again (airhorn-5wns)`);
     }
 
     // airhorn-39yh, the two shapes this change closes: (a) patch the record channel so the crash line is never written, and
@@ -437,15 +439,45 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     write('k-patch-channel-swallow.mjs', "import test from 'node:test';\nimport fs from 'node:fs';\ntest('one', () => {});\nsetTimeout(() => { const real = fs.writeSync; fs.writeSync = (...args) => (String(args[1]).includes('crashedOutsideTest') ? 0 : real.apply(fs, args)); process.prependListener('uncaughtException', () => process.exit(0)); throw new Error('swallowed after patching the channel'); }, 5);\n");
     write('k-strip-exit-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { for (const fn of process.listeners('exit')) process.removeListener('exit', fn); process.prependListener('unhandledRejection', () => process.exit(0)); Promise.reject(new Error('swallowed after stripping exit listeners')); }, 5);\n");
 
-    // airhorn-14ht: patching fs.writeSync and stripping 'exit' listeners reach nothing of the supervisor's
-    // any more - it is a different process, and the suite has no handle on its record stream or its fact
-    // pipe. These two worlds are therefore the in-process swallow again: never a catch (rc 2), which is
-    // the documented limit, and never a catch is the property that matters.
+    // airhorn-5wns: patching fs.writeSync and stripping 'exit' listeners reach nothing of the
+    // supervisor's, but that no longer leaves these worlds unwatched - each of them still registers a
+    // swallow the sentinel sees (an uncaught exception for the patch world, a PREPENDED rejection
+    // listener for the other two), and the sentinel refuses by death regardless of what else the suite
+    // patched, because its references were captured at preload before any suite code ran.
     for (const world of ['k-patch-channel-swallow.mjs', 'k-strip-exit-swallow.mjs', 'k-prepend-rejection-swallow.mjs']) {
       const closed = runWorld(['--suite', world]);
-      assert.equal(closed.status, 2, `${world} must never be a catch, got ${closed.status}: ${closed.stdout}${closed.stderr}`);
-      assert.match(closed.stdout, /verdict: fix-does-not-close/, `${world}: the honest answer is that the check does not close the hole`);
+      assert.equal(closed.status, 3, `${world} must be refused by the sentinel, got ${closed.status}: ${closed.stdout}${closed.stderr}`);
+      assert.doesNotMatch(closed.stdout, /verdict: mutant-caught/, `${world}: a refusal, never a catch`);
     }
+
+    // airhorn-5qdd, the shapes an exit-time position check cannot see, re-targeted: a prepended `once`
+    // is unwrapped before it fires and a self-removing listener removes itself, so neither survives to
+    // exit - but both were AHEAD of the sentinel at registration, and the sampler (captured nextTick,
+    // which drains before promise microtasks) sees that before a rejection registered in the same
+    // synchronous block can be delivered. A microtask-registered variant is pinned too: nextTick still
+    // drains first, so the sample runs before the rejection is delivered whichever queue registered it.
+    write('k-prepend-once-rejection-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { process.prependOnceListener('unhandledRejection', () => process.exit(0)); Promise.reject(new Error('once-swallowed rejection')); }, 5);\n");
+    write('k-self-removing-rejection-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { const swallow = () => { process.removeListener('unhandledRejection', swallow); process.exit(0); }; process.prependListener('unhandledRejection', swallow); Promise.reject(new Error('self-removed rejection')); }, 5);\n");
+    write('k-microtask-once-rejection-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nPromise.resolve().then(() => { process.prependOnceListener('unhandledRejection', () => process.exit(0)); Promise.reject(new Error('microtask-swallowed rejection')); });\n");
+    for (const world of ['k-prepend-once-rejection-swallow.mjs', 'k-self-removing-rejection-swallow.mjs', 'k-microtask-once-rejection-swallow.mjs']) {
+      const ephemeral = runWorld(['--suite', world]);
+      assert.equal(ephemeral.status, 3, `${world} must be a named refusal (the sampler sees the ahead-registration), got ${ephemeral.status}: ${ephemeral.stdout}${ephemeral.stderr}`);
+      assert.doesNotMatch(ephemeral.stdout, /verdict: mutant-caught/, `${world}: a refusal, never a catch`);
+    }
+
+    // airhorn-gb9y: the sampling watcher itself is an instrument - removing it deletes the check, so
+    // the strip is refused like every other instrument strip.
+    write('k-strip-sampling-watcher.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { for (const l of process.listeners('newListener')) process.removeListener('newListener', l); process.prependOnceListener('unhandledRejection', () => process.exit(0)); Promise.reject(new Error('swallowed after stripping the sampler')); }, 5);\n");
+    const watcherStrip = runWorld(['--suite', 'k-strip-sampling-watcher.mjs']);
+    assert.equal(watcherStrip.status, 3, `stripping the sampling watcher must be refused (airhorn-gb9y), got ${watcherStrip.status}: ${watcherStrip.stdout}${watcherStrip.stderr}`);
+
+    // Honest churn must stay unrefused: node:test's own harness listener registers by APPEND (never
+    // ahead of the preload sentinel), and a suite listener appended behind the sentinel never runs
+    // ahead of it - so adding and removing one hides nothing and is not manipulation.
+    write('k-honest-rejection-churn.mjs', "import test from 'node:test';\ntest('one', () => {});\nconst logger = () => {};\nprocess.on('unhandledRejection', logger);\nprocess.removeListener('unhandledRejection', logger);\n");
+    const honestChurn = runWorld(['--suite', 'k-honest-rejection-churn.mjs']);
+    assert.equal(honestChurn.status, 2, `honest appended churn must stay fix-does-not-close, got ${honestChurn.status}: ${honestChurn.stdout}${honestChurn.stderr}`);
+    assert.doesNotMatch(honestChurn.stderr + honestChurn.stdout, /refusing/, 'honest appended rejection churn must not be refused');
 
     // j-indirect-async CHANGED MEANING under airhorn-14ht and the change is the right way round: that
     // world registers a REAL test ('answer') that asserts about the mutant, so the mutant is genuinely
@@ -1130,7 +1162,7 @@ test('a TEST file is refused by every spelling AND by identity - symlink and har
   }
 });
 
-test('SUPPRESSION: strip + swallow-with-exit-0 + crash cannot become a catch, and is named as the documented limit (airhorn-p0dg, revised by airhorn-14ht)', () => {
+test('SUPPRESSION: strip + swallow-with-exit-0 + crash cannot become a catch - the sentinel refuses the strip (airhorn-p0dg, revised by airhorn-14ht, closed by airhorn-5wns)', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-p0dg-'));
   fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
   fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
@@ -1143,13 +1175,10 @@ test('passes', () => {});
 setTimeout(() => { throw new Error('the mutant crash, suppressed'); }, 50);
 `);
   const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
-  // airhorn-14ht: the suite no longer shares a process with the driver, so a swallow it installs in
-  // ITS process is invisible from outside - there is no monitor to see it first. The safe direction is
-  // kept (never a catch); the refusal-by-name became "the check does not close the hole", which is the
-  // documented KNOWN-LIMIT the driver and the printed trust line both state.
-  assert.equal(run.status, 2,
-    `a suppressed crash must never be a catch and never a false refusal - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
-  assert.match(run.stdout, /verdict: fix-does-not-close/);
+  // airhorn-5wns: the strip removes the sentinel's own rejection listener from ITS process, and the
+  // sentinel refuses a strip of itself - the run dies non-clean and is refused, never scored.
+  assert.equal(run.status, 3,
+    `a suppressed crash must be refused now that the sentinel watches the suite process - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
   assert.doesNotMatch(run.stdout, /verdict: mutant-caught/, 'the one thing a suppressed crash must never do is look caught');
 });
 
@@ -1170,18 +1199,16 @@ setTimeout(() => {
 }, 30);
 `);
   const run = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'suite.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
-  // airhorn-14ht: the strip lists no longer hold anything of ours (the supervisor is not in this
-  // process), so this world is the in-process swallow it always effectively was. Safe direction only.
-  assert.equal(run.status, 2,
-    `the one-timer suppression must never be a catch - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
-  assert.match(run.stdout, /verdict: fix-does-not-close/);
-  // airhorn-5qdd: this world strips the uncaughtException LISTENERS, which no longer decides anything - the driver records
-  // crashes from 'uncaughtExceptionMonitor', which the strip does not touch, so the crash is now named as the crash it is
-  // instead of being inferred from the strip. Both are named refusals; the strip is still what catches a suite that removes
-  // the MONITOR (the world below).
-  // airhorn-14ht: this world's strip lists nothing of ours any more, so what remains is an in-process
-  // swallow - the documented limit. It must never be a catch, and never a fabricated refusal.
-  assert.match(run.stdout, /verdict: fix-does-not-close/, `expected the documented limit, got: ${run.stdout}${run.stderr}`);
+  // airhorn-5wns: the strip lists hold the sentinel's instruments again - it lives in the suite's
+  // process, loaded by the supervisor's spawn. Removing the rejection sentinel (or the monitor) is a
+  // strip the sentinel refuses by dying non-clean, so the one-timer shape is a refusal, never a verdict.
+  assert.equal(run.status, 3,
+    `the one-timer suppression must be refused now - rc=${run.status}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+  assert.doesNotMatch(run.stdout, /verdict: mutant-caught/, 'the one thing a suppression must never do is look caught');
+  // airhorn-5qdd, airhorn-p0dg: both halves are named - the strip trips the sentinel's own watcher and
+  // the crash would fire its monitor; either alone refuses. The strip is what a suite that removes the
+  // MONITOR gets caught by (the world below).
+  assert.match(run.stdout + run.stderr, /\[(never-ran|threw-outside-a-test)\]/, `must be a named refusal, got: ${run.stdout}${run.stderr}`);
 
   // And the monitor is the thing to strip now: removing it trips the same watcher, so the attempt is reported at strip time
   // rather than succeeding.
@@ -1195,11 +1222,11 @@ setTimeout(() => {
 }, 30);
 `);
   const monitorStrip = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'monitor-strip.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
-  // There is no monitor in this process to remove any more, so the strip is a no-op and the swallow is
-  // the same in-process shape as above: never a catch, documented limit otherwise.
-  assert.equal(monitorStrip.status, 2,
-    `removing a monitor that is not in this process cannot change the verdict into a catch - rc=${monitorStrip.status}\nstdout:\n${monitorStrip.stdout}\nstderr:\n${monitorStrip.stderr}`);
-  assert.match(monitorStrip.stdout, /verdict: fix-does-not-close/);
+  // airhorn-5wns: the monitor IS in this process now - it is the sentinel's - so removing it is a strip
+  // the sentinel refuses by dying non-clean, and the swallow never gets to run.
+  assert.equal(monitorStrip.status, 3,
+    `removing the sentinel's monitor must be refused (airhorn-gb9y strip discipline) - rc=${monitorStrip.status}\nstdout:\n${monitorStrip.stdout}\nstderr:\n${monitorStrip.stderr}`);
+  assert.doesNotMatch(monitorStrip.stdout, /verdict: mutant-caught/, 'a stripped monitor must never look caught');
 });
 
 test('SUPPRESSION, end to end: strips are no-ops now, a crash is named from outside, and a supervisor defect is refused not judged (airhorn-co4h, airhorn-14ht)', () => {
@@ -1209,10 +1236,11 @@ test('SUPPRESSION, end to end: strips are no-ops now, a crash is named from outs
   try {
     fs.mkdirSync(path.join(tmp, 'src'));
     write('src/subject.js', 'export const answer = 41;\n');
-    // (a) a deliberate "strip" of handlers that are not in the suite's process at all, plus a test
-    // that genuinely catches the mutant: the catch decides, because there was nothing to strip.
+    // (a) a "strip" of what used to be nobody's handlers, plus a test that genuinely catches the
+    // mutant: airhorn-5wns changed the answer - the uncaughtExceptionMonitor list holds the sentinel's
+    // handler now, so the strip is refused and the catch is never reached.
     write('strip-top.test.js', "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { answer } from './src/subject.js';\nprocess.removeAllListeners('uncaughtExceptionMonitor');\ntest('answer', () => assert.equal(answer, 41));\n");
-    // (b) the same strip and nothing that catches: not a catch, and not a refusal either.
+    // (b) the same strip and nothing that catches: refused by the sentinel all the same.
     write('strip-timer.test.js', "import test from 'node:test';\ntest('passes', () => {});\nsetTimeout(() => { process.removeAllListeners('uncaughtExceptionMonitor'); process.removeAllListeners('unhandledRejection'); }, 20);\n");
     // (c) a crash after the strip: seen from OUTSIDE now (the child exits non-zero with no failing
     // test), so it is named as the crash it is - the airhorn-14ht capability the old design lacked,
@@ -1220,23 +1248,24 @@ test('SUPPRESSION, end to end: strips are no-ops now, a crash is named from outs
     write('strip-die.test.js', "import test from 'node:test';\ntest('passes', () => {});\nsetTimeout(() => { process.removeAllListeners('uncaughtExceptionMonitor'); throw new Error('genuine strip, then a crash nothing records'); }, 30);\n");
 
     const top = runWorld(['--suite', 'strip-top.test.js']);
-    assert.equal(top.status, 0, `a no-op strip beside a real catch must be caught - rc=${top.status}\n${top.stdout}${top.stderr}`);
-    assert.match(top.stdout, /verdict: mutant-caught/);
+    assert.equal(top.status, 3, `a strip of the sentinel's monitor must be refused even beside a real catch (airhorn-5wns) - rc=${top.status}\n${top.stdout}${top.stderr}`);
+    assert.doesNotMatch(top.stdout, /verdict: mutant-caught/, 'the catch is never reached: the strip refused the run first');
 
     const timer = runWorld(['--suite', 'strip-timer.test.js']);
-    assert.equal(timer.status, 2, `a no-op strip with no catcher is fix-does-not-close - rc=${timer.status}\n${timer.stdout}${timer.stderr}`);
-    assert.match(timer.stdout, /verdict: fix-does-not-close/);
+    assert.equal(timer.status, 3, `a strip of the sentinel's instruments is refused, no catcher or not - rc=${timer.status}\n${timer.stdout}${timer.stderr}`);
+    assert.doesNotMatch(timer.stdout, /verdict: mutant-caught/, 'a refused run scores no verdict');
 
     const died = runWorld(['--suite', 'strip-die.test.js']);
     assert.equal(died.status, 3, `a crash outside any test is refused by name - rc=${died.status}\n${died.stdout}${died.stderr}`);
     assert.match(died.stderr, /threw-outside-a-test/, 'the refusal must name the crash, which is now visible from outside the process');
 
-    // --expect-strip still means what it says (it is the caller's statement, not a suite-side marker),
-    // but with nothing to strip it changes no verdict: the catch decides.
+    // --expect-strip no longer changes any verdict: the sentinel refuses a strip of its instruments by
+    // dying non-clean, and nothing the caller passes can turn that death into a verdict (airhorn-5wns).
+    // The flag is accepted for command compatibility only.
     const opted = runWorld(['--suite', 'strip-top.test.js', '--expect-strip']);
-    assert.equal(opted.status, 0, `--expect-strip must not turn a catch into anything else - rc=${opted.status}\n${opted.stdout}${opted.stderr}`);
-    assert.match(opted.stdout, /verdict: mutant-caught/);
-    assert.match(opted.stdout, /policy: --expect-strip/);
+    assert.equal(opted.status, 3, `--expect-strip must not excuse a strip the sentinel refused - rc=${opted.status}\n${opted.stdout}${opted.stderr}`);
+    assert.doesNotMatch(opted.stdout, /verdict: mutant-caught/, 'an excused strip must never become a catch');
+    assert.match(opted.stdout, /policy: .*--expect-strip is accepted for command compatibility/, 'the policy line must say --expect-strip no longer changes anything');
 
     // A SUPERVISOR DEFECT is refused, not judged: with the child's wrapper identification removed the
     // child's real tests collapse into the file-level event, so realTests reads 0 and the run is
@@ -1371,7 +1400,11 @@ test('the tool prints its trust boundary, including the KNOWN-LIMIT it now carri
   assert.match(said, /QUOTED/, 'and that the suite bytes are quoted as data');
   assert.match(said, /pipe the suite does not inherit/, 'and that the facts travel on a channel the suite cannot write');
   assert.match(said, /KNOWN-LIMIT/, 'and it must state what it has given up rather than implying closure');
-  assert.match(said, /fix-does-not-close \(rc 2\), never mutant-caught/, 'naming the exact direction of the limit');
+  // airhorn-5wns: the swallow KNOWN-LIMIT became a sentinel refusal, so the line must claim the guard
+  // and its one unforgeable fact, and keep naming the limit that remains (the event self-report).
+  assert.match(said, /suite-guard\.mjs/, 'the sentinel must be named');
+  assert.match(said, /SIGKILL/, 'and the refusal mechanism (a non-clean death) must be stated');
+  assert.doesNotMatch(said, /indistinguishable from a passing suite/, 'the old swallow limit must not be claimed any more');
   assert.equal((said.match(/trust: the suite runs in a CHILD/g) || []).length, 1, 'printed once per invocation');
 });
 
