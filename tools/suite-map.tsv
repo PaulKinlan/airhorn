@@ -52,6 +52,8 @@ tools/merge-suite-map.mjs	tests/suite-map-merge.test.js
 tools/guarded-call.mjs	tests/lost-upgrade-copy.test.mjs
 # why: docs/coverage-map.md#tools-audio-parity-mjs
 tools/audio-parity.mjs	tests/audio-parity-verdict.test.js
+# why: docs/coverage-map.md#tools-measure-perf-mjs
+tools/measure-perf.mjs	tests/tool-verdicts.test.js
 # why: docs/coverage-map.md#tools-cache-growth-mjs
 tools/cache-growth.mjs	tests/soak-verdict.test.js tests/tool-bound-kill.test.mjs
 tools/soak.mjs	tests/soak-verdict.test.js tests/tool-bound-kill.test.mjs
@@ -69,6 +71,8 @@ tools/lib/endpoint-growth.mjs	tests/soak-verdict.test.js
 tools/lib/**	tests/test-support.test.js
 # why: docs/coverage-map.md#tools-lib-update-outcome-mjs
 tools/lib/update-outcome.mjs	tests/update-outcome.test.js
+# why: docs/coverage-map.md#tools-lib-perf-metrics-mjs
+tools/lib/perf-metrics.mjs	tests/tool-verdicts.test.js
 # why: docs/coverage-map.md#tools-install-https-proof-mjs
 tools/install-https-proof.mjs	tests/gate-smoke.test.js tests/test-support.test.js
 tools/resilience-audit.mjs	tests/resilience-probe.test.js tests/resilience-report.test.js tests/scenario-id-drift.test.js

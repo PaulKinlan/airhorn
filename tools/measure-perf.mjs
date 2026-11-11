@@ -6,7 +6,7 @@ import { installSignalExit } from '../tests/support/signal-exit.mjs';
 
 import { chromeBin, connectPage, launchChrome } from './lib/chrome.mjs';
 import { openRequestUrl } from './lib/request-path.mjs';
-import { measurementExitCode, unmeasured } from './lib/perf-metrics.mjs';
+import { measurementExitCode, observerOutcomes, unmeasured, wasSkipped } from './lib/perf-metrics.mjs';
 
 // The teardown below lives in a try/finally, which a bound-kill (fleet-gate's
 // SIGTERM, a job-tree reaper, Ctrl-C) never reaches - so the chrome tree and its
@@ -153,60 +153,117 @@ async function main() {
     await send('Runtime.enable');
     await send('Network.enable');
 
+    // What a PerformanceObserver registration can tell us, and the three outcomes the old empty
+    // catch collapsed into one (airhorn-nxuv.30). Before this, all four registrations sat in
+    // `catch (e) {}`, so every one of these left the column at its DEFAULT - FP 'None', LCP 'None
+    // (0 entries recorded)', CLS '0.0000' - inside a table that still read as a complete set of
+    // measurements, and the tool still exited 0:
+    //   - the browser has no PerformanceObserver / no such entry type -> NOT OBSERVABLE HERE. That
+    //     is a fact about the environment, so it is a loud SKIP naming the capability: not a
+    //     measurement, and deliberately not a failure (a missing capability must not be
+    //     catastrophic).
+    //   - construction/observe() THREW -> REFUSED: a failure, named with the browser's own reason.
+    //   - the observer's CALLBACK threw -> the old catch never saw it (the callback runs in a later
+    //     page task), so the field had already gone quiet: also a failure, named as a callback throw.
+    //   - the observer registered and simply produced nothing -> that is airhorn-lmlu's case, and
+    //     the report fails on entry counts and the observation window, not on this script.
     const observerScript = `
       window.__perfMetrics = {
         fp: null,
         fcp: null,
         lcp: null,
         lcpEntriesCount: 0,
+        paintEntries: 0,
         cls: 0,
-        rawEvents: []
+        clsEntries: 0,
+        rawEvents: [],
+        // Registration/construction/callback failures: this run is NOT a measurement.
+        observerErrors: [],
+        // Capabilities this browser does not have: named, printed, and not a failure.
+        observerSkips: []
       };
 
-      try {
-        new PerformanceObserver((entryList) => {
-          for (const entry of entryList.getEntries()) {
-            if (entry.name === 'first-paint') {
-              window.__perfMetrics.fp = entry.startTime;
-            } else if (entry.name === 'first-contentful-paint') {
-              window.__perfMetrics.fcp = entry.startTime;
+      // What THIS browser can observe at all. Read before constructing, so 'cannot observe X' is
+      // never confused with 'observed X and nothing arrived'.
+      const observeCapabilityMissing = (type) => {
+        if (typeof PerformanceObserver !== 'function') {
+          return 'this browser has no PerformanceObserver at all';
+        }
+        const types = PerformanceObserver.supportedEntryTypes;
+        if (!Array.isArray(types)) {
+          return 'this browser does not expose PerformanceObserver.supportedEntryTypes, so whether "' + type + '" can be observed is unknown';
+        }
+        return types.indexOf(type) === -1 ? 'Chromium lists no "' + type + '" in PerformanceObserver.supportedEntryTypes here' : null;
+      };
+
+      // One recorder for both failure phases, so a registration cannot fail without being recorded.
+      const recordObserverFailure = (type, phase, e) => {
+        window.__perfMetrics.observerErrors.push({
+          type,
+          phase,
+          message: String((e && e.message) || e)
+        });
+      };
+
+      // The only way an observer gets constructed: capability check, refusal recording, and a
+      // callback wrapper (the throw that used to vanish into the page's uncaught-error path).
+      const observe = (type, callback, options) => {
+        const missing = observeCapabilityMissing(type);
+        if (missing) {
+          window.__perfMetrics.observerSkips.push({ type, capability: missing });
+          return;
+        }
+        try {
+          new PerformanceObserver((entryList) => {
+            try {
+              callback(entryList);
+            } catch (e) {
+              recordObserverFailure(type, 'callback', e);
             }
-          }
-        }).observe({ type: 'paint', buffered: true });
-      } catch (e) {}
+          }).observe(options);
+        } catch (e) {
+          recordObserverFailure(type, 'registration', e);
+        }
+      };
 
-      try {
-        new PerformanceObserver((entryList) => {
-          const entries = entryList.getEntries();
-          window.__perfMetrics.lcpEntriesCount += entries.length;
-          if (entries.length > 0) {
-            window.__perfMetrics.lcp = entries[entries.length - 1].startTime;
+      observe('paint', (entryList) => {
+        for (const entry of entryList.getEntries()) {
+          window.__perfMetrics.paintEntries += 1;
+          if (entry.name === 'first-paint') {
+            window.__perfMetrics.fp = entry.startTime;
+          } else if (entry.name === 'first-contentful-paint') {
+            window.__perfMetrics.fcp = entry.startTime;
           }
-        }).observe({ type: 'largest-contentful-paint', buffered: true });
-      } catch (e) {}
+        }
+      }, { type: 'paint', buffered: true });
 
-      try {
-        new PerformanceObserver((entryList) => {
-          for (const entry of entryList.getEntries()) {
-            if (!entry.hadRecentInput) {
-              window.__perfMetrics.cls += entry.value;
-            }
-          }
-        }).observe({ type: 'layout-shift', buffered: true });
-      } catch (e) {}
+      observe('largest-contentful-paint', (entryList) => {
+        const entries = entryList.getEntries();
+        window.__perfMetrics.lcpEntriesCount += entries.length;
+        if (entries.length > 0) {
+          window.__perfMetrics.lcp = entries[entries.length - 1].startTime;
+        }
+      }, { type: 'largest-contentful-paint', buffered: true });
 
-      try {
-        new PerformanceObserver((entryList) => {
-          for (const entry of entryList.getEntries()) {
-            window.__perfMetrics.rawEvents.push({
-              name: entry.name,
-              duration: entry.duration,
-              interactionId: entry.interactionId || 0,
-              startTime: entry.startTime
-            });
+      observe('layout-shift', (entryList) => {
+        for (const entry of entryList.getEntries()) {
+          window.__perfMetrics.clsEntries += 1;
+          if (!entry.hadRecentInput) {
+            window.__perfMetrics.cls += entry.value;
           }
-        }).observe({ type: 'event', durationThreshold: 0, buffered: true });
-      } catch (e) {}
+        }
+      }, { type: 'layout-shift', buffered: true });
+
+      observe('event', (entryList) => {
+        for (const entry of entryList.getEntries()) {
+          window.__perfMetrics.rawEvents.push({
+            name: entry.name,
+            duration: entry.duration,
+            interactionId: entry.interactionId || 0,
+            startTime: entry.startTime
+          });
+        }
+      }, { type: 'event', durationThreshold: 0, buffered: true });
     `;
 
     await send('Page.addScriptToEvaluateOnNewDocument', { source: observerScript });
@@ -215,6 +272,10 @@ async function main() {
     networkTransferred = 0;
     requestTransferred.clear();
     responses.length = 0;
+    // The observation window is measured, not guessed: it is the time from this load's navigation
+    // to the harvest of its metrics, and the verdict cites it whenever a field came back empty so a
+    // reader can tell 'nothing was painted in 1.6 s' from 'nothing was painted' (airhorn-nxuv.30).
+    const coldWindowStart = process.hrtime.bigint();
 
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
     await new Promise(r => setTimeout(r, 1000));
@@ -273,6 +334,7 @@ async function main() {
       returnByValue: true
     });
     const coldMetrics = JSON.parse(coldEval.result.value);
+    coldMetrics.observationWindowMs = Number(process.hrtime.bigint() - coldWindowStart) / 1e6;
 
     let coldTransferred = 0;
     for (const b of requestTransferred.values()) coldTransferred += b;
@@ -283,6 +345,7 @@ async function main() {
     networkTransferred = 0;
     requestTransferred.clear();
     responses.length = 0;
+    const repeatWindowStart = process.hrtime.bigint();
 
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
     await new Promise(r => setTimeout(r, 1000));
@@ -312,6 +375,7 @@ async function main() {
       returnByValue: true
     });
     const repeatMetrics = JSON.parse(repeatEval.result.value);
+    repeatMetrics.observationWindowMs = Number(process.hrtime.bigint() - repeatWindowStart) / 1e6;
 
     let repeatTransferred = 0;
     for (const b of requestTransferred.values()) repeatTransferred += b;
@@ -367,22 +431,27 @@ async function main() {
     console.log(`Conditions: NO CPU throttling, NO network throttling, default viewport ${viewport}, ` +
       'server on loopback - a desktop-class measurement, NOT a phone on a mobile network');
     console.log(`SW Controller Present: ${swActive}`);
+    // A cell for a field whose observer this browser cannot run must not print a DEFAULT that reads
+    // as a measurement (airhorn-nxuv.30): a skipped CLS used to render `0.0000`, and a skipped LCP
+    // `None (0 entries recorded)`. The table is the artifact quoted as perf evidence, so it says
+    // 'not observed' in the cell itself, on top of the SKIPPED section below.
+    const NOT_OBSERVED = 'not observed (this browser cannot observe it)';
     console.table({
       'Cold Load': {
         'Transferred Bytes': `${coldTransferred} B`,
         'Request Provenance': summarizeResponses(coldResponses),
-        'First Paint (FP)': coldMetrics.fp !== null ? `${Math.round(coldMetrics.fp)} ms` : 'None',
-        'LCP': formatLcp(coldMetrics),
-        'INP (p98)': interactionDispatched ? computeInp(coldMetrics) : 'unmeasured (no interaction dispatched)',
-        'CLS': coldMetrics.cls.toFixed(4)
+        'First Paint (FP)': wasSkipped(coldMetrics, 'paint') ? NOT_OBSERVED : (coldMetrics.fp !== null ? `${Math.round(coldMetrics.fp)} ms` : 'None'),
+        'LCP': wasSkipped(coldMetrics, 'largest-contentful-paint') ? NOT_OBSERVED : formatLcp(coldMetrics),
+        'INP (p98)': interactionDispatched ? (wasSkipped(coldMetrics, 'event') ? NOT_OBSERVED : computeInp(coldMetrics)) : 'unmeasured (no interaction dispatched)',
+        'CLS': wasSkipped(coldMetrics, 'layout-shift') ? NOT_OBSERVED : coldMetrics.cls.toFixed(4)
       },
       [repeatLoadLabel(swActive)]: {
         'Transferred Bytes': `${repeatTransferred} B`,
         'Request Provenance': summarizeResponses(repeatResponses),
-        'First Paint (FP)': repeatMetrics.fp !== null ? `${Math.round(repeatMetrics.fp)} ms` : 'None',
-        'LCP': formatLcp(repeatMetrics),
-        'INP (p98)': interactionDispatched ? computeInp(repeatMetrics) : 'unmeasured (no interaction dispatched)',
-        'CLS': repeatMetrics.cls.toFixed(4)
+        'First Paint (FP)': wasSkipped(repeatMetrics, 'paint') ? NOT_OBSERVED : (repeatMetrics.fp !== null ? `${Math.round(repeatMetrics.fp)} ms` : 'None'),
+        'LCP': wasSkipped(repeatMetrics, 'largest-contentful-paint') ? NOT_OBSERVED : formatLcp(repeatMetrics),
+        'INP (p98)': interactionDispatched ? (wasSkipped(repeatMetrics, 'event') ? NOT_OBSERVED : computeInp(repeatMetrics)) : 'unmeasured (no interaction dispatched)',
+        'CLS': wasSkipped(repeatMetrics, 'layout-shift') ? NOT_OBSERVED : repeatMetrics.cls.toFixed(4)
       }
     });
 
@@ -390,18 +459,34 @@ async function main() {
     // observer registered but never fired, the table said "None (0 entries recorded)"
     // and the tool STILL exited 0, so a CWV report could be quoted for a field it
     // never measured. The row already told the truth; the exit code now agrees with it.
-    const notMeasured = unmeasured([
+    // The two loads the verdict is computed over, named once: unmeasured() and
+    // observerOutcomes() must judge the SAME rows the table printed.
+    const loads = [
       { label: 'cold load', metrics: coldMetrics },
       { label: 'repeat (SW-cached) load', metrics: repeatMetrics },
-    ]);
+    ];
+    // Three outcomes, three meanings (airhorn-nxuv.30) - the empty catch used to print one:
+    //   SKIPPED  = this browser cannot observe the type at all. Loud, named, NOT a failure.
+    //   FAILED   = construction/observe() or a callback threw. The field was never measured.
+    //   NOT MEASURED = the observer was live and nothing arrived. Fails on entry counts + window.
+    const outcomes = observerOutcomes(loads);
+    if (outcomes.skipped.length > 0) {
+      console.log(`\nSKIPPED (this browser cannot observe these - not a measurement, and not a failure): ${outcomes.skipped.length}`);
+      for (const skip of outcomes.skipped) console.log(`  - ${skip}`);
+    }
+    const notMeasured = unmeasured(loads);
     if (notMeasured.length > 0) {
       console.log('\nNOT MEASURED (this run is not evidence for these fields):');
       for (const finding of notMeasured) console.log(`  - ${finding}`);
       console.log('Exiting nonzero so an unmeasured report cannot be read as a green one.');
     }
+    if (outcomes.failed.length > 0) {
+      console.log(`\nOBSERVER FAILURES: ${outcomes.failed.length} (these fields were never measured):`);
+      for (const problem of outcomes.failed) console.log(`  - ${problem}`);
+    }
     const structuralProblems = measurePerfProblems({ swActive, interactionDispatched });
     for (const problem of structuralProblems) console.log(`  - ${problem}`);
-    process.exitCode = measurementExitCode([...notMeasured, ...structuralProblems]);
+    process.exitCode = measurementExitCode([...notMeasured, ...outcomes.failed, ...structuralProblems]);
 
   } finally {
     try { ws.close(); } catch { /* already closed */ }
