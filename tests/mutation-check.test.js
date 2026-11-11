@@ -606,6 +606,27 @@ test('the subject', () => assert.equal(answer, 41));
   assert.ok(run.stdout.indexOf('containment: NONE') < run.stdout.indexOf('verdict:'), 'the NONE line must precede the verdict');
 });
 
+test('a suite file that registers NO tests at all is never-ran, not a scored run (airhorn-3wth)', () => {
+  // The runner emits a file-level entry for every test file, and a file whose only content is the import
+  // registers nothing: it used to be counted as one REAL test (realTests:1, the wrapper), so a zero-test
+  // suite scored "fix-does-not-close" as if something had been measured. The guard that refuses it
+  // (realTests === 0) must stay reachable through the real call path, which is what this world checks.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), '3wth-empty-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
+    fs.writeFileSync(path.join(tmp, 'empty.test.mjs'), "import test from 'node:test';\n");
+    const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'empty.test.mjs'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+    assert.equal(result.status, 3, `a suite that registers no tests measured nothing and must be refused: ${result.stdout}${result.stderr}`);
+    const said = result.stdout + result.stderr;
+    assert.match(said, /never-ran/);
+    assert.match(said, /registered no tests/);
+    assert.doesNotMatch(result.stdout, /verdict: (mutant-caught|fix-does-not-close)/, 'nothing may be scored from a run with no tests');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('a describe() container is not a test: a container-only suite is never-ran, not a verdict', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'u1v2-container-'));
   try {
