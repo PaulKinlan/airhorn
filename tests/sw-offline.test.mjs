@@ -35,6 +35,7 @@ import { waitForCondition } from './support/poll.mjs';
 import { launchBrowser } from './support/browser.mjs';
 import { awaitSocketOpen } from './cdp-command-bound.mjs';
 import { serveDist } from './support/static-server.mjs';
+import { offlineAssetVerdict } from './support/offline-asset-verdict.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -530,6 +531,13 @@ async function testSwAndManifest() {
       `integrity stages must run against the build2 precache, got ${precacheInfo.name}`);
     console.log(`Precached: ${precacheInfo.urls.join(', ')}`);
 
+    // The real bundle bytes, captured while the origin is still up (airhorn-g0qr2). Stage B below
+    // has to tell "the worker served the real asset" apart from "the worker served something", and
+    // a byte comparison against this is the only form of that a wrong-but-nonempty body cannot pass.
+    const onlineAsset = await readAsset(assetUrl);
+    assert(healedOk(onlineAsset),
+      `the asset did not read back online before the integrity stages: ${JSON.stringify(onlineAsset)}`);
+
     const corrupt = (pathname, body, type) => evaluate(`(async () => {
       const name = (await caches.keys()).find((n) => n.startsWith('airhorner-'));
       const cache = await caches.open(name);
@@ -583,9 +591,32 @@ async function testSwAndManifest() {
     const offlineAsset = await evaluate(`fetch(${JSON.stringify(assetUrl)})
       .then(async (r) => ({ status: r.status, body: await r.text() }))
       .catch((e) => ({ status: 0, error: String(e && e.message || e) }))`);
-    assert(offlineAsset.body !== GARBAGE,
+    // POSITIVE EVIDENCE, NOT A NEGATIVE STRING COMPARISON (airhorn-g0qr2). This used to read
+    // `offlineAsset.body !== GARBAGE`, which is satisfied by an EMPTY body and by any 503 - i.e. by
+    // "nothing at all" - so a worker that returned nothing offline passed the one assertion that
+    // exists to prove it refuses bytes it cannot vouch for. The worker has exactly two legitimate
+    // outcomes here, and each is now required to carry evidence that it is that outcome:
+    //   - the real verified asset, BYTE-IDENTICAL to what the cache held while online; or
+    //   - the intended refusal: status 503 carrying the worker's own sentence in the body.
+    // Anything else - empty, a bare 503, a wrong-but-nonempty body, or the corrupted bytes - is RED.
+    //
+    // The decision itself lives in tests/support/offline-asset-verdict.mjs and is pinned BOTH WAYS
+    // browser-free (tests/offline-asset-verdict.test.js): this run proves the live path, that pin
+    // proves the empty-body and bare-503 shapes are rejected by name. One predicate, two tiers.
+    const verdict = offlineAssetVerdict({ online: onlineAsset, offline: offlineAsset });
+    assert(verdict.ok,
+      `offline, the corrupted asset was neither the real cached bundle nor the worker's intended refusal `
+      + `(rejected as ${verdict.why}) - it must not be served without evidence of what it is: ${JSON.stringify({
+        status: offlineAsset.status,
+        bodyLength: typeof offlineAsset.body === 'string' ? offlineAsset.body.length : null,
+        bodyHead: typeof offlineAsset.body === 'string' ? offlineAsset.body.slice(0, 120) : null,
+        error: offlineAsset.error,
+        onlineBodyLength: onlineAsset.body.length,
+      })}`);
+    assert(!(typeof offlineAsset.body === 'string' && offlineAsset.body.includes(GARBAGE)),
       `the corrupted asset was served from the cache offline: ${JSON.stringify(offlineAsset)}`);
-    console.log(`Corrupted asset refused offline: status ${offlineAsset.status}.`);
+    console.log(`Corrupted asset refused offline: status ${offlineAsset.status}`
+      + ` (${verdict.how === 'real' ? 'real verified bundle' : 'intended refusal body'}).`);
 
     const poisonedLeftBehind = await evaluate(`(async () => {
       const name = (await caches.keys()).find((n) => n.startsWith('airhorner-'));
