@@ -29,8 +29,11 @@ spellings THEN, with the pending rows.) Lines starting with # are comments. `!` 
 only with a reason. `~` rows are PENDING suites: declared, possibly arriving with a sibling branch;
 while the suite file is absent, selecting it SKIPS with 'fast-gate: pending:' instead of failing,
 and once it lands it runs like any other suite. A PLAIN row naming a missing suite is a stale map
-and fails the gate. Every suite in the tree must be reachable from a row (`~` counts) or exempted
-with `!`, or the gate fails loudly (reverse check).
+and fails the gate. A SUITE NEEDS NO ROW: it maps to itself, so a change to tests/x.test.mjs runs
+tests/x.test.mjs (the gate's selection does that for every tests/|test/*.test.{js,mjs,ts} spelling,
+at any depth) - airhorn-xh81. The map only places suites over OTHER files. A changed non-suite file
+with no row is still 'unmapped:' and fails, and a selection that runs nothing still fails, so the
+loud direction is the same as it always was.
 CONFLICT HERE? Do not hand-merge it (airhorn-tp3g, airhorn-fp5q). The map is a SET the gate unions at run
 time, so a collision is resolved by key, mechanically:
   git show :2:tools/suite-map.tsv > /tmp/ours.tsv; git show :3:tools/suite-map.tsv > /tmp/theirs.tsv
@@ -41,10 +44,16 @@ tools/gate.conf's SUITE_TIERS block has the SAME treatment (airhorn-09dr): union
   node tools/merge-suite-map.mjs --tiers-union /tmp/ours.conf /tmp/theirs.conf --write tools/gate.conf
 `git config merge.suite-map-union.driver "node tools/merge-suite-map.mjs --driver %O %A %B"` makes git do the
 union for you (.gitattributes has the entry); the tool refuses a disagreement by name instead of choosing.
-A row that names ONLY ITSELF (`tests/x.test.mjs -> tests/x.test.mjs`) is that reverse check, not a
-coverage opinion about source: it makes a change to the suite run the suite. It is deliberately NOT
-restated in .fleet/coverage-contract.json — the oracle skips self-rows, so naming one there reads as
-"the contract places this path, the map does not" and fails tests/gate-smoke.test.js (airhorn-x4l).
+A row that names ONLY ITSELF (`tests/x.test.mjs -> tests/x.test.mjs`) used to exist to satisfy the
+reverse check; since airhorn-xh81 it is a TAUTOLOGY and 47 of them were deleted from the map (the
+CSP-era rows included). Do not
+add one: the self-mapping is implicit. The single exception is `tests/acceptance.mjs`, whose row stays
+because it is not spelled `*.test.*` - the row is what makes it a suite at all, and it is
+explicit-only by design (airhorn-i8i, airhorn-w1ow). Such a row is deliberately NOT restated in
+.fleet/coverage-contract.json - the oracle skips self-rows, so naming one there reads as "the
+contract places this path, the map does not" and fails tests/gate-smoke.test.js (airhorn-x4l).
+A doc section whose row disappeared with airhorn-xh81 stays here: it is the record of why that suite
+exists, which is still the question a reader arrives with.
 
 `@importers` ROWS (airhorn-ooqm). A shared test helper's suite set is not a list to keep by hand: it
 had drifted six times (5t8, ckq, dco, 906, ooqm) because a helper gains a caller and the row keeps its
@@ -194,7 +203,8 @@ path runs against a throwaway repo, so a change to either rule selects the suite
 
 tools/mutation-check.mjs is the guard every sweep's mutation step runs through, so its
 own behaviour (does the --from apply? did the write land? is the target product code?) is
-covered by its own unit suite, which also needs the self-row below (airhorn-f41e).
+covered by its own unit suite, which needs no map row now that a suite maps to itself (airhorn-f41e,
+airhorn-xh81).
 
 ## `tools/lib/suite-mode-reporter.mjs`
 
@@ -263,16 +273,16 @@ ordering, which the browser-free pin already asserts.
 
 ## `.fleet/coverage-contract.json`
 
-Suite self-rows: the reverse check (every tree suite reachable from the map) reads these.
-Plural-spelling suites exist on master; the singular test/ spellings are declared pending - REMOVED in airhorn-92mp (never existed on any ref; vestigial).
-.fleet/coverage-contract.json is derived from this file via tools/derive-coverage-contract.mjs
+It is derived from this file via tools/derive-coverage-contract.mjs
 for the fleet's independent coverage oracle, which cannot read this tsv (airhorn-pwe, airhorn-y7mx).
 The two are kept in step by tests/gate-smoke.test.js, which requires the committed contract
 to be identical to the generated output.
 
 ## `tests/gate-map.test.js`
 
-The fast half's own self-row: a change to it must run it (airhorn-gkqu).
+The fast half's own coverage is now implicit (airhorn-gkqu, airhorn-xh81): the suite maps to itself, so
+a change to it runs it, and its row is gone. It also carries the pin that no OTHER row in the map names
+only itself.
 
 ## `tests/lost-upgrade-copy.test.mjs`
 
@@ -374,8 +384,9 @@ through them, and so the suite runs when it is the only thing that changed.
 Per-module rows, DERIVED (airhorn-x3f1): the generic tests/support/** row charged
 ALL 20 suites - 12 of them serial browser passes - for a one-line change to a pure
 helper like poll.mjs, which only 7 suites import. Each module now names @importers,
-so a helper's change runs exactly its importers and a NEW support module with no
-row fails the reverse check loudly instead of silently inheriting 20 suites.
+so a helper's change runs exactly its importers and a NEW support module with no row still fails loudly
+- as `fast-gate: unmapped:` on the change that touches it, since a support module is a changed path
+with no row rather than a suite (airhorn-xh81).
 report-hook.mjs is the one exception: it is RUNNER-INJECTED (node --import) into
 every script-tier suite, no file imports it, so @importers would see nothing.
 Its row lists the script tier explicitly - and tests/gate-map.test.js's airhorn-dco

@@ -129,6 +129,29 @@ src/horn.js\ttests/horn.test.js
   });
 });
 
+test('the deriver declares only what the map declares: no synthesised self-rows (airhorn-xh81)', () => {
+  // The self-MAP (a suite runs itself when it changes) is a gate rule derived from the TREE - it is not
+  // a row the map carries and not an entry the contract invents. Both halves are pinned here, because
+  // a synthesis would be invisible in a diff of the map and a reader could no longer tell what was
+  // declared from what was made up (the state airhorn-xh81 was filed about):
+  //   1. a map naming nothing derives an EMPTY contract, even though this tree is full of suites;
+  //   2. a suite whose row is deleted does NOT reappear in the contract by itself.
+  assert.deepEqual(deriveCoverageContract('', { root }), {},
+    'an empty map must derive an empty contract - the tree\'s suites are not synthesised into it');
+  const map = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
+  const suite = 'tests/horn.test.js';
+  assert.ok(!map.split('\n').some((line) => line.startsWith(`${suite}\t`)),
+    'fixture check: the map must carry no row keyed by this suite, so the case below is the no-row case');
+  const declared = deriveCoverageContract('src/elsewhere.js\ttests/a11y.test.mjs\n', { root });
+  assert.equal(declared[suite], undefined,
+    'the deriver must never add a self-row entry of its own - the gate derives that, the map does not');
+  // And the real contract carries no self-row entry today (0 of 62 at airhorn-xh81).
+  const committed = JSON.parse(fs.readFileSync(path.join(root, '.fleet', 'coverage-contract.json'), 'utf8'));
+  const selfish = Object.entries(committed).filter(([p, suites]) => suites.length === 1 && suites[0] === p);
+  assert.deepEqual(selfish, [],
+    'the contract must not restate the self-mapping of a suite - the oracle reads that as drift (airhorn-x4l)');
+});
+
 test('deriveCoverageContract accumulates multiple rows for the same pattern additively', () => {
   const tsv = `
 src/foo.js\ttests/a.test.js

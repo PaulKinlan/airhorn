@@ -559,6 +559,10 @@ export function expandRow(pattern, rest, options = {}) {
  * Derives the coverage contract object from the TSV content.
  * - Filters out comments (#) and empty lines
  * - Excludes exemption rows (!), pending suite rows (~), and self-rows
+ *   (a self-row states only "this path runs this suite", which the GATE derives from the tree for
+ *   every tests/|test/*.test.{js,mjs,ts} spelling - airhorn-xh81. The skip stays because the one
+ *   surviving self-row, tests/acceptance.mjs, is a placement rule for a file not spelled like a
+ *   suite, and the oracle has no business restating either.)
  * - Filters out pending suites declared via ~ rows until they exist on disk (airhorn-u42y, airhorn-x0xr)
  * - Resolves file presence against repo root regardless of process.cwd() (airhorn-xxqq)
  * - Deduplicates suites while preserving order

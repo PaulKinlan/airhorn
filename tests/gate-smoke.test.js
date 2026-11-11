@@ -165,6 +165,9 @@ const buildGateProbe = () => {
         'tests/second.test.mjs=node-test',
         'tests/dist-suite.test.js=node-test',
         'tests/plain-suite.test.js=node-test',
+        // airhorn-xh81's row-less suite: it is created only by that pin, and it deliberately has NO
+        // row in this probe's map - a suite maps to itself, so a declaration is all it needs.
+        'tests/sub/deep.test.js=node-test',
         // nh8y's build-plan fixture holds no node:test import and is never executed -
         // script is its honest declaration (a file with no node:test symbols is not a
         // node-test suite), and loop A's content audit agrees.
@@ -187,7 +190,9 @@ const buildGateProbe = () => {
     'src/a.js\ttests/pass.test.js',
     'pending-src.txt\ttests/pending.test.js',
     'mixed-src.js\ttests/pass.test.js tests/pending.test.js',
-    'tests/pass.test.js\ttests/pass.test.js',
+    // No `tests/pass.test.js -> itself` row: since airhorn-xh81 a suite present in the tree maps
+    // to itself with no row, and the probe mirrors the real map rather than a stricter one.
+    '~tests/pending.test.js\ttests/pending.test.js',
     '~tests/pending.test.js\ttests/pending.test.js',
     '!*.md',
     '',
@@ -754,38 +759,57 @@ test('a suite whose own report counts failures is FAILED, not passed (airhorn-nx
   }
 });
 
-test('a nested suite (tests/sub/*.test.js) is visible to the reverse check (map P2)', () => {
-  // The reverse check's tree enumeration was DEPTH-1 (tests/*.test.*), so a suite one
-  // directory deeper never reached the unmapped-suite check: the layer that exists to
-  // catch coverage blind spots had one. The probe writes its own minimal gate.conf
-  // WITHOUT SUITE_TIERS (the legacy extension mapping then applies) - copying the real
-  // conf declares real-repo suites a probe does not have, and the tier audit fails the
-  // probe before the reverse check runs (a pre-existing gate-tiermjs probe gap).
+test('a suite present in the tree maps to itself: no map row and no exemption needed (airhorn-xh81)', () => {
+  // Until airhorn-xh81 the gate required a row naming every suite in the tree (the reverse check),
+  // which is what ~45 tautological rows (`tests/x.test.mjs -> tests/x.test.mjs`) existed for, and what
+  // airhorn-ahxh mistyped as `test/...`. The row bought exactly one property - a change to a suite runs
+  // the suite - and the gate already gives that for free, at any depth (suites_for's `case` is not
+  // path-component bounded). So the rows went, and the check that demanded them went with them.
+  // The PROPERTY is what this pin keeps. Not "the gate no longer complains": a NEW suite, nested, with
+  // no row anywhere and no exemption, must actually RUN when it changes. The loud inverses are pinned
+  // here too, on the same probe, so removing the check cannot have softened them by accident.
   const { probe, run } = buildGateProbe();
   try {
-    fs.writeFileSync(path.join(probe, 'tools', 'gate.conf'),
-      'FAST_GATE_RUNNER="node --test --test-reporter=tap"\nFAST_GATE_JOBS=1\n');
-
-    // GREEN: no nested suite at all - the broadened glob adds no false positive.
-    const plain = run(['--changed', 'src/a.js']);
-    assert.equal(plain.status, 0, `a plain depth-1 tree must stay green: ${plain.stdout}${plain.stderr}`);
-
-    // RED: present, unmapped - the reverse check must name it.
     fs.mkdirSync(path.join(probe, 'tests', 'sub'), { recursive: true });
     fs.writeFileSync(path.join(probe, 'tests', 'sub', 'deep.test.js'),
-      "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('a nested suite', () => { assert.ok(true); });\n");
-    const unmapped = run(['--changed', 'src/a.js']);
-    assert.equal(unmapped.status, 1, `an unmapped nested suite must fail the gate: ${unmapped.stdout}`);
-    assert.ok(unmapped.stdout.includes('fast-gate: unmapped-suite: tests/sub/deep.test.js'),
-      `the nested suite must be NAMED as unmapped: ${unmapped.stdout}`);
+      "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('a nested suite with no row', () => { assert.ok(true); });\n");
+    // The fixture is only honest if the map really has no row for it.
+    const mapText = fs.readFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'utf8');
+    assert.ok(!mapText.split('\n').some((line) => line.includes('tests/sub/deep.test.js')),
+      'the probe map must not name the suite under test - it IS the no-row case');
 
-    // GREEN: mapped by its own row, the nested suite is reachable and nothing is flagged.
-    fs.writeFileSync(path.join(probe, 'src', 'deep.js'), '// deep\n');
-    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'src/deep.js\ttests/sub/deep.test.js\n');
-    const mapped = run(['--changed', 'src/a.js']);
-    assert.equal(mapped.status, 0, `a mapped nested suite must pass: ${mapped.stdout}${mapped.stderr}`);
-    assert.ok(!mapped.stdout.includes('unmapped-suite'),
-      `no unmapped-suite line may appear: ${mapped.stdout}`);
+    // It is selected, by itself, and nothing else is dragged in.
+    const listed = run(['--changed', 'tests/sub/deep.test.js', '--list']);
+    assert.equal(listed.status, 0, `a row-less suite must list cleanly: ${listed.stdout}${listed.stderr}`);
+    assert.deepEqual(listed.stdout.split('\n').filter(Boolean), ['tests/sub/deep.test.js'],
+      `the row-less suite must select itself and only itself: ${listed.stdout}`);
+
+    // ...and it RUNS: the property the deleted rows used to carry, still true with none of them.
+    const ran = run(['--changed', 'tests/sub/deep.test.js']);
+    assert.equal(ran.status, 0, `a row-less suite must run and pass: ${ran.stdout}${ran.stderr}`);
+    assert.ok(ran.stdout.includes('fast-gate: passed: tests/sub/deep.test.js'),
+      `the suite must be reported as passed: ${ran.stdout}`);
+    assert.ok(ran.stdout.includes('fast-gate: PASS (1 suite(s), 1 changed file(s))'),
+      `the pinned verdict line must be the 1-suite PASS: ${ran.stdout}`);
+    assert.ok(!ran.stdout.includes('unmapped'),
+      `a suite present in the tree is never unmapped: ${ran.stdout}`);
+
+    // LOUD INVERSE 1: a NON-suite path with no row is still refused, by name.
+    fs.writeFileSync(path.join(probe, 'src', 'rowless.js'), '// no row for this\n');
+    const unmapped = run(['--changed', 'src/rowless.js']);
+    assert.equal(unmapped.status, 1, `an unmapped non-suite change must still fail: ${unmapped.stdout}`);
+    assert.ok(unmapped.stdout.includes('fast-gate: unmapped: src/rowless.js'),
+      `the unmapped path must be named: ${unmapped.stdout}`);
+
+    // LOUD INVERSE 2: a PLAIN row naming a suite that does not exist is still a stale map - refused
+    // by the map-honesty pass, by name, before anything is selected (the `missing:` selection wording
+    // is unreachable for a literal row because validation fails first; both are rc 1).
+    fs.writeFileSync(path.join(probe, 'src', 'ghost.js'), '// ghost\n');
+    fs.appendFileSync(path.join(probe, 'tools', 'suite-map.tsv'), 'src/ghost.js\ttests/ghost.test.js\n');
+    const missing = run(['--changed', 'src/ghost.js']);
+    assert.equal(missing.status, 1, `a row naming a missing suite must fail the gate: ${missing.stdout}${missing.stderr}`);
+    assert.ok(missing.stderr.includes('missing_suite') && missing.stderr.includes('tests/ghost.test.js'),
+      `the missing suite must be refused by name: ${missing.stderr}`);
   } finally {
     fs.rmSync(probe, { recursive: true, force: true });
   }

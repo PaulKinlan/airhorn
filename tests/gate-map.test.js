@@ -34,7 +34,7 @@ import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
 import { makeRenderModel } from '../tools/render-model.mjs';
 import { READ_STATE } from '../tools/resilience-audit.mjs';
-import { main as deriveContractMain, deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites, isPendingSuite, importersOf, checkCoverageMapPointers } from '../tools/derive-coverage-contract.mjs';
+import { main as deriveContractMain, deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites, isPendingSuite, importersOf, suiteFiles, checkCoverageMapPointers } from '../tools/derive-coverage-contract.mjs';
 import { assertGuardedCall } from '../tools/guarded-call.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -461,9 +461,11 @@ test('every suite the map can select has a declared tier, so the gate can run wh
   // tests/acceptance.mjs was mapped to itself - the map promising "changing this file runs the
   // acceptance flow" - while tools/gate.conf SUITE_TIERS had no entry for it, so every change to
   // that file failed the gate with "no runner for tier 'undeclared'". The map is the gate, so a
-  // row the gate cannot run is a false promise. Derived here from the ROWS (not from the derived
-  // contract, which excludes self-rows by design - that exclusion is exactly why this went unseen),
-  // so the failure names the suites that have no tier instead of relying on someone noticing.
+  // row the gate cannot run is a false promise. Derived here from the ROWS *and the TREE*
+  // (airhorn-xh81: a suite maps to itself with no row, so a row-derived check would stop seeing the
+  // suites whose only row was a tautology) - never from the derived contract, which excludes self-rows
+  // by design and is exactly why this went unseen - so the failure names the suites that have no tier
+  // instead of relying on someone noticing.
   const gateConf = fs.readFileSync(path.join(root, 'tools', 'gate.conf'), 'utf8');
   const block = gateConf.slice(gateConf.indexOf('SUITE_TIERS="') + 'SUITE_TIERS="'.length);
   const declared = new Set(block.slice(0, block.indexOf('"')).split('\n')
@@ -485,16 +487,52 @@ test('every suite the map can select has a declared tier, so the gate can run wh
       : tokens;
     for (const suite of selected) suites.add(suite);
   }
-  // Only suites that EXIST are in scope: the map also carries a handful of pre-move `test/...`
-  // paths that name nothing in this tree (a separate defect - a row naming a ghost - filed as
-  // its own bead). Those cannot be run by anything, so requiring a tier for them would fail this
-  // pin for a reason that is not about what the gate promises.
+  // Only suites that EXIST are in scope: a row may name a path this tree does not carry yet (a
+  // '~'-pending sibling, or a row written before its file), and requiring a tier for those would fail
+  // this pin for a reason that is not about what the gate promises.
+  //
+  // The TREE is in scope too, not just the rows (airhorn-xh81): a suite present in the tree maps to
+  // itself with no row, so a suite whose only row used to be a tautology would vanish from a row-derived
+  // check while still being selectable - and the gate then fails its change as 'undeclared tier'. The
+  // gate's own audit (verify_suite_tiers) walks tests/*.test.* at depth 1; this walks the whole tree.
+  for (const suite of suiteFiles(tsv, { root })) suites.add(suite);
   const undeclared = [...suites]
     .filter((suite) => fs.existsSync(path.join(root, suite)))
     .filter((suite) => !declared.has(suite)).sort();
   assert.deepEqual(undeclared, [],
     'every suite the map selects must be declared in tools/gate.conf SUITE_TIERS, or the gate fails that '
     + `change as 'undeclared tier' instead of running it: ${JSON.stringify(undeclared)}`);
+});
+
+test('the map carries no tautological self-row: a suite maps to itself with no row (airhorn-xh81)', () => {
+  // 45 rows of the form `tests/x.test.mjs -> tests/x.test.mjs` used to carry one property: a change to a
+  // suite runs the suite. The gate derives that itself (suites_for), so the rows were a tautology that
+  // cost every new suite an edit on the repo's hottest file and was the single most mistyped thing in it
+  // (airhorn-ahxh: `test/` instead of `tests/`, silently dropped). airhorn-xh81 deleted them and the gate
+  // stopped demanding them; this pin keeps them from creeping back.
+  // tests/acceptance.mjs is the ONE exception and is named here so it cannot grow silently: it is not
+  // spelled *.test.*, so a row is the only thing that makes it a suite at all (airhorn-i8i, airhorn-w1ow).
+  const ALLOWED_SELF_ROWS = new Map([
+    ['tests/acceptance.mjs', 'not spelled *.test.*: the row is what makes it a suite at all (explicit-only, airhorn-i8i)'],
+  ]);
+  const map = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
+  const offenders = [];
+  for (const raw of map.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || line.startsWith('!')) continue;
+    const tab = line.indexOf('\t');
+    if (tab < 0) continue;
+    const pattern = line.slice(0, tab);
+    const tokens = line.slice(tab + 1).trim().split(/\s+/).filter(Boolean);
+    if (tokens.length === 1 && tokens[0] === pattern && !ALLOWED_SELF_ROWS.has(pattern)) offenders.push(line);
+  }
+  assert.deepEqual(offenders, [],
+    'a row naming only itself is a tautology - the gate already maps a suite to itself; delete these rows: '
+    + JSON.stringify(offenders));
+  // ...and the exception is still real: if acceptance.mjs ever loses its row it stops being a suite at all.
+  for (const [suite, why] of ALLOWED_SELF_ROWS) {
+    assert.ok(fs.existsSync(path.join(root, suite)), `${suite} is listed as a kept self-row but is gone: ${why}`);
+  }
 });
 
 test('every script-tier suite is gated by a tests/support change (airhorn-dco)', () => {
