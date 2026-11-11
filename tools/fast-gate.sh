@@ -525,6 +525,21 @@ if ! node "$HERE/derive-coverage-contract.mjs" --validate-map; then
   exit 1
 fi
 
+# --- preflight (airhorn-1pdt): contract freshness and coverage-map pointers, before any
+# selection. Millisecond checks; discovering them after staging cost the yxxq union its gate.
+# The same checks are one command for humans/mergers: node tools/preflight-map.mjs. Inline
+# here (not via that file) because the gate's sandboxed fixture trees carry only this script
+# and the derive tool.
+# ONE process for all three (impl-xnd1's measurement: 0.384s vs ~+0.35s for three invocations).
+# The mode itself fails closed: pointers declared with the doc missing is a FAIL; a fixture
+# tree declaring no pointers and carrying no contract passes, which is why fixtures stay green.
+if ! node "$HERE/derive-coverage-contract.mjs" --preflight > /dev/null; then  # stdout stays clean for --list parsers; failures print to stderr
+  echo "fast-gate: FAIL - the map/contract/pointer preflight failed (see above)." >&2
+  exit 1
+fi
+
+
+
 # --- expand every `@importers` row this run actually needs (airhorn-ooqm) --------------------------
 # Run-time derivation, not a hand-kept list: a change to a shared helper selects every suite that
 # REFERENCES it, so a new importer is covered with no map edit. Scanned only for the changed paths

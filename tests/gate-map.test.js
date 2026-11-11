@@ -34,7 +34,7 @@ import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
 import { makeRenderModel } from '../tools/render-model.mjs';
 import { READ_STATE } from '../tools/resilience-audit.mjs';
-import { main as deriveContractMain, deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites, isPendingSuite, importersOf } from '../tools/derive-coverage-contract.mjs';
+import { main as deriveContractMain, deriveCoverageContract, formatCoverageContract, deriveMapOpinion, extractPendingSuites, isPendingSuite, importersOf, checkCoverageMapPointers } from '../tools/derive-coverage-contract.mjs';
 import { assertGuardedCall } from '../tools/guarded-call.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -746,16 +746,9 @@ test('the page instrument turns DOM facts into the model verdict (airhorn-0w9, -
 test('every coverage-map pointer in suite-map.tsv resolves to a section in the doc (airhorn-m85h)', () => {
   const map = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
   const doc = fs.readFileSync(path.join(root, 'docs', 'coverage-map.md'), 'utf8');
-  const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  // The doc's anchors: slug of each backticked heading, with an <!-- anchor: x -->
-  // override for repeated patterns.
-  const anchors = new Set();
-  for (const line of doc.split('\n')) {
-    const h = line.match(/^## `([^`]+)`(?: *<!-- anchor: ([a-z0-9-]+) -->)?$/);
-    if (h) anchors.add(h[2] || slug(h[1]));
-  }
-  const pointers = [...map.matchAll(/^# why: docs\/coverage-map\.md#([a-z0-9-]+)$/gm)].map((m) => m[1]);
-  assert.ok(pointers.length > 10, 'the map must carry the pointers (sanity: the move happened)');
-  const dead = pointers.filter((a) => !anchors.has(a));
+  // The check lives in the derive tool (airhorn-1pdt) so the fast gate's unconditional
+  // preflight and this pin share ONE implementation.
+  assert.ok((map.match(/^# why: /gm) || []).length > 10, 'the map must carry the pointers (sanity: the move happened)');
+  const dead = checkCoverageMapPointers(map, doc);
   assert.deepEqual(dead, [], 'every pointer must resolve to a doc section; dead: ' + dead.join(', '));
 });

@@ -1704,3 +1704,28 @@ test('two failing attempts in the SAME second never clobber each other (airhorn-
     fs.rmSync(probe, { recursive: true, force: true });
   }
 });
+
+
+/* airhorn-1pdt: the fast gate runs the contract-freshness and pointer checks before any
+ * suite selection (guarded only on the artefacts existing, so fixture trees without a
+ * contract still run) - the yxxq union was staged with both broken and only hand-run
+ * focused checks caught it. If the preflight is removed, this fails. */
+test('fast-gate preflights contract freshness and coverage-map pointers unconditionally (airhorn-1pdt)', () => {
+  const gate = fs.readFileSync(path.join(root, 'tools', 'fast-gate.sh'), 'utf8');
+  const preflightIdx = gate.indexOf('derive-coverage-contract.mjs" --preflight');
+  assert.ok(preflightIdx > 0, 'fast-gate.sh must run the derive --preflight before selection (airhorn-1pdt)');
+  assert.ok(gate.indexOf('--preflight > /dev/null') > 0,
+    "the preflight's OK line must not pollute stdout - --list parsers read stdout (airhorn-1pdt)");
+  assert.ok(fs.existsSync(path.join(root, 'tools', 'preflight-map.mjs')),
+    'the standalone preflight command must exist for lanes and the merger');
+  // and the command must exist and name its artefacts
+  const preflight = fs.readFileSync(path.join(root, 'tools', 'preflight-map.mjs'), 'utf8');
+  for (const artefact of ['MAP ROW', 'CONTRACT', 'POINTER']) {
+    assert.ok(preflight.includes(artefact), `the preflight must name the ${artefact} artefact on failure`);
+  }
+  // and the checks themselves must exist in the tool the command wraps
+  const tool = fs.readFileSync(path.join(root, 'tools', 'derive-coverage-contract.mjs'), 'utf8');
+  assert.ok(tool.includes("'--check-pointers'"), 'the derive tool must implement --check-pointers');
+  assert.ok(tool.includes('export function checkCoverageMapPointers'),
+    'the pointer check must be the shared implementation the gate-map pin delegates to');
+});

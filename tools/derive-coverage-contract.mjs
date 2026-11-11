@@ -624,6 +624,22 @@ export function formatCoverageContract(contract) {
 // this checkout, instead of asserting that two different strings differ, which is
 // true by construction and exercises nothing (airhorn-bja9). The CLI passes
 // neither, so production behaviour is unchanged.
+/* airhorn-1pdt: the coverage-map pointer check, shared by the gate-map pin AND the fast
+ * gate's unconditional preflight - one implementation, so the two cannot drift. A pointer
+ * whose doc section is gone is a dead reference a reader follows into a wall (m85h); on a
+ * union-merged tree the driver can resurrect a pointer whose row was deduped away (yxxq,
+ * 2026-11-10) - discovered by hand after staging. Returns the dead anchors ([] = clean). */
+export function checkCoverageMapPointers(tsvText, docText) {
+  const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const anchors = new Set();
+  for (const line of docText.split('\n')) {
+    const h = line.match(/^## `([^`]+)`(?: *<!-- anchor: ([a-z0-9-]+) -->)?$/);
+    if (h) anchors.add(h[2] || slug(h[1]));
+  }
+  const pointers = [...tsvText.matchAll(/^# why: docs\/coverage-map\.md#([a-z0-9-]+)$/gm)].map((m) => m[1]);
+  return pointers.filter((a) => !anchors.has(a));
+}
+
 export function main(args = process.argv.slice(2), { root = DEFAULT_ROOT, existsFn, fileExists } = {}) {
   const tsvPath = path.join(root, 'tools', 'suite-map.tsv');
   const contractPath = path.join(root, '.fleet', 'coverage-contract.json');
@@ -664,6 +680,61 @@ export function main(args = process.argv.slice(2), { root = DEFAULT_ROOT, exists
     const derived = deriveCoverageContract(tsvText, { root, existsFn, fileExists });
     const formatted = formatCoverageContract(derived);
     process.stdout.write(formatted);
+    return 0;
+  }
+
+  if (args.includes('--preflight')) {
+    // airhorn-1pdt: all three checks in ONE process (the map is parsed once) - measured by
+    // impl-xnd1: 0.384s vs 0.208s for validate alone, vs ~+0.35s for three invocations.
+    const mapBad = reportMapViolations();
+    if (mapBad.length > 0) return 1;
+    let docText = null;
+    try { docText = fs.readFileSync(path.join(root, 'docs', 'coverage-map.md'), 'utf8'); } catch {}
+    const declared = (tsvText.match(/^# why: /gm) || []).length;
+    if (docText === null && declared > 0) {
+      console.error(`FAIL: the map declares ${declared} coverage-map pointer(s) but docs/coverage-map.md is missing`);
+      return 1;
+    }
+    if (docText !== null) {
+      const dead = checkCoverageMapPointers(tsvText, docText);
+      if (dead.length > 0) {
+        console.error(`FAIL: dead coverage-map pointer(s): ${dead.join(', ')}`);
+        return 1;
+      }
+    }
+    let current = null;
+    try { current = fs.readFileSync(contractPath, 'utf8'); } catch {}
+    if (current !== null) {
+      const derived = deriveCoverageContract(tsvText, { root, existsFn, fileExists });
+      if (current !== formatCoverageContract(derived)) {
+        console.error('FAIL: .fleet/coverage-contract.json is stale (run node tools/derive-coverage-contract.mjs)');
+        return 1;
+      }
+    }
+    console.log('preflight OK');
+    return 0;
+  }
+
+  if (args.includes('--check-pointers')) {
+    let docText = '';
+    try {
+      docText = fs.readFileSync(path.join(root, 'docs', 'coverage-map.md'), 'utf8');
+    } catch (err) {
+      // airhorn-1pdt (impl-xnd1's catch): FAIL CLOSED when the map declares pointers - a
+      // missing doc then means every pointer is dead, and skipping would green it. Only a
+      // map declaring NO pointers (fixture trees) may pass without the doc.
+      const declared = (tsvText.match(/^# why: /gm) || []).length;
+      if (declared > 0) {
+        console.error(`FAIL: the map declares ${declared} coverage-map pointer(s) but docs/coverage-map.md is unreadable: ${err.message}`);
+        return 1;
+      }
+      return 0;
+    }
+    const dead = checkCoverageMapPointers(tsvText, docText);
+    if (dead.length > 0) {
+      console.error(`FAIL: suite-map.tsv carries dead coverage-map pointer(s): ${dead.join(', ')} - the doc section is gone (airhorn-1pdt).`);
+      return 1;
+    }
     return 0;
   }
 
