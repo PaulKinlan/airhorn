@@ -1237,8 +1237,12 @@ fs.writeSync(1, frame({ type: 'test:fail', data: { ...data, testNumber: 1 } }));
 test('passes and asserts nothing about the mutant', () => {});
 `);
   const forged = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'forged.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 90000 });
+  // HALF ONE: the FIRST run really is fooled - the runner counted the forged event as a failing test.
+  // Without this the case would not prove the hole exists, only that a refusal happened.
+  assert.match(forged.stdout, /"realFailed":1[^}]*"failing":\["forged"\]|"failing":\["forged"\]/, `the forged event must be counted by the runner (that IS the hole) - stdout:\n${forged.stdout}`);
+  // HALF TWO: the conjunction refuses, by name, and never becomes a verdict.
   assert.equal(forged.status, 3, `a frame-only forgery must be a NAMED refusal, never a catch - rc=${forged.status}\nstdout:\n${forged.stdout}\nstderr:\n${forged.stderr}`);
-  assert.match(forged.stderr, /caught-unconfirmed/, 'the refusal must name the corroboration that failed');
+  assert.match(forged.stderr, /caught-unconfirmed/, 'the refusal must name the corroboration that failed, not just fail');
   assert.doesNotMatch(forged.stdout, /verdict: mutant-caught/, 'and it must not be a verdict');
 
   // (2) A REAL catcher still scores, because its direct run fails on an assertion.
@@ -1267,6 +1271,25 @@ setTimeout(() => process.abort(), 40);
   const died = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'forged-abort.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 90000 });
   assert.equal(died.status, 3, `forged frames plus a hard crash must never be a catch - rc=${died.status}\nstdout:\n${died.stdout}\nstderr:\n${died.stderr}`);
   assert.doesNotMatch(died.stdout, /verdict: mutant-caught/);
+
+  // (4) A direct run that could not EXECUTE the suite (here: a dependency the child runner tolerates and a
+  // plain node does not) proves nothing about an assertion, so it is UNCORROBORATED - never a catch.
+  fs.writeFileSync(path.join(tmp, 'env-fail.test.js'), `
+import fs from 'node:fs';
+import v8 from 'node:v8';
+import { test } from 'node:test';
+${frameHelper}
+if (process.env.NODE_TEST_CONTEXT === undefined) {
+  // Plain node: fail to load, the way a missing browser or a native dependency does.
+  throw new Error('ERR_MODULE_NOT_FOUND: the corroboration run cannot execute this suite');
+}
+fs.writeSync(1, frame({ type: 'test:start', data }));
+fs.writeSync(1, frame({ type: 'test:fail', data: { ...data, testNumber: 1 } }));
+test('passes', () => {});
+`);
+  const uncorroborated = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'env-fail.test.js'], { cwd: tmp, encoding: 'utf8', timeout: 90000 });
+  assert.equal(uncorroborated.status, 3, `an unexecutable corroboration run must not corroborate - rc=${uncorroborated.status}\nstdout:\n${uncorroborated.stdout}\nstderr:\n${uncorroborated.stderr}`);
+  assert.match(uncorroborated.stderr, /caught-uncorroborated|could not EXECUTE/, 'the refusal must say the second run could not speak, not that it disagreed');
 });
 
 test('the tool prints its trust boundary, including the KNOWN-LIMIT it now carries (airhorn-p0dg, airhorn-14ht)', () => {

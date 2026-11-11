@@ -584,6 +584,16 @@ async function runSuite(suite, cwd, label, suiteMode, timeoutMs = DEFAULT_TIMEOU
     if (direct.rc === 0) {
       return { problem: `${label} [caught-unconfirmed] the runner reported a failing test, but the same suite run directly (no test runner, nothing to forge) passed: the failure exists only as runner events, which the code under test can write itself (airhorn-yvwo/uk28)` };
     }
+    // A direct run that could not EXECUTE the suite proves nothing: it exits non-zero for its own
+    // reasons (a missing dependency, a browser the suite needs, a bad import), and reading that as
+    // "the assertion failed" would let an environmental failure corroborate a forged catch. This is
+    // the SKIP-LOUD path coord asked for: the mutation is UNCORROBORATED - never counted as caught,
+    // never silently passed - and the refusal says which run could not speak.
+    const couldNotRun = /ERR_MODULE_NOT_FOUND|Cannot find module|ERR_UNSUPPORTED_ESM_URL_SCHEME|SyntaxError|Cannot find package|ERR_UNKNOWN_FILE_EXTENSION/.test(direct.stderr || '');
+    if (couldNotRun) {
+      const why = (String(direct.stderr || '').split('\n').find((line) => /ERR_MODULE_NOT_FOUND|Cannot find module|SyntaxError|Cannot find package|ERR_UNKNOWN_FILE_EXTENSION|ERR_UNSUPPORTED_ESM_URL_SCHEME/.test(line)) || '').trim();
+      return { problem: `${label} [caught-uncorroborated] the runner reported a failing test but the direct run could not EXECUTE the suite (${why || 'a load error'}), so this mutation is UNCORROBORATED and is never counted as caught - the runner's claim stands unverified (airhorn-uk28)` };
+    }
   }
   return { rc: classified.rc, note: classified.note };
 }
