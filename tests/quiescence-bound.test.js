@@ -108,9 +108,14 @@ test('the a11y call site shape has no flat wall-clock pin (airhorn-ixk1)', async
   const settled = await waitForQuiescence(sender(200, () => quiet), a11yShape(null));
   assert.equal(settled.samples, 4, 'four quiet samples decide it');
   assert.ok(settled.waitedMs >= 700, `the sampler really was slow (${settled.waitedMs}ms)`);
-  // the same shape WITH a flat pin smaller than the sampling cost is what the bead removed
+  // airhorn-jmpm: a caller-supplied ceiling SMALLER than the sampling cost no longer fails a page that is
+  // already quiet - the criterion decides once the page has been observed quiet, so the same shape with a
+  // flat 400ms pin now reaches quiescence too (it used to be the failure the bead removed).
+  const flatPin = await waitForQuiescence(sender(200, () => quiet), a11yShape(400));
+  assert.equal(flatPin.samples, 4, 'a flat small ceiling must not fail a quiet page on a slow host (airhorn-jmpm)');
+  // ...but the ceiling still bounds a wait whose page never goes quiet.
   await assert.rejects(
-    () => waitForQuiescence(sender(200, () => quiet), a11yShape(400)),
+    () => waitForQuiescence(sender(60, (n) => ({ ...quiet, quietCondition: false, pendingTimers: (n % 5) + 1 })), a11yShape(400)),
     /ceiling \(checked between samples/,
   );
 });
@@ -188,14 +193,45 @@ test('a FLAPPING quiet condition on a drained page is named as flapping, never a
     },
   );
   // The control: an identical signature (the page's own state does not change between samples) is still
-  // called a starved host when the ceiling cut the sampling short - so the new label is discriminating,
-  // not just "every failing case is now flapping".
+  // called a starved host - the label needs a sampler slower than the DOUBLED backstop, so with 2s round-trips
+  // and a 200ms ceiling only one sample completes. So the new arm discriminates, it does not swallow every
+  // failure, and a single sample is never called flapping.
   await assert.rejects(
-    () => waitForQuiescence(sender(200, () => ({ ...quiet })), { timeoutMs: 400, pollMs: 10 }),
+    () => waitForQuiescence(sender(600, () => ({ ...quiet })), { timeoutMs: 200, pollMs: 10 }),
     (error) => {
       assert.match(error.message, /a starved host, not a busy page/, 'an unchanging quiet page keeps its starved-host label');
-      assert.doesNotMatch(error.message, /QUIET CONDITION is flapping/, 'and is not called flapping');
+      assert.doesNotMatch(error.message, /QUIET CONDITION is flapping/, 'and a single slow sample is not called flapping');
       return true;
     },
   );
+});
+
+test('a caller-supplied ceiling does not fail a QUIET page on a slow host (airhorn-jmpm)', async () => {
+  // airhorn-ypfn's promise - "a quiet page on a loaded host reaches quiescence and passes" - only held for
+  // callers that took the 120s default. a11y passes timeoutMs:15000 and soak/cache-growth 10000, so on a host
+  // whose Runtime.evaluate round-trip costs 5s a page with ZERO pending work and quietCondition:true still
+  // threw "never reached quiescence within the 15000ms ceiling". The ceiling is now the caller's bound only
+  // while the page has not been seen quiet; after that the criterion decides, up to a doubled backstop.
+  const slowButQuiet = await waitForQuiescence(sender(200, () => quiet), { timeoutMs: 400, pollMs: 10 });
+  assert.equal(slowButQuiet.samples, 4, 'four quiet samples need ~800ms of sampling against a 400ms caller ceiling, and that is allowed');
+  assert.ok(slowButQuiet.waitedMs >= 700, `the wait really did spend the sampling (${slowButQuiet.waitedMs}ms)`);
+
+  // The backstop is doubled, not removed: a page that is quiet but whose samples are so slow that even 2 x
+  // timeoutMs cannot produce four of them still fails, and says it is the doubled backstop.
+  await assert.rejects(
+    () => waitForQuiescence(sender(600, () => quiet), { timeoutMs: 400, pollMs: 10 }),
+    (error) => {
+      assert.match(error.message, /800ms ceiling \(checked between samples/, 'the failure names the DOUBLED backstop it hit');
+      assert.match(error.message, /DOUBLED backstop, because the page WAS quiet/, 'and says why it was doubled');
+      return true;
+    },
+  );
+
+  // A page that never goes quiet is still bounded by the caller's ceiling, not the doubled one.
+  const started = Date.now();
+  await assert.rejects(
+    () => waitForQuiescence(sender(20, (n) => ({ ...quiet, quietCondition: false, pendingTimers: (n % 3) + 1 })), { timeoutMs: 300, pollMs: 10 }),
+    /300ms ceiling \(checked between samples/,
+  );
+  assert.ok(Date.now() - started < 2000, 'the not-quiet bound fires at the caller ceiling');
 });
