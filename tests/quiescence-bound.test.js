@@ -185,6 +185,13 @@ test('a FLAPPING quiet condition on a drained page is named as flapping, never a
     (error) => {
       assert.match(error.message, /QUIET CONDITION is flapping, not the host starving/,
         `a condition that changes every sample must be named as flapping: ${error.message}`);
+      // airhorn-xi86: the ratio must be the samples that WERE quiet, not samples-minus-no-progress (which is
+      // always samples in this arm and produced the contradictory "held on 39 of 39 ... never on 4 in a row").
+      const ratio = error.message.match(/held on (\d+) of (\d+) sample\(s\)/);
+      assert.ok(ratio, `the flapping message must report a quiet-sample ratio: ${error.message}`);
+      const [, held, total] = ratio.map(Number);
+      assert.ok(held > 0 && held < total,
+        `an alternating condition holds on SOME but not all samples, so the ratio must not be ${held} of ${total}`);
       assert.doesNotMatch(error.message, /starved host, not a busy page/,
         'and must not claim a starved host on the strength of one historical quiet sample');
       assert.doesNotMatch(error.message, /never held, and the state grace period did not fire/,

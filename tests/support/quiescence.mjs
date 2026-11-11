@@ -190,6 +190,7 @@ export async function waitForQuiescence(send, {
   let lastSignature = null;
   let noProgressSamples = 0;
   let sawQuietSample = false;
+  let quietSamples = 0;          // how many samples were drained+quiet, for the flapping ratio (airhorn-xi86)
 
   // The ceiling is a BACKSTOP for an unwinnable wait, never the criterion (airhorn-ypfn, airhorn-jmpm):
   // while the page has not been seen quiet the caller's ceiling applies; once it has, the remaining work is
@@ -269,7 +270,7 @@ export async function waitForQuiescence(send, {
       drainedAt = null;
     }
 
-    if (quiet) sawQuietSample = true;
+    if (quiet) { sawQuietSample = true; quietSamples += 1; }
     stable = quiet ? stable + 1 : 0;
     if (stable >= stableSamples) {
       return { waitedMs: Date.now() - started, samples, pending: last };
@@ -288,7 +289,7 @@ export async function waitForQuiescence(send, {
   const why = pending
     ? sawQuietSample
       ? noProgressSamples === 0 && samples >= 2
-        ? `the page's work had drained and its quiet condition held on ${samples - noProgressSamples} of ${samples} sample(s), ` +
+        ? `the page's work had drained and its quiet condition held on ${quietSamples} of ${samples} sample(s), ` +
           `but never on ${stableSamples} in a row, and the page's state kept changing (${noProgressSamples} with no change) - ` +
           `the QUIET CONDITION is flapping, not the host starving`
         : `the page WAS quiet but the sampler only completed ${samples} round-trip(s) (${noProgressSamples} with no change) ` +
