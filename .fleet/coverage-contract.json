@@ -66,6 +66,7 @@
  ],
  "index.html": [
   "tests/preload-priority.test.js",
+  "tests/csp.test.js",
   "tests/horn.test.js",
   "tests/a11y.test.mjs",
   "tests/webmcp-browser.test.mjs",
@@ -178,6 +179,20 @@
   "tests/visual-overrides.test.mjs",
   "tests/reflow-zoom.test.mjs"
  ],
+ "public/boot-watchdog.js": [
+  "tests/resilience-ui.test.mjs",
+  "tests/csp-enforced.test.mjs",
+  "tests/csp.test.js"
+ ],
+ "public/sw-register.js": [
+  "tests/resilience-ui.test.mjs",
+  "tests/csp.test.js"
+ ],
+ "public/async-css.js": [
+  "tests/resilience-ui.test.mjs",
+  "tests/csp-enforced.test.mjs",
+  "tests/csp.test.js"
+ ],
  ".fleet/coverage-contract.json": [
   "tests/gate-smoke.test.js",
   "tests/gate-map.test.js"
@@ -209,6 +224,7 @@
  "tests/support/browser.mjs": [
   "tests/a11y.test.mjs",
   "tests/csp-boot.test.mjs",
+  "tests/csp-enforced.test.mjs",
   "tests/horn.test.js",
   "tests/keyboard.test.mjs",
   "tests/multitab.test.mjs",
@@ -224,6 +240,8 @@
  ],
  "tests/support/static-server.mjs": [
   "tests/csp-boot.test.mjs",
+  "tests/csp-enforced.test.mjs",
+  "tests/csp.test.js",
   "tests/health.test.mjs",
   "tests/sw-failover.test.mjs",
   "tests/sw-offline.test.mjs",
@@ -238,6 +256,7 @@
  "tests/cdp-command-bound.mjs": [
   "tests/a11y.test.mjs",
   "tests/csp-boot.test.mjs",
+  "tests/csp-enforced.test.mjs",
   "tests/keyboard.test.mjs",
   "tests/multitab.test.mjs",
   "tests/reflow-zoom.test.mjs",
@@ -261,6 +280,7 @@
  "tests/support/report-hook.mjs": [
   "tests/a11y.test.mjs",
   "tests/csp-boot.test.mjs",
+  "tests/csp-enforced.test.mjs",
   "tests/keyboard.test.mjs",
   "tests/multitab.test.mjs",
   "tests/reflow-zoom.test.mjs",
@@ -274,6 +294,7 @@
   "tests/webmcp.test.mjs"
  ],
  "tests/support/poll.mjs": [
+  "tests/csp-enforced.test.mjs",
   "tests/keyboard.test.mjs",
   "tests/resilience-ui.test.mjs",
   "tests/screenreader.test.mjs",
@@ -305,7 +326,9 @@
  ],
  "public/_headers": [
   "tests/pages-config.test.js",
-  "tests/csp-boot.test.mjs"
+  "tests/csp-boot.test.mjs",
+  "tests/csp.test.js",
+  "tests/csp-enforced.test.mjs"
  ],
  "wrangler.jsonc": [
   "tests/pages-config.test.js"

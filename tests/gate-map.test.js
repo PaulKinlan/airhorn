@@ -230,8 +230,10 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
     `index.html must not select the SW-update suite, got ${JSON.stringify(pageRow)}`);
   assert.ok(pageRow.includes('tests/resilience-ui.test.mjs'),
     `index.html must select resilience-ui, got ${JSON.stringify(pageRow)}`);
-  // (b) index.html authors the copy; the selected suite delegates its live
-  // observation to an enforcer whose failure is proven by its own browser-free
+  // (b) the page authors the copy - in public/sw-register.js as of airhorn-xnd1
+  // (it was inline in index.html, which the CSP no longer allows); the selected
+  // suite delegates its live observation to an enforcer whose failure is proven
+  // by its own browser-free
   // unit test. Do not scan the suite's prose for copy: a comment/non-enforcing
   // action used to pass that check (airhorn-rrme), and so did a commented-out
   // call, a stringified call and a swallowed call (airhorn-nqje).
@@ -247,17 +249,19 @@ test('the page row keeps the failover suite off it - and the branch it lost is c
   // try/catch, a catch-all wrapper and a promise .catch() - including a caller that
   // stubs process.exit. So a wrapped call here is GREEN because it is harmless, and
   // the enforcement is measured rather than inferred from a call expression.
-  const page = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+  const page = fs.readFileSync(path.join(root, 'public', 'sw-register.js'), 'utf8');
   const suite = fs.readFileSync(path.join(root, 'tests', 'resilience-ui.test.mjs'), 'utf8');
   for (const copy of ['The app could not update', 'previous version']) {
-    assert.ok(page.includes(copy), `index.html must author the lost-upgrade copy "${copy}"`);
+    assert.ok(page.includes(copy), `public/sw-register.js must author the lost-upgrade copy "${copy}"`);
   }
   assertGuardedCall(suite, { callee: 'assertLostUpgradeNotice', from: './support/lost-upgrade-copy.mjs' },
     'tests/resilience-ui.test.mjs');
   // The worker's own failure story is still the failover suite's job, and the
   // suite still has a row owner (the worker). No page module carries worker code
-  // since the split (airhorn-1l04): the registration handler is inline in
-  // index.html, which is why the page row above carries the copy assertions.
+  // since the split (airhorn-1l04): the registration handler lives in
+  // public/sw-register.js (inline in index.html until airhorn-xnd1), which is why
+  // that file's row carries the copy assertions and the page row still selects
+  // the suite that drives it.
   assert.ok(listFor('public/sw.js').includes('tests/sw-failover.test.mjs'),
     'public/sw.js must still select the failover suite');
   // (c) the REPLACEMENT coverage, asserted here rather than left implied. Before
@@ -532,9 +536,9 @@ test('a shared helper\'s selection is DERIVED from the tree, not hand-listed (ai
   // suites - a false green inside the fix for false greens. What is pinned now:
   //   1. the scan itself, on fixtures in each import SHAPE (static, require, dynamic, template,
   //      computed path.join) and on a prose mention that must NOT count;
-  //   2. the TRUE reference count in this tree, by name of the suites (14 for cdp-command-bound.mjs - the 13th is tests/csp-boot.test.mjs, added by airhorn-yxxq);
+  //   2. the TRUE reference count in this tree, by name of the suites (15 for cdp-command-bound.mjs - the 13th is tests/csp-boot.test.mjs, added by airhorn-yxxq, the 15th is tests/csp-enforced.test.mjs, added by airhorn-xnd1);
   //   3. the gate's selection for that module == that set minus the explicit-only acceptance pass
-  //      (12), as EXACT set equality - over- and under-selection both fail;
+  //      (14), as EXACT set equality - over- and under-selection both fail;
   //   4. the row is an `@importers` row, so re-hand-listing it fails here;
   //   5. the derived contract restates the same set, so the fleet oracle cannot drift from the gate.
   const tsv = fs.readFileSync(path.join(root, 'tools', 'suite-map.tsv'), 'utf8');
@@ -571,12 +575,12 @@ test('a shared helper\'s selection is DERIVED from the tree, not hand-listed (ai
 
   // 2. the true reference count in THIS tree, spelled out: losing a caller from the row must fail.
   const all = importersOf(helper, { root, tsvText: tsv });
-  assert.equal(all.length, 14, `every suite that references ${helper} must be found, got ${JSON.stringify(all, null, 2)}`);
+  assert.equal(all.length, 15, `every suite that references ${helper} must be found, got ${JSON.stringify(all, null, 2)}`);
   assert.ok(all.includes('tests/test-support.test.js'),
     'the computed path.join reference in tests/test-support.test.js must count - it is the one the old regex missed');
   assert.ok(!all.includes('tests/horn.test.js'), 'tests/horn.test.js references the browser helper, not this one');
   const expected = all.filter((s) => !EXPLICIT_ONLY.includes(s));
-  assert.equal(expected.length, 13, `13 suites minus the explicit-only acceptance pass must remain, got ${JSON.stringify(expected)}`);
+  assert.equal(expected.length, 14, `14 suites minus the explicit-only acceptance pass must remain, got ${JSON.stringify(expected)}`);
 
   // 3. what the REAL gate does, as exact set equality.
   const selected = listFor(helper);

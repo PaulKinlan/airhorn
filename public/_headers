@@ -1,19 +1,32 @@
-# Cloudflare Pages response headers (airhorn-kv7m). This file is copied verbatim into
-# dist/ by `npm run build` (public/ is the Vite publicDir) and served by Cloudflare
-# Pages on every response. It takes effect when the Pages deploy is the live origin;
-# the current Google Frontend origin ignores it (the production switch is Paul's
+# Cloudflare Pages response headers (airhorn-kv7m, airhorn-xnd1). This file is copied
+# verbatim into dist/ by `npm run build` (public/ is the Vite publicDir) and served by
+# Cloudflare Pages on every response. It takes effect when the Pages deploy is the live
+# origin; the current Google Frontend origin ignores it (the production switch is Paul's
 # decision - see .github/workflows/deploy-pages.yml).
 #
-# Scope decision: these five are no-app-risk. The CSP is NOT here on purpose:
-# index.html carries two deliberate inline scripts (the boot watchdog and the SW
-# registration) plus one inline critical stylesheet, so script-src 'self' would
-# break the boot - the CSP needs the inline-script decision first (external files
-# vs hashes), tracked separately.
+# The CSP ships here as of airhorn-xnd1. It was withheld in kv7m because index.html
+# carried two inline <script> blocks (boot watchdog, SW registration), one inline <style>
+# and two inline event-handler attributes on the stylesheet link - all of which
+# script-src 'self' blocks, the attributes silently and severely (the sheet's media
+# never swapped). They are now external files in public/ (boot-watchdog.js,
+# sw-register.js, async-css.js), and the one inline <style> - the critical first-paint
+# layer - stays inline and is allowed by its sha256 below. That hash is the digest of the
+# style element's text in the SERVED document, so tests/csp.test.js derives it from
+# dist/index.html (a dynamic fact: the build output the browser is given, not a copy of a
+# sentence). Source and build agree today; re-derive, do not hand-edit, if they diverge.
 #
-# Pinned by tests/pages-config.test.js - if you change a value, the pin names it.
+# Pinned by tests/pages-config.test.js and tests/csp.test.js - if you change a value, the
+# pin names it.
+#
+# The `/*` below is the ALL-PATHS PATTERN, not a comment opener: Pages `_headers` has `#`
+# comments and glob path lines, and it has no block terminator. A `*/` line is not valid
+# Pages syntax - it would be an unparseable rule - so do not add one here (airhorn-xnd1 got
+# this wrong first; tools/lib/static-server.mjs refuses the file by name and that is what
+# caught it).
 /*
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: geolocation=(), camera=(), microphone=(), payment=(), usb=()
   X-Frame-Options: DENY
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'sha256-SzoBGjTyngQ/zkIpaFY/vwl8+X1140qzc/vw8t+tq5g='; img-src 'self' data:; media-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'

@@ -46,6 +46,14 @@ const precacheUrls = [
   `/index.html`,
   `/styles/main.css`,
   `/sounds/airhorn.mp3`,
+  // The document's own scripts (airhorn-xnd1). They used to be inline, so they
+  // came with `/index.html` for free; now they are separate first-load
+  // requests, and without them an offline first load has no boot watchdog (a
+  // blocked bundle would be silent), no SW registration and no media swap for
+  // the precached `/styles/main.css`.
+  `/boot-watchdog.js`,
+  `/sw-register.js`,
+  `/async-css.js`,
   /* __PRECACHE_ASSETS__ */
 ];
 

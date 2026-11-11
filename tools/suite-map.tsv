@@ -29,7 +29,7 @@ src/status.js	tests/modules.test.js tests/screenreader.test.mjs tests/keyboard.t
 src/analytics.js	tests/modules.test.js
 src/webmcp.js	tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs
 # why: docs/coverage-map.md#index-html
-index.html	tests/preload-priority.test.js tests/horn.test.js tests/a11y.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs
+index.html	tests/preload-priority.test.js tests/csp.test.js tests/horn.test.js tests/a11y.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs
 vite.config.js	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs tests/webmcp-browser.test.mjs
 package.json	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs tests/webmcp.test.mjs tests/webmcp-browser.test.mjs
 package-lock.json	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs tests/webmcp.test.mjs tests/webmcp-browser.test.mjs
@@ -80,6 +80,12 @@ public/manifest.json	tests/sw-offline.test.mjs
 public/sounds/**	tests/sw-offline.test.mjs
 # why: docs/coverage-map.md#public-styles
 public/styles/**	tests/a11y.test.mjs tests/keyboard.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs
+# why: docs/coverage-map.md#public-csp-files
+public/boot-watchdog.js	tests/resilience-ui.test.mjs tests/csp-enforced.test.mjs tests/csp.test.js
+public/sw-register.js	tests/resilience-ui.test.mjs tests/csp.test.js
+public/async-css.js	tests/resilience-ui.test.mjs tests/csp-enforced.test.mjs tests/csp.test.js
+tests/csp.test.js	tests/csp.test.js
+tests/csp-enforced.test.mjs	tests/csp-enforced.test.mjs
 # why: docs/coverage-map.md#fleet-coverage-contract-json
 .fleet/coverage-contract.json	tests/gate-smoke.test.js tests/gate-map.test.js
 tests/derive-coverage-contract.test.js	tests/derive-coverage-contract.test.js
@@ -151,7 +157,7 @@ tests/support/signal-exit.mjs	@importers except=tests/acceptance.mjs
 tests/quiescence-bound.test.js	tests/quiescence-bound.test.js
 tests/test-support.test.js	tests/test-support.test.js
 # why: docs/coverage-map.md#tests-support-report-hook-mjs
-tests/support/report-hook.mjs	tests/a11y.test.mjs tests/csp-boot.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/reflow-zoom.test.mjs tests/resilience-ui.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/webmcp.test.mjs
+tests/support/report-hook.mjs	tests/a11y.test.mjs tests/csp-boot.test.mjs tests/csp-enforced.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/reflow-zoom.test.mjs tests/resilience-ui.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/webmcp.test.mjs
 tests/support/poll.mjs	@importers
 tests/support/quiescence.mjs	@importers
 tests/support/lost-upgrade-copy.mjs	@importers
@@ -161,7 +167,7 @@ tests/support/axe.min.js	@importers
 tests/press-guard.test.mjs	tests/press-guard.test.mjs
 # why: docs/coverage-map.md#public-headers
 # why: docs/coverage-map.md#public-headers
-public/_headers	tests/pages-config.test.js tests/csp-boot.test.mjs
+public/_headers	tests/pages-config.test.js tests/csp-boot.test.mjs tests/csp.test.js tests/csp-enforced.test.mjs
 tests/csp-boot.test.mjs	tests/csp-boot.test.mjs
 wrangler.jsonc	tests/pages-config.test.js
 .github/workflows/deploy-pages.yml	tests/pages-config.test.js

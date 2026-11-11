@@ -71,13 +71,19 @@ async function testBootWatchdog() {
 
   // The suite times its healthy-boot assertion off the page's own watchdog
   // grace (arm on load, reveal after this many ms). Read it from the built
-  // page so the suite follows the page instead of carrying a stale copy of
-  // the constant; if the watchdog's shape changes and the constant can no
-  // longer be found, this suite fails loudly rather than guessing.
-  const graceMatch = fs.readFileSync(path.join(distDir, 'index.html'), 'utf8')
+  // watchdog SCRIPT (airhorn-xnd1: it used to be inline in the page, and the
+  // CSP made it an external file) so the suite follows the page instead of
+  // carrying a stale copy of the constant; if the watchdog's shape changes and
+  // the constant can no longer be found, this suite fails loudly rather than
+  // guessing.
+  const watchdogPath = path.join(distDir, 'boot-watchdog.js');
+  if (!fs.existsSync(watchdogPath)) {
+    throw new Error('dist/boot-watchdog.js is missing: the page loads its boot watchdog from there (airhorn-xnd1)');
+  }
+  const graceMatch = fs.readFileSync(watchdogPath, 'utf8')
     .match(/setTimeout\(show,\s*(\d+)\)/);
   if (!graceMatch) {
-    throw new Error('boot watchdog grace not found in dist/index.html; the healthy-boot case times itself off it');
+    throw new Error('boot watchdog grace not found in dist/boot-watchdog.js; the healthy-boot case times itself off it');
   }
   const WATCHDOG_GRACE_MS = Number(graceMatch[1]);
 
@@ -618,6 +624,17 @@ async function testBootWatchdog() {
     await evaluate(`window.__case7Outgoing = true`);
     await waitUntil(`!window.__case7Outgoing && typeof window.__airhorn !== 'undefined'`,
       WAIT_TIMEOUT_MS, 'case 7 navigation to commit a fresh unstyled document');
+    // The failed-sheet verdict is reached by public/async-css.js, which is
+    // DEFERRED since airhorn-xnd1 (a parser-blocking loader would put a round
+    // trip in front of first paint). A blocked request can therefore settle
+    // before the loader's listeners exist, and the loader's own reconciliation
+    // (link.sheet is null at window load => the sheet failed) is what marks the
+    // page - at window load, not at the error task. So WAIT for the state this
+    // case is about instead of sampling for it at boot: the contract is 'a
+    // failed sheet reveals the label', not 'it reveals it within N ms of the
+    // error task' (the same reason the suite polls rather than sleeping).
+    await waitUntil(`document.documentElement.classList.contains('stylesheet-failed')`,
+      WAIT_TIMEOUT_MS, 'the failed-sheet class that reveals the label (set by the deferred loader)');
     const unstyled = await evaluate(`(() => {
       const horn = document.querySelector('.horn');
       if (!horn) throw new Error('the fresh unstyled document booted without a .horn element');

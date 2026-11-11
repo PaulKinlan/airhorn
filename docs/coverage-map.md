@@ -127,13 +127,15 @@ end-to-end failure story (public/sw.js: lie-fi, quota-denied upgrade), the page'
 markup is already asserted by horn, a11y and resilience-ui, and putting the
 14s SW-update suite on the most frequently edited file left a worst-case fast
 gate at ~60s with no headroom. Since the split it is not on a src/ row either,
-because no page module owns worker code - the registration handler is inline in
-index.html, and resilience-ui asserts the copy that handler authors.
+because no page module owns worker code - the registration handler lived in
+index.html and now lives in public/sw-register.js (airhorn-xnd1), and
+resilience-ui asserts the copy that handler authors.
 
 The page DOES author one thing sw-failover asserted - the lost-upgrade
-announcement, in the inline registration handler next to #app-status - so
-leaving it to sw-failover made a one-line edit to that branch green on this
-row and red only in a suite the row no longer selected (airhorn-906).
+announcement, in the registration handler next to #app-status (public/
+sw-register.js since airhorn-xnd1) - so leaving it to sw-failover made a one-line
+edit to that branch green on this row and red only in a suite the row no longer
+selected (airhorn-906).
 resilience-ui, which runs here, now asserts that branch itself (case 11), so
 dropping sw-failover from this row does not drop its coverage. Keep it that
 way: move the branch, or add a suite - never a comment claiming a suite you
@@ -235,6 +237,29 @@ visual-overrides (airhorn-1jrc) pins forced-colors and reduced-motion;
 reflow-zoom (airhorn-xaxg) pins no horizontal overflow at 320px / 200% text,
 horn pressability, and reachable affordances. Leaving public/styles/** to
 the !public/** exemption meant a focus-ring change landed with zero coverage.
+
+## `public/csp files`
+
+The three files that used to be inline in index.html (airhorn-xnd1, decision airhorn-ao23):
+boot-watchdog.js, sw-register.js and async-css.js. They are mapped by BEHAVIOUR, not by
+proximity to the page - shipping one of them broken is what the CSP makes possible, because
+a blocked inline handler or script fails silently.
+
+- resilience-ui drives all three in a browser: the watchdog's banner, grace and late-retire
+  (cases 1, 2, 3, 8, 9), the registration and lost-upgrade notices (cases 6, 10, 11), and the
+  blocked-stylesheet fallback (case 7). It reads the watchdog's grace constant out of
+  dist/boot-watchdog.js rather than a copy.
+- csp.test.js is the browser-free artifact pin: the document has no inline script and no on*
+  attribute, the loader is the script immediately after the link, the three files exist in the
+  build, and the worker precaches each with a build digest.
+- csp-enforced.test.mjs serves dist/ with the shipped _headers applied and proves the page
+  boots under the enforced policy - sheet swapped and applying, horn decoding, zero
+  violations, an inline-script probe refused by name, the watchdog revealing on a blocked
+  bundle, and (the negative control) a loader that never swaps leaving media at print.
+
+index.html keeps csp.test.js (the document-level facts) rather than the browser suite: the
+page row is the most frequently edited one, and the behaviour it can break is the loader's
+ordering, which the browser-free pin already asserts.
 
 ## `.fleet/coverage-contract.json`
 
@@ -362,6 +387,11 @@ Cloudflare Pages hosting (airhorn-9dal, fleet-fpr18). The site is a static Vite 
 hosting config and its deploy workflow are pinned by one browser-free suite: it asserts the config
 is minimal and points at dist/, that the workflow carries the two secrets by name, and it RUNS the
 workflow's credential guard to prove the no-secret path fails by name before anything is built.
+
+The CSP ships here too (airhorn-xnd1), so two more suites are on the row: csp.test.js pins the
+policy directive by directive, the /* all-paths pattern it lives under, and the style hash against
+the SERVED document; csp-enforced.test.mjs proves a browser enforces it. pages-config stays the
+owner of the five no-risk headers and the deploy path - one owner per fact.
 
 Since airhorn-yxxq the file is also SERVED: tests/csp-boot.test.mjs drives dist/ through the
 shared static server (tools/lib/static-server.mjs, the tools/lib/** row; re-exported at
