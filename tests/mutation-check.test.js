@@ -741,17 +741,26 @@ test('a suite file that registers NO tests at all is never-ran, not a scored run
   // registers nothing: it used to be counted as one REAL test (realTests:1, the wrapper), so a zero-test
   // suite scored "fix-does-not-close" as if something had been measured. The guard that refuses it
   // (realTests === 0) must stay reachable through the real call path, which is what this world checks.
+  // airhorn-jfb8: the SPELLING must not matter. Directory-qualified paths once bypassed name-based
+  // guards because node names the file-level event with the path AS PASSED (airhorn-lnme); the guard
+  // is execution-based now, so every spelling refuses identically - and this pin is what keeps a
+  // future spelling-sensitive edit from resurrecting the bypass. Measured before pinning: bare,
+  // ./, sub/, ./sub/ and absolute all refuse rc 3 [never-ran] on master 8b7ef0b2.
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), '3wth-empty-'));
   try {
     fs.mkdirSync(path.join(tmp, 'src'));
+    fs.mkdirSync(path.join(tmp, 'sub'));
     fs.writeFileSync(path.join(tmp, 'src', 'subject.js'), 'export const answer = 41;\n');
     fs.writeFileSync(path.join(tmp, 'empty.test.mjs'), "import test from 'node:test';\n");
-    const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', 'empty.test.mjs'], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
-    assert.equal(result.status, 3, `a suite that registers no tests measured nothing and must be refused: ${result.stdout}${result.stderr}`);
-    const said = result.stdout + result.stderr;
-    assert.match(said, /never-ran/);
-    assert.match(said, /registered no tests/);
-    assert.doesNotMatch(result.stdout, /verdict: (mutant-caught|fix-does-not-close)/, 'nothing may be scored from a run with no tests');
+    fs.writeFileSync(path.join(tmp, 'sub', 'empty.test.mjs'), "import test from 'node:test';\n");
+    for (const spelling of ['empty.test.mjs', './empty.test.mjs', 'sub/empty.test.mjs', './sub/empty.test.mjs', path.join(tmp, 'empty.test.mjs')]) {
+      const result = spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', spelling], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+      assert.equal(result.status, 3, `a suite that registers no tests measured nothing and must be refused (${spelling}): ${result.stdout}${result.stderr}`);
+      const said = result.stdout + result.stderr;
+      assert.match(said, /never-ran/, `${spelling} must name never-ran`);
+      assert.match(said, /registered no tests/, `${spelling} must name the empty guard`);
+      assert.doesNotMatch(result.stdout, /verdict: (mutant-caught|fix-does-not-close)/, `nothing may be scored from a run with no tests (${spelling})`);
+    }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
