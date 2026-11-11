@@ -235,14 +235,15 @@ itself, so a change to the rule is gated on the suite that proves all three outc
 ## `tools/measure-perf.mjs`
 
 The tool's own verdict rules (what a row may CLAIM, and which structural holes fail the run)
-live in `tests/tool-verdicts.test.js` as browser-free pins - `repeatLoadLabel`, `measurePerfProblems`
-and now `observerFailures`. A change to the tool gains that suite on top of the `tools/*` row,
+live in `tests/tool-verdicts.test.js` as browser-free pins - `repeatLoadLabel`, `measurePerfProblems`,
+and the observer outcome helpers in `tools/lib/perf-metrics.mjs` (`observerOutcomes`, `wasSkipped`).
+A change to the tool gains that suite on top of the `tools/*` row,
 which still selects gate-smoke and gate-map (rows are additive).
 
 ## `tools/lib/perf-metrics.mjs`
 
-The measurement-integrity judgements - `isMeasured`, `unmeasured`, `measurementExitCode` and now
-`observerFailures` - are pinned browser-free in `tests/tool-verdicts.test.js`, on top of the
+The measurement-integrity judgements - `isMeasured`, `unmeasured`, `measurementExitCode`,
+`observerOutcomes` and `wasSkipped` - are pinned browser-free in `tests/tool-verdicts.test.js`, on top of the
 `tools/lib/**` row that selects test-support. Splitting the pins this way keeps a change to the
 rule out of the browser suites it is meant to judge (airhorn-nxuv.30).
 
