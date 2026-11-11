@@ -153,6 +153,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *   zero pending. The criterion is `stableSamples` consecutive quiet samples;
  *   the ceiling only stops an unwinnable wait, and it is generous enough for a
  *   starved host to still reach quiescence.
+ *
+ *   A CALLER-SUPPLIED ceiling bounds the wait only while the page has not been
+ *   observed quiet with nothing pending (airhorn-jmpm). Once it has, the only
+ *   thing left is sampling, so the criterion decides and the backstop doubles
+ *   (2 x timeoutMs): a page that is already quiet must not fail because the host
+ *   is slow, which is what a small explicit ceiling (a11y 15 s, soak/cache-growth
+ *   10 s) used to do. A page that never goes quiet is still bounded by timeoutMs.
  * @param {number} [options.stableSamples] consecutive quiet samples required
  * @param {number} [options.pollMs] gap between samples
  * @param {string} [options.quietExpression] extra in-page boolean expression
@@ -183,8 +190,14 @@ export async function waitForQuiescence(send, {
   let lastSignature = null;
   let noProgressSamples = 0;
   let sawQuietSample = false;
+  let quietSamples = 0;          // how many samples were drained+quiet, for the flapping ratio (airhorn-xi86)
 
-  while (Date.now() - started < timeoutMs) {
+  // The ceiling is a BACKSTOP for an unwinnable wait, never the criterion (airhorn-ypfn, airhorn-jmpm):
+  // while the page has not been seen quiet the caller's ceiling applies; once it has, the remaining work is
+  // sampling, so only the doubled backstop stops it.
+  const hardCeilingMs = timeoutMs * 2;
+  for (;;) {
+    if (Date.now() - started >= (sawQuietSample ? hardCeilingMs : timeoutMs)) break;
     const result = await send('Runtime.evaluate', {
       expression: `(() => {
         const q = window.__quiescence;
@@ -257,7 +270,7 @@ export async function waitForQuiescence(send, {
       drainedAt = null;
     }
 
-    if (quiet) sawQuietSample = true;
+    if (quiet) { sawQuietSample = true; quietSamples += 1; }
     stable = quiet ? stable + 1 : 0;
     if (stable >= stableSamples) {
       return { waitedMs: Date.now() - started, samples, pending: last };
@@ -266,20 +279,29 @@ export async function waitForQuiescence(send, {
     await sleep(pollMs);
   }
 
-  // The ceiling is a backstop, so the message must not invent a cause. Three
-  // distinguishable situations, named rather than merged into "still pending":
+  // The ceiling is a backstop, so the message must not invent a cause. Four
+  // distinguishable situations, named rather than merged into "still pending"
+  // (airhorn-3a0k added the flapping case: a drained page whose quiet condition
+  // changes every sample was being called "a starved host" on the strength of ONE
+  // historical quiet sample, an attribution the probe contradicts).
   const probe = JSON.stringify(last);
   const pending = last && last.pendingTimers === 0 && last.pendingIntervals === 0 && last.pendingFetches === 0;
   const why = pending
     ? sawQuietSample
-      ? `the page WAS quiet but the sampler only completed ${samples} round-trip(s) (${noProgressSamples} with no change) ` +
-        `before the ceiling - a starved host, not a busy page; raise timeoutMs or lower stableSamples/pollMs`
+      ? noProgressSamples === 0 && samples >= 2
+        ? `the page's work had drained and its quiet condition held on ${quietSamples} of ${samples} sample(s), ` +
+          `but never on ${stableSamples} in a row, and the page's state kept changing (${noProgressSamples} with no change) - ` +
+          `the QUIET CONDITION is flapping, not the host starving`
+        : `the page WAS quiet but the sampler only completed ${samples} round-trip(s) (${noProgressSamples} with no change) ` +
+          `before the ceiling - a starved host, not a busy page; raise timeoutMs or lower stableSamples/pollMs`
       : `the page's work had drained but the quiet condition never held, and the state grace period did not fire`
     : noProgressSamples >= stableSamples
       ? `nothing the page reports changed across ${noProgressSamples + 1} consecutive samples, so this is a page that is not progressing rather than a host that is merely slow`
       : `the page kept changing across ${samples} samples, so it is still doing work, not merely starved`;
   throw new Error(
-    `Page never reached quiescence within the ${timeoutMs}ms ceiling (checked between samples; a slow sample completes first - airhorn-n1qu) ` +
+    `Page never reached quiescence within the ${sawQuietSample ? hardCeilingMs : timeoutMs}ms ceiling ` +
+    `(checked between samples; a slow sample completes first - airhorn-n1qu` +
+    `${sawQuietSample ? `; this is the DOUBLED backstop, because the page WAS quiet: the criterion decides and timeoutMs=${timeoutMs} no longer bounds the wait (airhorn-jmpm)` : `; the page was never observed quiet, so the caller's timeoutMs bounds it`}) ` +
     `(${probe}, ${samples} samples, ${noProgressSamples} consecutive with no change): ${why}. ` +
     `Quiescence needs ${stableSamples} consecutive quiet samples; the ceiling is a backstop, not the criterion (airhorn-ypfn).`,
   );
