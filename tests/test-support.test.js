@@ -731,10 +731,16 @@ test('install-https-proof refuses paint-level invisibility and coverage, by name
     // (coveredBy is null there too: it cannot tell 'button hit' from 'nothing hit').
     ['an ANCESTOR opacity:0 paints nothing', { ancestorOpacity: '0' }, /ancestor's opacity is 0/],
     ['a near-zero ancestor opacity paints (almost) nothing', { ancestorOpacity: '0.02' }, /ancestor's opacity is 0\.02/],
+    // airhorn-5exb: a filter is not inherited either. `#outer { filter: opacity(0) }` zeroes the whole
+    // subtree's paint while the button's own filter, its opacity and every ancestor opacity read
+    // healthy and hit testing still reaches the button - the last road to 'wrap-transparent'.
+    ['an ANCESTOR filter opacity(0) paints nothing', { ancestorFilter: '0' }, /ancestor's filter is opacity\(0\)/],
+    ['a near-zero ancestor filter paints (almost) nothing', { ancestorFilter: '0.02' }, /ancestor's filter is opacity\(0\.02\)/],
+    ['a 0.9 ancestor filter still paints (control)', { ancestorFilter: '0.9' }, null],
     ['a 0.9 ancestor still paints (control)', { ancestorOpacity: '0.9' }, null],
     ['nothing hittable at the centre: clipped or shrunk away', { hitIsButtonOrChild: false, coveredBy: null }, /nothing is hittable at the button's centre/],
     ['an overlay still names itself first when the hit also misses', { hitIsButtonOrChild: false, coveredBy: '#consent' }, /covered at its centre by #consent/],
-    ['legacy evidence without paint fields still passes (no regression)', { opacity: undefined, filter: undefined, color: undefined, backgroundColor: undefined, borderColor: undefined, coveredBy: undefined, ancestorOpacity: undefined, hitIsButtonOrChild: undefined }, null],
+    ['legacy evidence without paint fields still passes (no regression)', { opacity: undefined, filter: undefined, color: undefined, backgroundColor: undefined, borderColor: undefined, coveredBy: undefined, ancestorOpacity: undefined, ancestorFilter: undefined, hitIsButtonOrChild: undefined }, null],
     // airhorn-qpac: the alpha-spelling enumeration. Every row was run against the pre-fix
     // predicate at e35b71bb: rgba/transparent caught, EVERYTHING ELSE greened an invisible
     // button. Now each zero-alpha spelling fails by name, the controls pass, and a spelling

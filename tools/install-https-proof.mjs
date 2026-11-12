@@ -341,9 +341,18 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
     // exactly that property one level up. Multiply the ANCESTOR chain above the button:
     // the product is the subtree's real paint alpha (one zero zeroes the whole subtree).
     let ancestorProduct = 1;
+    let ancestorFilterProduct = 1;
     for (let n = b.parentElement; n; n = n.parentElement) {
-      ancestorProduct *= Number(getComputedStyle(n).opacity);
-      if (ancestorProduct === 0) break;
+      const ncs = getComputedStyle(n);
+      ancestorProduct *= Number(ncs.opacity);
+      // airhorn-5exb: a filter is not inherited either, and a filter: opacity(0) on a wrap zeroes the
+      // subtree's paint while every inherited property - including opacity - still reads healthy, and
+      // hit testing is unaffected. Multiply the chain's opacity() factors the same way the opacity
+      // clause multiplies the chain's opacity, so the wrap-transparent defect has no road left.
+      for (const m of String(ncs.filter || '').matchAll(/\\bopacity\\(\\s*([0-9.]+)\\s*\\)/g)) {
+        ancestorFilterProduct *= Number(m[1]);
+      }
+      if (ancestorProduct === 0 && ancestorFilterProduct === 0) break;
     }
     // airhorn-iqrz (gap 2): coveredBy below answers 'an overlay covers the centre', but it
     // conflates 'the button itself was hit' with 'NOTHING was hit' - both leave it null
@@ -360,6 +369,7 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
       rect: { width: rect.width, height: rect.height },
       opacity: cs.opacity,
       ancestorOpacity: String(ancestorProduct),
+      ancestorFilter: String(ancestorFilterProduct),
       filter: cs.filter,
       color: cs.color,
       backgroundColor: cs.backgroundColor,
@@ -549,6 +559,12 @@ export function affordanceProblem(btn) {
   }
   if (typeof btn.filter === 'string' && /\bopacity\(0(\.0+)?\)/.test(btn.filter)) {
     return `filter zeroes the opacity ('${btn.filter}') - checkVisibility does not consult filters`;
+  }
+  // airhorn-5exb: the clause above reads the button's OWN filter. A filter on an ANCESTOR zeroes the
+  // subtree's paint without being inherited and without touching hit testing, so the chain walk
+  // collects its opacity() product too and it is refused here with the same 0.05 floor.
+  if (btn.ancestorFilter !== undefined && Number(btn.ancestorFilter) <= 0.05) {
+    return `an ancestor's filter is opacity(${btn.ancestorFilter}), so the button's whole subtree paints (almost) nothing`;
   }
   // airhorn-qpac: the transparency verdict comes from ONE classifier over the computed
   // colour string. What it cannot classify is 'unknown' - and unknown FAILS NAMED, because
