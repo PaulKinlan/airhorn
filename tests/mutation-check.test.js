@@ -471,6 +471,59 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     const watcherStrip = runWorld(['--suite', 'k-strip-sampling-watcher.mjs']);
     assert.equal(watcherStrip.status, 3, `stripping the sampling watcher must be refused (airhorn-gb9y), got ${watcherStrip.status}: ${watcherStrip.stdout}${watcherStrip.stderr}`);
 
+    // airhorn-lg5d: a listener APPENDED at IMPORT time - the one shape 5wns' two watches could not see.
+    // It is behind the sentinel, so the precedence sampler is right to say nothing; it removes nothing,
+    // so the strip watcher says nothing. But it is registered before node:test's harness listener, which
+    // registers lazily at run start, so `process.exit(0)` there ends the suite process before anything
+    // can judge the rejection and the parent sees a CLEAN run. Measured on master 8e3c3d3b: rc 2 (a
+    // verdict, "fix-does-not-close") in 5 of 5 runs, where the same suite without the swallow refuses
+    // rc 3. The sentinel now refuses a clean exit after a rejection reached it; the refusal is deferred
+    // to 'exit' on purpose, because a rejection the harness attributes to a test is a failed TEST rather
+    // than a refusal (airhorn-812k), and the 'exit' listener is named in the strip set like every other
+    // instrument. Both registration positions are pinned: before the first test(), and after it.
+    write('k-import-append-exit-swallow.mjs', "import test from 'node:test';\nprocess.on('unhandledRejection', () => process.exit(0));\ntest('one', () => {});\nsetTimeout(() => { Promise.reject(new Error('import-time swallow hid the crash')); }, 5);\n");
+    write('k-import-append-exit-swallow-late.mjs', "import test from 'node:test';\ntest('one', () => {});\nprocess.on('unhandledRejection', () => process.exit(0));\nsetTimeout(() => { Promise.reject(new Error('import-time swallow hid the crash')); }, 5);\n");
+    for (const world of ['k-import-append-exit-swallow.mjs', 'k-import-append-exit-swallow-late.mjs']) {
+      const imported = runWorld(['--suite', world]);
+      assert.equal(imported.status, 3,
+        `${world} must be a named refusal (a clean exit after a delivered rejection IS the manipulation), ` +
+        `got ${imported.status}: ${imported.stdout}${imported.stderr}`);
+      assert.match(imported.stderr + imported.stdout, /threw-outside-a-test/,
+        `${world}: the refusal must name the crash it caught (airhorn-lg5d)`);
+      assert.doesNotMatch(imported.stdout, /verdict:/, `${world}: a refusal, never a verdict`);
+    }
+    // The exit check is an instrument too: an APPENDED swallow plus a strip of the 'exit' listeners now
+    // has nothing left to refuse it except the strip itself, so the strip must refuse (airhorn-gb9y's
+    // rule applied to the new instrument, airhorn-lg5d).
+    write('k-strip-exit-check-swallow.mjs', "import test from 'node:test';\ntest('one', () => {});\nsetTimeout(() => { for (const fn of process.listeners('exit')) process.removeListener('exit', fn); process.on('unhandledRejection', () => process.exit(0)); Promise.reject(new Error('stripped the exit check')); }, 5);\n");
+    const exitCheckStrip = runWorld(['--suite', 'k-strip-exit-check-swallow.mjs']);
+    assert.equal(exitCheckStrip.status, 3,
+      `stripping the exit check must be refused like every other instrument strip (airhorn-lg5d), got ${exitCheckStrip.status}: ${exitCheckStrip.stdout}${exitCheckStrip.stderr}`);
+
+    // airhorn-jzrs: process.exit(code) EMITS 'exit' (that is what the check above stands on), but
+    // process.reallyExit(code) does not - so the same appended import-time swallow calling
+    // reallyExit(0) laundered the crash as a verdict again (measured rc 2 at 4e366206 and on master
+    // 8e3c3d3b). The preload captures reallyExit and republishes it as a NON-CONFIGURABLE accessor:
+    // the getter is a wrapper that applies the same check, the setter refuses. A suite can therefore
+    // not replace it, recover the original, or delete it - and a clean reallyExit after a delivered
+    // rejection is the refusal.
+    write('k-really-exit-swallow.mjs', "import test from 'node:test';\nprocess.on('unhandledRejection', () => process.reallyExit(0));\ntest('one', () => {});\nsetTimeout(() => { Promise.reject(new Error('reallyExit swallow')); }, 5);\n");
+    const reallyExitSwallow = runWorld(['--suite', 'k-really-exit-swallow.mjs']);
+    assert.equal(reallyExitSwallow.status, 3,
+      `a reallyExit(0) swallow must be refused like the exit(0) one (airhorn-jzrs), got ${reallyExitSwallow.status}: ${reallyExitSwallow.stdout}${reallyExitSwallow.stderr}`);
+    assert.match(reallyExitSwallow.stderr + reallyExitSwallow.stdout, /threw-outside-a-test/,
+      'the reallyExit shape must name the crash it caught (airhorn-jzrs)');
+    // ...and the exit path cannot be taken back from the suite: replacing the captured reallyExit
+    // refuses, and a delete-then-call still reaches the wrapper (the property is non-configurable).
+    write('k-really-exit-replace.mjs', "import test from 'node:test';\ntest('one', () => {});\nprocess.reallyExit = () => {};\nprocess.on('unhandledRejection', () => process.reallyExit(0));\nsetTimeout(() => { Promise.reject(new Error('replace reallyExit')); }, 5);\n");
+    write('k-really-exit-delete.mjs', "import test from 'node:test';\ntest('one', () => {});\ntry { delete process.reallyExit; } catch {}\nprocess.on('unhandledRejection', () => { try { process.reallyExit(0); } catch { process.exit(0); } });\nsetTimeout(() => { Promise.reject(new Error('delete reallyExit')); }, 5);\n");
+    for (const world of ['k-really-exit-replace.mjs', 'k-really-exit-delete.mjs']) {
+      const tamper = runWorld(['--suite', world]);
+      assert.equal(tamper.status, 3,
+        `${world} must be refused (the exit path cannot be taken back, airhorn-jzrs), got ${tamper.status}: ${tamper.stdout}${tamper.stderr}`);
+      assert.doesNotMatch(tamper.stdout, /verdict:/, `${world}: a refusal, never a verdict`);
+    }
+
     // Honest churn must stay unrefused: node:test's own harness listener registers by APPEND (never
     // ahead of the preload sentinel), and a suite listener appended behind the sentinel never runs
     // ahead of it - so adding and removing one hides nothing and is not manipulation.
