@@ -74,7 +74,8 @@ export function startUrlInScope({ scope, startUrl, manifestHref, pageHref } = {}
  * Which of the required icon sizes the manifest does not actually declare.
  *
  * `sizes` is a whitespace-separated list of exact `WxH` tokens; an icon declared
- * `1920x1080` is not a 192x192 icon.
+ * `1920x1080` is not a 192x192 icon. The keyword `any` is the manifest's spelling
+ * for a SCALABLE icon, so it declares every size at once (airhorn-iyim).
  */
 export function missingIconSizes({ icons, required = ['192x192', '512x512'] } = {}) {
   const declared = new Set();
@@ -83,5 +84,15 @@ export function missingIconSizes({ icons, required = ['192x192', '512x512'] } = 
       if (token) declared.add(token.toLowerCase());
     }
   }
+  // airhorn-iyim: `sizes: "any"` is a scalable declaration and satisfies every required size. The
+  // previous refusal was a FALSE NEGATIVE in the nxuv.28 direction - a check that fails a site Chrome
+  // would install. Measured through tools/install-https-proof.mjs on headless Chrome 155 (HTTPS, real
+  // service worker, self-signed cert trusted by spki), one variable per leg: a manifest whose ONLY
+  // icon is sizes:"any" FIRES beforeinstallprompt and enables the app's Install button as an SVG
+  // (type image/svg+xml), as an SVG with no type at all, as a PNG, and spelled "ANY" in upper case -
+  // while the raster control and the HTTP contrast behave unchanged. So the token, not the image
+  // type, is what the browser honours. The token itself must still be EXACT: "anything" is not
+  // scalable, which is the same exactness contract the WxH tokens are held to (airhorn-nxuv.28).
+  if (declared.has('any')) return [];
   return required.filter((size) => !declared.has(String(size).toLowerCase()));
 }
