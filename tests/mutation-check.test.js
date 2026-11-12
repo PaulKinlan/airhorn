@@ -79,6 +79,53 @@ test('--dry-run writes nothing and runs nothing, and the same command without it
   }
 });
 
+test('--dry-run refuses what the run would refuse, and plans every step the run takes (airhorn-qf30)', () => {
+  // The rehearsal's own contract is 'a dry run cannot print a plan a real run would refuse'. It printed one anyway:
+  // suite presence is a pure stat the run abandons on before writing anything, so a nonexistent --suite or
+  // --suite-old rehearsed green, and --build - a step that can refuse after the mutant is on disk - was never
+  // mentioned. Both halves are pinned here against the REAL run, so the plan cannot drift from the run silently.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-qf30-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    const subject = path.join(tmp, 'src', 'subject.js');
+    const original = 'export const f = (n) => n + 1;\n';
+    fs.writeFileSync(subject, original);
+    fs.writeFileSync(path.join(tmp, 'green.mjs'), "import test from 'node:test';\ntest('green', () => {});\n");
+    const base = ['--file', 'src/subject.js', '--from', 'n + 1', '--to', 'n + 2'];
+    const run = (...args) => spawnSync(process.execPath, [tool, ...base, ...args], { cwd: tmp, encoding: 'utf8', timeout: 60000 });
+
+    // (a) a missing --suite is refused at PLAN time, not rehearsed. Control: the identical command without --dry-run
+    // refuses too, with the same clause - that equality is the contract, so both are read.
+    const dryMissing = run('--suite', 'tests/does-not-exist.mjs', '--dry-run');
+    assert.equal(dryMissing.status, 3, `a dry run over a missing suite must refuse, got ${dryMissing.status}: ${dryMissing.stdout}${dryMissing.stderr}`);
+    assert.match(dryMissing.stderr, /the suite tests\/does-not-exist\.mjs does not exist/);
+    assert.doesNotMatch(dryMissing.stdout, /dry run - nothing was written/, 'no plan may be printed for a command that cannot run');
+    assert.doesNotMatch(dryMissing.stdout, /would mutate/, 'and it must not describe steps it would never reach');
+    const realMissing = run('--suite', 'tests/does-not-exist.mjs');
+    assert.equal(realMissing.status, 3, `control: the real run refuses the same command: ${realMissing.stdout}${realMissing.stderr}`);
+    assert.match(realMissing.stderr, /the suite tests\/does-not-exist\.mjs does not exist/);
+
+    // (b) the same for the BASELINE suite: a missing --suite-old refuses the rehearsal too.
+    const dryMissingOld = run('--suite', 'green.mjs', '--suite-old', 'tests/missing-old.mjs', '--dry-run');
+    assert.equal(dryMissingOld.status, 3, `a dry run over a missing --suite-old must refuse, got ${dryMissingOld.status}: ${dryMissingOld.stdout}${dryMissingOld.stderr}`);
+    assert.match(dryMissingOld.stderr, /the suite tests\/missing-old\.mjs does not exist/);
+    assert.doesNotMatch(dryMissingOld.stdout, /would then run green\.mjs/);
+
+    // (c) --build is a step, and the plan states it. Control: the real run prints the build it performs, so the plan
+    // line and the run line name the same command.
+    const dryBuild = run('--suite', 'green.mjs', '--build', 'echo build-step', '--dry-run');
+    assert.equal(dryBuild.status, 0, `a buildable plan still rehearses cleanly: ${dryBuild.stdout}${dryBuild.stderr}`);
+    assert.match(dryBuild.stdout, /would then build: echo build-step/);
+    const realBuild = run('--suite', 'green.mjs', '--build', 'echo build-step');
+    assert.match(realBuild.stdout, /building: echo build-step/, 'control: the run really takes that step');
+
+    // (d) and nothing above wrote anything: the rehearsal's other promise is untouched.
+    assert.equal(fs.readFileSync(subject, 'utf8'), original, 'no dry run may touch the product file');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 /* --- the guards: a mutation that did not apply is an error, never a result ---- */
 
 test('applyMutation replaces exactly one occurrence', () => {
