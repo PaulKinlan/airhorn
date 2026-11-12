@@ -44,10 +44,14 @@ test('a QUIET page passes on the sample count, not on a clock', async () => {
   // that costs 4x more per round-trip must make the wait proportionally longer, because the wait IS
   // the sampling and nothing else is added to it.
   const fast = await waitForQuiescence(sender(10, () => quiet));
-  const slow = await waitForQuiescence(sender(40, () => quiet));
+  const slow = await waitForQuiescence(sender(100, () => quiet));
   assert.equal(slow.samples, 4, 'a slower sampler does not change the criterion');
-  assert.ok(slow.waitedMs - fast.waitedMs >= 4 * 20,
-    `the 30ms-per-sample difference must show up in the wait (fast ${fast.waitedMs}ms, slow ${slow.waitedMs}ms): the wait is the sampling it did, not a fixed margin around it`);
+  // 4 x 90ms nominal difference, asserted at 4 x 60: the 120ms slack absorbs timer jitter on a starved
+  // host (the old 10ms-vs-40ms pair asserted 80 of a nominal 120 and flaked when both samplers
+  // overslept by load-dependent amounts - the SHAPE is relative, so widening the gap keeps it
+  // machine-independent). Oversleeping only ADDS to each sampler, so the slack is one-sided.
+  assert.ok(slow.waitedMs - fast.waitedMs >= 4 * 60,
+    `the 90ms-per-sample difference must show up in the wait (fast ${fast.waitedMs}ms, slow ${slow.waitedMs}ms): the wait is the sampling it did, not a fixed margin around it`);
 });
 
 test('a STARVED host still reaches quiescence when the ceiling allows it - the same sampler, two ceilings', async () => {
@@ -57,17 +61,15 @@ test('a STARVED host still reaches quiescence when the ceiling allows it - the s
   assert.equal(settled.samples, 4, 'a slow host must not turn a quiet page into a failure');
   assert.ok(settled.waitedMs >= 1000, `the wait really did spend the starved time (${settled.waitedMs}ms)`);
 
-  // ...and with a ceiling below the sampling cost it fails, NAMING the ceiling and the fact that
-  // the page was quiet - never "work is still pending", which its own probe contradicts.
-  await assert.rejects(
-    () => waitForQuiescence(starved(), { timeoutMs: 400 }),
-    (error) => {
-      assert.match(error.message, /ceiling \(checked between samples/, 'the failure names the ceiling');
-      assert.match(error.message, /WAS quiet/, 'and says the page was quiet, so the host was starved');
-      assert.doesNotMatch(error.message, /work is still pending/, 'the old message is gone');
-      return true;
-    },
-  );
+  // ...and a ceiling FAR below the sampling cost fails nothing either (airhorn-ypfn): the page is
+  // quiet, so every completed quiet sample is observed progress and the criterion - not a clock -
+  // decides. Four 300ms samples need ~1.2s against a 400ms caller ceiling; under the old DOUBLED
+  // backstop (800ms) this exact call THREW "the page WAS quiet...a starved host". It passes now, and
+  // the pass carries NAME-ABLE evidence: the sample count is the criterion, the waited time is the
+  // sampling it really did.
+  const belowCost = await waitForQuiescence(starved(), { timeoutMs: 400 });
+  assert.equal(belowCost.samples, 4, 'a quiet page outlives any caller ceiling: the criterion decides');
+  assert.ok(belowCost.waitedMs >= 1100, `the starved sampling was really paid (${belowCost.waitedMs}ms)`);
 });
 
 test('a page that keeps changing never passes, and the ceiling says it was still working', async () => {
@@ -162,9 +164,13 @@ test('ynvv: the ceiling is BETWEEN samples - one slow sample completes, then the
   // The doc used to claim an ABSOLUTE ceiling; the code checks the deadline at the top of
   // the loop, so a single 2s sample with a 400ms ceiling overshoots - and that is the
   // honest semantic: the wait ends within timeoutMs of the last COMPLETED sample.
+  // The page here NEVER goes quiet (airhorn-ypfn): a quiet page's slow sample completing is observed
+  // progress, and progress reschedules the ceiling instead of firing it - the between-samples ceiling
+  // is pinned on a page it legitimately bounds.
+  const busy = (n) => ({ ...quiet, pendingTimers: (n % 5) + 1, quietCondition: false });
   const started = Date.now();
   await assert.rejects(
-    () => waitForQuiescence(sender(2000, () => quiet), { timeoutMs: 400, stateTimeoutMs: 0 }),
+    () => waitForQuiescence(sender(2000, busy), { timeoutMs: 400, stateTimeoutMs: 0 }),
     /ceiling/,
     'after the slow sample completes, the ceiling must fire and be named',
   );
@@ -199,15 +205,15 @@ test('a FLAPPING quiet condition on a drained page is named as flapping, never a
       return true;
     },
   );
-  // The control: an identical signature (the page's own state does not change between samples) is still
-  // called a starved host - the label needs a sampler slower than the DOUBLED backstop, so with 2s round-trips
-  // and a 200ms ceiling only one sample completes. So the new arm discriminates, it does not swallow every
-  // failure, and a single sample is never called flapping.
+  // The discrimination control, redone for observed progress (airhorn-ypfn): an UNCHANGING quiet page
+  // can no longer fail at all - its streak grows every sample - so the case that must not be called
+  // flapping is now a condition stuck FALSE with the grace disabled: it fails as app state that never
+  // held, and an unchanging page is never called flapping.
   await assert.rejects(
-    () => waitForQuiescence(sender(600, () => ({ ...quiet })), { timeoutMs: 200, pollMs: 10 }),
+    () => waitForQuiescence(sender(20, () => ({ ...quiet, quietCondition: false })), { timeoutMs: 200, pollMs: 10, stateTimeoutMs: 0 }),
     (error) => {
-      assert.match(error.message, /a starved host, not a busy page/, 'an unchanging quiet page keeps its starved-host label');
-      assert.doesNotMatch(error.message, /QUIET CONDITION is flapping/, 'and a single slow sample is not called flapping');
+      assert.match(error.message, /never held, and the state grace period did not fire/, 'a stuck-false condition is app state, not flapping');
+      assert.doesNotMatch(error.message, /QUIET CONDITION is flapping/, 'and an unchanging page is never called flapping');
       return true;
     },
   );
@@ -218,21 +224,18 @@ test('a caller-supplied ceiling does not fail a QUIET page on a slow host (airho
   // callers that took the 120s default. a11y passes timeoutMs:15000 and soak/cache-growth 10000, so on a host
   // whose Runtime.evaluate round-trip costs 5s a page with ZERO pending work and quietCondition:true still
   // threw "never reached quiescence within the 15000ms ceiling". The ceiling is now the caller's bound only
-  // while the page has not been seen quiet; after that the criterion decides, up to a doubled backstop.
+  // while the page has not been seen quiet; after that the criterion decides, bounded by observed
+  // progress: every new-longest quiet streak buys a fresh window (airhorn-ypfn).
   const slowButQuiet = await waitForQuiescence(sender(200, () => quiet), { timeoutMs: 400, pollMs: 10 });
   assert.equal(slowButQuiet.samples, 4, 'four quiet samples need ~800ms of sampling against a 400ms caller ceiling, and that is allowed');
   assert.ok(slowButQuiet.waitedMs >= 700, `the wait really did spend the sampling (${slowButQuiet.waitedMs}ms)`);
 
-  // The backstop is doubled, not removed: a page that is quiet but whose samples are so slow that even 2 x
-  // timeoutMs cannot produce four of them still fails, and says it is the doubled backstop.
-  await assert.rejects(
-    () => waitForQuiescence(sender(600, () => quiet), { timeoutMs: 400, pollMs: 10 }),
-    (error) => {
-      assert.match(error.message, /800ms ceiling \(checked between samples/, 'the failure names the DOUBLED backstop it hit');
-      assert.match(error.message, /DOUBLED backstop, because the page WAS quiet/, 'and says why it was doubled');
-      return true;
-    },
-  );
+  // The backstop is OBSERVED PROGRESS, not a doubled clock (airhorn-ypfn): quiet samples whose
+  // round-trips each outlive even 2 x timeoutMs keep buying fresh windows until the criterion is
+  // met, so this passes too where the doubled backstop used to throw.
+  const slower = await waitForQuiescence(sender(250, () => quiet), { timeoutMs: 100, pollMs: 10 });
+  assert.equal(slower.samples, 4, 'four quiet samples against a 100ms ceiling: observed progress outlives any clock');
+  assert.ok(slower.waitedMs >= 950, `the wait really did spend the starved sampling (${slower.waitedMs}ms)`);
 
   // A page that never goes quiet is still bounded by the caller's ceiling, not the doubled one.
   const started = Date.now();
@@ -241,4 +244,43 @@ test('a caller-supplied ceiling does not fail a QUIET page on a slow host (airho
     /300ms ceiling \(checked between samples/,
   );
   assert.ok(Date.now() - started < 2000, 'the not-quiet bound fires at the caller ceiling');
+});
+
+test('the ceiling failure names the condition waited for, the samples that changed, and the elapsed time (airhorn-ypfn)', async () => {
+  // "starved host" and "page never went quiet" were the recurring mis-attribution in this suite.
+  // The failure must carry the facts that distinguish them BY NAME: which quiet condition the wait
+  // was sampling, how many samples changed, and how long it actually waited.
+  await assert.rejects(
+    () => waitForQuiescence(
+      sender(10, (n) => ({ ...quiet, pendingTimers: (n % 3) + 1, quietCondition: false })),
+      { timeoutMs: 300, pollMs: 10, quietExpression: '!window.__hornSounding' },
+    ),
+    (error) => {
+      assert.match(error.message, /condition `!window\.__hornSounding`/, 'names WHICH condition it was waiting for');
+      assert.match(error.message, /after \d+ms and \d+ sample\(s\) \(\d+ changed/, 'names the elapsed time and the samples that changed');
+      assert.match(error.message, /never observed quiet/, '"never went quiet" is said, distinguishable from a starved host');
+      return true;
+    },
+  );
+});
+
+test('a quiet streak that plateaus below the criterion fails bounded, naming the plateau (airhorn-ypfn)', async () => {
+  // quiet, quiet, busy, repeat: streaks of two never reach four. Under observed progress only the
+  // FIRST new-longest streak buys a window, so the wait ends timeoutMs after that progress - not at
+  // 2 x timeoutMs from the start, and never unbounded - and names the plateau it stalled at.
+  const started = Date.now();
+  const plateau = () => sender(5, (n) => ({ ...quiet, quietCondition: n % 3 !== 0 }));
+  await assert.rejects(
+    () => waitForQuiescence(plateau(), { timeoutMs: 200, pollMs: 5 }),
+    (error) => {
+      assert.match(error.message, /best quiet streak 2 of the 4 required/, `names the plateau it stalled at: ${error.message}`);
+      // The deadline lands mid-pattern, so the honest attribution is one of two: the condition is
+      // flapping (trailing samples all changed) or the streak stopped improving (trailing samples
+      // repeated). What must never happen is the old lie - blaming the host.
+      assert.match(error.message, /(streak stopped improving|QUIET CONDITION is flapping)/, `an honest attribution is named: ${error.message}`);
+      assert.doesNotMatch(error.message, /a starved host/, 'and never blames the host for a page whose criterion is unreachable');
+      return true;
+    },
+  );
+  assert.ok(Date.now() - started < 3000, `the plateau wait is bounded by last progress + timeoutMs (${Date.now() - started}ms)`);
 });

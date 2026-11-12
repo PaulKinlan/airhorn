@@ -145,8 +145,11 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *   to claim 'ABSOLUTE CEILING', which is false: one sample is a single
  *   Runtime.evaluate round-trip bounded only by the caller's send, so a hung or
  *   starved sample overshoots the ceiling arbitrarily; the guarantee is that the
- *   wait ends within timeoutMs of the last COMPLETED sample, and a slow-sample
- *   world is pinned in tests/quiescence-bound.test.js). A wall clock cannot tell
+ *   wait ends within timeoutMs of the last COMPLETED sample in the never-quiet
+ *   world, and within timeoutMs of the last OBSERVED PROGRESS (a new-longest
+ *   quiet streak) once the page has been seen quiet (airhorn-ypfn), and a
+ *   slow-sample world is pinned in tests/quiescence-bound.test.js). A wall clock
+ *   cannot tell
  *   "still working" from "starved": on a loaded host a single Runtime.evaluate
  *   round-trip can take seconds, so a fixed 20 s bound failed a page that was
  *   ALREADY quiet and printed "work is still pending" next to a probe showing
@@ -156,10 +159,14 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *
  *   A CALLER-SUPPLIED ceiling bounds the wait only while the page has not been
  *   observed quiet with nothing pending (airhorn-jmpm). Once it has, the only
- *   thing left is sampling, so the criterion decides and the backstop doubles
- *   (2 x timeoutMs): a page that is already quiet must not fail because the host
- *   is slow, which is what a small explicit ceiling (a11y 15 s, soak/cache-growth
- *   10 s) used to do. A page that never goes quiet is still bounded by timeoutMs.
+ *   thing left is sampling, so the criterion decides and the backstop is
+ *   OBSERVED PROGRESS instead of a clock (airhorn-ypfn): every new-longest quiet
+ *   streak buys a fresh timeoutMs window, so a host whose quiet round-trips each
+ *   outlive the whole ceiling still reaches quiescence - a wall-clock bound
+ *   cannot tell "the sampler is slow" from "the criterion is unreachable". A
+ *   streak that stops improving (a flapping condition, one stuck false) buys no
+ *   new window and fails by name. A page that never goes quiet is still bounded
+ *   by timeoutMs.
  * @param {number} [options.stableSamples] consecutive quiet samples required
  * @param {number} [options.pollMs] gap between samples
  * @param {string} [options.quietExpression] extra in-page boolean expression
@@ -191,13 +198,16 @@ export async function waitForQuiescence(send, {
   let noProgressSamples = 0;
   let sawQuietSample = false;
   let quietSamples = 0;          // how many samples were drained+quiet, for the flapping ratio (airhorn-xi86)
+  let bestStreak = 0;            // the longest quiet streak ever observed (airhorn-ypfn)
+  let progressAt = started;      // when the streak last reached a new maximum: the observed progress
+  let unchangedSamples = 0;      // samples whose signature repeated the previous one, total
 
   // The ceiling is a BACKSTOP for an unwinnable wait, never the criterion (airhorn-ypfn, airhorn-jmpm):
   // while the page has not been seen quiet the caller's ceiling applies; once it has, the remaining work is
-  // sampling, so only the doubled backstop stops it.
-  const hardCeilingMs = timeoutMs * 2;
+  // sampling, and the backstop is the last OBSERVED PROGRESS - a new-longest quiet streak - plus timeoutMs,
+  // not any fixed wall-clock number (a slow host pays per round-trip, and its quiet samples are progress).
   for (;;) {
-    if (Date.now() - started >= (sawQuietSample ? hardCeilingMs : timeoutMs)) break;
+    if (Date.now() >= (sawQuietSample ? progressAt + timeoutMs : started + timeoutMs)) break;
     const result = await send('Runtime.evaluate', {
       expression: `(() => {
         const q = window.__quiescence;
@@ -225,7 +235,7 @@ export async function waitForQuiescence(send, {
       last.pendingTimers, last.pendingIntervals, last.pendingFetches,
       last.scheduled, last.completed, last.quietCondition,
     ]);
-    if (signature === lastSignature) noProgressSamples += 1;
+    if (signature === lastSignature) { noProgressSamples += 1; unchangedSamples += 1; }
     else { lastSignature = signature; noProgressSamples = 0; }
 
     if (last.probe !== 'present') {
@@ -270,8 +280,16 @@ export async function waitForQuiescence(send, {
       drainedAt = null;
     }
 
-    if (quiet) { sawQuietSample = true; quietSamples += 1; }
     stable = quiet ? stable + 1 : 0;
+    if (quiet) {
+      sawQuietSample = true;
+      quietSamples += 1;
+      // A NEW-LONGEST quiet streak is the progress this wait exists to observe (airhorn-ypfn): it
+      // buys a fresh timeoutMs window, so the criterion decides however slow the host is. A streak
+      // that stops improving - flapping, or a condition stuck false - buys no more windows and the
+      // wait ends, bounded and named at the throw below.
+      if (stable > bestStreak) { bestStreak = stable; progressAt = Date.now(); }
+    }
     if (stable >= stableSamples) {
       return { waitedMs: Date.now() - started, samples, pending: last };
     }
@@ -292,18 +310,27 @@ export async function waitForQuiescence(send, {
         ? `the page's work had drained and its quiet condition held on ${quietSamples} of ${samples} sample(s), ` +
           `but never on ${stableSamples} in a row, and the page's state kept changing (${noProgressSamples} with no change) - ` +
           `the QUIET CONDITION is flapping, not the host starving`
-        : `the page WAS quiet but the sampler only completed ${samples} round-trip(s) (${noProgressSamples} with no change) ` +
-          `before the ceiling - a starved host, not a busy page; raise timeoutMs or lower stableSamples/pollMs`
+        : `the page WAS quiet - best streak ${bestStreak} of the ${stableSamples} required, held on ${quietSamples} of ${samples} - ` +
+          `but the streak stopped improving for ${timeoutMs}ms, so the criterion is unreachable on this page, not slowed: ` +
+          `a host that keeps completing longer quiet streaks can no longer lose to a ceiling (airhorn-ypfn)`
       : `the page's work had drained but the quiet condition never held, and the state grace period did not fire`
     : noProgressSamples >= stableSamples
       ? `nothing the page reports changed across ${noProgressSamples + 1} consecutive samples, so this is a page that is not progressing rather than a host that is merely slow`
       : `the page kept changing across ${samples} samples, so it is still doing work, not merely starved`;
+  const waitedMsTotal = Date.now() - started;
   throw new Error(
-    `Page never reached quiescence within the ${sawQuietSample ? hardCeilingMs : timeoutMs}ms ceiling ` +
-    `(checked between samples; a slow sample completes first - airhorn-n1qu` +
-    `${sawQuietSample ? `; this is the DOUBLED backstop, because the page WAS quiet: the criterion decides and timeoutMs=${timeoutMs} no longer bounds the wait (airhorn-jmpm)` : `; the page was never observed quiet, so the caller's timeoutMs bounds it`}) ` +
-    `(${probe}, ${samples} samples, ${noProgressSamples} consecutive with no change): ${why}. ` +
-    `Quiescence needs ${stableSamples} consecutive quiet samples; the ceiling is a backstop, not the criterion (airhorn-ypfn).`,
+    (sawQuietSample
+      ? `Page never reached quiescence: ${timeoutMs}ms passed with no new-longest quiet streak ` +
+        `(best quiet streak ${bestStreak} of the ${stableSamples} required; the page WAS quiet, so observed progress ` +
+        `decides and the caller's timeoutMs=${timeoutMs} no longer bounds the wait - airhorn-jmpm/ypfn)`
+      : `Page never reached quiescence within the ${timeoutMs}ms ceiling ` +
+        `(checked between samples; a slow sample completes first - airhorn-n1qu; ` +
+        `the page was never observed quiet, so the caller's timeoutMs bounds it)`) +
+    ` after ${waitedMsTotal}ms and ${samples} sample(s) (${samples - unchangedSamples} changed, ${quietSamples} quiet, ` +
+    `${noProgressSamples} consecutive with no change at the end), ` +
+    `waiting for ${stableSamples} consecutive quiet samples with condition \`${quietExpression}\` ` +
+    `(${probe}): ${why}. ` +
+    `The ceiling is a backstop, not the criterion (airhorn-ypfn).`,
   );
 }
 
