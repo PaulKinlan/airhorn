@@ -27,6 +27,7 @@ import {
   normaliseComments,
   lastWord,
   beadIdsInRange,
+  attributes,
   proveInTrunk,
   decideBead,
   formatSupersede,
@@ -42,6 +43,28 @@ const TOOL = fileURLToPath(new URL('../tools/closure-claims.mjs', import.meta.ur
 // airhorn-jmpm, airhorn-merger, 2026-11-11T14:14:19Z - the note that starts the class.
 const STALE_NOTE =
   'QUEUE STALE: cleared:be942892 pins an ancestor of origin/fleet/impl-del@34a10e8b (branch moved since clearance), no corresponding branch points at this sha and it is NOT in origin/master@e2b5ad0d. Cannot independently land a historical commit by assuming the moved carrier\'s contents were reviewed. Cleared and merge-queue removed, merge-blocked. Owner/coord next action: consolidate into ONE immutable fleet carrier tip, author truthful LAND-SUMMARY for the whole delta, independent cross-family full-carrier verdict, then requeue; individual findings are COVERED BY after actual landing, not independently MERGED.';
+
+// airhorn-3wth, airhorn-merger, 2026-11-11T14:15:09Z - the same class in a different wording: the QUEUE
+// ENTRY resolved to a branch unrelated to the bead. Its own commit 2410a5fd IS in master (batch-six).
+const QUEUE_INVALID_NOTE =
+  'QUEUE INVALID: helper currently resolves fleet/u1v2-control@41fc47fd, a +1433-line 8-commit branch from c6445913 unrelated to this bead; reviewer explicitly limited its reproduction to single-commit delta 91c11e89..2410a5fd on DIFFERENT moved branch fleet/impl-del. A PASS comment for the test-only delta is not independent review of u1v2-control whole branch; cannot gate/push that carrier. Original cleared:41fc47fd + merge-queue removed, merge-blocked. Owner/coord next action: immutable reviewed carrier tip whose exact full delta and author LAND-SUMMARY include the intended 3wth change, then fresh independent full-carrier verdict and requeue.';
+
+// airhorn-14ht, airhorn-merger, 2026-11-11T22:42:56Z - a refusal whose subject is an older carrier, while
+// the bead itself closed COVERED BY a later one (610dbe78 is in master).
+const QUEUE_REFUSED_NOTE =
+  'QUEUE REFUSED (not landed/gated): bead blocked and cleared:6cfd720a points at fleet/812k-guard@6cfd720a, which has an explicit earlier cross-family FAIL on airhorn-14ht for forged stdout frames and an 812k FAIL, plus coord STOP/HOLD and recorded park. New reviewer PASS comment is internally inconsistent: header claims Delta 191d5ded..6cfd720a and Branch fleet/812k-guard, but all reproduced behavior and cached fast PASS are from DIFFERENT fleet/impl-brows-14ht@00fb47ba, delta 2cccb34f..00fb47ba. Helper rc0 cannot turn a reproduction on new bytes into clearance for old failed bytes. Cleared + queue removed, merge-blocked. Coord/author next: independently review exact full-delta tip on the CORRECT frozen branch, write truthful carrier LAND-SUMMARY, then queue matching carrier bead; old 812k-guard stays parked and cannot be borrowed.';
+
+// airhorn-nxuv.27, airhorn-impl-suite, 2026-11-11T16:27:51Z - a CONTENT CHECK that the content IS present.
+// "its exact hunk is deliberately not in master because a measurement contradicted it" is not a claim
+// that the bead did not land; reading it as one is the false-positive direction this tool must not take.
+const CONTENT_CHECK_NOTE =
+  "CONTENT CHECK against origin/master 191d5ded: PRESENT, but in the MEASURED-CORRECTED direction, not the branch's. Landing: f85f83c7 ('render-model: visibility:collapse takes the own verdict, measured (airhorn-9bki)'), merge 557cc06c; both verified ancestors. Current bytes tools/render-model.mjs:63-66 treat `visibility: 'collapse'` as 'own' (drop the element's own text, keep walking) and the comment names this bead's branch explicitly: 'The nxuv27 branch's none (prune the whole subtree) was the wrong direction: it dropped text Chromium paints.' tests/gate-map.test.js:675-682 pins the same measured facts, including a visibility:visible descendant override inside a collapsed row. So the defect ('collapse treated as visible text') is fixed; the branch's exact hunk is deliberately not in master because a browser measurement contradicted it.";
+
+// airhorn-nxuv.36, airhorn-merger, 2026-11-11T20:34:23Z - a MERGED closure that mentions "not landed"
+// about a withdrawn duplicate in its prose. Searching that prose for a negative phrase inverts the
+// record, which is why a landing verdict is read structurally (the comment OPENS with it).
+const MERGED_WITH_DUPLICATE_NOTE =
+  'MERGED cd3ac72250f8c7a1310d670fdf160e41da8326bd - no-SAB sleepSync bounded spin restores meaningful host-steal window and removes duplicate unreachable page-target throw; withdrawn partial duplicate 6bfbcecd not landed. Exact-tip fleet/impl-brows-nxuv36@8f04fbb9 independent full-delta cross-family review.';
 
 // The two hand-written corrections that followed it on the same bead (airhorn-land2, same day). They
 // QUOTE the stale note, which is how this tool tells "reporting the note" from "making the claim".
@@ -79,10 +102,39 @@ test('citations are stripped, and stripping can only hide a marker, never invent
   assert.match(stripCitations('QUEUE STALE: cleared:be942892'), /QUEUE STALE/);
 });
 
+test('the queue-entry notes in every wording this record contains are claims about the entry, not the work', () => {
+  const invalid = classifyNote(QUEUE_INVALID_NOTE);
+  assert.equal(invalid.state, 'stale-clearance');
+  assert.equal(invalid.pinned[0].role, 'cleared', 'the pinned commit is the branch tip the queue entry resolved to');
+  assert.equal(invalid.pinned[0].sha, '41fc47fd');
+
+  const refused = classifyNote(QUEUE_REFUSED_NOTE);
+  assert.equal(refused.state, 'stale-clearance');
+  assert.equal(refused.pinned[0].sha, '6cfd720a');
+});
+
+test('a content check that says the content IS present is not a stale claim', () => {
+  // The false positive this classifier must not have: the only stale-looking wording is the clause
+  // "deliberately not in master", which describes a hunk, not a bead.
+  assert.equal(classifyNote(CONTENT_CHECK_NOTE).state, 'other');
+  assert.equal(classifyNote("the branch's hunk is deliberately not in master because a measurement contradicted it").state, 'other');
+  // The copula is what makes it a claim about a commit.
+  assert.equal(classifyNote('and it is NOT in origin/master@e2b5ad0d, merge-blocked').state, 'stale-clearance');
+  assert.equal(classifyNote('the work is still not in master.').state, 'stale-clearance');
+  assert.equal(classifyNote('the carrier was not landed/gated: merge-blocked.').state, 'stale-clearance');
+});
+
 test('merge-blocked alone is a conflict note, and a conflict note makes no claim about the trunk', () => {
   const conflict = classifyNote('Merge conflict in src/horn.js; aborted the merge, removed merge-queue, merge-blocked. Owner/coord next action: rebase on master and requeue.');
   assert.equal(conflict.state, 'other');
   assert.equal(conflict.pinned.length, 0);
+});
+
+test('a landing verdict that opens the comment wins over a "not landed" clause about another commit', () => {
+  assert.equal(classifyNote(MERGED_WITH_DUPLICATE_NOTE).state, 'landed');
+  // The verdict must OPEN the comment; the same words later in a queue note are the merger's claim.
+  assert.equal(classifyNote('MERGED nothing of note. Later: not listed.').state, 'landed');
+  assert.equal(classifyNote('Note that cd3ac722 is not landed.').state, 'stale-clearance');
 });
 
 test('a landing claim is "landed", not a stale claim', () => {
@@ -171,7 +223,8 @@ test('the written comment names the proof, its method, and says the status is un
     ref: 'origin/master',
     refSha: '8b7ef0b2cccc',
   });
-  assert.match(subject, /whose subject names this bead/);
+  assert.match(subject, /the landing commit that attributes it is ffffffff/);
+  assert.match(subject, /whose subject is "Merge fleet\/batch-six \(airhorn-jmpm\): nine beads"/);
   assert.doesNotMatch(subject, /IS an ancestor of origin\/master@8b7ef0b2 \(git merge-base/);
 });
 
@@ -245,6 +298,27 @@ test('a pinned commit that is NOT an ancestor falls back to a trunk commit namin
   assert.equal(proof.method, 'subject-landing');
   assert.equal(proof.sha, carrier);
   assert.match(proof.attempts[0], /is NOT an ancestor of master/);
+});
+
+test('only ATTRIBUTION proves a landing: a subject that mentions the id in prose proves nothing', (t) => {
+  const { dir } = buildHistory(t);
+  // A merge whose prose happens to name the bead is not a landing for it; give it a commit to find.
+  git(dir, ['checkout', '-q', '-b', 'fleet/unrelated']);
+  commit(dir, 'unrelated.txt', 'unrelated\n', 'airhorn-other: unrelated work', '2026-11-11T13:00:00+00:00');
+  git(dir, ['checkout', '-q', 'master']);
+  git(dir, ['merge', '--no-ff', '-q', '-m', 'Merge fleet/unrelated (airhorn-other): follow-up to the airhorn-aabn comment', 'fleet/unrelated'], {
+    GIT_AUTHOR_DATE: '2026-11-11T13:00:00+00:00',
+    GIT_COMMITTER_DATE: '2026-11-11T13:00:00+00:00',
+  });
+  const proof = proveInTrunk({ cwd: dir, ref: 'master', beadId: 'airhorn-aabn', pinned: [] });
+  assert.equal(proof.state, 'unproven');
+
+  // Both attribution conventions are accepted.
+  assert.equal(attributes("airhorn-aabn: a bead's own commit", 'airhorn-aabn'), true);
+  assert.equal(attributes('Merge fleet/x (airhorn-aabn): one bead', 'airhorn-aabn'), true);
+  assert.equal(attributes('Pin the refusal (airhorn-a, airhorn-aabn).', 'airhorn-aabn'), true);
+  assert.equal(attributes('the airhorn-aabn comment is stale', 'airhorn-aabn'), false);
+  assert.equal(attributes('airhorn-aabn: but not another bead', 'airhorn-another'), false);
 });
 
 test('no ancestor and no subject naming the bead is "unproven" - the note may be true', (t) => {

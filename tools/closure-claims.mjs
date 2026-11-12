@@ -37,8 +37,11 @@
  *   node tools/closure-claims.mjs --require-clear               # exit 1 if any correction is outstanding
  *
  * WHAT COUNTS AS A STALE LAST WORD. The LAST comment on a bead that is CLOSED, whose text ASSERTS (not
- * quotes, not reports) that the work is not in the trunk: `QUEUE STALE`, `pins an ancestor of`, `no
- * corresponding branch points at this sha`, `is NOT in origin/master`. `merge-blocked` alone is NOT a
+ * quotes, not reports) that the work is not in the trunk: a queue-entry note (`QUEUE STALE`, `QUEUE
+ * INVALID`, `QUEUE REFUSED`), `pins an ancestor of`, `no corresponding branch points at this sha`, `is
+ * NOT in origin/master`, `not landed`. "NOT in master" only counts with its copula ("is/are/still NOT in
+ * master"), because "its hunk is deliberately not in master because a measurement contradicted it" is a
+ * content check that the content IS present (airhorn-nxuv.27). `merge-blocked` alone is NOT a
  * marker - the merger labels a bead merge-blocked for a real merge conflict too, and a conflict note
  * makes no claim about the trunk. A comment that quotes such a note ("the last comment is a merger
  * 'QUEUE STALE ... it is NOT in origin/master' note") is REPORTING it, not making the claim: quoted
@@ -49,8 +52,9 @@
  * WHAT COUNTS AS PROOF. The note itself names the commit it is talking about (`cleared:<sha>`, or
  * `tip <sha>`), so that is what gets checked, against the trunk, by ancestry:
  * `git merge-base --is-ancestor <sha> <ref>` -> 0. If the pinned sha is not an ancestor, the tool falls
- * back to a trunk commit whose subject names the bead (`Merge fleet/<branch> (<bead>): ...`), and says
- * so in the comment it writes. If neither holds, the row is `review:unproven` and NOTHING is written:
+ * back to a trunk commit whose subject ATTRIBUTES the bead - `(<bead>)` in a parenthetical, or the
+ * repo's own `<bead>: <what changed>` subject - and says so in the comment it writes. A subject that
+ * merely mentions the id in prose proves nothing. If neither holds, the row is `review:unproven` and NOTHING is written:
  * a stale-sounding note whose pinned commit is genuinely absent from the trunk may well be true, and
  * this tool never writes a correction it cannot evidence.
  *
@@ -78,15 +82,25 @@ export const DECISIONS = ['supersede', 'skip:not-closed', 'skip:last-word-ok', '
  * about the trunk, which is what makes them checkable. `merge-blocked` is deliberately not here.
  */
 const STALE_MARKERS = [
-  /QUEUE\s+STALE/i,
+  // The queue-entry notes: the merger saying THIS QUEUE ENTRY cannot be landed. All three wordings are
+  // in this project's record (QUEUE STALE on the seven of 2026-11-11, QUEUE INVALID airhorn-3wth,
+  // QUEUE REFUSED airhorn-14ht), and every one of them is about the entry, not about the work.
+  /\bQUEUE\s+(?:STALE|INVALID|REFUSED)\b/i,
   /\bpins an ancestor of\b/i,
   /\bno corresponding branch points at this sha\b/i,
-  /\bis\s+NOT\s+in\s+origin\/master\b/i,
-  /\bNOT\s+in\s+(?:origin\/)?master\b/i,
+  // "NOT in master" must be a claim about a commit, so the copula is part of the marker: "its hunk is
+  // deliberately not in master because a measurement contradicted it" (airhorn-nxuv.27) is a CONTENT
+  // CHECK that the content is present, and reading that as a stale claim is the one wrong direction
+  // this tool must not take.
+  /\b(?:is|are|it is|still)\s+NOT\s+in\s+(?:origin\/)?master\b/i,
+  /\bnot landed\b/i,
 ];
 
 /** A comment that already corrects (or is our own correction) - never re-corrected. */
 const SUPERSEDE_MARKERS = [/SUPERSEDED-BY-LANDING/, /\bsupersede[ds]?\b/i, /^[ \t]*CORRECTION\b/im];
+
+/** A comment that OPENS with a landing verdict (MERGED <sha>, LANDED <sha>, COVERED BY <sha>). */
+const LANDING_VERDICT = /^[\s*_]*(?:MERGED|LANDED|COVERED BY)\s+(?:in\s+|by\s+)?[0-9a-f]{7,40}\b/i;
 
 /** The commits a stale note pins as "this is the work and it is not in the trunk", most specific first. */
 const PINNED_PATTERNS = [
@@ -138,6 +152,10 @@ export function classifyNote(text) {
   const claim = stripCitations(raw);
   const pinned = pinnedShas(claim);
   if (SUPERSEDE_MARKERS.some((pattern) => pattern.test(claim))) return { state: 'superseded', pinned };
+  // A landing VERDICT is read structurally - the comment OPENS with the verb and the commit - exactly
+  // as the gate verdict is: airhorn-nxuv.36's closure says "MERGED cd3ac722... ; withdrawn partial
+  // duplicate 6bfbcecd not landed", and searching its prose for "not landed" would invert the record.
+  if (LANDING_VERDICT.test(claim)) return { state: 'landed', pinned };
   if (STALE_MARKERS.some((pattern) => pattern.test(claim))) return { state: 'stale-clearance', pinned };
   if (/\b(landed|MERGED|COVERED BY|in origin\/master|is an ancestor|an ancestor of)\b/i.test(claim)) return { state: 'landed', pinned };
   return { state: 'other', pinned };
@@ -222,6 +240,23 @@ export function beadIdsInRange(cwd, range, { prefix = null } = {}) {
   return [...ids];
 }
 
+/**
+ * Does a commit subject ATTRIBUTE this bead? Two shapes, both conventions this repo already uses:
+ * `airhorn-xxxx: <what changed>` (a bead's own commit, and the strongest signal) and the bead inside a
+ * parenthetical - `... (airhorn-xxxx)` / `... (airhorn-a, airhorn-b)`. A subject that merely mentions the
+ * id in prose ("the airhorn-xy comment") is not a landing for it, so it proves nothing.
+ */
+export function attributes(subject, beadId) {
+  const text = String(subject || '');
+  const own = new RegExp(`^${escapeRegex(beadId)}:`, 'i');
+  if (own.test(text)) return true;
+  for (const match of text.matchAll(/\(([^)]*)\)/g)) {
+    const ids = match[1].split(/[\s,]+/).map((token) => token.replace(/[.;]+$/, ''));
+    if (ids.some((id) => id.toLowerCase() === String(beadId).toLowerCase())) return true;
+  }
+  return false;
+}
+
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -245,13 +280,12 @@ export function proveInTrunk({ cwd, ref, beadId, pinned = [] }) {
     attempts.push(`pinned ${role} commit ${sha} is NOT an ancestor of ${ref}`);
   }
   const named = git(cwd, ['log', '--format=%H%x1f%s', '--fixed-strings', `--grep=${beadId}`, ref]);
-  if (named.ok) {
-    for (const line of named.stdout.split('\n').filter(Boolean)) {
-      const [sha, subject = ''] = line.split('\x1f');
-      if (!new RegExp(`\\(${beadId}\\)|\\b${beadId}\\b`).test(subject)) continue;
-      if (!git(cwd, ['merge-base', '--is-ancestor', sha, ref]).ok) continue;
-      return { state: 'proven', method: 'subject-landing', sha, subject, attempts };
-    }
+  const attributed = named.ok
+    ? named.stdout.split('\n').filter(Boolean).map((line) => line.split('\x1f')).filter(([, subject = '']) => attributes(subject, beadId))
+    : [];
+  for (const [sha, subject] of attributed) {
+    if (!git(cwd, ['merge-base', '--is-ancestor', sha, ref]).ok) continue;
+    return { state: 'proven', method: 'subject-landing', sha, subject, attempts };
   }
   attempts.push(`no trunk commit's subject names ${beadId}`);
   return { state: 'unproven', method: null, sha: null, attempts };
@@ -296,12 +330,12 @@ export function decideBead({ beadId, status, comments, proof }) {
 export function formatSupersede({ bead, proof, ref, refSha: trunk }) {
   const short = (sha) => String(sha).slice(0, 8);
   const evidence = proof.method === 'subject-landing'
-    ? `its work is in the trunk: the landing commit for it is ${proof.sha} (${short(proof.sha)}), whose subject names this bead ("${String(proof.subject || '').replace(/\s+/g, ' ').trim()}") and which is an ancestor of ${ref}@${short(trunk)}`
+    ? `its work is in the trunk: the landing commit that attributes it is ${proof.sha} (${short(proof.sha)}), whose subject is "${String(proof.subject || '').replace(/\s+/g, ' ').trim()}", and it is an ancestor of ${ref}@${short(trunk)}`
     : `its landing commit ${short(proof.sha)} IS an ancestor of ${ref}@${short(trunk)} (git merge-base --is-ancestor ${short(proof.sha)} ${ref} -> 0)`;
   return [
-    `${MARKER} (tools/closure-claims.mjs, airhorn-3di8). This bead's last word before this comment was a merger stale-clearance note - a "QUEUE STALE ... it is NOT in origin/master@<baseline> ... merge-blocked" note - and it now misreads: ${evidence}.`,
+    `${MARKER} (tools/closure-claims.mjs, airhorn-3di8). This bead's last word before this comment was the merger refusing to land a QUEUE ENTRY that pointed at this bead's branch - a "QUEUE STALE / INVALID / REFUSED ... it is NOT in origin/master@<baseline> ... merge-blocked" note - and it now misreads: ${evidence}.`,
     '',
-    'That earlier note was CORRECT when written: it answered "can this clearance land this historical commit NOW?", and a clearance pinned on an ancestor cannot land a carrier that has moved. It never answered "will the work reach master?". A later carrier merged that content, which is what this comment records.',
+    'That earlier note was CORRECT when written: it answered "can this clearance land this historical commit NOW?", and a clearance pinned on an ancestor (or on a moved/misresolved branch) cannot land it. It never answered "will the work reach master?". A later carrier merged that content, which is what this comment records.',
     '',
     'The STATUS is unchanged (closed) - this is a record correction, not a reopen, and nothing is requeued. Read the trunk commit above as this bead\'s landing.',
   ].join('\n');
