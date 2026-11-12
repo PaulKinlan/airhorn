@@ -304,6 +304,9 @@
  "tools/lib/perf-metrics.mjs": [
   "tests/tool-verdicts.test.js"
  ],
+ "tools/lib/pwa-manifest.mjs": [
+  "tests/pwa-manifest.test.js"
+ ],
  "tools/lib/static-server.mjs": [
   "tests/test-support.test.js",
   "tests/csp-boot.test.mjs",

@@ -58,6 +58,8 @@
 # why: docs/coverage-map.md#public-headers
 # why: docs/coverage-map.md#public-headers
 # why: docs/coverage-map.md#tools-closure-claims-mjs
+# The installability rules the HTTPS proof claims (airhorn-nxuv.28): the start_url must be
+# inside the worker scope, and the manifest must declare the exact icon sizes it needs.
 !*.md
 .beads/config.yaml	tests/beads-config.test.js
 .fleet/coverage-contract.json	tests/gate-smoke.test.js tests/gate-map.test.js
@@ -121,6 +123,7 @@ tools/landings.mjs	tests/landings.test.js
 tools/lib/**	tests/test-support.test.js
 tools/lib/endpoint-growth.mjs	tests/soak-verdict.test.js
 tools/lib/perf-metrics.mjs	tests/tool-verdicts.test.js
+tools/lib/pwa-manifest.mjs	tests/pwa-manifest.test.js
 tools/lib/static-server.mjs	tests/test-support.test.js tests/csp-boot.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs
 tools/lib/suite-driver.mjs	tests/mutation-check.test.js
 tools/lib/suite-guard.mjs	tests/mutation-check.test.js
