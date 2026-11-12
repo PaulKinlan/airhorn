@@ -701,10 +701,13 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   // touching the file has already run above (the target guard and the unique-occurrence check), so a dry run here is
   // exactly the plan that a real run would carry out - printed, and nothing done.
   if (args.dryRun) {
-    // ...and a plan a real run would REFUSE is not a plan (airhorn-qf30). Suite presence is a pure stat: the run
-    // abandons on it without writing anything, so the rehearsal must abandon on it too - in the order the run reaches
-    // the checks, and with the run's own wording, or the rehearsal green-lights a command whose only outcome is a
-    // refusal. Only stat-able refusals belong here; anything that needs the mutation on disk stays a run-time refusal.
+    // ...and a plan a real run would REFUSE is not a plan (airhorn-qf30). Suite presence is a pure stat, so the
+    // rehearsal can decide it here without touching the file - in the order the run reaches the checks and with the
+    // run's own wording, or the rehearsal green-lights a command whose only outcome is a refusal. Only stat-able
+    // refusals belong in this block: the real run REFUSES THESE ONLY AFTER IT HAS WRITTEN THE MUTANT (it applies the
+    // mutation, prints 'mutant applied ... verified on disk', refuses inside runSuite, and restores in the finally),
+    // which is exactly why the dry run must decide them from the filesystem rather than by imitating that order
+    // (airhorn-jcdo).
     for (const candidate of [args.suiteOld, args.suite]) {
       const presence = candidate === undefined ? null : suitePresenceProblem(candidate, cwd);
       if (presence) {
