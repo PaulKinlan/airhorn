@@ -111,32 +111,36 @@ test('the tool no longer asks whether the scope is the string / and does assert 
     'the HTTPS leg must FAIL when a required icon size is missing');
 });
 
-test('the scope rule is a SEGMENT prefix, which a string prefix is not (airhorn-5006)', () => {
-  // The gap the browser could not close: reg.scope always carries its trailing slash, so in a
-  // real page both rules refuse /app-evil/ against /app/ and the two are indistinguishable.
-  // Here the scope has NO trailing slash, which is where the rules disagree.
-  const STRING_PREFIX_ONLY = (scope, startUrl) => startUrl.startsWith(scope);
+test('scope matching is the platform\u2019s PREFIX rule, not a path-segment rule (airhorn-5006, airhorn-c51i)', () => {
+  // I first wrote this as a segment-boundary assertion (airhorn-5006) and a reviewer took it
+  // apart with the specs (airhorn-c51i): Service Workers' 'Match Service Worker Registration'
+  // matches on the SERIALIZED url prefix, with a normative note that "prefix-of/resource.html"
+  // is within scope "prefix", and the Web App Manifest's 'within scope' algorithm compares the
+  // target and scope as strings, so query and fragment never move a url out of scope. The rule
+  // below is therefore the platform's, and the cases that would distinguish a segment rule are
+  // exactly the cases that PROVE the platform is not one.
   const facts = {
     scope: 'https://localhost:8443/app',
-    startUrl: '/app-evil/index.html',
     manifestHref: 'https://localhost:8443/app/manifest.json',
     pageHref: 'https://localhost:8443/app/',
   };
-  const naive = STRING_PREFIX_ONLY(facts.scope, new URL(facts.startUrl, facts.pageHref).href);
-  assert.equal(naive, true, 'a string prefix DOES accept /app-evil inside /app - that is the bug');
+  const inScope = (startUrl, scope = facts.scope) => startUrlInScope({ ...facts, scope, startUrl }).inScope;
 
-  const verdict = startUrlInScope(facts);
-  assert.equal(verdict.inScope, false, `a segment prefix must refuse it: ${verdict.reason}`);
-
-  // ...and the sibling cases, so the boundary rule is not just "refuse siblings":
-  assert.equal(startUrlInScope({ ...facts, startUrl: '/app/index.html' }).inScope, true,
-    'a real child of the scope is still in scope');
-  assert.equal(startUrlInScope({ ...facts, startUrl: '/app' }).inScope, true,
-    'the scope itself is in scope');
-  // A scope WITH its trailing slash does not accept its own path without one: /app is not
-  // inside /app/ (the URL model, not string slicing).
-  assert.equal(startUrlInScope({ ...facts, scope: 'https://localhost:8443/app/', startUrl: '/app' }).inScope,
-    false, '/app is not inside /app/');
+  // Same path, different query or fragment: in scope (a segment rule would wrongly refuse).
+  assert.equal(inScope('/app?source=pwa'), true, 'a query does not move a start_url out of scope');
+  assert.equal(inScope('/app#home'), true, 'a fragment does not move a start_url out of scope');
+  // Plain children and the scope itself.
+  assert.equal(inScope('/app/'), true);
+  assert.equal(inScope('/app/index.html'), true);
+  // A scope WITHOUT its trailing slash is a prefix, so a sibling that shares the prefix is
+  // inside it. This is the spec's own example, not an accident.
+  assert.equal(inScope('/app-evil/index.html'), true,
+    'https://h/app is a prefix of https://h/app-evil/index.html, so the platform puts it in scope');
+  // The /app-evil protection therefore comes from the trailing slash the platform supplies.
+  assert.equal(inScope('/app-evil/index.html', 'https://localhost:8443/app/'), false,
+    'with the scope the browser actually reports (/app/), the sibling is outside');
+  // And an unrelated path is outside either way.
+  assert.equal(inScope('/other/index.html', 'https://localhost:8443/app/'), false);
 });
 
 test('the icon enumeration: every spelling the manifest allows is exercised (airhorn-5006)', () => {
