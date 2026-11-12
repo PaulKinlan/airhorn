@@ -52,3 +52,43 @@ test('olju: the drift rule is WIRED into the audit, not merely exported', () => 
   assert.match(source, /if \(drift\) throw new Error\(`resilience-audit: \$\{drift\}`\)/,
     'and a drift must abort the audit - a row would let the run report OK over a selector no scenario answers');
 });
+
+test('olju: a drift ABORTS a drifted tool for real - the pin is behavioural, not text-shaped (airhorn-peq9)', () => {
+  // airhorn-peq9: the wiring pin above is text-shaped, so a mutant that keeps both matched fragments
+  // intact as DEAD CODE (an early return above them, a conditional that never fires) greens this whole
+  // suite while a drifted tool exits 0 - the exact hole the olju fix existed to close, resurrected under
+  // a green pin. This world proves the abort by EXECUTION: copy tools/ into a tmp dir, rename one
+  // want() literal in the copy (a suite-side typo, the original defect), and require the copy to exit 1
+  // naming BOTH diverging sides. A dead-coded throw in the real tool is inherited by the copy, the copy
+  // then exits 0 on the drifted ids, and this world goes red - measured before landing (the pin was
+  // RED-proven against the dead-code mutant of the throw; the regex world above stays green on it, which
+  // is precisely why this world exists).
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'olju-drift-'));
+  try {
+    const toolsCopy = path.join(out, 'tools');
+    fs.cpSync(path.join(root, 'tools'), toolsCopy, { recursive: true });
+    // The copy resolves dist/ against ITS own root (startServer shims the served sw.js even on a
+    // 'none' run), so it needs the real built dist to get past server setup and reach the drift check.
+    // Read-only: the shim stamps what it SERVES, never the file on disk.
+    fs.symlinkSync(path.join(root, 'dist'), path.join(out, 'dist'), 'dir');
+    const copyPath = path.join(toolsCopy, 'resilience-audit.mjs');
+    const copy = fs.readFileSync(copyPath, 'utf8');
+    assert.match(copy, /want\('quota'\)/, 'the drift target literal must exist for this world to mean anything');
+    const drifted = copy.replace("want('quota')", "want('qu0ta')");
+    assert.notEqual(drifted, copy, 'the drift edit must actually change the copy');
+    assert.doesNotMatch(drifted, /want\('quota'\)/, 'the original literal must be gone, not duplicated');
+    fs.writeFileSync(copyPath, drifted);
+    const run = spawnSync(process.execPath, [copyPath], {
+      env: { ...process.env, RESILIENCE_ONLY: 'none', RESILIENCE_OUT: path.join(out, 'res'), CHROME_BIN: '/nonexistent-chrome' },
+      encoding: 'utf8', timeout: 60000,
+    });
+    const said = run.stdout + run.stderr;
+    assert.equal(run.status, 1, `a drifted tool must ABORT with rc 1 (got ${run.status}):
+${said}`);
+    assert.match(said, /resilience-audit: scenario-id drift/, 'the abort must be the drift error, not an incidental failure');
+    assert.match(said, /only in KNOWN_SCENARIOS: quota/, 'it must name the side the rename left behind');
+    assert.match(said, /only in want\(\): qu0ta/, 'and the side the rename invented');
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+});
