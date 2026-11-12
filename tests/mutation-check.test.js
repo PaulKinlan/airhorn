@@ -524,6 +524,25 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
       assert.doesNotMatch(tamper.stdout, /verdict:/, `${world}: a refusal, never a verdict`);
     }
 
+    // airhorn-lucn, on airhorn-gb9y's rule: an instrument that can vanish in silence is weaker than the ones it
+    // extends. The reallyExit boundary exists only if the preload's defineProperty succeeds, so a failure to install
+    // it must be the REFUSAL, not a comment - otherwise a future preload/load-order change, or a node that made the
+    // property non-configurable, silently re-opens the launder path with nothing recorded anywhere. Driven here by
+    // making the property un-redefinable BEFORE the guard loads (a prior --import), which is exactly that shape; the
+    // honest load below is the control, so "it died" cannot be satisfied by refusing every suite.
+    const stub = path.join(tmp, 'k-lucn-no-redefine.mjs');
+    fs.writeFileSync(stub, "Object.defineProperty(process, 'reallyExit', { configurable: false, enumerable: false, writable: false, value: process.reallyExit });\n");
+    const guardPath = path.join(root, 'tools', 'lib', 'suite-guard.mjs');
+    const cannotInstall = spawnSync(process.execPath, ['--import', stub, '--import', guardPath, '-e', 'console.log("ALIVE")'], { encoding: 'utf8' });
+    assert.doesNotMatch(String(cannotInstall.stdout), /ALIVE/,
+      `a guard that could not install the reallyExit boundary must refuse, not load (airhorn-lucn): it printed ${JSON.stringify(cannotInstall.stdout)} and exited ${cannotInstall.status}`);
+    assert.equal(cannotInstall.signal, 'SIGKILL',
+      `the refusal must be the sentinel's own death (airhorn-lucn/gb9y), got signal=${cannotInstall.signal} status=${cannotInstall.status} stderr=${String(cannotInstall.stderr).slice(0, 200)}`);
+    const honestLoad = spawnSync(process.execPath, ['--import', guardPath, '-e', 'console.log("ALIVE-OK")'], { encoding: 'utf8' });
+    assert.equal(honestLoad.status, 0,
+      `control: an installable boundary must not refuse (airhorn-lucn), got signal=${honestLoad.signal} status=${honestLoad.status} stderr=${String(honestLoad.stderr).slice(0, 200)}`);
+    assert.match(String(honestLoad.stdout), /ALIVE-OK/);
+
     // Honest churn must stay unrefused: node:test's own harness listener registers by APPEND (never
     // ahead of the preload sentinel), and a suite listener appended behind the sentinel never runs
     // ahead of it - so adding and removing one hides nothing and is not manipulation.

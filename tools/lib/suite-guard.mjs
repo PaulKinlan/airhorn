@@ -44,6 +44,20 @@ const kill = process.kill.bind(process);
 const nextTick = process.nextTick.bind(process);
 const listenerList = process.listeners.bind(process);
 
+// The one statement this process can make is its own death, so the refuser is defined before ANY
+// instrument that can reach it - including the load-time ones below (airhorn-lucn: calling it from
+// the reallyExit install catch hit this block's own TDZ and produced a load crash instead of a
+// refusal, which is a different and misleading sentence to the operator).
+let refused = false;
+function refuse() {
+  if (refused) return;
+  refused = true;
+  // No JS runs after SIGKILL, so no exit listener, swallow or rescue callback can turn this
+  // into the clean exit the laundering shapes need. The parent sees a suite process that did
+  // not finish cleanly and refuses by name — the one fact this process can state.
+  kill(process.pid, 'SIGKILL');
+}
+
 // The sentinel is FIRST on the rejection channel, so it is the one place that learns a rejection
 // was delivered at all. It writes nothing and refuses nothing at delivery time - see onExit.
 let sawRejection = false;
@@ -95,8 +109,14 @@ try {
     set: () => refuse(),
   });
 } catch {
-  // Not reachable on a supported node (the property is configurable at load), but if it ever were,
-  // onExit still covers process.exit and the residual boundary is stated in docs/trust-boundary.md.
+  // airhorn-lucn, on airhorn-gb9y's rule: an instrument that can vanish in silence is weaker than the
+  // ones it extends. The boundary exists only if this accessor does, so a failure to install it is not
+  // a comment to leave behind - it is the refusal, stated where it happens. Unreachable on a node that
+  // lets the property be redefined at preload (measured: it is a configurable own property), so the
+  // honest path never pays for it; if a future preload/load-order change or a stricter node makes the
+  // property non-configurable while process.exit still works, every suite refuses instead of every
+  // suite silently losing the reallyExit boundary.
+  refuse();
 }
 const onNewListener = (name, fn) => {
   if (name === 'unhandledRejection' && fn !== sentinel) {
@@ -115,15 +135,6 @@ const onRemoveListener = (name, fn) => {
   }
 };
 
-let refused = false;
-function refuse() {
-  if (refused) return;
-  refused = true;
-  // No JS runs after SIGKILL, so no exit listener, swallow or rescue callback can turn this
-  // into the clean exit the laundering shapes need. The parent sees a suite process that did
-  // not finish cleanly and refuses by name — the one fact this process can state.
-  kill(process.pid, 'SIGKILL');
-}
 
 process.on('unhandledRejection', sentinel);
 process.on('uncaughtExceptionMonitor', onMonitor);
