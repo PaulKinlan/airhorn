@@ -276,8 +276,9 @@ async function testBootWatchdog() {
   // answered by the document being left (airhorn-ie0b). The other navigations keep
   // the waits they had, because their outgoing document cannot satisfy that wait:
   // Case 1 starts from about:blank; Case 5 follows the Case 4 noscript page, where
-  // scripting is disabled and no bundle ran; Case 10 follows the Case 9 page, which
-  // the suite asserts is unbooted (:827-828). Guarding those
+  // scripting is disabled and no bundle ran; Case 10 follows the Case 9 page, and the
+  // suite asserts that page is unbooted (`stillDead`: no `window.__airhorn` after the
+  // setup throw). Guarding those
   // three would be a rule the code cannot justify - fewer guards, each with a
   // reason, is the deliverable.
   //
@@ -285,8 +286,8 @@ async function testBootWatchdog() {
   // coverage it does not have: Case 7's unstyled navigation and Case 8's slow-bundle
   // navigation guard themselves with their own outgoing-document markers instead of
   // calling navigateFresh - Case 7 marks `__case7Outgoing` and waits for marker-absent
-  // PLUS `__airhorn` (:624-625, airhorn-byl0), Case 8 marks `__case8Outgoing` and waits
-  // for marker-absent PLUS `__airhornBooted` (:891-893), because its post-boot signal is
+  // PLUS `__airhorn` (airhorn-byl0), Case 8 marks `__case8Outgoing` and waits
+  // for marker-absent PLUS `__airhornBooted`, because its post-boot signal is
   // `__airhornBooted` and its marker has to be set after the fetch hold is armed. (This
   // paragraph said Case 7 still waited bare until 2026-11-12; the Case 7 fix had already
   // landed, so the comment was describing a hole the suite no longer had - a stale claim
