@@ -341,18 +341,19 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
     // exactly that property one level up. Multiply the ANCESTOR chain above the button:
     // the product is the subtree's real paint alpha (one zero zeroes the whole subtree).
     let ancestorProduct = 1;
-    let ancestorFilterProduct = 1;
+    const ancestorFilters = [];
     for (let n = b.parentElement; n; n = n.parentElement) {
       const ncs = getComputedStyle(n);
       ancestorProduct *= Number(ncs.opacity);
       // airhorn-5exb: a filter is not inherited either, and a filter: opacity(0) on a wrap zeroes the
       // subtree's paint while every inherited property - including opacity - still reads healthy, and
-      // hit testing is unaffected. Multiply the chain's opacity() factors the same way the opacity
-      // clause multiplies the chain's opacity, so the wrap-transparent defect has no road left.
-      for (const m of String(ncs.filter || '').matchAll(/\\bopacity\\(\\s*([0-9.]+)\\s*\\)/g)) {
-        ancestorFilterProduct *= Number(m[1]);
-      }
-      if (ancestorProduct === 0 && ancestorFilterProduct === 0) break;
+      // hit testing is unaffected. Collect the chain's computed filter STRINGS and let the Node side
+      // (filterOpacityProduct) decide - parsing a CSS number in page code meant a once-escaped regex
+      // that matched nothing, and a numeric-only reader that silently dropped opacity(1e-07)
+      // (airhorn-w6jt). Raw facts out, one parser in.
+      const chainFilter = String(ncs.filter || '');
+      if (chainFilter && chainFilter !== 'none') ancestorFilters.push(chainFilter);
+      if (ancestorProduct === 0) break;
     }
     // airhorn-iqrz (gap 2): coveredBy below answers 'an overlay covers the centre', but it
     // conflates 'the button itself was hit' with 'NOTHING was hit' - both leave it null
@@ -369,7 +370,7 @@ async function probeOrigin(cdp, originUrl, label, expectSecure) {
       rect: { width: rect.width, height: rect.height },
       opacity: cs.opacity,
       ancestorOpacity: String(ancestorProduct),
-      ancestorFilter: String(ancestorFilterProduct),
+      ancestorFilters,
       filter: cs.filter,
       color: cs.color,
       backgroundColor: cs.backgroundColor,
@@ -539,6 +540,33 @@ export function classifyPaintAlpha(c) {
  * remained: an ANCESTOR's opacity (read as the product of the chain above the button) and a
  * centre hit-test that comes back EMPTY (a clip/shrink that removes the button from hit
  * testing while its rect still claims a box). */
+/* airhorn-5exb / airhorn-w6jt: read the opacity() factors out of a computed `filter` string.
+ *
+ * A computed filter can carry several functions ('blur(2px) opacity(0.02)') and Chrome serialises a
+ * tiny alpha in EXPONENT notation ('opacity(1e-07)' for `opacity(1e-7)`), so the number reader takes
+ * the whole CSS number token - optional sign, decimal, exponent, optional percentage - and treats a
+ * percentage as a fraction. An argument it cannot read is returned as `unreadable` rather than
+ * silently counting as 1: a paint the proof cannot evaluate is refused by name, never greened.
+ */
+export function filterOpacityProduct(filter) {
+  let product = 1;
+  let unreadable = null;
+  // One level of nesting is allowed inside the argument, so opacity(var(--a)) reports 'var(--a)' rather
+  // than truncating at the first ')', which would name the wrong thing in the refusal.
+  for (const match of String(filter || '').matchAll(/\bopacity\(((?:[^()]|\([^()]*\))*)\)/g)) {
+    const raw = String(match[1]).trim();
+    const isPercent = raw.endsWith('%');
+    const body = isPercent ? raw.slice(0, -1) : raw;
+    const value = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(body) ? Number(body) : NaN;
+    if (!Number.isFinite(value)) {
+      if (unreadable === null) unreadable = raw;
+      continue;
+    }
+    product *= isPercent ? value / 100 : value;
+  }
+  return { product, unreadable };
+}
+
 export function affordanceProblem(btn) {
   if (btn.display === 'none') return 'display is none, so nothing is painted';
   if (btn.visibility !== 'visible') return `visibility is ${btn.visibility}`;
@@ -557,14 +585,38 @@ export function affordanceProblem(btn) {
   if (btn.ancestorOpacity !== undefined && Number(btn.ancestorOpacity) <= 0.05) {
     return `an ancestor's opacity is ${btn.ancestorOpacity}, so the button's whole subtree paints (almost) nothing`;
   }
-  if (typeof btn.filter === 'string' && /\bopacity\(0(\.0+)?\)/.test(btn.filter)) {
-    return `filter zeroes the opacity ('${btn.filter}') - checkVisibility does not consult filters`;
+  if (typeof btn.filter === 'string' && btn.filter !== 'none') {
+    // airhorn-w6jt: the own-filter read is the shared parser too, so an exponent spelling reaches the
+    // same verdict instead of slipping past a literal-looking regex, and an opacity() argument that
+    // cannot be read REFUSES rather than being treated as 1.
+    const own = filterOpacityProduct(btn.filter);
+    if (own.unreadable !== null) {
+      return `cannot evaluate the button's filter opacity(${own.unreadable}) - the proof refuses to green a paint it cannot read`;
+    }
+    if (own.product <= 0.05) {
+      return `filter zeroes the opacity ('${btn.filter}') - checkVisibility does not consult filters`;
+    }
   }
-  // airhorn-5exb: the clause above reads the button's OWN filter. A filter on an ANCESTOR zeroes the
-  // subtree's paint without being inherited and without touching hit testing, so the chain walk
-  // collects its opacity() product too and it is refused here with the same 0.05 floor.
-  if (btn.ancestorFilter !== undefined && Number(btn.ancestorFilter) <= 0.05) {
-    return `an ancestor's filter is opacity(${btn.ancestorFilter}), so the button's whole subtree paints (almost) nothing`;
+  // airhorn-5exb: a filter on an ANCESTOR zeroes the subtree's paint without being inherited and
+  // without touching hit testing, and airhorn-w6jt: Chrome serialises a tiny alpha as opacity(1e-07),
+  // so the chain is parsed by the same CSS-number reader as the button's own filter and an unreadable
+  // argument fails NAMED. The evidence is the raw computed filter strings; no numeric scalar is kept,
+  // because a product computed in page code is what let the exponent spelling slip through.
+  const ancestorFilterStrings = Array.isArray(btn.ancestorFilters) ? btn.ancestorFilters : [];
+  if (ancestorFilterStrings.length > 0) {
+    let ancestorFilterProduct = 1;
+    let unreadable = null;
+    for (const chainFilter of ancestorFilterStrings) {
+      const parsed = filterOpacityProduct(chainFilter);
+      if (parsed.unreadable !== null && unreadable === null) unreadable = parsed.unreadable;
+      ancestorFilterProduct *= parsed.product;
+    }
+    if (unreadable !== null) {
+      return `cannot evaluate an ancestor's filter opacity(${unreadable}) - the proof refuses to green a paint it cannot read`;
+    }
+    if (ancestorFilterProduct <= 0.05) {
+      return `an ancestor's filter is opacity(${ancestorFilterProduct}), so the button's whole subtree paints (almost) nothing`;
+    }
   }
   // airhorn-qpac: the transparency verdict comes from ONE classifier over the computed
   // colour string. What it cannot classify is 'unknown' - and unknown FAILS NAMED, because
