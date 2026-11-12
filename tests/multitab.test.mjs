@@ -662,9 +662,17 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
     }
     state.swShim = null;
 
+    // B reloads on controllerchange as well, so it can still be navigating here:
+    // a one-shot read of "booted" then fails mid-reload (airhorn-dfth saw this
+    // suite fail on 'a tab did not recover after the final update' while both
+    // tabs were in fact fine). Wait for the boot instead of reading once.
+    const dRecovered = await D.waitBooted();
+    const bRecovered = await B.waitBooted();
     const dFinal = await D.hornState();
     const bFinal = await B.hornState();
-    assert(dFinal.booted && bFinal.booted, 'a tab did not recover after the final update');
+    assert(dRecovered && bRecovered && dFinal.booted && bFinal.booted,
+      `a tab did not recover after the final update (D booted=${dFinal.booted}, B booted=${bFinal.booted}; ` +
+      `waiting for a boot: D=${dRecovered}, B=${bRecovered})`);
     assert(dFinal.bootAlertHidden && bFinal.bootAlertHidden, 'the boot-failure alert showed after the final update');
 
     /* --- F. coming back to the app acknowledges the badge (airhorn-7x7m) --- */
@@ -880,6 +888,11 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       // outside the lock's contract: serializing it is not something the app can
       // do, so the assertion messages say "a bump that takes the origin lock"
       // rather than "no blast can ever be lost".
+      // The origin's lock queue is the observability this sequence uses (Web
+      // Locks reports pending requests by name); query() is origin-scoped, so a
+      // request queued in ANY tab is visible from A2.
+      const pendingLockNames = async () => JSON.parse(await A2.evaluate(`navigator.locks.query()
+        .then((q) => JSON.stringify(q.pending.map((l) => l.name)))`));
       // THE HOLD COMES FIRST, BEFORE THE LOOK (airhorn-dfth). Activating A2 IS a
       // look, and a look acknowledges the shared badge (airhorn-7x7m) - its
       // acknowledge asks for this same origin lock. Taking the hold first makes
@@ -900,6 +913,21 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       assert(a2Hidden,
         `tab A2 never went hidden after activating tab B (A2 reads ` +
         `${await A2.evaluate(`document.visibilityState`)}) - sequence I cannot fire a real look transition here`);
+      // Fronting B hands B its OWN look-transition acknowledge, and an
+      // acknowledge that landed late would clear the count after A2's post-look
+      // blast, reading as a lost increment. Let it settle before taking the hold,
+      // observably: the origin's lock queue empty across two reads (same lesson
+      // as airhorn-f5ut's quiescence gate, and sequence H's settle).
+      const lookSettled = await waitUntil(async () => {
+        try {
+          if ((await pendingLockNames()).length !== 0) return null;
+          await new Promise((r) => setTimeout(r, 120));
+          return (await pendingLockNames()).length === 0 ? true : null;
+        } catch { return null; }
+      }, 5000);
+      assert(lookSettled,
+        `the look-transition acknowledges on the origin never settled before sequence I took the lock ` +
+        `(pending: ${JSON.stringify(await pendingLockNames().catch(() => null))}) - a late acknowledge would race the measurement`);
       // The assignment expression evaluates to the REQUEST'S PROMISE, and
       // evaluate awaits promises - so return a plain true and never let the
       // harness await a promise that resolves only at release.
@@ -917,8 +945,6 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       await waitUntil(async () => (await A2.evaluate(`document.visibilityState`)) === 'visible', 5000);
       // The look's acknowledge is now queued behind the hold - observable, not a
       // sleep. If it is not, this sequence cannot reproduce the gate's ordering.
-      const pendingLockNames = async () => JSON.parse(await A2.evaluate(`navigator.locks.query()
-        .then((q) => JSON.stringify(q.pending.map((l) => l.name)))`));
       const ackQueued = await waitUntil(async () => {
         try { return (await pendingLockNames()).includes('airhorn:blast-count') ? true : null; } catch { return null; }
       }, 5000);
