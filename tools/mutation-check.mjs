@@ -60,7 +60,7 @@ import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const PRODUCT_PREFIXES_TO_REFUSE = ['tests/', 'test/'];
 
@@ -531,6 +531,117 @@ function stripNote(report) {
   return { note: "the suite removed the driver's crash handlers and --expect-strip accepted it - a crash outside any test is INVISIBLE in this run, so the verdict rests only on the tests that ran (airhorn-co4h)" };
 }
 
+/**
+ * Measure WHICH PHASE a suite failed in, when the run's own record cannot say (airhorn-vhkz, airhorn-k92k).
+ *
+ * Why this exists: three different worlds collapse into ONE parent-side record. Measured at master
+ * 9519d9b0 with the same fixture, one world per run - (a) a suite that throws while loading, (b) a test
+ * that throws from inside its body (uncaught outside its own await scope), (c) an honest suite that
+ * prepends a rejection logger and is refused by the sentinel - the supervisor's fd-3 record and the
+ * runner's event stream are BYTE-IDENTICAL for all three:
+ *   fd 3   : {"startedTests":0,"realTests":0,"fileLevelFailed":true,...}
+ *   events : one file-level test:fail, message 'test failed', failureType 'testCodeFailure', NO error detail
+ * So `importFailed` (a file-level failure with no real test) named all three "threw while loading" - a
+ * cause its own probe contradicts, for (b) and (c). Naming a phase the record cannot establish would be
+ * the same defect again, so the phase is MEASURED, in two ~70ms probes, in fresh processes:
+ *
+ *   1. LOAD PHASE - import the file and exit as soon as the module body has run, with no test runner and
+ *      no sentinel. The exit matters: a bare `await import(...)` also EXECUTES the registered tests, so a
+ *      test-body throw fails it too (measured: the first version of this probe reported the in-test
+ *      throw as a load throw). Resolving the import and leaving immediately runs the module body - the
+ *      load phase - and nothing after it.
+ *   2. SENTINEL PHASE - the same import with the sentinel loaded (--import), the mutation environment set
+ *      and ONE tick allowed to pass before exiting, so the sentinel's listener-order sample runs. Only a
+ *      sentinel refusal ends that probe, and it ends it by SIGKILL: measured 137 for the prepended
+ *      logger, 0 for the in-test throw, the clean suite, the load throw and the no-tests suite.
+ *
+ * Whatever is left over failed after the load and with no sentinel refusal: a test body that threw. Each
+ * probe is bounded and contained like every other run, and the result is used for NAMING ONLY - the
+ * classification and the rc 3 refusal are unchanged, whatever the probes say.
+ */
+export async function measureFailurePhase(suite, cwd, timeoutMs = 20000) {
+  const contained = containmentPrefix();
+  const resolved = path.resolve(cwd, suite);
+  const url = pathToFileURL(resolved).href;
+  const bound = Math.min(timeoutMs, 20000);
+  const quote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+  // A contained run makes the command it spawns PID 1 of a fresh namespace, and a namespace's init
+  // IGNORES a self-SIGKILL (measured: the sentinel probe returned 0 under unshare and 137 outside it).
+  // The sentinel refuses by killing its OWN process, so under containment the probe runs through `sh`,
+  // which stays init and leaves node as a child whose SIGKILL is honoured - containment kept, signal
+  // path intact. The expression travels in the environment, so no quoting of JS can leak into the shell.
+  const probe = async (expression, extra = {}) => {
+    const env = { ...(extra.env || childEnv(resolved, null, { plain: true })), PROBE_EXPR: expression };
+    const nodeArgs = [...(extra.nodeArgs || []), '--input-type=module'];
+    if (contained.length) {
+      const command = ['node', ...nodeArgs.map(quote), '-e', '"$PROBE_EXPR"'].join(' ');
+      return run(contained[0], [...contained.slice(1), 'sh', '-c', command], cwd,
+        { captureStderr: true, quiet: true, timeoutMs: bound, env });
+    }
+    return run(process.execPath, [...nodeArgs, '-e', expression], cwd,
+      { captureStderr: true, quiet: true, timeoutMs: bound, env });
+  };
+  // 1. load phase, no runner and no sentinel
+  const load = await probe(`import(${JSON.stringify(url)}).then(() => process.exit(0), () => process.exit(1));`);
+  if (load.timedOut) return { phase: 'unknown', why: `importing the file in a fresh process did not finish within ${bound}ms` };
+  if (load.rc !== 0) {
+    return { phase: 'load-threw', why: `importing the file in a fresh process, without running its tests, failed (exit ${load.rc})` };
+  }
+  // 2. sentinel phase: same import, sentinel loaded, one tick for its listener-order sample
+  const guard = path.join(path.dirname(SELF), 'lib', 'suite-guard.mjs');
+  const sentinelEnv = { ...childEnv(resolved, null, { plain: true }), MUTATION_SUITE_FILE: resolved, MUTATION_RUN_NONCE: '' };
+  const sentinel = await probe(
+    `const u = ${JSON.stringify(url)}; import(u).then(() => new Promise((r) => setImmediate(r))).then(() => process.exit(0), () => process.exit(1));`,
+    { nodeArgs: ['--import', guard], env: sentinelEnv },
+  );
+  if (sentinel.timedOut) return { phase: 'unknown', why: `the sentinel probe did not finish within ${bound}ms` };
+  if (sentinel.signal === 'SIGKILL' || sentinel.rc === 137) {
+    return { phase: 'sentinel-refused', why: 'the file imports cleanly without the sentinel, and dies by SIGKILL when the sentinel is loaded and no test has run yet' };
+  }
+  if (sentinel.rc !== 0) {
+    return { phase: 'unknown', why: `the file imports cleanly, but a sentinel probe with no test running exited ${sentinel.rc}` };
+  }
+  return { phase: 'inside-test', why: 'the file imports cleanly and the sentinel probe survives with no test running, so the failure came from a test that had already started' };
+}
+
+/**
+ * Name a "no test event" refusal from the MEASURED phase instead of guessing a cause.
+ *
+ * The three worlds above are one record, so the text splits on what the probes established:
+ *   load-threw      -> the suite file threw while loading. The phrase survives, with its evidence.
+ *   sentinel-refused -> a REFUSAL: the sentinel ended the process. It names the manipulation shapes
+ *                      the sentinel refuses for (airhorn-k92k asked for exactly this).
+ *   inside-test     -> a throw from inside a test body, which is what the old text called a load throw.
+ *   unknown         -> say no cause could be established rather than inventing one.
+ */
+export function nameUnmeasuredFailure({ exitCode, phase, suite }) {
+  const p = phase || { phase: 'unknown', why: 'no probe was run' };
+  if (p.phase === 'load-threw') {
+    return `threw while loading (${p.why}), so NO test ever started and this is not a caught mutant (exit ${exitCode}, 0 test event(s) seen). If this is a script suite whose top-level assertion failed, say so with --suite-mode script`;
+  }
+  if (p.phase === 'sentinel-refused') {
+    return `the SENTINEL ended the suite process, so this is a REFUSAL and not a crash (${p.why}) - the shapes it refuses for are a rejection listener registered AHEAD of it, an instrument it owns being stripped, or a suite that swallowed a rejection by exiting cleanly. Its tests were never judged and nothing about the mutant was measured (exit ${exitCode}, 0 test event(s) seen) (airhorn-k92k)`;
+  }
+  if (p.phase === 'inside-test') {
+    return `a throw from INSIDE a test body (${p.why}) - an uncaught exception outside the test's own await scope ends the suite process, and node's runner then reports one file-level failure with NO error detail, which is why the parent's own counts cannot tell this from a load throw. Nothing about the mutant was measured (exit ${exitCode}, 0 test event(s) seen); diagnose with \`node --test ${suite}\` (airhorn-vhkz)`;
+  }
+  return `the run reported a file-level failure and 0 test event(s) (exit ${exitCode}) and the phase could not be established (${p.why}), so this refusal names no cause: it is a suite file that threw while loading, a throw from inside a test body, or a sentinel refusal, and nothing this run measured separates them`;
+}
+
+/**
+ * The refusal text for the ambiguous "file-level failure, no test event" shape, with the load phase
+ * measured first. Returns null for every other shape, so the laundering, strip and rc 3 paths are
+ * untouched - this only replaces a GUESSED cause with a measured one.
+ */
+async function nameUnmeasuredRun({ classified, report, suite, cwd, exitCode, timeoutMs }) {
+  if (!classified || classified.mode !== 'never-ran') return null;
+  const childReport = report && report.driver && report.driver.childReport;
+  if (!childReport || childReport.fileLevelFailed !== true) return null;
+  if ((report.realTests || 0) !== 0) return null;
+  const phase = await measureFailurePhase(suite, cwd, Math.min(timeoutMs, 20000));
+  return nameUnmeasuredFailure({ exitCode, phase, suite });
+}
+
 // Real paths, so an invocation through a symlink (tool-link/mutation-check.mjs) still finds its own
 // helper files AND still recognises itself as main. Before this, a symlinked invocation exited 0
 // having done nothing at all - a silent pass, which is worse than any wrong verdict
@@ -632,7 +743,12 @@ async function runSuite(suite, cwd, label, suiteMode, timeoutMs = DEFAULT_TIMEOU
   const classified = classifyRun({ report, exitCode: ran.rc, suiteMode, expectStrip });
   // The state is NAMED in the refusal, not just implied by the exit code (airhorn-so88): a reader
   // must be able to tell "never-ran" from "threw-outside-a-test" without reading prose.
-  if (classified.problem) return { problem: `${label} [${classified.mode}] ${classified.problem}` };
+  if (classified.problem) {
+    // airhorn-vhkz/k92k: when the run's own record cannot separate a load throw from an in-test throw
+    // from a sentinel refusal, MEASURE the load phase instead of naming a cause the record contradicts.
+    const measured = await nameUnmeasuredRun({ classified, report, suite, cwd, exitCode: ran.rc, timeoutMs });
+    return { problem: `${label} [${classified.mode}] ${measured || classified.problem}` };
+  }
   // CORROBORATION (airhorn-uk28, closing airhorn-yvwo's forged-runner-event class). A 'caught' verdict
   // rests on the runner's counters, and those are the code under test's own report: node's runner reads
   // test events as v8-serializer frames on the WORKER's stdout, and the suite runs in that worker, so a
