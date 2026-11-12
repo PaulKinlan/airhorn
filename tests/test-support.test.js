@@ -731,10 +731,25 @@ test('install-https-proof refuses paint-level invisibility and coverage, by name
     // (coveredBy is null there too: it cannot tell 'button hit' from 'nothing hit').
     ['an ANCESTOR opacity:0 paints nothing', { ancestorOpacity: '0' }, /ancestor's opacity is 0/],
     ['a near-zero ancestor opacity paints (almost) nothing', { ancestorOpacity: '0.02' }, /ancestor's opacity is 0\.02/],
+    // airhorn-5exb: a filter is not inherited either. `#outer { filter: opacity(0) }` zeroes the whole
+    // subtree's paint while the button's own filter, its opacity and every ancestor opacity read
+    // healthy and hit testing still reaches the button - the last road to 'wrap-transparent'.
+    // airhorn-w6jt: the chain is parsed by the shared CSS-number reader, so an EXPONENT spelling (Chrome
+    // serialises 1e-7 as opacity(1e-07)), a percentage, several functions and an unreadable argument all
+    // reach a verdict instead of falling through as 'healthy'.
+    ['an ANCESTOR filter opacity(0) paints nothing', { ancestorFilters: ['opacity(0)'] }, /ancestor's filter is opacity\(0\)/],
+    ['a near-zero ancestor filter paints (almost) nothing', { ancestorFilters: ['opacity(0.02)'] }, /ancestor's filter is opacity\(0\.02\)/],
+    ['an EXPONENT ancestor filter paints nothing (airhorn-w6jt)', { ancestorFilters: ['opacity(1e-07)'] }, /ancestor's filter is opacity\(1e-7\)/],
+    ['a percentage ancestor filter below the floor paints nothing', { ancestorFilters: ['opacity(1%)'] }, /ancestor's filter is opacity\(0\.01\)/],
+    ['several filter functions: the opacity factor still counts', { ancestorFilters: ['blur(2px) opacity(0.02)'] }, /ancestor's filter is opacity\(0\.02\)/],
+    ['an unreadable ancestor filter REFUSES, never greens (airhorn-w6jt)', { ancestorFilters: ['opacity(var(--a))'] }, /cannot evaluate an ancestor's filter opacity\(var\(--a\)\)/],
+    ['a 0.9 ancestor filter still paints (control)', { ancestorFilters: ['opacity(0.9)'] }, null],
+    ['an EXPONENT own filter REFUSES (airhorn-w6jt, own-filter arm)', { filter: 'opacity(1e-07)' }, /filter zeroes the opacity/],
+    ['an unreadable own filter REFUSES, never greens', { filter: 'opacity(var(--a))' }, /cannot evaluate the button's filter opacity\(var\(--a\)\)/],
     ['a 0.9 ancestor still paints (control)', { ancestorOpacity: '0.9' }, null],
     ['nothing hittable at the centre: clipped or shrunk away', { hitIsButtonOrChild: false, coveredBy: null }, /nothing is hittable at the button's centre/],
     ['an overlay still names itself first when the hit also misses', { hitIsButtonOrChild: false, coveredBy: '#consent' }, /covered at its centre by #consent/],
-    ['legacy evidence without paint fields still passes (no regression)', { opacity: undefined, filter: undefined, color: undefined, backgroundColor: undefined, borderColor: undefined, coveredBy: undefined, ancestorOpacity: undefined, hitIsButtonOrChild: undefined }, null],
+    ['legacy evidence without paint fields still passes (no regression)', { opacity: undefined, filter: undefined, color: undefined, backgroundColor: undefined, borderColor: undefined, coveredBy: undefined, ancestorOpacity: undefined, ancestorFilters: undefined, hitIsButtonOrChild: undefined }, null],
     // airhorn-qpac: the alpha-spelling enumeration. Every row was run against the pre-fix
     // predicate at e35b71bb: rgba/transparent caught, EVERYTHING ELSE greened an invisible
     // button. Now each zero-alpha spelling fails by name, the controls pass, and a spelling
