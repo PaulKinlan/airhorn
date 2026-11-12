@@ -868,9 +868,9 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
     if (haveLocks) {
       // Deterministic interleaving: the TEST holds the app's origin lock, so
       // (with the fix) any blast bump in either tab queues behind it and both
-      // serialize on release - the shared count must end at before+2. Without
-      // the lock both tabs read the pre-blast count and write before+1:
-      // one blast lost.
+      // serialize on release - one increment each, neither lost. Without the
+      // lock both tabs read the pre-blast count and write the same value: one
+      // blast lost.
       //
       // SCOPE (airhorn-lg0e): everything below is about bumps that QUEUE ON THE
       // ORIGIN LOCK. It does not, and cannot, rule out a writer that never asks
@@ -880,9 +880,26 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       // outside the lock's contract: serializing it is not something the app can
       // do, so the assertion messages say "a bump that takes the origin lock"
       // rather than "no blast can ever be lost".
-      await send('Target.activateTarget', { targetId: A2.targetId });
-      await waitUntil(async () => (await A2.evaluate(`document.visibilityState`)) === 'visible', 5000);
-      const before = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      // THE HOLD COMES FIRST, BEFORE THE LOOK (airhorn-dfth). Activating A2 IS a
+      // look, and a look acknowledges the shared badge (airhorn-7x7m) - its
+      // acknowledge asks for this same origin lock. Taking the hold first makes
+      // that ordering deterministic instead of a race with the app's own
+      // visibilitychange handler: the look's acknowledge must QUEUE behind the
+      // hold (observed below, not slept for), the blast fired afterwards queues
+      // behind it, and - the point of this pin - that blast must still COUNT once
+      // the lock drains. On union 47b59bcb the look's acknowledge landed between
+      // the two bumps and the increment was dropped (shared count 1, expected 2).
+      //
+      // A look only fires on a TRANSITION, so make it one: front tab B first
+      // (A2 hidden), take the hold, then activate A2 again - its visibilitychange
+      // must fire while the hold is held. A2 already being visible here would mean
+      // activating it fires no event at all, so require the hidden state by name.
+      await send('Target.activateTarget', { targetId: B.targetId });
+      const a2Hidden = await waitUntil(async () =>
+        (await A2.evaluate(`document.visibilityState`)) === 'hidden' ? true : null, 5000);
+      assert(a2Hidden,
+        `tab A2 never went hidden after activating tab B (A2 reads ` +
+        `${await A2.evaluate(`document.visibilityState`)}) - sequence I cannot fire a real look transition here`);
       // The assignment expression evaluates to the REQUEST'S PROMISE, and
       // evaluate awaits promises - so return a plain true and never let the
       // harness await a promise that resolves only at release.
@@ -895,6 +912,19 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
         try { return await A2.evaluate(`typeof window.__rqz1Release === 'function'`); } catch { return false; }
       }, 5000);
       assert(held, 'the test could not hold the origin badge lock - sequence I cannot force the interleaving');
+      const before = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      await send('Target.activateTarget', { targetId: A2.targetId });
+      await waitUntil(async () => (await A2.evaluate(`document.visibilityState`)) === 'visible', 5000);
+      // The look's acknowledge is now queued behind the hold - observable, not a
+      // sleep. If it is not, this sequence cannot reproduce the gate's ordering.
+      const pendingLockNames = async () => JSON.parse(await A2.evaluate(`navigator.locks.query()
+        .then((q) => JSON.stringify(q.pending.map((l) => l.name)))`));
+      const ackQueued = await waitUntil(async () => {
+        try { return (await pendingLockNames()).includes('airhorn:blast-count') ? true : null; } catch { return null; }
+      }, 5000);
+      assert(ackQueued,
+        `becoming visible did not queue the look's badge acknowledge on the origin lock while the test held it - ` +
+        `sequence I cannot reproduce the ordering the full gate hit (airhorn-dfth)`);
       await A2.evaluate(`window.__airhorn.start()`);
       // Wait for the bump to QUEUE, not for a clock (airhorn-g0qr.8). A fixed app asks
       // the lock manager for the app's own lock in order to bump, and Web Locks reports
@@ -910,13 +940,17 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
             pending: q.pending.map((l) => l.name),
           }))`);
           const parsed = JSON.parse(q);
-          return parsed.pending.includes('airhorn:blast-count') ? parsed : null;
+          // TWO requests carry this name: the look's acknowledge (queued by the
+          // activation above) and this blast's bump. One alone would be the
+          // acknowledge, which says nothing about the bump (airhorn-dfth).
+          const queuedBumps = parsed.pending.filter((n) => n === 'airhorn:blast-count').length;
+          return queuedBumps >= 2 ? parsed : null;
         } catch {
           return null;
         }
       }, 5000);
       assert(queued,
-        `a blast's increment never queued on the origin lock while the test held it (queues seen: ${JSON.stringify(queued)}) - ` +
+        `a blast's increment never queued on the origin lock behind the look's acknowledge (queues seen: ${JSON.stringify(queued)}) - ` +
         `the app's bump is then an unlocked read-modify-write, and interleaved tabs can lose a blast (airhorn-rqz1)`);
       // ...and with the bump queued, nothing may have been written. This is now
       // deterministic rather than a race against 300 ms: the app is demonstrably
@@ -926,21 +960,42 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
         `a blast's increment was written while another holder owned the origin lock (count ${before} -> ${duringHold} under the hold) - ` +
         `the bump did not take the lock, so it is a non-atomic read-modify-write and interleaved tabs can lose a blast (airhorn-rqz1)`);
       await A2.evaluate(`window.__rqz1Release && window.__rqz1Release()`);
+      // FIFO behind the hold: the look's acknowledge was queued FIRST, so it runs
+      // first (it retires whatever was stored, or nothing), and then A2's bump.
+      // A blast fired AFTER the look must COUNT (airhorn-dfth): the bump
+      // publishes 1 from whatever the acknowledge left behind. A bump that drops
+      // itself because an acknowledge ran in between loses a real blast - on union
+      // 47b59bcb exactly that happened and the gate read a shared count of 1.
+      const a2Bumped = await waitUntil(async () => {
+        try {
+          const recs = JSON.parse(await A2.evaluate(`JSON.stringify(window.__badgeWrites || [])`));
+          const last = recs[recs.length - 1];
+          return last && last.inLock && last.value === '1' ? recs : null;
+        } catch { return null; }
+      }, 10000);
+      const a2Writes = a2Bumped || JSON.parse(await A2.evaluate(`JSON.stringify(window.__badgeWrites || [])`));
+      const a2Count = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
+      assert(a2Bumped && a2Count === 1,
+        `a blast fired AFTER its tab became visible did not count: the shared count is ${a2Count} and tab A2's count ` +
+        `writes are ${JSON.stringify(a2Writes)} - the look's acknowledge ran first and this bump dropped itself instead ` +
+        `of incrementing, so a real blast never reached the badge (airhorn-dfth)`);
       await B.evaluate(`window.__airhorn.start()`);
-      // airhorn-u9cd: 20s, not 5s. A2's VIEW of the shared count lags the writes through
-      // cross-tab propagation, and on a starved gate host that lag has been observed past
-      // 5s. The success condition is MONOTONE - the value becomes before + 2 only if both
-      // increments really landed - so a longer window cannot mask a lost blast, it only
-      // stops failing on slow propagation (same lesson as airhorn-qfxp and airhorn-wzcw).
+      // airhorn-u9cd: 20s, not 5s. A2's VIEW of B's write lags through cross-tab
+      // propagation, and on a starved gate host that lag has been observed past 5s.
+      // The success condition is MONOTONE and the look has already retired the
+      // pre-blast count, so 2 means one increment from each tab and nothing else:
+      // a longer window cannot mask a lost blast, it only stops failing on slow
+      // propagation (same lesson as airhorn-qfxp and airhorn-wzcw).
       const settled = await waitUntil(async () => {
         const n = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
-        return n === before + 2 ? n : null;
+        return n === 2 ? n : null;
       }, 20000);
       const after = await A2.evaluate(`Number(window.localStorage.getItem('airhorn:blast-count')) || 0`);
       assert(settled,
-        `two blasts in two tabs produced a shared count of ${after}, expected ${before + 2} - ` +
+        `two blasts in two tabs produced a shared count of ${after}, expected 2 - ` +
         `the two bumps, which both queued on the origin lock, were not serialized: one clobbered the other and a blast was lost (airhorn-rqz1). ` +
-        `(A separate, unlocked writer is not covered here - airhorn-lg0e)`);
+        `(A separate, unlocked writer is not covered here - airhorn-lg0e; the look's acknowledge ran before both ` +
+        `bumps, so 2 is the whole contract - one increment per blast)`);
       // The claim this sequence makes is that a blast's increment is a LOCKED
       // read-modify-write, because that is what makes interleaved tabs add up
       // instead of clobbering (airhorn-rqz1). "A request was queued" is not that
@@ -1001,8 +1056,8 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
         const second = await A2.evaluate(`window.localStorage.getItem('airhorn:blast-count')`);
         return first === second && first !== null ? first : null;
       }, 5000);
-      assert(quiesced !== null && Number(quiesced) === before + 2,
-        `the bumps never quiesced at ${before + 2} (last stable read: ${JSON.stringify(quiesced)}) - ` +
+      assert(quiesced !== null && Number(quiesced) === 2,
+        `the bumps never quiesced at 2 (last stable read: ${JSON.stringify(quiesced)}) - ` +
         `a late count write is still in flight and the boundary measurement would race it (airhorn-f5ut)`);
       await B.evaluate(`(window.localStorage.setItem('airhorn:blast-count', '1'), true)`);
       // airhorn-u9cd: wait for A2 to OBSERVE the raw write, do not read once - the write
@@ -1034,7 +1089,8 @@ self.fetch = (...args) => new Promise((resolve) => setTimeout(() => __origFetch(
       assert(merged === 2,
         `an app bump after a raw clobber to 1 left the count at ${mergedNow} - ` +
         `the bump re-published a stale captured total instead of building on what is stored (airhorn-f5ut)`);
-      console.log(`  simultaneous bumps that take the origin lock serialized: ${before} -> ${after}, neither lost ` +
+      console.log(`  simultaneous bumps that take the origin lock serialized: ${before} retired by the look's ` +
+        `acknowledge, then ${after} from the two blasts, neither lost ` +
         `(every one of ${records.length} count write(s) observed inside the lock); a raw write outside the app's API then took it to ` +
         `${afterUnlocked} (the lg0e boundary, still true), and the next app bump built on it: ${mergedNow} (airhorn-f5ut).`);
 
