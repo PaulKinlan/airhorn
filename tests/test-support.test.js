@@ -746,6 +746,14 @@ test('install-https-proof refuses paint-level invisibility and coverage, by name
     ['hex alpha zero (defensive: computed style never emits hex)', { color: '#0000', backgroundColor: '#00000000', borderColor: '#0000' }, /nothing to see/],
     ['non-zero alpha CONTROL passes', { color: 'rgba(0, 0, 0, 0.5)', backgroundColor: 'oklch(0.5 0.1 200 / 0.8)', borderColor: 'rgb(10, 10, 10)' }, null],
     ['a spelling the classifier cannot read REFUSES, never greens', { color: 'currentColor', backgroundColor: 'currentColor', borderColor: 'currentColor' }, /cannot evaluate the paint spelling/],
+    // airhorn-of4v: an alpha the numeric reader cannot PARSE is not an absent alpha. Pre-fix, the
+    // slash-alpha regex simply did not match calc(0)/0e0 and the body fell through to 'opaque', so a
+    // fully transparent button was greened. Unreadable alpha now refuses by name.
+    ['oklch alpha in calc() REFUSES, never greens', { color: 'oklch(0 0 0 / calc(0))', backgroundColor: 'oklch(0 0 0 / calc(0))', borderColor: 'oklch(0 0 0 / calc(0))' }, /cannot evaluate the paint spelling 'oklch\(0 0 0 \/ calc\(0\)\)'/],
+    ['rgb alpha in exponent notation REFUSES', { color: 'rgb(0 0 0 / 0e0)', backgroundColor: 'rgb(0 0 0 / 0e0)', borderColor: 'rgb(0 0 0 / 0e0)' }, /cannot evaluate the paint spelling/],
+    ['comma-form alpha in calc() REFUSES (same hole, same close)', { color: 'rgba(0, 0, 0, calc(0))', backgroundColor: 'rgba(0, 0, 0, calc(0))', borderColor: 'rgba(0, 0, 0, calc(0))' }, /cannot evaluate the paint spelling/],
+    ['normalized computed-style alpha stays green (CONTROL)', { color: 'oklch(0 0 0 / 0)', backgroundColor: 'color(srgb 0 0 0 / 0)', borderColor: 'oklab(0 0 0 / 0)' }, /nothing to see/],
+    ['a readable non-zero alpha still paints (CONTROL)', { color: 'oklch(0.5 0 0 / 100%)', backgroundColor: 'rgb(255 255 255 / 100%)', borderColor: 'rgb(0 0 0 / 50%)' }, null],
   ];
   for (const [name, over, expected] of TABLE) {
     const problem = affordanceProblem({ ...healthy, ...over });

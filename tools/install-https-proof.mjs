@@ -493,8 +493,9 @@ async function main() {
  * never emits hex, but the classifier must not guess); every CSS colour FUNCTION
  * (rgb/rgba, hsl/hsla, oklch, oklab, lab, lch, color(...), color-mix(...)) whose alpha is
  * the trailing '/ a' segment or last comma argument. Alpha exactly 0 -> 'transparent';
- * present and non-zero, or absent -> 'opaque'; anything else -> 'unknown' (refused by the
- * caller, never greened). Pinned per spelling in tests/test-support.test.js. */
+ * present and non-zero -> 'opaque'; absent -> 'opaque'; anything else - including an alpha the
+ * numeric reader cannot parse, such as calc(0), 0e0 or var(--a) - -> 'unknown' (refused by the
+ * caller, never greened; airhorn-of4v). Pinned per spelling in tests/test-support.test.js. */
 export function classifyPaintAlpha(c) {
   if (typeof c !== 'string' || c === '') return 'unknown';
   if (c === 'transparent') return 'transparent';
@@ -513,8 +514,18 @@ export function classifyPaintAlpha(c) {
   const body = fn[2].trim();
   const slashAlpha = body.match(/\/\s*([0-9.]+%?)\s*$/);
   if (slashAlpha) return parseFloat(slashAlpha[1]) === 0 ? 'transparent' : 'opaque';
+  // airhorn-of4v: a '/' whose alpha the numeric reader above could NOT parse (calc(0), 0e0, var(--a))
+  // used to fall through to 'opaque' - a channel with an unreadable alpha read as a channel with NO
+  // alpha, which greens a fully transparent button. That is the exact inversion of this function's
+  // refuse-loud contract, so unreadable alpha is 'unknown' and the caller refuses it BY NAME.
+  if (body.includes('/')) return 'unknown';
   const commaParts = body.split(',').map((x) => x.trim());
-  if (commaParts.length === 4) return parseFloat(commaParts[3]) === 0 ? 'transparent' : 'opaque';
+  if (commaParts.length === 4) {
+    // The comma form has the same hole and it is closed the same way: rgba(0, 0, 0, calc(0)).
+    const alpha = parseFloat(commaParts[3]);
+    if (!Number.isFinite(alpha)) return 'unknown';
+    return alpha === 0 ? 'transparent' : 'opaque';
+  }
   if (commaParts.length >= 2) return 'opaque'; // comma form with no alpha channel
   return 'opaque'; // space-separated with no '/' means no alpha channel
 }
