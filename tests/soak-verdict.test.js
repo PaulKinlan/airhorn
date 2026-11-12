@@ -23,7 +23,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { cycleHeapGrowth, offlineHeapGrowth, audioSummaryLine, exitCodeForSummary, heapGrowthDetail, summariseChecks } from '../tools/soak.mjs';
+import { cycleHeapGrowth, offlineHeapGrowth, audioNodesReleased, audioSummaryLine, exitCodeForSummary, heapGrowthDetail, summariseChecks } from '../tools/soak.mjs';
 import { storedBytesDrift, usageDrift } from '../tools/cache-growth.mjs';
 import { growthFromSeries } from '../tools/lib/endpoint-growth.mjs';
 
@@ -99,4 +99,56 @@ test('a soak run with ZERO checks is not a pass (batch D row 5)', () => {
   assert.equal(summariseChecks([]).pass, false, 'zero checks is a measurement of nothing');
   assert.equal(summariseChecks([{ name: 'x', pass: true, detail: 'd' }]).pass, true);
   assert.equal(summariseChecks([{ name: 'x', pass: false, detail: 'd' }]).pass, false);
+});
+
+test('the audio-node release check cannot pass on an unmeasured heap or a leaked oscillator (airhorn-nxuv.4)', () => {
+  // The P1 this pins: `heapBufferSources ?? 0` coerced an UNMEASURABLE heap sample to 0, so
+  // 'heap sources max 0 <= 2' passed when nothing had been measured, and liveOscillators /
+  // heapOscillators were computed and printed but were not IN the assertion at all - an
+  // OscillatorNode leak passed green. Both holes are closed in audioNodesReleased and neither
+  // had a pin, which is how a check that cannot fail survives: a mutation of the coercion or of
+  // the oscillator clause changed nothing a test could see.
+  const clean = (over = {}) => ({ liveSources: 0, liveOscillators: 0, heapBufferSources: 0, heapOscillators: 0, ...over });
+  const after = (over = {}) => ({ sourcesCreated: 4, sourcesEnded: 4, oscillatorsCreated: 4, oscillatorsEnded: 4, liveSources: 0, liveOscillators: 0, ...over });
+  const healthy = audioNodesReleased([clean(), clean()], after());
+  assert.equal(healthy.pass, true, `a world with nothing retained must pass: ${healthy.detail}`);
+
+  // (a) UNMEASURED is not zero. One null heap sample poisons the maximum; the verdict must fail
+  // and the detail must say it is unknown rather than reporting a count of 0.
+  const unmeasured = audioNodesReleased([clean(), clean({ heapBufferSources: null })], after());
+  assert.equal(unmeasured.pass, false, 'an unmeasurable heap sample must not pass a release check');
+  assert.match(unmeasured.detail, /sources heap count UNMEASURED/);
+  assert.doesNotMatch(unmeasured.detail, /sources heap max 0/, 'unknown must not be reported as a count');
+
+  // (b) an oscillator LEAK, seen only in the heap count: the live counter is clean in this world
+  // (created and ended balance) and the retained node shows up in the prototype count alone.
+  const oscHeapLeak = audioNodesReleased([clean(), clean({ heapOscillators: 5 })], after());
+  assert.equal(oscHeapLeak.pass, false, 'a leaked oscillator in the heap must fail the release check');
+  assert.match(oscHeapLeak.detail, /oscillators heap max 5/);
+
+  // ...and the same for the live counters, so neither half of the check can be dropped unnoticed.
+  assert.equal(audioNodesReleased([clean({ liveOscillators: 4 })], after()).pass, false,
+    'four live oscillators is over the floor and must fail');
+  assert.equal(audioNodesReleased([clean({ liveSources: 3 })], after()).pass, false,
+    'three live sources is over the floor and must fail');
+  assert.equal(audioNodesReleased([clean()], after({ liveSources: 1 })).pass, false,
+    'a source still live after the cycles must fail');
+  // The QUESCED half, one clause per node kind. This is the gap airhorn-ki2d found: the cases
+  // above poison the PEAK (liveOscillatorsMax) or the sources' quiesced count, so dropping
+  // `&& afterCycles.liveOscillators === 0` from the pass expression left the suite green while
+  // audioNodesReleased answered pass:true for a world that still holds an oscillator.
+  assert.equal(audioNodesReleased([clean()], after({ liveOscillators: 1 })).pass, false,
+    'an oscillator still live after the cycles must fail');
+  assert.equal(audioNodesReleased([clean()], after({ liveSources: 1, liveOscillators: 1 })).pass, false,
+    'both kinds still live after the cycles must fail');
+  // (The verdict takes afterCycles.liveOscillators as SAMPLED; it does not derive it from
+  // oscillatorsCreated - oscillatorsEnded, so an unbalanced count alone is not a leak signal.)
+
+  // NULL NOT COUNTED AS A LEAK EITHER: a world that never created a node is vacuous, not a
+  // failure, and the detail says so - otherwise the strictness above would turn every
+  // oscillator-free run red.
+  const vacuous = audioNodesReleased([clean({ heapBufferSources: null, heapOscillators: null })],
+    after({ sourcesCreated: 0, sourcesEnded: 0, oscillatorsCreated: 0, oscillatorsEnded: 0 }));
+  assert.equal(vacuous.pass, true, `no node was ever created, so nothing can be retained: ${vacuous.detail}`);
+  assert.match(vacuous.detail, /no sources ever created/);
 });
