@@ -64,6 +64,8 @@ tools/landings.mjs	tests/landings.test.js
 # why: docs/coverage-map.md#tools-mutation-check-mjs
 tools/mutation-check.mjs	tests/mutation-check.test.js
 tools/lib/suite-driver.mjs	tests/mutation-check.test.js
+# why: docs/trust-boundary.md#known-limits-stated-rather-than-implied (airhorn-5wns)
+tools/lib/suite-guard.mjs	tests/mutation-check.test.js
 # why: docs/coverage-map.md#tools-lib-suite-mode-reporter-mjs
 tools/lib/suite-mode-reporter.mjs	tests/mutation-check.test.js
 tools/lib/endpoint-growth.mjs	tests/soak-verdict.test.js
