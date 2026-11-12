@@ -701,10 +701,27 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   // touching the file has already run above (the target guard and the unique-occurrence check), so a dry run here is
   // exactly the plan that a real run would carry out - printed, and nothing done.
   if (args.dryRun) {
+    // ...and a plan a real run would REFUSE is not a plan (airhorn-qf30). Suite presence is a pure stat: the run
+    // abandons on it without writing anything, so the rehearsal must abandon on it too - in the order the run reaches
+    // the checks, and with the run's own wording, or the rehearsal green-lights a command whose only outcome is a
+    // refusal. Only stat-able refusals belong here; anything that needs the mutation on disk stays a run-time refusal.
+    for (const candidate of [args.suiteOld, args.suite]) {
+      const presence = candidate === undefined ? null : suitePresenceProblem(candidate, cwd);
+      if (presence) {
+        console.error(`mutation-check: refusing: ${presence}`);
+        console.error('mutation-check: the dry run refuses what the run would refuse - nothing was written and no suite was run');
+        return 3;
+      }
+    }
     const bytes = applied.content.length - original.length;
     console.log(`mutation-check: dry run - nothing was written and no suite was run`);
     console.log(`  would mutate ${args.file} (${bytes >= 0 ? '+' : ''}${bytes} bytes): ${JSON.stringify(args.from)} -> ${JSON.stringify(args.to ?? '')}`);
-    console.log(`  would then run ${args.suite}${args.suiteOld ? ` (after a baseline run of ${args.suiteOld})` : ''}`);
+    // Every step the run takes after the mutant is on disk, in the order it takes them, because each one can refuse and
+    // a plan that omits one is the same defect as the one above. The build is first (a mutant that does not build
+    // proves nothing), then the baseline suite, then the suite judge.
+    if (args.build) console.log(`  would then build: ${args.build} (a build that fails or times out is a refusal, never a verdict)`);
+    if (args.suiteOld) console.log(`  would then run ${args.suiteOld} (the OLD suite, for the baseline: if it already fails the mutant the verdict is not-reproducible)`);
+    console.log(`  would then run ${args.suite}`);
     console.log(`  would restore ${args.file} in a finally block, and verify the restore on disk`);
     return 0;
   }
