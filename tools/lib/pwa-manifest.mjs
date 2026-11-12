@@ -57,8 +57,18 @@ export function startUrlInScope({ scope, startUrl, manifestHref, pageHref } = {}
       reason: `the manifest start_url (${JSON.stringify(startUrl)}) does not resolve against ${manifestHref || pageHref}`,
     };
   }
-  // A scope is a URL PREFIX, not a pathname string: comparing pathnames would call
-  // /app-evil inside the scope of /app/.
+  // Scope matching is PREFIX-based on the SERIALIZED url, and deliberately not path-structural.
+  // Both normative algorithms say so: Service Workers' 'Match Service Worker Registration'
+  // picks the longest scope string the client url starts with, with a note that the match is
+  // prefix-based and that https://example.com/prefix-of/resource.html is within the scope
+  // https://example.com/prefix; the Web App Manifest's 'within scope' algorithm compares target
+  // against scope as strings, so a query or fragment does not move a url out of scope.
+  //
+  // The consequence that matters for /app-evil: it is excluded by the scope's TRAILING SLASH,
+  // which the platform always supplies (reg.scope for a script at /app/sw.js is /app/), not by
+  // any segment logic here. A scope without that slash genuinely contains /app-evil - per spec,
+  // not by oversight. airhorn-c51i: a segment-boundary rule here false-rejected /app?source=pwa,
+  // /app#home and /app-evil against a scope of /app.
   const inScope = startUrlHref.startsWith(scopeHref);
   return {
     inScope,

@@ -137,3 +137,51 @@ test('sizes:"any" is a scalable declaration and satisfies every required size (a
       `"${spell}" is not the scalable keyword`);
   }
 });
+
+test('scope matching is the platform\u2019s PREFIX rule, not a path-segment rule (airhorn-5006, airhorn-c51i)', () => {
+  // I first wrote this as a segment-boundary assertion (airhorn-5006) and a reviewer took it apart
+  // with the specs (airhorn-c51i): Service Workers' 'Match Service Worker Registration' matches on
+  // the SERIALIZED url prefix, with a normative note that "prefix-of/resource.html" is within scope
+  // "prefix", and the Web App Manifest's 'within scope' algorithm compares the target and scope as
+  // strings, so query and fragment never move a url out of scope. The rule below is therefore the
+  // platform's, and the cases that would distinguish a segment rule are exactly the cases that
+  // PROVE the platform is not one.
+  const facts = {
+    scope: 'https://localhost:8443/app',
+    manifestHref: 'https://localhost:8443/app/manifest.json',
+    pageHref: 'https://localhost:8443/app/',
+  };
+  const inScope = (startUrl, scope = facts.scope) => startUrlInScope({ ...facts, scope, startUrl }).inScope;
+
+  // Same path, different query or fragment: in scope (a segment rule would wrongly refuse).
+  assert.equal(inScope('/app?source=pwa'), true, 'a query does not move a start_url out of scope');
+  assert.equal(inScope('/app#home'), true, 'a fragment does not move a start_url out of scope');
+  // Plain children and the scope itself.
+  assert.equal(inScope('/app/'), true);
+  assert.equal(inScope('/app/index.html'), true);
+  // A scope WITHOUT its trailing slash is a prefix, so a sibling that shares the prefix is inside
+  // it. This is the spec's own example, not an accident.
+  assert.equal(inScope('/app-evil/index.html'), true,
+    'https://h/app is a prefix of https://h/app-evil/index.html, so the platform puts it in scope');
+  // The /app-evil protection therefore comes from the trailing slash the platform supplies.
+  assert.equal(inScope('/app-evil/index.html', 'https://localhost:8443/app/'), false,
+    'with the scope the browser actually reports (/app/), the sibling is outside');
+  // And an unrelated path is outside either way.
+  assert.equal(inScope('/other/index.html', 'https://localhost:8443/app/'), false);
+});
+
+test('the icon enumeration: every spelling the manifest allows is exercised (airhorn-5006)', () => {
+  // One entry declaring several sizes (the shape big manifests use).
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '192x192 512x512' }] }), []);
+  // Whitespace-padded and upper-case tokens.
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '  192X192   512x512  ' }] }), []);
+  // Several entries, one per size, plus an unrelated size that must not count as either.
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '96x96' }, { sizes: '512x512' }, { sizes: '192x192' }] }), []);
+  // A required size satisfied only as a PREFIX or SUFFIX is not satisfied.
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '1192x1920' }, { sizes: '512x5120' }] }), ['192x192', '512x512']);
+  // `sizes: "any"` is NOT pinned here: airhorn-iyim measured that Chrome installs such a manifest and
+  // owns that decision, which is why the exactness rule here is about WxH tokens only.
+  // A caller can ask for different requirements without changing the rule.
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '192x192' }], required: ['192x192'] }), []);
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '192x192' }], required: ['512x512'] }), ['512x512']);
+});
