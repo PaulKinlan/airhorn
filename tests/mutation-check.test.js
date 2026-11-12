@@ -13,6 +13,7 @@ import {
   mutationTargetProblem,
   restoreVerified,
   classifyRun,
+  nameUnmeasuredFailure,
   readChannel,
   suiteLoadProblem,
   suitePresenceProblem,
@@ -459,7 +460,13 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     // airhorn-5wns: the sentinel (tools/lib/suite-guard.mjs) lives in the suite's process now, so a
     // removeAllListeners of its rejection sentinel is a strip it REFUSES - the run dies non-clean and
     // is named from outside as a suite that never finished loading cleanly.
-    assert.match(stripped.stderr + stripped.stdout, /threw while loading|registered no tests|crashed/i);
+    // airhorn-vhkz/k92k: that comment said the refusal is "named from outside as a suite that never
+    // finished loading cleanly" - which was the guess this bead pair is about. The refusal is now
+    // MEASURED: the load probe imports the file cleanly, so the run did not fail while loading, and
+    // the sentinel probe dies by SIGKILL with no test running, so the sentinel is what ended it. The
+    // pin asks for that specific name instead of the old "threw while loading | registered no tests |
+    // crashed" alternation, which was wide enough to be true of the wrong cause.
+    assert.match(stripped.stderr + stripped.stdout, /SENTINEL ended the suite process, so this is a REFUSAL/);
 
     // airhorn-5wns (re-targeting airhorn-5qdd onto the supervisor design): the suite process is not
     // unwatched after all. The supervisor loads a sentinel (tools/lib/suite-guard.mjs) into the
@@ -1569,5 +1576,62 @@ test('no gate surface invokes mutation-check as a harness (airhorn-zach)', () =>
     // the pin fails on it directly; the validator also refuses it by name.
     const absolutes = cells.slice(1).join(' ').split(/\s+/).filter((t) => t.startsWith('/'));
     assert.deepEqual(absolutes, [], `absolute spellings are refused (airhorn-eff1): ${line}`);
+  }
+});
+
+test('the phase a "no test event" refusal names is MEASURED, not guessed (airhorn-vhkz, airhorn-k92k)', () => {
+  // Three worlds are ONE record on master 9519d9b0 - measured, same fixture, one world per run:
+  //   (a) the suite file throws while loading, (b) a test throws from inside its body, (c) a benign
+  //   prepended rejection logger the sentinel refuses. For all three the supervisor's fd-3 record is
+  //   {"startedTests":0,"realTests":0,"fileLevelFailed":true,...} and node's runner emits ONE
+  //   file-level test:fail with message 'test failed' and NO error detail, so the old text called all
+  //   three "threw while loading" - a cause the record contradicts for (b) and (c).
+  // airhorn-vhkz is (b), airhorn-k92k is (c). One mechanism closes both: the phase is measured with
+  // two ~70ms probes (a plain import, then the same import with the sentinel loaded and one tick for
+  // its listener-order sample), and only the NAMING uses them - rc 3 and the refusal are unchanged.
+  const naming = (phase) => nameUnmeasuredFailure({ exitCode: 1, phase, suite: 's.mjs' });
+  assert.match(naming({ phase: 'load-threw', why: 'import failed' }), /threw while loading \(import failed\)/,
+    'a measured load throw keeps its phrase, now with its evidence');
+  assert.match(naming({ phase: 'sentinel-refused', why: 'killed' }), /SENTINEL ended the suite process, so this is a REFUSAL/,
+    'the sentinel refusal is named, not called a load throw (airhorn-k92k)');
+  assert.match(naming({ phase: 'sentinel-refused', why: 'killed' }), /rejection listener registered AHEAD of it/,
+    'and it names the shapes the sentinel refuses for, which is what k92k asked for');
+  assert.match(naming({ phase: 'inside-test', why: 'survived' }), /a throw from INSIDE a test body/,
+    'an in-test throw is named as such (airhorn-vhkz)');
+  assert.doesNotMatch(naming({ phase: 'inside-test', why: 'survived' }), /threw while loading/,
+    'and must NOT claim the load phase, which is the defect vhkz names');
+  assert.match(naming(null), /names no cause/,
+    'when the probes cannot establish the phase, say so rather than inventing one');
+
+  // ...and the same three worlds END TO END, because a helper can be right while the wiring is not.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vhkz-'));
+  const write = (name, body) => fs.writeFileSync(path.join(tmp, name), body);
+  const world = (suite) => spawnSync(process.execPath, [tool, '--file', 'src/subject.js', '--from', '41', '--to', '42', '--suite', suite], { cwd: tmp, encoding: 'utf8' });
+  try {
+    fs.mkdirSync(path.join(tmp, 'src'));
+    write('src/subject.js', 'export const answer = 41;\n');
+    write('load-throw.mjs', "import test from 'node:test';\nthrow new Error('load-boom');\ntest('x', () => {});\n");
+    write('in-test-throw.mjs', "import test from 'node:test';\ntest('in-test', (t, done) => { setTimeout(() => { throw new Error('in-test-uncaught'); }, 10); });\n");
+    write('prepend-logger.mjs', "import test from 'node:test';\ntest('one', () => {});\nconst log = () => {};\nprocess.prependListener('unhandledRejection', log);\n");
+
+    const load = world('load-throw.mjs');
+    const inTest = world('in-test-throw.mjs');
+    const prepended = world('prepend-logger.mjs');
+    for (const [label, r] of [['load-throw', load], ['in-test-throw', inTest], ['prepend-logger', prepended]]) {
+      assert.equal(r.status, 3, `${label} must stay a refusal (rc 3), got ${r.status}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout + r.stderr, /\[never-ran\]/, `${label} must still name its state`);
+    }
+    assert.match(load.stdout + load.stderr, /threw while loading \(importing the file in a fresh process/,
+      'the load throw is named, with the probe that established it');
+    assert.match(inTest.stdout + inTest.stderr, /a throw from INSIDE a test body/,
+      'the in-test throw is named (airhorn-vhkz)');
+    assert.doesNotMatch(inTest.stdout + inTest.stderr, /threw while loading/,
+      'and the in-test throw is NOT reported as a load throw - the defect vhkz describes');
+    assert.match(prepended.stdout + prepended.stderr, /SENTINEL ended the suite process, so this is a REFUSAL/,
+      'an honest prepended logger is named as a sentinel refusal (airhorn-k92k)');
+    assert.doesNotMatch(prepended.stdout + prepended.stderr, /threw while loading/,
+      'not as a load crash, which is what sent the k92k reader to the wrong place');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
