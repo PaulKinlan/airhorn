@@ -133,6 +133,16 @@ test('the audio-node release check cannot pass on an unmeasured heap or a leaked
     'three live sources is over the floor and must fail');
   assert.equal(audioNodesReleased([clean()], after({ liveSources: 1 })).pass, false,
     'a source still live after the cycles must fail');
+  // The QUESCED half, one clause per node kind. This is the gap airhorn-ki2d found: the cases
+  // above poison the PEAK (liveOscillatorsMax) or the sources' quiesced count, so dropping
+  // `&& afterCycles.liveOscillators === 0` from the pass expression left the suite green while
+  // audioNodesReleased answered pass:true for a world that still holds an oscillator.
+  assert.equal(audioNodesReleased([clean()], after({ liveOscillators: 1 })).pass, false,
+    'an oscillator still live after the cycles must fail');
+  assert.equal(audioNodesReleased([clean()], after({ liveSources: 1, liveOscillators: 1 })).pass, false,
+    'both kinds still live after the cycles must fail');
+  // (The verdict takes afterCycles.liveOscillators as SAMPLED; it does not derive it from
+  // oscillatorsCreated - oscillatorsEnded, so an unbalanced count alone is not a leak signal.)
 
   // NULL NOT COUNTED AS A LEAK EITHER: a world that never created a node is vacuous, not a
   // failure, and the detail says so - otherwise the strictness above would turn every
