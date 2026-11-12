@@ -110,3 +110,49 @@ test('the tool no longer asks whether the scope is the string / and does assert 
   assert.ok(source.includes('httpsEv.missingIconSizes.length > 0'),
     'the HTTPS leg must FAIL when a required icon size is missing');
 });
+
+test('the scope rule is a SEGMENT prefix, which a string prefix is not (airhorn-5006)', () => {
+  // The gap the browser could not close: reg.scope always carries its trailing slash, so in a
+  // real page both rules refuse /app-evil/ against /app/ and the two are indistinguishable.
+  // Here the scope has NO trailing slash, which is where the rules disagree.
+  const STRING_PREFIX_ONLY = (scope, startUrl) => startUrl.startsWith(scope);
+  const facts = {
+    scope: 'https://localhost:8443/app',
+    startUrl: '/app-evil/index.html',
+    manifestHref: 'https://localhost:8443/app/manifest.json',
+    pageHref: 'https://localhost:8443/app/',
+  };
+  const naive = STRING_PREFIX_ONLY(facts.scope, new URL(facts.startUrl, facts.pageHref).href);
+  assert.equal(naive, true, 'a string prefix DOES accept /app-evil inside /app - that is the bug');
+
+  const verdict = startUrlInScope(facts);
+  assert.equal(verdict.inScope, false, `a segment prefix must refuse it: ${verdict.reason}`);
+
+  // ...and the sibling cases, so the boundary rule is not just "refuse siblings":
+  assert.equal(startUrlInScope({ ...facts, startUrl: '/app/index.html' }).inScope, true,
+    'a real child of the scope is still in scope');
+  assert.equal(startUrlInScope({ ...facts, startUrl: '/app' }).inScope, true,
+    'the scope itself is in scope');
+  // A scope WITH its trailing slash does not accept its own path without one: /app is not
+  // inside /app/ (the URL model, not string slicing).
+  assert.equal(startUrlInScope({ ...facts, scope: 'https://localhost:8443/app/', startUrl: '/app' }).inScope,
+    false, '/app is not inside /app/');
+});
+
+test('the icon enumeration: every spelling the manifest allows is exercised (airhorn-5006)', () => {
+  // One entry declaring several sizes (the shape big manifests use).
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '192x192 512x512' }] }), []);
+  // Whitespace-padded and upper-case tokens.
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '  192X192   512x512  ' }] }), []);
+  // Several entries, one per size, plus an unrelated size that must not count as either.
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '96x96' }, { sizes: '512x512' }, { sizes: '192x192' }] }), []);
+  // A required size satisfied only as a PREFIX or SUFFIX is not satisfied.
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '1192x1920' }, { sizes: '512x5120' }] }), ['192x192', '512x512']);
+  // `sizes: any` is the SVG spelling and does NOT declare an exact raster size - pinned as the
+  // current decision (a manifest that relies on it is refused), see airhorn-5006 for the
+  // open question of whether Chrome would install such a manifest.
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: 'any' }] }), ['192x192', '512x512']);
+  // A caller can ask for different requirements without changing the rule.
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '192x192' }], required: ['192x192'] }), []);
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '192x192' }], required: ['512x512'] }), ['512x512']);
+});

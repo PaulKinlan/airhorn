@@ -57,9 +57,12 @@ export function startUrlInScope({ scope, startUrl, manifestHref, pageHref } = {}
       reason: `the manifest start_url (${JSON.stringify(startUrl)}) does not resolve against ${manifestHref || pageHref}`,
     };
   }
-  // A scope is a URL PREFIX, not a pathname string: comparing pathnames would call
-  // /app-evil inside the scope of /app/.
-  const inScope = startUrlHref.startsWith(scopeHref);
+  // A scope is a URL PREFIX on a SEGMENT boundary, not a string prefix: a bare startsWith
+  // would call /app-evil inside the scope of /app whenever the scope lacks its trailing slash
+  // (airhorn-5006 - reg.scope from a browser always carries one, so the string bug was
+  // unreachable there, which is why the browser could not distinguish the two rules).
+  const boundary = scopeHref.endsWith('/') ? scopeHref : `${scopeHref}/`;
+  const inScope = startUrlHref === scopeHref || startUrlHref.startsWith(boundary);
   return {
     inScope,
     scopeHref,
