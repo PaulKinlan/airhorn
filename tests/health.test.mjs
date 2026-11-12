@@ -34,6 +34,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { serverBounds } from './support/server-bounds.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -71,7 +72,8 @@ function childEnv(overrides = {}) {
 // Every wait is bounded so a wedged server fails the case instead of the gate.
 // `where` runs a *copy* of server.ts in another directory: it resolves its
 // commit from import.meta.dirname, so the copy reports that directory's git.
-function startServer(overrides = {}, readyTimeoutMs = 30000, where = {}) {
+const BOUNDS = serverBounds();
+function startServer(overrides = {}, readyTimeoutMs = BOUNDS.readyMs, where = {}) {
   return new Promise((resolve, reject) => {
     // The spawn/listening bracket (airhorn-g0qr.6): server.ts fixes BUILD_TIMESTAMP at
     // module load, which is after this line and before the listening line, so a fresh
@@ -108,7 +110,7 @@ function startServer(overrides = {}, readyTimeoutMs = 30000, where = {}) {
         host,
         spawnedAt,
         listeningAt: Date.now(),
-        fetch: (p, init) => fetch(url + p, { ...init, signal: AbortSignal.timeout(5000) }),
+        fetch: (p, init) => fetch(url + p, { ...init, signal: AbortSignal.timeout(BOUNDS.fetchMs) }),
         kill: async () => {
           child.kill('SIGTERM');
           const exited = new Promise((done) => child.once('exit', done));

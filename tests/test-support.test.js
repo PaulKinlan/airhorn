@@ -2094,3 +2094,41 @@ test('the steal probe window still spans real time without SharedArrayBuffer (ai
     if (saved) Object.defineProperty(globalThis, 'SharedArrayBuffer', saved);
   }
 });
+
+test('the spawned-server waits stretch with host steal, and say so when they cannot (airhorn-dwbl)', async () => {
+  // The two waits that made these suites red on a starved host were fixed constants (a 5000 ms
+  // fetch abort, a 30000 ms ready bound). A client-side TimeoutError is indistinguishable from a
+  // product bug, so the bound has to follow the host. This pins the adaptor itself: an adaptor
+  // that silently returned the fixed numbers would look identical to the defect.
+  const { serverBounds } = await import('./support/server-bounds.mjs');
+  const { MAX_BOUND_STRETCH } = await import(`${pathToFileURL(CHROME_MJS).href}?dwbl-bounds`);
+
+  const calm = serverBounds({ steal: 0 });
+  assert.deepEqual([calm.fetchMs, calm.readyMs], [5000, 30000], 'an unstarved host keeps the documented bounds');
+
+  const half = serverBounds({ steal: 0.5 });
+  assert.deepEqual([half.fetchMs, half.readyMs], [10000, 60000], 'at 50% steal both waits double');
+
+  const starved = serverBounds({ steal: 0.96 });
+  const cap = Math.min(1 / (1 - 0.96), MAX_BOUND_STRETCH);
+  assert.equal(starved.fetchMs, Math.round(5000 * cap), 'a starved host stretches the fetch bound');
+  assert.equal(starved.readyMs, Math.round(30000 * cap), 'and the ready bound');
+  assert.ok(starved.fetchMs > 5000 && starved.readyMs > 30000, 'stretched, not narrowed');
+
+  // UNKNOWN steal is not "no steal": the adaptor cannot claim a stretch it did not measure, so
+  // the fixed bounds come back unchanged rather than a guessed multiplier.
+  for (const steal of [null, undefined]) {
+    const unknown = serverBounds({ steal });
+    assert.deepEqual([unknown.fetchMs, unknown.readyMs], [5000, 30000],
+      `steal=${steal} must leave the bounds alone, not invent a factor`);
+  }
+
+  // And the suites must USE it: the constants are what the bead filed.
+  const recipe = fs.readFileSync(path.join(import.meta.dirname, 'docs-recipe.test.mjs'), 'utf8');
+  const health = fs.readFileSync(path.join(import.meta.dirname, 'health.test.mjs'), 'utf8');
+  for (const [name, text] of [['docs-recipe', recipe], ['health', health]]) {
+    assert.match(text, /AbortSignal\.timeout\(BOUNDS\.fetchMs\)/, `${name} must take its fetch bound from the host`);
+    assert.ok(!/AbortSignal\.timeout\(5000\)/.test(text), `${name} must not keep the fixed 5000 ms fetch bound`);
+    assert.match(text, /readyTimeoutMs = BOUNDS\.readyMs/, `${name} must take its ready bound from the host`);
+  }
+});
