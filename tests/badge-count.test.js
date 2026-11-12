@@ -110,11 +110,12 @@ test('(e) single-tab path: two sequential blasts store 2 and badge 2', async () 
 
 test('(a) a stale writer over a fresher committed 9 builds on it: 10, never 6', async () => {
   // Read order in the fixed code: constructor's boot derive (1), then blast's
-  // entry count (2), epoch (3), epoch inside bump (4), now (5), FRESH (6), then
-  // the write. Inject the other tab's commit (9) at the FRESH read - the read
-  // the merge exists for. A revert that drops the fresh read makes only 5
-  // reads, so no commit fires and the entry-5 bump writes 6: RED.
-  const storage = scriptedStorage({ initial: 5, commitAtRead: 6, commitTo: 9 });
+  // entry count (2), now (3), FRESH (4), then the write - the badge epoch that
+  // used to sit between them as two extra reads is gone (airhorn-dfth). Inject
+  // the other tab's commit (9) at the FRESH read - the read the merge exists
+  // for. A revert that drops the fresh read makes only 3 reads, so no commit
+  // fires and the entry-5 bump writes 6: RED.
+  const storage = scriptedStorage({ initial: 5, commitAtRead: 4, commitTo: 9 });
   installDom(storage);
   const badge = new BlastBadge();
   badge.blast(); await settle();
