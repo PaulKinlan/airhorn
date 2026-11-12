@@ -14,7 +14,6 @@
  */
 
 const BADGE_COUNT_KEY = 'airhorn:blast-count';
-const BADGE_EPOCH_KEY = 'airhorn:badge-epoch';
 
 export class BlastBadge {
   // Per-tab fallback, used only when shared storage is unavailable and the
@@ -79,12 +78,22 @@ export class BlastBadge {
 
   // The "you looked at it again" acknowledgement (airhorn-7x7m): clear the
   // shared count and the OS badge so the badge never shows a total from a
-  // session nobody is looking at. The clear runs UNDER the blast-count lock
-  // and bumps a storage epoch, so a blast bump that queued before the look
-  // cannot publish its stale total afterwards (airhorn-3v90): bumps compare
-  // the epoch they captured at entry against the stored one inside the lock
-  // and drop themselves when an acknowledge happened in between. Without a
-  // lock manager this is the old best-effort synchronous clear.
+  // session nobody is looking at. The clear runs UNDER the blast-count lock, and
+  // Web Locks grants that lock in REQUEST order, which is what orders it against
+  // blast bumps (airhorn-3v90):
+  //   - a bump that asked for the lock BEFORE the look runs first, publishes its
+  //     total, and this acknowledge then clears it - the look wins;
+  //   - a bump that asks AFTER the look runs after it and counts from whatever
+  //     the acknowledge left stored - a blast fired after the look is not lost.
+  // An earlier version ALSO stamped a stored epoch and made every bump drop
+  // itself when an acknowledge had run in between. That drop was wrong in the
+  // second case - it discarded a real post-look blast whose bump happened to be
+  // queued behind an acknowledge - and it lost an increment (the full gate
+  // caught it as "two blasts in two tabs produced a shared count of 1, expected
+  // 2", airhorn-dfth). Nothing replaces it: the request ordering above is the
+  // whole guarantee, and a bump reads INSIDE the lock, so it never republishes a
+  // total captured before an acknowledge. Without a lock manager this is the old
+  // best-effort synchronous clear.
   async #acknowledgeSharedBadgeCount() {
     if (!navigator.locks?.request) {
       const current = this.#readSharedBadgeCount();
@@ -106,12 +115,6 @@ export class BlastBadge {
     }
     const acknowledge = () => {
       const current = this.#readSharedBadgeCount();
-      // The epoch is bumped even when nothing is owed: a bump queued behind
-      // this acknowledge still represents a blast that happened BEFORE the
-      // look, and must not publish after it (airhorn-3v90).
-      let epoch = 0;
-      try { epoch = Number(window.localStorage.getItem(BADGE_EPOCH_KEY)) || 0; } catch {}
-      try { window.localStorage.setItem(BADGE_EPOCH_KEY, String(epoch + 1)); } catch {}
       if (current === null) {
         // Storage unavailable: the shared count is unknowable, but the badge is
         // still one per origin and this tab may have set it through the per-tab
@@ -142,16 +145,7 @@ export class BlastBadge {
       this.#counter = (this.#counter % 99) + 1;
       return this.#counter;
     }
-    // The blast's intent is stamped with the badge epoch BEFORE queuing on
-    // the lock: an acknowledge that arrives while this bump waits bumps the
-    // stored epoch, and this bump then drops itself inside the lock instead
-    // of publishing a total the user's look already cleared (airhorn-3v90).
-    let myEpoch = 0;
-    try { myEpoch = Number(window.localStorage.getItem(BADGE_EPOCH_KEY)) || 0; } catch {}
     const bump = () => {
-      let stored = myEpoch;
-      try { stored = Number(window.localStorage.getItem(BADGE_EPOCH_KEY)) || 0; } catch {}
-      if (stored !== myEpoch) return null;
       // The re-read happens INSIDE the origin lock: interleaved tabs
       // serialize here instead of each writing pre-blast count + 1, which
       // clobbered the first writer's blast (airhorn-rqz1).
