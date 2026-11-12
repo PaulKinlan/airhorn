@@ -44,10 +44,31 @@ const kill = process.kill.bind(process);
 const nextTick = process.nextTick.bind(process);
 const listenerList = process.listeners.bind(process);
 
+// The sentinel is FIRST on the rejection channel, so it is the one place that learns a rejection
+// was delivered at all. It writes nothing and refuses nothing at delivery time - see onExit.
+let sawRejection = false;
 const sentinel = () => {
   // The honest path: a rejection that reaches this listener happened outside any test, and the
   // parent's outside view already refuses a non-clean run. The sentinel does not need to write
   // anything — being FIRST is the invariant everything else in this file protects.
+  sawRejection = true;
+};
+
+// THE CLEAN EXIT AFTER A REJECTION (airhorn-lg5d). The two watches below are PRECEDENCE and STRIP,
+// and both are blind to the shape that still laundered on 2026-11-12: a listener APPENDED at import
+// time (`process.on('unhandledRejection', () => process.exit(0))` at the top of the suite) is BEHIND
+// the sentinel, so the sampler is right to say nothing, and it removes nothing, so the strip watcher
+// says nothing. But it still runs BEFORE node:test's harness listener - that one registers lazily
+// when the run starts - so process.exit(0) there ends the suite process before anything can judge
+// the rejection, and the parent sees a clean run: measured on master 8e3c3d3b as a VERDICT (rc 2,
+// "fix-does-not-close") where the same suite without the swallow refuses rc 3.
+//
+// node:test turns every rejection into a failed test or a file-level failure, so a CLEAN exit after
+// one was delivered is the anomaly itself. The refusal is deferred to exit ON PURPOSE: dying on
+// delivery would refuse a rejection the harness is about to attribute to a test - a failed TEST, not
+// a refusal (airhorn-812k) - while dying on a clean exit cannot: the harness had nothing left to say.
+const onExit = () => {
+  if (sawRejection && (process.exitCode === undefined || process.exitCode === 0)) refuse();
 };
 
 const onMonitor = () => refuse();
@@ -61,6 +82,7 @@ const onNewListener = (name, fn) => {
 const onRemoveListener = (name, fn) => {
   if ((name === 'unhandledRejection' && fn === sentinel)
     || (name === 'uncaughtExceptionMonitor' && fn === onMonitor)
+    || (name === 'exit' && fn === onExit)
     || (name === 'newListener' && fn === onNewListener)
     || (name === 'removeListener' && fn === onRemoveListener)) {
     refuse();
@@ -79,5 +101,6 @@ function refuse() {
 
 process.on('unhandledRejection', sentinel);
 process.on('uncaughtExceptionMonitor', onMonitor);
+process.on('exit', onExit);
 process.on('newListener', onNewListener);
 process.on('removeListener', onRemoveListener);

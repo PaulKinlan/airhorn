@@ -62,7 +62,15 @@ mutation-check  --fd3 pipe-->  DRIVER (supervisor, test file for the outer runne
    on the rejection channel and owns the `uncaughtExceptionMonitor`, so the airhorn-5qdd shapes - a
    prepended, prepended-once or self-removing `unhandledRejection` swallow, sampled one captured
    nextTick after registration (before any microtask can deliver the rejection), and any uncaught
-   exception at all - end the suite process by SIGKILL. Nothing written from the suite's process is a
+   exception at all - end the suite process by SIGKILL. A listener **appended at import time** is
+   behind the sentinel and removes nothing, so neither watch sees it - but it runs before
+   node:test's harness listener, so `process.exit(0)` there used to end the suite before anything
+   judged the rejection and the run scored as a VERDICT (airhorn-lg5d, rc 2 measured). The sentinel
+   therefore also refuses a CLEAN exit after a rejection reached it: node:test turns every rejection
+   into a failed test or a file-level failure, so a clean exit afterwards is the anomaly itself, and
+   the `exit` listener that enforces it is named in the strip set like every other instrument (the
+   refusal is deferred to exit on purpose - dying on delivery would refuse a rejection the harness
+   attributes to a test, airhorn-812k). Nothing written from the suite's process is a
    fact the parent can trust (it arrives quoted), so the sentinel's one unforgeable statement is that
    death, and the parent classifies a non-clean suite death as a refusal (rc 3), never a verdict. The
    remaining boundary is load-order, not secrecy: the sentinel runs at the same uid and loads before
