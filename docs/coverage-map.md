@@ -208,6 +208,20 @@ pruned verdict cache (airhorn-32wa, ADR 0002). Its parse/classify rules and its 
 by their own hermetic suite - the fixtures are message shapes real history contains, and the read
 path runs against a throwaway repo, so a change to either rule selects the suite that can fail.
 
+## `tools/closure-claims.mjs`
+
+tools/closure-claims.mjs exists because a merger's stale-clearance note ("QUEUE STALE ... it is NOT in
+origin/master@<baseline> ... merge-blocked") can survive as a CLOSED bead's last word after a later
+carrier lands the same content, leaving a record that reads "this never landed" (airhorn-3di8, from the
+closure audit airhorn-k1wo: 7 of 101 closures on 2026-11-11, every one an ancestor of master). Its two
+halves are what a reviewer has to be able to break: the CLASSIFIER (which comments are claims about the
+trunk, and which are citations of someone else's claim) and the PROOF (ancestry of the commit the note
+itself pins, with a named-commit fallback, and nothing written when neither holds). Both are pinned by
+`tests/closure-claims.test.mjs` against verbatim record fixtures and a throwaway repository with a stub
+`bd` on PATH, so the suite needs no browser, no network and no tracker of its own - the only external
+thing it touches is git in a temp dir. A change to the classifier, the proof rules or the write shape
+selects that suite; a change to nothing else here does.
+
 ## `tools/mutation-check.mjs`
 
 tools/mutation-check.mjs is the guard every sweep's mutation step runs through, so its

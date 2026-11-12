@@ -1,68 +1,31 @@
 {
- "src/horn.js": [
-  "tests/horn.test.js",
-  "tests/a11y.test.mjs",
-  "tests/shortcuts.test.mjs"
+ ".beads/config.yaml": [
+  "tests/beads-config.test.js"
  ],
- "src/main.js": [
-  "tests/modules.test.js",
-  "tests/resilience-ui.test.mjs",
-  "tests/webmcp-browser.test.mjs"
+ ".fleet/coverage-contract.json": [
+  "tests/gate-smoke.test.js",
+  "tests/gate-map.test.js"
  ],
- "src/airhorn.js": [
-  "tests/modules.test.js",
-  "tests/horn.test.js",
-  "tests/a11y.test.mjs",
-  "tests/keyboard.test.mjs",
-  "tests/screenreader.test.mjs",
-  "tests/shortcuts.test.mjs",
-  "tests/reflow-zoom.test.mjs",
-  "tests/visual-overrides.test.mjs",
-  "tests/webmcp-browser.test.mjs",
-  "tests/resilience-ui.test.mjs"
+ ".gitattributes": [
+  "tests/suite-map-merge.test.js"
  ],
- "src/input.js": [
-  "tests/modules.test.js",
-  "tests/horn.test.js",
-  "tests/keyboard.test.mjs",
-  "tests/a11y.test.mjs",
-  "tests/screenreader.test.mjs",
-  "tests/visual-overrides.test.mjs",
-  "tests/reflow-zoom.test.mjs"
+ ".github/workflows/deploy-pages.yml": [
+  "tests/pages-config.test.js"
  ],
- "src/badge.js": [
-  "tests/badge-count.test.js",
-  "tests/modules.test.js",
-  "tests/multitab.test.mjs",
-  "tests/webmcp-browser.test.mjs"
+ "README.md": [
+  "tests/docs-recipe.test.mjs"
  ],
- "src/install.js": [
-  "tests/modules.test.js",
-  "tests/a11y.test.mjs",
-  "tests/keyboard.test.mjs",
-  "tests/resilience-ui.test.mjs",
-  "tests/reflow-zoom.test.mjs"
+ "deno.lock": [
+  "tests/health.test.mjs"
  ],
- "src/launch.js": [
-  "tests/modules.test.js",
-  "tests/shortcuts.test.mjs",
-  "tests/multitab.test.mjs"
+ "docs/runbooks/**": [
+  "tests/docs-recipe.test.mjs"
  ],
- "src/status.js": [
-  "tests/modules.test.js",
-  "tests/screenreader.test.mjs",
-  "tests/keyboard.test.mjs",
-  "tests/multitab.test.mjs",
-  "tests/resilience-ui.test.mjs",
-  "tests/visual-overrides.test.mjs"
+ "docs/runbooks/DEPLOY.md": [
+  "tests/docs-recipe.test.mjs"
  ],
- "src/analytics.js": [
-  "tests/modules.test.js"
- ],
- "src/webmcp.js": [
-  "tests/webmcp.test.mjs",
-  "tests/webmcp-fuzz.test.mjs",
-  "tests/webmcp-browser.test.mjs"
+ "docs/webmcp-tools.md": [
+  "tests/docs-evidence-map.test.mjs"
  ],
  "index.html": [
   "tests/preload-priority.test.js",
@@ -74,10 +37,11 @@
   "tests/keyboard.test.mjs",
   "tests/screenreader.test.mjs"
  ],
- "vite.config.js": [
+ "package-lock.json": [
   "tests/horn.test.js",
   "tests/a11y.test.mjs",
   "tests/sw-offline.test.mjs",
+  "tests/webmcp.test.mjs",
   "tests/webmcp-browser.test.mjs"
  ],
  "package.json": [
@@ -87,95 +51,21 @@
   "tests/webmcp.test.mjs",
   "tests/webmcp-browser.test.mjs"
  ],
- "package-lock.json": [
-  "tests/horn.test.js",
-  "tests/a11y.test.mjs",
-  "tests/sw-offline.test.mjs",
-  "tests/webmcp.test.mjs",
-  "tests/webmcp-browser.test.mjs"
+ "public/_headers": [
+  "tests/pages-config.test.js",
+  "tests/csp-boot.test.mjs",
+  "tests/csp.test.js",
+  "tests/csp-enforced.test.mjs"
  ],
- "server.ts": [
-  "tests/gate-smoke.test.js",
-  "tests/health.test.mjs"
+ "public/async-css.js": [
+  "tests/resilience-ui.test.mjs",
+  "tests/csp-enforced.test.mjs",
+  "tests/csp.test.js"
  ],
- "deno.lock": [
-  "tests/health.test.mjs"
- ],
- "tools/*": [
-  "tests/gate-smoke.test.js",
-  "tests/gate-map.test.js"
- ],
- "tools/suite-map.tsv": [
-  "tests/gate-smoke.test.js",
-  "tests/gate-map.test.js",
-  "tests/suite-map-merge.test.js"
- ],
- "tools/merge-suite-map.mjs": [
-  "tests/suite-map-merge.test.js"
- ],
- ".gitattributes": [
-  "tests/suite-map-merge.test.js"
- ],
- "tools/guarded-call.mjs": [
-  "tests/lost-upgrade-copy.test.mjs"
- ],
- "tools/audio-parity.mjs": [
-  "tests/audio-parity-verdict.test.js"
- ],
- "tools/measure-perf.mjs": [
-  "tests/tool-verdicts.test.js"
- ],
- "tools/cache-growth.mjs": [
-  "tests/soak-verdict.test.js",
-  "tests/tool-bound-kill.test.mjs"
- ],
- "tools/soak.mjs": [
-  "tests/soak-verdict.test.js",
-  "tests/tool-bound-kill.test.mjs"
- ],
- "tools/derive-coverage-contract.mjs": [
-  "tests/derive-coverage-contract.test.js"
- ],
- "tools/landings.mjs": [
-  "tests/landings.test.js"
- ],
- "tools/mutation-check.mjs": [
-  "tests/mutation-check.test.js"
- ],
- "tools/lib/suite-driver.mjs": [
-  "tests/mutation-check.test.js"
- ],
- "tools/lib/suite-guard.mjs": [
-  "tests/mutation-check.test.js"
- ],
- "tools/lib/suite-mode-reporter.mjs": [
-  "tests/mutation-check.test.js"
- ],
- "tools/lib/endpoint-growth.mjs": [
-  "tests/soak-verdict.test.js"
- ],
- "tools/lib/**": [
-  "tests/test-support.test.js"
- ],
- "tools/lib/update-outcome.mjs": [
-  "tests/update-outcome.test.js"
- ],
- "tools/lib/perf-metrics.mjs": [
-  "tests/tool-verdicts.test.js"
- ],
- "tools/install-https-proof.mjs": [
-  "tests/gate-smoke.test.js",
-  "tests/test-support.test.js"
- ],
- "tools/resilience-audit.mjs": [
-  "tests/resilience-probe.test.js",
-  "tests/resilience-report.test.js",
-  "tests/scenario-id-drift.test.js"
- ],
- "public/sw.js": [
-  "tests/sw-offline.test.mjs",
-  "tests/sw-failover.test.mjs",
-  "tests/sw-redirect.test.mjs"
+ "public/boot-watchdog.js": [
+  "tests/resilience-ui.test.mjs",
+  "tests/csp-enforced.test.mjs",
+  "tests/csp.test.js"
  ],
  "public/manifest.json": [
   "tests/sw-offline.test.mjs"
@@ -189,47 +79,102 @@
   "tests/visual-overrides.test.mjs",
   "tests/reflow-zoom.test.mjs"
  ],
- "public/boot-watchdog.js": [
-  "tests/resilience-ui.test.mjs",
-  "tests/csp-enforced.test.mjs",
-  "tests/csp.test.js"
- ],
  "public/sw-register.js": [
   "tests/resilience-ui.test.mjs",
   "tests/csp.test.js"
  ],
- "public/async-css.js": [
-  "tests/resilience-ui.test.mjs",
-  "tests/csp-enforced.test.mjs",
-  "tests/csp.test.js"
+ "public/sw.js": [
+  "tests/sw-offline.test.mjs",
+  "tests/sw-failover.test.mjs",
+  "tests/sw-redirect.test.mjs"
  ],
- ".fleet/coverage-contract.json": [
+ "server.ts": [
   "tests/gate-smoke.test.js",
-  "tests/gate-map.test.js"
+  "tests/health.test.mjs"
  ],
- "tests/support/lock-spy.mjs": [
-  "tests/lock-spy.test.js"
+ "src/airhorn.js": [
+  "tests/modules.test.js",
+  "tests/horn.test.js",
+  "tests/a11y.test.mjs",
+  "tests/keyboard.test.mjs",
+  "tests/screenreader.test.mjs",
+  "tests/shortcuts.test.mjs",
+  "tests/reflow-zoom.test.mjs",
+  "tests/visual-overrides.test.mjs",
+  "tests/webmcp-browser.test.mjs",
+  "tests/resilience-ui.test.mjs"
  ],
- "tools/rollback-rehearsal.mjs": [
-  "tests/rollback-epipe.test.js"
+ "src/analytics.js": [
+  "tests/modules.test.js"
  ],
- "tools/idle-cost.mjs": [
-  "tests/idle-cost-verdict.test.js"
+ "src/badge.js": [
+  "tests/badge-count.test.js",
+  "tests/modules.test.js",
+  "tests/multitab.test.mjs",
+  "tests/webmcp-browser.test.mjs"
  ],
- ".beads/config.yaml": [
-  "tests/beads-config.test.js"
+ "src/horn.js": [
+  "tests/horn.test.js",
+  "tests/a11y.test.mjs",
+  "tests/shortcuts.test.mjs"
  ],
- "README.md": [
-  "tests/docs-recipe.test.mjs"
+ "src/input.js": [
+  "tests/modules.test.js",
+  "tests/horn.test.js",
+  "tests/keyboard.test.mjs",
+  "tests/a11y.test.mjs",
+  "tests/screenreader.test.mjs",
+  "tests/visual-overrides.test.mjs",
+  "tests/reflow-zoom.test.mjs"
  ],
- "docs/runbooks/DEPLOY.md": [
-  "tests/docs-recipe.test.mjs"
+ "src/install.js": [
+  "tests/modules.test.js",
+  "tests/a11y.test.mjs",
+  "tests/keyboard.test.mjs",
+  "tests/resilience-ui.test.mjs",
+  "tests/reflow-zoom.test.mjs"
  ],
- "docs/webmcp-tools.md": [
-  "tests/docs-evidence-map.test.mjs"
+ "src/launch.js": [
+  "tests/modules.test.js",
+  "tests/shortcuts.test.mjs",
+  "tests/multitab.test.mjs"
  ],
- "docs/runbooks/**": [
-  "tests/docs-recipe.test.mjs"
+ "src/main.js": [
+  "tests/modules.test.js",
+  "tests/resilience-ui.test.mjs",
+  "tests/webmcp-browser.test.mjs"
+ ],
+ "src/status.js": [
+  "tests/modules.test.js",
+  "tests/screenreader.test.mjs",
+  "tests/keyboard.test.mjs",
+  "tests/multitab.test.mjs",
+  "tests/resilience-ui.test.mjs",
+  "tests/visual-overrides.test.mjs"
+ ],
+ "src/webmcp.js": [
+  "tests/webmcp.test.mjs",
+  "tests/webmcp-fuzz.test.mjs",
+  "tests/webmcp-browser.test.mjs"
+ ],
+ "tests/cdp-command-bound.mjs": [
+  "tests/a11y.test.mjs",
+  "tests/csp-boot.test.mjs",
+  "tests/csp-enforced.test.mjs",
+  "tests/keyboard.test.mjs",
+  "tests/multitab.test.mjs",
+  "tests/reflow-zoom.test.mjs",
+  "tests/resilience-ui.test.mjs",
+  "tests/screenreader.test.mjs",
+  "tests/shortcuts.test.mjs",
+  "tests/sw-failover.test.mjs",
+  "tests/sw-offline.test.mjs",
+  "tests/test-support.test.js",
+  "tests/visual-overrides.test.mjs",
+  "tests/webmcp-browser.test.mjs"
+ ],
+ "tests/support/axe.min.js": [
+  "tests/a11y.test.mjs"
  ],
  "tests/support/browser.mjs": [
   "tests/a11y.test.mjs",
@@ -248,44 +193,40 @@
   "tests/visual-overrides.test.mjs",
   "tests/webmcp-browser.test.mjs"
  ],
- "tests/support/static-server.mjs": [
-  "tests/csp-boot.test.mjs",
-  "tests/csp-enforced.test.mjs",
-  "tests/csp.test.js",
-  "tests/health.test.mjs",
-  "tests/sw-failover.test.mjs",
-  "tests/sw-offline.test.mjs",
-  "tests/test-support.test.js"
+ "tests/support/lock-spy.mjs": [
+  "tests/lock-spy.test.js"
  ],
- "tools/lib/static-server.mjs": [
-  "tests/test-support.test.js",
-  "tests/csp-boot.test.mjs",
-  "tests/sw-failover.test.mjs",
+ "tests/support/lost-upgrade-copy.mjs": [
+  "tests/lost-upgrade-copy.test.mjs",
+  "tests/resilience-ui.test.mjs"
+ ],
+ "tests/support/nav-guard.mjs": [
+  "tests/nav-guard.test.mjs",
+  "tests/resilience-ui.test.mjs"
+ ],
+ "tests/support/offline-asset-verdict.mjs": [
+  "tests/offline-asset-verdict.test.js",
   "tests/sw-offline.test.mjs"
  ],
- "tests/cdp-command-bound.mjs": [
-  "tests/a11y.test.mjs",
-  "tests/csp-boot.test.mjs",
+ "tests/support/poll.mjs": [
   "tests/csp-enforced.test.mjs",
   "tests/keyboard.test.mjs",
-  "tests/multitab.test.mjs",
-  "tests/reflow-zoom.test.mjs",
   "tests/resilience-ui.test.mjs",
   "tests/screenreader.test.mjs",
-  "tests/shortcuts.test.mjs",
   "tests/sw-failover.test.mjs",
   "tests/sw-offline.test.mjs",
   "tests/test-support.test.js",
   "tests/visual-overrides.test.mjs",
   "tests/webmcp-browser.test.mjs"
  ],
- "tests/support/signal-exit.mjs": [
-  "tests/keyboard.test.mjs",
-  "tests/multitab.test.mjs",
-  "tests/screenreader.test.mjs",
-  "tests/shortcuts.test.mjs",
-  "tests/sw-failover.test.mjs",
-  "tests/test-support.test.js"
+ "tests/support/press-guard.mjs": [
+  "tests/press-guard.test.mjs",
+  "tests/resilience-ui.test.mjs"
+ ],
+ "tests/support/quiescence.mjs": [
+  "tests/a11y.test.mjs",
+  "tests/quiescence-bound.test.js",
+  "tests/sw-offline.test.mjs"
  ],
  "tests/support/report-hook.mjs": [
   "tests/a11y.test.mjs",
@@ -303,55 +244,117 @@
   "tests/webmcp-browser.test.mjs",
   "tests/webmcp.test.mjs"
  ],
- "tests/support/poll.mjs": [
-  "tests/csp-enforced.test.mjs",
+ "tests/support/signal-exit.mjs": [
   "tests/keyboard.test.mjs",
-  "tests/resilience-ui.test.mjs",
+  "tests/multitab.test.mjs",
   "tests/screenreader.test.mjs",
+  "tests/shortcuts.test.mjs",
+  "tests/sw-failover.test.mjs",
+  "tests/test-support.test.js"
+ ],
+ "tests/support/static-server.mjs": [
+  "tests/csp-boot.test.mjs",
+  "tests/csp-enforced.test.mjs",
+  "tests/csp.test.js",
+  "tests/health.test.mjs",
   "tests/sw-failover.test.mjs",
   "tests/sw-offline.test.mjs",
-  "tests/test-support.test.js",
-  "tests/visual-overrides.test.mjs",
-  "tests/webmcp-browser.test.mjs"
- ],
- "tests/support/quiescence.mjs": [
-  "tests/a11y.test.mjs",
-  "tests/quiescence-bound.test.js",
-  "tests/sw-offline.test.mjs"
- ],
- "tests/support/offline-asset-verdict.mjs": [
-  "tests/offline-asset-verdict.test.js",
-  "tests/sw-offline.test.mjs"
- ],
- "tests/support/lost-upgrade-copy.mjs": [
-  "tests/lost-upgrade-copy.test.mjs",
-  "tests/resilience-ui.test.mjs"
- ],
- "tests/support/nav-guard.mjs": [
-  "tests/nav-guard.test.mjs",
-  "tests/resilience-ui.test.mjs"
- ],
- "tests/support/press-guard.mjs": [
-  "tests/press-guard.test.mjs",
-  "tests/resilience-ui.test.mjs"
- ],
- "tests/support/axe.min.js": [
-  "tests/a11y.test.mjs"
- ],
- "public/_headers": [
-  "tests/pages-config.test.js",
-  "tests/csp-boot.test.mjs",
-  "tests/csp.test.js",
-  "tests/csp-enforced.test.mjs"
- ],
- "wrangler.jsonc": [
-  "tests/pages-config.test.js"
- ],
- ".github/workflows/deploy-pages.yml": [
-  "tests/pages-config.test.js"
+  "tests/test-support.test.js"
  ],
  "tests/support/webmcp-refusals.mjs": [
   "tests/webmcp-browser.test.mjs",
   "tests/webmcp-refusal-bound.test.js"
+ ],
+ "tools/*": [
+  "tests/gate-smoke.test.js",
+  "tests/gate-map.test.js"
+ ],
+ "tools/audio-parity.mjs": [
+  "tests/audio-parity-verdict.test.js"
+ ],
+ "tools/cache-growth.mjs": [
+  "tests/soak-verdict.test.js",
+  "tests/tool-bound-kill.test.mjs"
+ ],
+ "tools/closure-claims.mjs": [
+  "tests/closure-claims.test.mjs"
+ ],
+ "tools/derive-coverage-contract.mjs": [
+  "tests/derive-coverage-contract.test.js"
+ ],
+ "tools/guarded-call.mjs": [
+  "tests/lost-upgrade-copy.test.mjs"
+ ],
+ "tools/idle-cost.mjs": [
+  "tests/idle-cost-verdict.test.js"
+ ],
+ "tools/install-https-proof.mjs": [
+  "tests/gate-smoke.test.js",
+  "tests/test-support.test.js"
+ ],
+ "tools/landings.mjs": [
+  "tests/landings.test.js"
+ ],
+ "tools/lib/**": [
+  "tests/test-support.test.js"
+ ],
+ "tools/lib/endpoint-growth.mjs": [
+  "tests/soak-verdict.test.js"
+ ],
+ "tools/lib/perf-metrics.mjs": [
+  "tests/tool-verdicts.test.js"
+ ],
+ "tools/lib/static-server.mjs": [
+  "tests/test-support.test.js",
+  "tests/csp-boot.test.mjs",
+  "tests/sw-failover.test.mjs",
+  "tests/sw-offline.test.mjs"
+ ],
+ "tools/lib/suite-driver.mjs": [
+  "tests/mutation-check.test.js"
+ ],
+ "tools/lib/suite-guard.mjs": [
+  "tests/mutation-check.test.js"
+ ],
+ "tools/lib/suite-mode-reporter.mjs": [
+  "tests/mutation-check.test.js"
+ ],
+ "tools/lib/update-outcome.mjs": [
+  "tests/update-outcome.test.js"
+ ],
+ "tools/measure-perf.mjs": [
+  "tests/tool-verdicts.test.js"
+ ],
+ "tools/merge-suite-map.mjs": [
+  "tests/suite-map-merge.test.js"
+ ],
+ "tools/mutation-check.mjs": [
+  "tests/mutation-check.test.js"
+ ],
+ "tools/resilience-audit.mjs": [
+  "tests/resilience-probe.test.js",
+  "tests/resilience-report.test.js",
+  "tests/scenario-id-drift.test.js"
+ ],
+ "tools/rollback-rehearsal.mjs": [
+  "tests/rollback-epipe.test.js"
+ ],
+ "tools/soak.mjs": [
+  "tests/soak-verdict.test.js",
+  "tests/tool-bound-kill.test.mjs"
+ ],
+ "tools/suite-map.tsv": [
+  "tests/gate-smoke.test.js",
+  "tests/gate-map.test.js",
+  "tests/suite-map-merge.test.js"
+ ],
+ "vite.config.js": [
+  "tests/horn.test.js",
+  "tests/a11y.test.mjs",
+  "tests/sw-offline.test.mjs",
+  "tests/webmcp-browser.test.mjs"
+ ],
+ "wrangler.jsonc": [
+  "tests/pages-config.test.js"
  ]
 }
