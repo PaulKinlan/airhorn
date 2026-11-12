@@ -228,6 +228,11 @@
   "tests/quiescence-bound.test.js",
   "tests/sw-offline.test.mjs"
  ],
+ "tests/support/server-bounds.mjs": [
+  "tests/docs-recipe.test.mjs",
+  "tests/health.test.mjs",
+  "tests/test-support.test.js"
+ ],
  "tests/support/report-hook.mjs": [
   "tests/a11y.test.mjs",
   "tests/csp-boot.test.mjs",

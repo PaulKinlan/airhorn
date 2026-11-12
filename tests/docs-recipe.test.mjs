@@ -45,6 +45,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { serverBounds } from './support/server-bounds.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -100,7 +101,10 @@ const forceEphemeralPort = (recipe) => (/\bPORT=\d+\b/.test(recipe)
 
 // Start the documented command; resolve once the server prints its own listening
 // line. Every wait is bounded so a wedged server fails the case, not the gate.
-function runRecipe(recipe, readyTimeoutMs = 30000) {
+// A starved host needs more wall clock than a fixed constant allows (airhorn-dwbl): the
+// shape of the two waits is unchanged, the numbers are the host's (tests/support/server-bounds.mjs).
+const BOUNDS = serverBounds();
+function runRecipe(recipe, readyTimeoutMs = BOUNDS.readyMs) {
   const command = forceEphemeralPort(recipe);
   const env = { ...process.env };
   for (const key of ['APP_VERSION', 'GIT_COMMIT', 'COMMIT_SHA', 'BUILD_TIMESTAMP']) delete env[key];
@@ -127,7 +131,7 @@ function runRecipe(recipe, readyTimeoutMs = 30000) {
       resolve({
         port,
         command,
-        fetch: (p, init) => fetch(url + p, { ...init, signal: AbortSignal.timeout(5000) }),
+        fetch: (p, init) => fetch(url + p, { ...init, signal: AbortSignal.timeout(BOUNDS.fetchMs) }),
         kill: async () => {
           child.kill('SIGTERM');
           const exited = new Promise((done) => child.once('exit', done));
