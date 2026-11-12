@@ -16,120 +16,122 @@
 #   node tools/merge-suite-map.mjs --tiers-union /tmp/ours.conf /tmp/theirs.conf --write tools/gate.conf
 # `git config merge.suite-map-union.driver "node tools/merge-suite-map.mjs --driver %O %A %B"` makes git do the
 # union for you (.gitattributes has the entry); the tool refuses a disagreement by name instead of choosing.
-src/horn.js	tests/horn.test.js tests/a11y.test.mjs tests/shortcuts.test.mjs
 # why: docs/coverage-map.md#src-main-js
-src/main.js	tests/modules.test.js tests/resilience-ui.test.mjs tests/webmcp-browser.test.mjs
 # why: docs/coverage-map.md#src-airhorn-js
-src/airhorn.js	tests/modules.test.js tests/horn.test.js tests/a11y.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/reflow-zoom.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs
 # why: docs/coverage-map.md#src-input-js
-src/input.js	tests/modules.test.js tests/horn.test.js tests/keyboard.test.mjs tests/a11y.test.mjs tests/screenreader.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs
 # why: docs/coverage-map.md#src-badge-js
-src/badge.js	tests/badge-count.test.js tests/modules.test.js tests/multitab.test.mjs tests/webmcp-browser.test.mjs
 # why: docs/coverage-map.md#src-install-js
-src/install.js	tests/modules.test.js tests/a11y.test.mjs tests/keyboard.test.mjs tests/resilience-ui.test.mjs tests/reflow-zoom.test.mjs
 # why: docs/coverage-map.md#src-launch-js
-src/launch.js	tests/modules.test.js tests/shortcuts.test.mjs tests/multitab.test.mjs
 # why: docs/coverage-map.md#src-status-js
-src/status.js	tests/modules.test.js tests/screenreader.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/resilience-ui.test.mjs tests/visual-overrides.test.mjs
 # why: docs/coverage-map.md#src-analytics-js
-src/analytics.js	tests/modules.test.js
-src/webmcp.js	tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs
 # why: docs/coverage-map.md#index-html
-index.html	tests/preload-priority.test.js tests/csp.test.js tests/horn.test.js tests/a11y.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs
-vite.config.js	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs tests/webmcp-browser.test.mjs
-package.json	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs tests/webmcp.test.mjs tests/webmcp-browser.test.mjs
-package-lock.json	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs tests/webmcp.test.mjs tests/webmcp-browser.test.mjs
 # why: docs/coverage-map.md#server-ts
-server.ts	tests/gate-smoke.test.js tests/health.test.mjs
 # why: docs/coverage-map.md#deno-lock
-deno.lock	tests/health.test.mjs
 # why: docs/coverage-map.md#tools
-tools/*	tests/gate-smoke.test.js tests/gate-map.test.js
-tools/suite-map.tsv	tests/gate-smoke.test.js tests/gate-map.test.js tests/suite-map-merge.test.js
-tools/merge-suite-map.mjs	tests/suite-map-merge.test.js
-.gitattributes	tests/suite-map-merge.test.js
 # why: docs/coverage-map.md#tools-guarded-call-mjs
-tools/guarded-call.mjs	tests/lost-upgrade-copy.test.mjs
 # why: docs/coverage-map.md#tools-audio-parity-mjs
-tools/audio-parity.mjs	tests/audio-parity-verdict.test.js
 # why: docs/coverage-map.md#tools-measure-perf-mjs
-tools/measure-perf.mjs	tests/tool-verdicts.test.js
 # why: docs/coverage-map.md#tools-cache-growth-mjs
-tools/cache-growth.mjs	tests/soak-verdict.test.js tests/tool-bound-kill.test.mjs
-tools/soak.mjs	tests/soak-verdict.test.js tests/tool-bound-kill.test.mjs
 # why: docs/coverage-map.md#tools-derive-coverage-contract-mjs
-tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
 # why: docs/coverage-map.md#tools-landings-mjs
-tools/landings.mjs	tests/landings.test.js
 # why: docs/coverage-map.md#tools-mutation-check-mjs
-tools/mutation-check.mjs	tests/mutation-check.test.js
-tools/lib/suite-driver.mjs	tests/mutation-check.test.js
 # why: docs/trust-boundary.md#known-limits-stated-rather-than-implied (airhorn-5wns)
-tools/lib/suite-guard.mjs	tests/mutation-check.test.js
 # why: docs/coverage-map.md#tools-lib-suite-mode-reporter-mjs
-tools/lib/suite-mode-reporter.mjs	tests/mutation-check.test.js
-tools/lib/endpoint-growth.mjs	tests/soak-verdict.test.js
 # why: docs/coverage-map.md#tools-lib
-tools/lib/**	tests/test-support.test.js
 # why: docs/coverage-map.md#tools-lib-update-outcome-mjs
-tools/lib/update-outcome.mjs	tests/update-outcome.test.js
 # why: docs/coverage-map.md#tools-lib-perf-metrics-mjs
-tools/lib/perf-metrics.mjs	tests/tool-verdicts.test.js
 # why: docs/coverage-map.md#tools-install-https-proof-mjs
-tools/install-https-proof.mjs	tests/gate-smoke.test.js tests/test-support.test.js
-tools/resilience-audit.mjs	tests/resilience-probe.test.js tests/resilience-report.test.js tests/scenario-id-drift.test.js
 # why: docs/coverage-map.md#public-sw-js
-public/sw.js	tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/sw-redirect.test.mjs
+# why: docs/coverage-map.md#public-styles
+# why: docs/coverage-map.md#public-csp-files
+# why: docs/coverage-map.md#fleet-coverage-contract-json
+# why: docs/coverage-map.md#readme-md
+# why: docs/coverage-map.md#docs-runbooks-deploy-md
+# why: docs/coverage-map.md#docs-webmcp-tools-md
+# why: docs/coverage-map.md#docs-runbooks
+# why: docs/coverage-map.md#md
+# why: docs/coverage-map.md#preview
+# why: docs/coverage-map.md#tests-acceptance-mjs
+# why: docs/coverage-map.md#tests-support-browser-mjs
+# why: docs/coverage-map.md#tools-lib-static-server-mjs
+# why: docs/coverage-map.md#tests-support-report-hook-mjs
+# why: docs/coverage-map.md#public-headers
+# why: docs/coverage-map.md#public-headers
+# why: docs/coverage-map.md#tools-closure-claims-mjs
+!*.md
+.beads/config.yaml	tests/beads-config.test.js
+.fleet/coverage-contract.json	tests/gate-smoke.test.js tests/gate-map.test.js
+.gitattributes	tests/suite-map-merge.test.js
+.github/workflows/deploy-pages.yml	tests/pages-config.test.js
+!.gitignore
+!LICENSE
+README.md	tests/docs-recipe.test.mjs
+deno.lock	tests/health.test.mjs
+docs/runbooks/**	tests/docs-recipe.test.mjs
+docs/runbooks/DEPLOY.md	tests/docs-recipe.test.mjs
+docs/webmcp-tools.md	tests/docs-evidence-map.test.mjs
+index.html	tests/preload-priority.test.js tests/csp.test.js tests/horn.test.js tests/a11y.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs
+package-lock.json	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs tests/webmcp.test.mjs tests/webmcp-browser.test.mjs
+package.json	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs tests/webmcp.test.mjs tests/webmcp-browser.test.mjs
+!preview/**
+!public/**
+public/_headers	tests/pages-config.test.js tests/csp-boot.test.mjs tests/csp.test.js tests/csp-enforced.test.mjs
+public/async-css.js	tests/resilience-ui.test.mjs tests/csp-enforced.test.mjs tests/csp.test.js
+public/boot-watchdog.js	tests/resilience-ui.test.mjs tests/csp-enforced.test.mjs tests/csp.test.js
 public/manifest.json	tests/sw-offline.test.mjs
 public/sounds/**	tests/sw-offline.test.mjs
-# why: docs/coverage-map.md#public-styles
 public/styles/**	tests/a11y.test.mjs tests/keyboard.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs
-# why: docs/coverage-map.md#public-csp-files
-public/boot-watchdog.js	tests/resilience-ui.test.mjs tests/csp-enforced.test.mjs tests/csp.test.js
 public/sw-register.js	tests/resilience-ui.test.mjs tests/csp.test.js
-public/async-css.js	tests/resilience-ui.test.mjs tests/csp-enforced.test.mjs tests/csp.test.js
-# why: docs/coverage-map.md#fleet-coverage-contract-json
-.fleet/coverage-contract.json	tests/gate-smoke.test.js tests/gate-map.test.js
-tests/support/lock-spy.mjs	tests/lock-spy.test.js
-tools/rollback-rehearsal.mjs	tests/rollback-epipe.test.js
-tools/idle-cost.mjs	tests/idle-cost-verdict.test.js
-.beads/config.yaml	tests/beads-config.test.js
-# why: docs/coverage-map.md#readme-md
-README.md	tests/docs-recipe.test.mjs
-# why: docs/coverage-map.md#docs-runbooks-deploy-md
-docs/runbooks/DEPLOY.md	tests/docs-recipe.test.mjs
-# why: docs/coverage-map.md#docs-webmcp-tools-md
-docs/webmcp-tools.md	tests/docs-evidence-map.test.mjs
-# why: docs/coverage-map.md#docs-runbooks
-docs/runbooks/**	tests/docs-recipe.test.mjs
-# why: docs/coverage-map.md#md
-!*.md
-!LICENSE
-!.gitignore
-!public/**
-# why: docs/coverage-map.md#preview
-!preview/**
-# why: docs/coverage-map.md#tests-acceptance-mjs
+public/sw.js	tests/sw-offline.test.mjs tests/sw-failover.test.mjs tests/sw-redirect.test.mjs
+server.ts	tests/gate-smoke.test.js tests/health.test.mjs
+src/airhorn.js	tests/modules.test.js tests/horn.test.js tests/a11y.test.mjs tests/keyboard.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/reflow-zoom.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/resilience-ui.test.mjs
+src/analytics.js	tests/modules.test.js
+src/badge.js	tests/badge-count.test.js tests/modules.test.js tests/multitab.test.mjs tests/webmcp-browser.test.mjs
+src/horn.js	tests/horn.test.js tests/a11y.test.mjs tests/shortcuts.test.mjs
+src/input.js	tests/modules.test.js tests/horn.test.js tests/keyboard.test.mjs tests/a11y.test.mjs tests/screenreader.test.mjs tests/visual-overrides.test.mjs tests/reflow-zoom.test.mjs
+src/install.js	tests/modules.test.js tests/a11y.test.mjs tests/keyboard.test.mjs tests/resilience-ui.test.mjs tests/reflow-zoom.test.mjs
+src/launch.js	tests/modules.test.js tests/shortcuts.test.mjs tests/multitab.test.mjs
+src/main.js	tests/modules.test.js tests/resilience-ui.test.mjs tests/webmcp-browser.test.mjs
+src/status.js	tests/modules.test.js tests/screenreader.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/resilience-ui.test.mjs tests/visual-overrides.test.mjs
+src/webmcp.js	tests/webmcp.test.mjs tests/webmcp-fuzz.test.mjs tests/webmcp-browser.test.mjs
 tests/acceptance.mjs	tests/acceptance.mjs
-# why: docs/coverage-map.md#tests-support-browser-mjs
-tests/support/browser.mjs	@importers except=tests/acceptance.mjs
-tests/support/static-server.mjs	@importers
-# why: docs/coverage-map.md#tools-lib-static-server-mjs
-tools/lib/static-server.mjs	tests/test-support.test.js tests/csp-boot.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs
 tests/cdp-command-bound.mjs	@importers except=tests/acceptance.mjs
-tests/support/signal-exit.mjs	@importers except=tests/acceptance.mjs
-# why: docs/coverage-map.md#tests-support-report-hook-mjs
-tests/support/report-hook.mjs	tests/a11y.test.mjs tests/csp-boot.test.mjs tests/csp-enforced.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/reflow-zoom.test.mjs tests/resilience-ui.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/webmcp.test.mjs
-tests/support/poll.mjs	@importers
-tests/support/quiescence.mjs	@importers
-tests/support/offline-asset-verdict.mjs	tests/offline-asset-verdict.test.js tests/sw-offline.test.mjs
+tests/support/axe.min.js	@importers
+tests/support/browser.mjs	@importers except=tests/acceptance.mjs
+tests/support/lock-spy.mjs	tests/lock-spy.test.js
 tests/support/lost-upgrade-copy.mjs	@importers
 tests/support/nav-guard.mjs	@importers
+tests/support/offline-asset-verdict.mjs	tests/offline-asset-verdict.test.js tests/sw-offline.test.mjs
+tests/support/poll.mjs	@importers
 tests/support/press-guard.mjs	@importers
-tests/support/axe.min.js	@importers
-# why: docs/coverage-map.md#public-headers
-# why: docs/coverage-map.md#public-headers
-public/_headers	tests/pages-config.test.js tests/csp-boot.test.mjs tests/csp.test.js tests/csp-enforced.test.mjs
-wrangler.jsonc	tests/pages-config.test.js
-.github/workflows/deploy-pages.yml	tests/pages-config.test.js
+tests/support/quiescence.mjs	@importers
+tests/support/report-hook.mjs	tests/a11y.test.mjs tests/csp-boot.test.mjs tests/csp-enforced.test.mjs tests/keyboard.test.mjs tests/multitab.test.mjs tests/reflow-zoom.test.mjs tests/resilience-ui.test.mjs tests/screenreader.test.mjs tests/shortcuts.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs tests/visual-overrides.test.mjs tests/webmcp-browser.test.mjs tests/webmcp.test.mjs
+tests/support/signal-exit.mjs	@importers except=tests/acceptance.mjs
+tests/support/static-server.mjs	@importers
 tests/support/webmcp-refusals.mjs	@importers
+tools/*	tests/gate-smoke.test.js tests/gate-map.test.js
+tools/audio-parity.mjs	tests/audio-parity-verdict.test.js
+tools/cache-growth.mjs	tests/soak-verdict.test.js tests/tool-bound-kill.test.mjs
+tools/closure-claims.mjs	tests/closure-claims.test.mjs
+tools/derive-coverage-contract.mjs	tests/derive-coverage-contract.test.js
+tools/guarded-call.mjs	tests/lost-upgrade-copy.test.mjs
+tools/idle-cost.mjs	tests/idle-cost-verdict.test.js
+tools/install-https-proof.mjs	tests/gate-smoke.test.js tests/test-support.test.js
+tools/landings.mjs	tests/landings.test.js
+tools/lib/**	tests/test-support.test.js
+tools/lib/endpoint-growth.mjs	tests/soak-verdict.test.js
+tools/lib/perf-metrics.mjs	tests/tool-verdicts.test.js
+tools/lib/static-server.mjs	tests/test-support.test.js tests/csp-boot.test.mjs tests/sw-failover.test.mjs tests/sw-offline.test.mjs
+tools/lib/suite-driver.mjs	tests/mutation-check.test.js
+tools/lib/suite-guard.mjs	tests/mutation-check.test.js
+tools/lib/suite-mode-reporter.mjs	tests/mutation-check.test.js
+tools/lib/update-outcome.mjs	tests/update-outcome.test.js
+tools/measure-perf.mjs	tests/tool-verdicts.test.js
+tools/merge-suite-map.mjs	tests/suite-map-merge.test.js
+tools/mutation-check.mjs	tests/mutation-check.test.js
+tools/resilience-audit.mjs	tests/resilience-probe.test.js tests/resilience-report.test.js tests/scenario-id-drift.test.js
+tools/rollback-rehearsal.mjs	tests/rollback-epipe.test.js
+tools/soak.mjs	tests/soak-verdict.test.js tests/tool-bound-kill.test.mjs
+tools/suite-map.tsv	tests/gate-smoke.test.js tests/gate-map.test.js tests/suite-map-merge.test.js
+vite.config.js	tests/horn.test.js tests/a11y.test.mjs tests/sw-offline.test.mjs tests/webmcp-browser.test.mjs
+wrangler.jsonc	tests/pages-config.test.js

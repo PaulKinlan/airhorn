@@ -139,6 +139,9 @@
  "tools/landings.mjs": [
   "tests/landings.test.js"
  ],
+ "tools/closure-claims.mjs": [
+  "tests/closure-claims.test.mjs"
+ ],
  "tools/mutation-check.mjs": [
   "tests/mutation-check.test.js"
  ],
