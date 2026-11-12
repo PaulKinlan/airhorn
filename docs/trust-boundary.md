@@ -70,7 +70,10 @@ mutation-check  --fd3 pipe-->  DRIVER (supervisor, test file for the outer runne
    into a failed test or a file-level failure, so a clean exit afterwards is the anomaly itself, and
    the `exit` listener that enforces it is named in the strip set like every other instrument (the
    refusal is deferred to exit on purpose - dying on delivery would refuse a rejection the harness
-   attributes to a test, airhorn-812k). Nothing written from the suite's process is a
+   attributes to a test, airhorn-812k). `process.reallyExit(code)` is the same clean exit without the
+   `exit` event, so the preload captures it and republishes it as a non-configurable accessor whose
+   getter is a wrapper applying the same check and whose setter refuses: it cannot be replaced,
+   recovered or deleted from the suite (airhorn-jzrs). Nothing written from the suite's process is a
    fact the parent can trust (it arrives quoted), so the sentinel's one unforgeable statement is that
    death, and the parent classifies a non-clean suite death as a refusal (rc 3), never a verdict. The
    remaining boundary is load-order, not secrecy: the sentinel runs at the same uid and loads before

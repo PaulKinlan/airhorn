@@ -500,6 +500,30 @@ test('the five worlds, actually run: caught, direct-throw, indirect-throw, decoy
     assert.equal(exitCheckStrip.status, 3,
       `stripping the exit check must be refused like every other instrument strip (airhorn-lg5d), got ${exitCheckStrip.status}: ${exitCheckStrip.stdout}${exitCheckStrip.stderr}`);
 
+    // airhorn-jzrs: process.exit(code) EMITS 'exit' (that is what the check above stands on), but
+    // process.reallyExit(code) does not - so the same appended import-time swallow calling
+    // reallyExit(0) laundered the crash as a verdict again (measured rc 2 at 4e366206 and on master
+    // 8e3c3d3b). The preload captures reallyExit and republishes it as a NON-CONFIGURABLE accessor:
+    // the getter is a wrapper that applies the same check, the setter refuses. A suite can therefore
+    // not replace it, recover the original, or delete it - and a clean reallyExit after a delivered
+    // rejection is the refusal.
+    write('k-really-exit-swallow.mjs', "import test from 'node:test';\nprocess.on('unhandledRejection', () => process.reallyExit(0));\ntest('one', () => {});\nsetTimeout(() => { Promise.reject(new Error('reallyExit swallow')); }, 5);\n");
+    const reallyExitSwallow = runWorld(['--suite', 'k-really-exit-swallow.mjs']);
+    assert.equal(reallyExitSwallow.status, 3,
+      `a reallyExit(0) swallow must be refused like the exit(0) one (airhorn-jzrs), got ${reallyExitSwallow.status}: ${reallyExitSwallow.stdout}${reallyExitSwallow.stderr}`);
+    assert.match(reallyExitSwallow.stderr + reallyExitSwallow.stdout, /threw-outside-a-test/,
+      'the reallyExit shape must name the crash it caught (airhorn-jzrs)');
+    // ...and the exit path cannot be taken back from the suite: replacing the captured reallyExit
+    // refuses, and a delete-then-call still reaches the wrapper (the property is non-configurable).
+    write('k-really-exit-replace.mjs', "import test from 'node:test';\ntest('one', () => {});\nprocess.reallyExit = () => {};\nprocess.on('unhandledRejection', () => process.reallyExit(0));\nsetTimeout(() => { Promise.reject(new Error('replace reallyExit')); }, 5);\n");
+    write('k-really-exit-delete.mjs', "import test from 'node:test';\ntest('one', () => {});\ntry { delete process.reallyExit; } catch {}\nprocess.on('unhandledRejection', () => { try { process.reallyExit(0); } catch { process.exit(0); } });\nsetTimeout(() => { Promise.reject(new Error('delete reallyExit')); }, 5);\n");
+    for (const world of ['k-really-exit-replace.mjs', 'k-really-exit-delete.mjs']) {
+      const tamper = runWorld(['--suite', world]);
+      assert.equal(tamper.status, 3,
+        `${world} must be refused (the exit path cannot be taken back, airhorn-jzrs), got ${tamper.status}: ${tamper.stdout}${tamper.stderr}`);
+      assert.doesNotMatch(tamper.stdout, /verdict:/, `${world}: a refusal, never a verdict`);
+    }
+
     // Honest churn must stay unrefused: node:test's own harness listener registers by APPEND (never
     // ahead of the preload sentinel), and a suite listener appended behind the sentinel never runs
     // ahead of it - so adding and removing one hides nothing and is not manipulation.

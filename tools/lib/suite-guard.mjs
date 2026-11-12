@@ -72,6 +72,32 @@ const onExit = () => {
 };
 
 const onMonitor = () => refuse();
+
+// THE OTHER CLEAN EXIT (airhorn-jzrs). process.exit(code) emits 'exit', so onExit sees it - but
+// process.reallyExit(code) terminates WITHOUT emitting 'exit', so the SAME appended import-time
+// swallow calling reallyExit(0) laundered the crash as a verdict (measured rc 2 at 4e366206,
+// airhorn-jzrs). The preload runs before the suite exists, so the exit path is taken away before
+// any suite code can reach it: the real function is captured into this module's scope and the
+// property becomes a NON-CONFIGURABLE accessor - the getter returns a wrapper that applies onExit's
+// check, the setter refuses. So a suite cannot replace the wrapper (assignment refuses), cannot
+// recover the original (the captured reference is module-private), and cannot delete the property;
+// calling it with a clean code after a delivered rejection IS the refusal.
+const realReallyExit = process.reallyExit.bind(process);
+const onReallyExit = (code) => {
+  if (sawRejection && Number(code || 0) === 0) refuse();
+  return realReallyExit(code);
+};
+try {
+  Object.defineProperty(process, 'reallyExit', {
+    configurable: false,
+    enumerable: false,
+    get: () => onReallyExit,
+    set: () => refuse(),
+  });
+} catch {
+  // Not reachable on a supported node (the property is configurable at load), but if it ever were,
+  // onExit still covers process.exit and the residual boundary is stated in docs/trust-boundary.md.
+}
 const onNewListener = (name, fn) => {
   if (name === 'unhandledRejection' && fn !== sentinel) {
     nextTick(() => {
