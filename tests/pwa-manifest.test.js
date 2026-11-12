@@ -110,3 +110,30 @@ test('the tool no longer asks whether the scope is the string / and does assert 
   assert.ok(source.includes('httpsEv.missingIconSizes.length > 0'),
     'the HTTPS leg must FAIL when a required icon size is missing');
 });
+
+test('sizes:"any" is a scalable declaration and satisfies every required size (airhorn-iyim)', () => {
+  // MEASURED, not assumed: with a manifest whose ONLY icon is sizes:"any", headless Chrome 155
+  // (--headless=new, --no-sandbox, --disable-gpu, --host-resolver-rules MAP airhorn.test 127.0.0.1,
+  // cert trusted via --ignore-certificate-errors-spki-list, fresh profile) over a real HTTPS origin
+  // FIRES beforeinstallprompt and enables the app's Install button - so refusing it (the previous
+  // behaviour, and the reading airhorn-5006 pinned) was a FALSE NEGATIVE, not a regression: the check
+  // failed a site Chrome would install, the airhorn-nxuv.28 bug inverted. The same measurement fixes
+  // the rule's SHAPE: the browser honours the token, not the image type or its case.
+  //   SVG type=image/svg+xml : fired=True   PNG declaring "any"   : fired=True
+  //   SVG with NO type        : fired=True   "ANY" in upper case  : fired=True
+  // (raster control fired=True over HTTPS and the HTTP contrast fired=False on every run, so the
+  // harness still discriminates). Evidence: /tmp/iyim/{control,svgonly}/install-https-evidence.json,
+  // /tmp/iyim2/{png-any,svg-any-notype,svg-any-upper}/install-https-evidence.json.
+  assert.deepEqual(missingIconSizes({ icons: [{ src: '/icon.svg', sizes: 'any', type: 'image/svg+xml' }] }), []);
+  assert.deepEqual(missingIconSizes({ icons: [{ src: '/icon.svg', sizes: 'any' }] }), [], 'no type field');
+  assert.deepEqual(missingIconSizes({ icons: [{ src: '/i.png', sizes: 'ANY', type: 'image/png' }] }), [], 'case is not the discriminator');
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '96x96 any' }] }), [], 'one scalable entry covers the list');
+  assert.deepEqual(missingIconSizes({ icons: [{ sizes: '96x96' }] }), ['192x192', '512x512'],
+    'and the raster rule is unchanged: 96x96 declares neither required size');
+
+  // The token must be EXACT - the substring bug (nxuv.28) must not re-enter through this door.
+  for (const spell of ['anything', 'anywhere', 'mana', 'an', 'ANYTHING', '192x192ansi']) {
+    assert.deepEqual(missingIconSizes({ icons: [{ sizes: spell }] }), ['192x192', '512x512'],
+      `"${spell}" is not the scalable keyword`);
+  }
+});
