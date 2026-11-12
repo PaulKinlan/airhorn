@@ -201,6 +201,7 @@ export async function waitForQuiescence(send, {
   let bestStreak = 0;            // the longest quiet streak ever observed (airhorn-ypfn)
   let progressAt = started;      // when the streak last reached a new maximum: the observed progress
   let unchangedSamples = 0;      // samples whose signature repeated the previous one, total
+  let realChanges = 0;           // samples whose signature differed from an EARLIER sample: the changes the page really showed (airhorn-a1c8)
 
   // The ceiling is a BACKSTOP for an unwinnable wait, never the criterion (airhorn-ypfn, airhorn-jmpm):
   // while the page has not been seen quiet the caller's ceiling applies; once it has, the remaining work is
@@ -236,7 +237,12 @@ export async function waitForQuiescence(send, {
       last.scheduled, last.completed, last.quietCondition,
     ]);
     if (signature === lastSignature) { noProgressSamples += 1; unchangedSamples += 1; }
-    else { lastSignature = signature; noProgressSamples = 0; }
+    else {
+      // The first sample is not a change: it is the baseline every later sample is compared with.
+      if (lastSignature !== null) realChanges += 1;
+      lastSignature = signature;
+      noProgressSamples = 0;
+    }
 
     if (last.probe !== 'present') {
       throw new Error(
@@ -297,11 +303,19 @@ export async function waitForQuiescence(send, {
     await sleep(pollMs);
   }
 
-  // The ceiling is a backstop, so the message must not invent a cause. Four
-  // distinguishable situations, named rather than merged into "still pending"
+  // The ceiling is a backstop, so the message must not invent a cause. The
+  // situations are named rather than merged into "still pending"
   // (airhorn-3a0k added the flapping case: a drained page whose quiet condition
   // changes every sample was being called "a starved host" on the strength of ONE
   // historical quiet sample, an attribution the probe contradicts).
+  //
+  // The not-quiet arms are decided by CHANGE EVIDENCE, not by a sample count
+  // (airhorn-a1c8): a page that reported the same signature on every sample has
+  // shown no change at all, which is absolute evidence however many samples fit
+  // inside the ceiling, and a page whose reports changed at all is not called
+  // "not progressing". Thresholding on `stableSamples` consecutive no-change
+  // samples made the attribution a function of host speed - on a starved host
+  // only two round-trips fit, and an unchanging page was named "kept changing".
   const probe = JSON.stringify(last);
   const pending = last && last.pendingTimers === 0 && last.pendingIntervals === 0 && last.pendingFetches === 0;
   const why = pending
@@ -314,9 +328,17 @@ export async function waitForQuiescence(send, {
           `but the streak stopped improving for ${timeoutMs}ms, so the criterion is unreachable on this page, not slowed: ` +
           `a host that keeps completing longer quiet streaks can no longer lose to a ceiling (airhorn-ypfn)`
       : `the page's work had drained but the quiet condition never held, and the state grace period did not fire`
-    : noProgressSamples >= stableSamples
-      ? `nothing the page reports changed across ${noProgressSamples + 1} consecutive samples, so this is a page that is not progressing rather than a host that is merely slow`
-      : `the page kept changing across ${samples} samples, so it is still doing work, not merely starved`;
+    : samples < 2
+      ? `only ${samples} sample(s) fit inside the ${timeoutMs}ms ceiling, so the host was too slow to observe the page twice - that names a slow host, not what the page was doing`
+    : realChanges === 0
+      // NO change is absolute evidence, and it does not depend on how many samples fit the ceiling
+      // (airhorn-a1c8): the old arm demanded `stableSamples` consecutive no-change samples, so on a
+      // starved host - where only two round-trips fit in 400ms - an unchanging page was named
+      // "kept changing ... still doing work, not merely starved", contradicting its own probe payload.
+      ? `the page reported the same thing on every one of its ${samples} samples, so this is a page that is not progressing rather than a host that is merely slow`
+      : noProgressSamples >= stableSamples
+        ? `the page's reports changed on ${realChanges} of ${samples} sample(s) and then stopped changing for the last ${noProgressSamples + 1}, so its work has stalled rather than the host being merely slow`
+        : `the page kept changing across ${samples} samples, so it is still doing work, not merely starved`;
   const waitedMsTotal = Date.now() - started;
   throw new Error(
     (sawQuietSample
@@ -326,7 +348,7 @@ export async function waitForQuiescence(send, {
       : `Page never reached quiescence within the ${timeoutMs}ms ceiling ` +
         `(checked between samples; a slow sample completes first - airhorn-n1qu; ` +
         `the page was never observed quiet, so the caller's timeoutMs bounds it)`) +
-    ` after ${waitedMsTotal}ms and ${samples} sample(s) (${samples - unchangedSamples} changed, ${quietSamples} quiet, ` +
+    ` after ${waitedMsTotal}ms and ${samples} sample(s) (${realChanges} changed, ${quietSamples} quiet, ` +
     `${noProgressSamples} consecutive with no change at the end), ` +
     `waiting for ${stableSamples} consecutive quiet samples with condition \`${quietExpression}\` ` +
     `(${probe}): ${why}. ` +

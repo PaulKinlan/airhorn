@@ -87,14 +87,26 @@ test('a page that keeps changing never passes, and the ceiling says it was still
 });
 
 test('a page with NO observable progress is named as not progressing, not as slow', async () => {
-  const stuck = () => sender(40, () => ({ ...quiet, pendingTimers: 1, quietCondition: false }));
+  // The attribution must not depend on how many samples fit inside the ceiling (airhorn-a1c8). A page
+  // that reports the SAME signature on every sample has shown no change at all, and that is absolute
+  // evidence however few round-trips the host completed - the arm used to require `stableSamples`
+  // consecutive no-change samples, so on a starved host (two 150ms round-trips in a 400ms ceiling)
+  // the identical page was named "kept changing ... still doing work, not merely starved", the exact
+  // mis-attribution this suite exists to prevent, contradicting its own probe payload.
+  const stuck = (ms) => () => sender(ms, () => ({ ...quiet, pendingTimers: 1, quietCondition: false }));
+  const notProgressing = /not progressing rather than a host that is merely slow/;
   await assert.rejects(
-    () => waitForQuiescence(stuck(), { timeoutMs: 400 }),
+    () => waitForQuiescence(stuck(150)(), { timeoutMs: 400 }),
     (error) => {
-      assert.match(error.message, /not progressing rather than a host that is merely slow/);
+      assert.match(error.message, notProgressing, `a slow host cannot invent page progress: ${error.message}`);
+      assert.match(error.message, /0 changed/, 'and the count of changes the page really showed is zero');
+      assert.doesNotMatch(error.message, /kept changing|still doing work/, 'a page that never changed was not "still doing work"');
       return true;
     },
   );
+  // ...and the SAME verdict with room for many samples: the sample count is not the evidence, the
+  // absence of any change is, so a fast host and a starved host must agree here.
+  await assert.rejects(() => waitForQuiescence(stuck(5)(), { timeoutMs: 400 }), notProgressing);
 });
 
 test('the a11y call site shape has no flat wall-clock pin (airhorn-ixk1)', async () => {
