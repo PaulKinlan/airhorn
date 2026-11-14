@@ -140,20 +140,29 @@ RESULTS_DIR=${AIRHORN_RESULTS_DIR:-/tmp/airhorn-test-results}
 # inferred. With the block present, an undeclared suite is 'undeclared' and the gate fails it
 # rather than guessing. With the block ABSENT (the gate-smoke probes' own confs), the legacy
 # extension mapping applies - probes declare nothing and keep working.
-declared_tier() { # $1 = suite path; prints the declared tier; rc 1 when absent/undeclared
-  [ -n "${SUITE_TIERS:-}" ] || return 1
-  local line s t
+#
+# The declarations are parsed ONCE into an associative array, in pure-bash string ops - no
+# fork per line. declared_tier used to rescan the whole SUITE_TIERS block with a printf|tr
+# fork per line at EVERY lookup, and the tier audit calls it once per suite FILE, so one
+# gate invocation paid O(suites x rows) process spawns: measured ~1.4k tr execs and ~5k
+# processes in a single no-op refusal run - the dominant per-spawn cost, ~10-26 s standalone
+# and 8x that under fleet load (airhorn-jqcb). First declaration of a suite wins, exactly
+# as the linear scan did.
+declare -A TIER_MAP=()
+if [ -n "${SUITE_TIERS:-}" ]; then
   while IFS= read -r line; do
-    s=$(printf '%s' "${line%%=*}" | tr -d '[:space:]')
+    s=${line%%=*}; s=${s//[[:space:]]/}
     [ -n "$s" ] || continue
-    [ "$s" = "$1" ] || continue
-    t=$(printf '%s' "${line#*=}" | tr -d '[:space:]')
-    printf '%s' "$t"
-    return 0
+    [[ -z ${TIER_MAP[$s]+x} ]] || continue
+    t=${line#*=}; TIER_MAP[$s]=${t//[[:space:]]/}
   done <<TIEREOF
 $SUITE_TIERS
 TIEREOF
-  return 1
+fi
+declared_tier() { # $1 = suite path; prints the declared tier; rc 1 when absent/undeclared
+  [[ -n "${SUITE_TIERS:-}" && -n ${TIER_MAP[$1]+x} ]] || return 1
+  printf '%s' "${TIER_MAP[$1]}"
+  return 0
 }
 tier_of() {
   local d
@@ -188,7 +197,7 @@ verify_suite_tiers() { # no args: every declared suite; returns non-zero on any 
   local bad=0 s d line declared_present=0
   [ -n "${SUITE_TIERS:-}" ] || return 0  # probes declare nothing (legacy extension mapping)
   while IFS= read -r line; do
-    s=$(printf '%s' "${line%%=*}" | tr -d '[:space:]')
+    s=${line%%=*}; s=${s//[[:space:]]/}
     [ -n "$s" ] || continue
     # Absent is NOT a disagreement: a probe (or partial checkout) holds a SUBSET
     # of the declared suites, and grepping ENOENT read as 'imports no node:test
@@ -197,7 +206,7 @@ verify_suite_tiers() { # no args: every declared suite; returns non-zero on any 
     # file was DELETED from the real tree is the map-honesty layer's concern.
     [ -f "$ROOT/$s" ] || continue
     declared_present=$((declared_present + 1))
-    d=$(printf '%s' "${line#*=}" | tr -d '[:space:]')
+    d=${line#*=}; d=${d//[[:space:]]/}
     case $d in
       node-test)
         if ! grep -qE "$NODE_TEST_IMPORT_RE" "$ROOT/$s" 2>/dev/null; then
