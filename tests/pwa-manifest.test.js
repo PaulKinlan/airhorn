@@ -92,6 +92,18 @@ test('icon sizes are exact tokens, so 1920x1080 is NOT a 192 icon (airhorn-nxuv.
 
   // Case and spacing are tolerated; a missing sizes field is not a match.
   assert.deepEqual(missingIconSizes({ icons: [{ sizes: ' 192X192 ' }, { sizes: '512x512' }] }), []);
+  // And that refusal is MEASURED, not an assumption (airhorn-nnos): headless Chrome 155
+  // (--headless=new, --no-sandbox, --disable-gpu, --host-resolver-rules MAP airhorn.test 127.0.0.1,
+  // cert trusted via --ignore-certificate-errors-spki-list, fresh profile) over the real-HTTPS
+  // harness (tools/install-https-proof.mjs, dist built at 822dcc0a, service worker ACTIVATED on
+  // every leg) does NOT fire beforeinstallprompt when the manifest's ONLY icon declares NO sizes
+  // member ({ src: '/images/airhorn.svg' }) or sizes:"" - the same not-installable signature as
+  // the no-icons negative control - while the same harness fires for the repo's explicit-size
+  // icons and for sizes:"any" (airhorn-iyim), and the HTTP contrast leg never fired on any run.
+  // So refusing {} and sizes:'' is what the browser does; unlike the 'any' refusal this pin is
+  // the measured answer, not a false negative. Evidence: /tmp/nnos/{control-default,no-sizes,
+  // control-any,control-none,control-empty-sizes}/install-https-evidence.json (driver:
+  // /tmp/nnos/run-legs.sh; one variable per leg, one browser at a time, closed in finally).
   assert.deepEqual(missingIconSizes({ icons: [{}, null, { sizes: '' }] }), ['192x192', '512x512']);
 });
 
