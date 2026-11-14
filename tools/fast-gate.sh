@@ -365,14 +365,67 @@ input_paths() { # existing build-input paths, relative to ROOT.
   # else does. The walk is bounded by a visited set; a specifier that does not
   # resolve to a file here (bare module, directory import) is simply not an input
   # file of its own.
-  local p spec rel pending next visited guard=0
+  local p
+  local closure
   for p in src public index.html package.json package-lock.json deno.lock; do
     [ -e "$ROOT/$p" ] && printf '%s\n' "$p"
   done
-  pending=""
-  for p in "$ROOT"/vite.config.*; do
-    [ -e "$p" ] && pending="$pending ${p#"$ROOT"/}"
-  done
+  # The config (and since airhorn-sjn4 the build stage's own scripts) plus every local module they
+  # import: the build definition is walked, not hand-listed, so a new local import enters the set
+  # automatically. literal_read_targets() adds the paths those definition files READ by name, which
+  # is the half an import graph cannot see (airhorn-sjn4).
+  closure=$(build_definition_closure)
+  [ -n "$closure" ] && printf '%s\n' "$closure"
+  literal_read_targets $closure
+}
+
+# --- the build's READ SURFACE, derived (airhorn-sjn4) ------------------------------------------------
+# input_paths() proves which local MODULES the build loads. It cannot prove the build never reads a
+# PATH, and it used to miss two whole classes: a build that runs from package.json's build stage
+# ("build": "node build.js") was not walked at all, and a relative specifier was only matched when
+# it began "./", so "../tools/x.mjs" was invisible. The skip receipt then called a changed tools/ path
+# "outside the build inputs" while the build read it, so the gate kept dist/ bytes no build made
+# (measured on a build.js that fs.readFileSync('tools/data.json') into dist/: the receipt said
+# SKIPPED build: changed paths outside the build inputs: tools/data.json, and the kept bytes were the
+# old ones). Three derivations below, none hand-listed. The direction is always fail-closed: a false
+# skip ships an unbuilt tree, a false build costs one build (measured 478 ms here), so anything the
+# derivation cannot bound BUILDS and says why.
+READ_CALL_RE='(readFileSync|readFile|readdirSync|readdir|createReadStream|existsSync|statSync|lstatSync|openSync|execSync|execFileSync|spawnSync|execFile|spawn)[[:space:]]*\([^)]*'
+
+# Every fact below is a pure function of the tree, and one gate run asks for them several times (the
+# inputs digest twice, the receipt once). Cached per process: the derivation is derived ONCE and costs
+# a round of greps, not one round per question. A gate invocation is a fresh process, so the tree
+# cannot change under a cache.
+_CACHE_OUTDIR=""; _CACHE_CLOSURE=""; _CACHE_READS=""
+_CACHE_OUTDIR_SET=0; _CACHE_CLOSURE_SET=0; _CACHE_READS_SET=0
+
+quote_strip() { # $1 = text that STARTS at a quote (a read's first argument) -> sets STRIPPED
+  local s=$1
+  case "$s" in
+    \'*) s=${s#\'}; s=${s%%\'*} ;;
+    \"*) s=${s#\"}; s=${s%%\"*} ;;
+    *) STRIPPED=""; return 1 ;;
+  esac
+  STRIPPED=$s
+}
+
+quote_strip_spec() { # $1 = an import/require MATCH ("from './x'") -> sets STRIPPED to the specifier
+  local s=$1
+  case "$s" in
+    *\'*) s=${s#*\'}; s=${s%%\'*} ;;
+    *\"*) s=${s#*\"}; s=${s%%\"*} ;;
+    *) STRIPPED=""; return 1 ;;
+  esac
+  STRIPPED=$s
+}
+
+import_specifiers() { # $1 = file (relative to ROOT) -> its relative import/require matches
+  grep -hoE "(from|import|require)[[:space:]]*\(?[[:space:]]*['\"]\.[^'\"]*" "$ROOT/$1" 2>/dev/null
+}
+
+import_closure() { # $@ = entry paths relative to ROOT -> every relative file they import, once each
+  local p spec rel pending next visited guard=0
+  pending="$*"
   visited=" "
   while [ -n "${pending# }" ] && [ "$guard" -lt 10 ]; do
     guard=$((guard + 1))
@@ -383,15 +436,154 @@ input_paths() { # existing build-input paths, relative to ROOT.
       [ -f "$ROOT/$p" ] || continue
       printf '%s\n' "$p"
       while IFS= read -r spec; do
-        rel=${spec#*./}          # shortest prefix up to the first './': keep the path
-        rel=${rel%%[\"\) ]*}    # cut the closing quote / paren the grep left on
-        [ -n "$rel" ] || continue
+        quote_strip_spec "$spec" || continue
+        rel=${STRIPPED#./}
+        case "$rel" in ../*|/*) continue ;; esac   # outside the tree: not a hashed input
         case "$visited" in *" $rel "*) continue ;; esac
         [ -f "$ROOT/$rel" ] && next="$next $rel"
-      done < <(grep -hoE "(from|import)[[:space:]]*['\"]\./[^'\"]+|import\\([[:space:]]*['\"]\./[^'\"]+" "$ROOT/$p" 2>/dev/null)
+      done < <(import_specifiers "$p")
     done
     pending=$next
   done
+}
+
+build_stage_entries() { # local scripts the build stage names: prebuild|build|postbuild
+  local val tok
+  while IFS= read -r val; do
+    val=${val#*:}; val=${val#"${val%%[![:space:]]*}"}; val=${val#\"}   # '"build": "node x.js"' -> 'node x.js' 
+    for tok in $val; do
+      tok=${tok//\"/}; tok=${tok//\'/}
+      case "$tok" in ./*) tok=${tok#./} ;; esac
+      case "$tok" in
+        *.js|*.mjs|*.cjs|*.ts|*.mts) [ -f "$ROOT/$tok" ] && printf '%s\n' "$tok" ;;
+      esac
+    done
+  done < <(grep -oE '"(pre|post)?build"[[:space:]]*:[[:space:]]*"[^"]*"' "$ROOT/package.json" 2>/dev/null)
+}
+
+build_outdir() { # the build's output tree: its bytes are the stamp's OUTPUT half, never an input
+  if [ "$_CACHE_OUTDIR_SET" -eq 0 ]; then
+    local d
+    d=$(grep -hoE -m1 "outDir[[:space:]]*:[[:space:]]*['\"][^'\"]+" "$ROOT"/vite.config.* 2>/dev/null)
+    d=${d#*[\"\']}; d=${d%%[\"\']*}
+    [ -n "$d" ] || d=dist
+    _CACHE_OUTDIR=${d#./}
+    _CACHE_OUTDIR_SET=1
+  fi
+  printf '%s\n' "$_CACHE_OUTDIR"
+}
+
+build_definition_closure() { # the config, the build stage's scripts, and everything they import
+  if [ "$_CACHE_CLOSURE_SET" -eq 0 ]; then
+    local entries="" p
+    for p in "$ROOT"/vite.config.*; do [ -e "$p" ] && entries="$entries ${p#"$ROOT"/}"; done
+    entries="$entries $(build_stage_entries | tr '\n' ' ')"
+    _CACHE_CLOSURE=$(import_closure $entries)
+    _CACHE_CLOSURE_SET=1
+  fi
+  [ -n "$_CACHE_CLOSURE" ] && printf '%s\n' "$_CACHE_CLOSURE"
+}
+
+read_call_sites() { # $@ = definition files -> "file:line:<read-family call>" (ONE grep for all of them)
+  local f
+  [ "$#" -gt 0 ] || return 0
+  local -a paths=()
+  for f in "$@"; do [ -f "$ROOT/$f" ] && paths+=("$ROOT/$f"); done
+  [ "${#paths[@]}" -gt 0 ] || return 0
+  grep -HnEo "$READ_CALL_RE" "${paths[@]}" 2>/dev/null | sed "s|^$ROOT/||"
+}
+
+literal_read_targets() { # $@ = definition files -> relative paths the build reads as a LITERAL
+  if [ "$_CACHE_READS_SET" -eq 0 ]; then
+    local outdir chunk rest call args target out=""
+    outdir=$(build_outdir)
+    while IFS= read -r chunk; do
+      rest=${chunk#*:}; call=${rest#*:}
+      args=${call#*\(}
+      args=${args#"${args%%[![:space:]]*}"}
+      quote_strip "$args" || continue      # a computed path: cannot be named (see derivation_audit)
+      target=${STRIPPED#./}
+      case "$target" in
+        "$outdir"/*|node_modules/*|/*|"") continue ;;   # outputs / absolutes are not inputs
+      esac
+      [ -f "$ROOT/$target" ] && out="$out $target"
+    done < <(read_call_sites "$@")
+    _CACHE_READS=$(printf '%s\n' $out | sort -u)
+    _CACHE_READS_SET=1
+  fi
+  [ -n "$_CACHE_READS" ] && printf '%s\n' "$_CACHE_READS"
+}
+
+read_root_literal() { # $1 = file -> an input root or the outDir it names as a literal, else nothing
+  # ONE grep for all the roots (each grep is a fork, and this is on the gate's own path).
+  local outdir hit
+  outdir=$(build_outdir)
+  hit=$(grep -hoE "['\"](/)?(${outdir}|src|public)(['\"]|/)" "$ROOT/$1" 2>/dev/null | head -1)
+  [ -n "$hit" ] || return 1
+  hit=${hit#*[\"\'/]}; hit=${hit%%[\"\'/]*}
+  printf '%s\n' "$hit"
+}
+
+# derivation_audit: the receipt's facts, and the ONLY thing that may license a skip (airhorn-sjn4).
+#   DERIVED_FILES  - the build definition walked to here
+#   DERIVED_READS  - literal read targets it adds as build inputs
+#   DERIVED_ROOTS  - roots that BOUND the computed reads (so they cannot reach a skipped path)
+#   DERIVED_GAPS   - computed read sites NO literal root bounds. Non-empty = the derivation is SILENT
+#                    about where the build reads, so no changed path may be called 'outside the build
+#                    inputs': the classifier refuses and prints the site instead of guessing.
+# A computed path is bounded only by evidence in the tree: the reading file - or the closure file that
+# imports it - names an input root or the outDir literally. Deliberately narrow. It is what bounds this
+# repo (vite.config.js's dist/ walk, and tools/lib/sw-integrity.mjs, which vite.config.js calls with
+# that directory); anything wider names a site a human has to look at.
+derivation_audit() {
+  local files f chunk rest call args bound imp p site
+  local -A bounded=()
+  local -a sites=() files_with_sites=()
+  files=$(build_definition_closure)
+  DERIVED_FILES=$files
+  DERIVED_READS=$(literal_read_targets $files)
+  DERIVED_ROOTS=""
+  DERIVED_GAPS=""
+  while IFS= read -r site; do
+    site=${site#"$ROOT"/}
+    sites+=("$site")
+    rest=${site#*:}; call=${rest#*:}
+    args=${call#*\(}
+    args=${args#"${args%%[![:space:]]*}"}
+    case "$args" in \'*|\"*) continue ;; esac       # a literal path: already an input
+    f=${site%%:*}
+    case " ${files_with_sites[*]-} " in *" $f "*) ;; *) files_with_sites+=("$f") ;; esac
+  done < <(read_call_sites $files)
+
+  # Bounds are only asked about for files that actually compute a read path: a definition whose every
+  # read names its target needs no bound, so a plain config pays nothing here.
+  for f in ${files_with_sites[@]+"${files_with_sites[@]}"}; do
+    bound=$(read_root_literal "$f")
+    if [ -z "$bound" ]; then
+      for imp in $files; do
+        [ "$imp" = "$f" ] && continue
+        while IFS= read -r p; do
+          quote_strip_spec "$p" || continue
+          [ "${STRIPPED#./}" = "$f" ] || continue
+          bound=$(read_root_literal "$imp")
+          [ -n "$bound" ] && break
+        done < <(import_specifiers "$imp")
+        [ -n "$bound" ] && break
+      done
+    fi
+    bounded[$f]=$bound
+    [ -n "$bound" ] && case " $DERIVED_ROOTS " in *" $bound "*) ;; *) DERIVED_ROOTS="$DERIVED_ROOTS $bound" ;; esac
+  done
+  for site in ${sites[@]+"${sites[@]}"}; do
+    rest=${site#*:}; call=${rest#*:}
+    args=${call#*\(}
+    args=${args#"${args%%[![:space:]]*}"}
+    case "$args" in \'*|\"*) continue ;; esac
+    f=${site%%:*}
+    [ -n "${bounded[$f]-}" ] && continue
+    DERIVED_GAPS="$DERIVED_GAPS ${site%%:*}:${rest%%:*}:$call"
+  done
+  return 0
 }
 
 digest_fail() { echo "fast-gate: digest: cannot read $1" >&2; return 1; }
@@ -712,15 +904,18 @@ build_decision() { # [suite...]; prints "<build|keep> <reason>"; never builds, n
   if [ "$stamp_tc" != "$want_tc" ]; then
     echo "build the toolchain changed (stamp: ${stamp_tc:-none}, now: $want_tc)"; return
   fi
-  # --- the skip receipt (airhorn-aeu0): a keep that cannot say WHY it skipped is a
-  # guess with a stamp on it. Every changed path must be PROVABLY outside the build
-  # inputs at this point: anything in input_paths that changed already failed the
-  # inputs digest above (the digest is computed from the TREE, so --changed narrowing
-  # cannot hide it), and tools/ files the config does not import are proven not-build
-  # by that same derivation. So the classifier only answers for paths the digest
-  # cannot see - and its default is REBUILD, named. A skip that guesses
-  # reintroduces the stale-dist defect with extra confidence.
+  # --- the skip receipt (airhorn-aeu0, corrected by airhorn-sjn4): a keep that cannot say WHY it
+  # skipped is a guess with a stamp on it. Anything in input_paths that changed already failed the
+  # inputs digest above (the digest is computed from the TREE, so --changed narrowing cannot hide
+  # it) - and since airhorn-sjn4 input_paths includes the paths the build definition READS BY NAME,
+  # not only the modules it imports, so a `readFileSync('tools/data.json')` build is covered by the
+  # digest rather than by a promise. What is left for the classifier is the paths the digest cannot
+  # see: tools//tests//docs/ prefixes, which may only be skipped when derivation_audit() is CLOSED
+  # (no computed read site it cannot bound). Anything else is a REBUILD, named.
   local p skipped=""
+  # The derivation facts are computed only when a keep is actually being considered: a run whose
+  # digest arms above already forced a build pays nothing for them (airhorn-sjn4).
+  derivation_audit
   for p in ${CHANGED[@]+"${CHANGED[@]}"}; do
     case "$p" in
       tools/*|tests/*|docs/*|preview/*|.github/*|.beads/*|*.md) skipped="$skipped $p" ;;
@@ -728,8 +923,14 @@ build_decision() { # [suite...]; prints "<build|keep> <reason>"; never builds, n
         echo "build changed path $p is not a build input and not provably irrelevant - fail-closed rebuild"; return ;;
     esac
   done
+  # A computed read the derivation cannot bound means 'where the build reads' is SILENT, and a
+  # silent derivation cannot certify a changed path as irrelevant. Refusing here costs one build;
+  # the alternative is the receipt this bead is about, which claimed a proof it did not have.
+  if [ -n "$skipped" ] && [ -n "$DERIVED_GAPS" ]; then
+    echo "build the build reads paths it COMPUTES and nothing in the tree bounds them (${DERIVED_GAPS# }) - ${skipped# } cannot be certified outside the build inputs, so this fails toward building"; return
+  fi
   if [ -n "$skipped" ]; then
-    echo "keep dist/ is stamped for these inputs and these output bytes (inputs=$want_in); SKIPPED build: changed paths outside the build inputs:$skipped"
+    echo "keep dist/ is stamped for these inputs and these output bytes (inputs=$want_in); SKIPPED build: changed paths outside the build inputs:$skipped (${DERIVED_FILES:-derived from: no build definition to walk}${DERIVED_READS:+; read by name: $(printf '%s' "$DERIVED_READS" | tr '\n' ' ')}${DERIVED_ROOTS:+; computed reads bounded by:$DERIVED_ROOTS})"
   else
     echo "keep dist/ is stamped for these inputs and these output bytes (inputs=$want_in); SKIPPED build: no changed paths to consider"
   fi

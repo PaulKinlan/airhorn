@@ -1630,6 +1630,103 @@ test('a tools-only change that is not a build input skips, with the path named (
   } finally { fs.rmSync(probe.probe, { recursive: true, force: true }); }
 });
 
+test('a tools/ file the build READS BY PATH is a build input, never "outside the build inputs" (airhorn-sjn4)', () => {
+  // The false skip this pins: the derivation walked the config's IMPORT graph only, so a build that
+  // reads a PATH - `fs.readFileSync('tools/data.json')` from a package.json build script, which was
+  // not walked at all - read a file no digest covered. The receipt then said 'SKIPPED build: changed
+  // paths outside the build inputs: tools/data.json' while dist/ held bytes that build would no
+  // longer produce (measured pre-fix: keep, and the kept text was the old one). Derived now: the
+  // build stage's own scripts join the walk, and the paths they read as a LITERAL become inputs.
+  const gateProbe = buildGateProbe();
+  const dir = gateProbe.probe;
+  const run = gateProbe.run;
+  try {
+    fs.writeFileSync(path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'node build.js' } }));
+    fs.writeFileSync(path.join(dir, 'build.js'), [
+      "import fs from 'node:fs';",
+      "const data = fs.readFileSync('tools/data.json', 'utf8');",
+      "fs.mkdirSync('dist', { recursive: true });",
+      "fs.writeFileSync('dist/index.html', 'DATA:' + data);",
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(dir, 'tools', 'data.json'), '{"assets":["a"]}\n');
+    fs.appendFileSync(path.join(dir, 'tools', 'suite-map.tsv'), 'tools/data.json\ttests/pass.test.js\n');
+    const distFile = path.join(dir, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'DATA:{"assets":["a"]}\n');
+    for (const args of [['add', 'package.json', 'build.js', 'tools/data.json', 'tools/suite-map.tsv'], ['commit', '-m', 'path-read build']]) {
+      const g = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+      assert.equal(g.status, 0, `probe git ${args[0]} failed: ${g.stderr}`);
+    }
+    stampProbeDist(gateProbe);
+
+    // RED pre-fix (keep + 'outside the build inputs'): the file IS a build input, because the build
+    // definition reads it by name. It is now in input_paths, so the inputs digest moves.
+    fs.writeFileSync(path.join(dir, 'tools', 'data.json'), '{"assets":["a","b"]}\n');
+    const read = run(['--build-plan', '--changed', 'tools/data.json', '--changed', 'tests/pass.test.js']);
+    assert.equal(read.status, 0, read.stderr);
+    assert.match(read.stdout, /build-plan: build \(/, `a path the build reads must rebuild: ${read.stdout}`);
+    assert.doesNotMatch(read.stdout, /SKIPPED build/, `and must never be called 'outside the build inputs': ${read.stdout}`);
+
+    // The other direction, and it is the whole point of the fast gate: a tools/ file the build does
+    // NOT read still skips - and the receipt now names the definition it derived, so the claim is
+    // inspectable rather than asserted.
+    fs.writeFileSync(path.join(dir, 'tools', 'data.json'), '{"assets":["a"]}\n');
+    stampProbeDist(gateProbe);
+    fs.writeFileSync(path.join(dir, 'tools', 'unread.js'), '// never read by the build\n');
+    const unread = run(['--build-plan', '--changed', 'tools/unread.js', '--changed', 'tests/pass.test.js']);
+    assert.equal(unread.status, 0, unread.stderr);
+    assert.match(unread.stdout, /build-plan: keep \(dist\/ is stamped for these inputs/,
+      `a file the build never reads must still skip: ${unread.stdout}`);
+    assert.match(unread.stdout, /SKIPPED build: changed paths outside the build inputs: tools\/unread\.js tests\/pass\.test\.js/,
+      `the skip must still name the path: ${unread.stdout}`);
+    assert.match(unread.stdout, /build\.js/, `the receipt must name the build definition it derived: ${unread.stdout}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a build that COMPUTES a read path makes the skip REFUSE, naming the site (airhorn-sjn4)', () => {
+  // The residual class: a read whose path the build computes cannot be bounded by reading the
+  // source, so the derivation is SILENT about where the build reads. A silent derivation must not
+  // certify any changed path as irrelevant - the direction that hurts is the skip (it ships an
+  // unbuilt tree), so this fails toward building and prints the site. Bounded computed reads (this
+  // repo's: vite.config.js walking dist/, which the outputs digest already covers) do not refuse.
+  const gateProbe = buildGateProbe();
+  const dir = gateProbe.probe;
+  const run = gateProbe.run;
+  try {
+    fs.writeFileSync(path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'node build.js' } }));
+    // No literal path anywhere: the source and the destination both arrive as arguments, so nothing
+    // in the tree bounds what this build can read.
+    fs.writeFileSync(path.join(dir, 'build.js'), [
+      "import fs from 'node:fs';",
+      "import path from 'node:path';",
+      'const [src, out] = process.argv.slice(2);',
+      "const body = fs.readFileSync(src, 'utf8');",
+      'fs.mkdirSync(path.dirname(out), { recursive: true });',
+      'fs.writeFileSync(out, body);',
+      '',
+    ].join('\n'));
+    const distFile = path.join(dir, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'BUILT-NOW');
+    for (const args of [['add', 'package.json', 'build.js'], ['commit', '-m', 'computed-read build']]) {
+      const g = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+      assert.equal(g.status, 0, `probe git ${args[0]} failed: ${g.stderr}`);
+    }
+    stampProbeDist(gateProbe);
+
+    fs.writeFileSync(path.join(dir, 'tools', 'extra.js'), '// not imported by the config\n');
+    const res = run(['--build-plan', '--changed', 'tools/extra.js', '--changed', 'tests/pass.test.js']);
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /build-plan: build \(the build reads paths it COMPUTES/,
+      `an unbounded computed read must refuse the skip: ${res.stdout}`);
+    assert.match(res.stdout, /build\.js:\d+:/, `the refusal must name the site: ${res.stdout}`);
+    assert.doesNotMatch(res.stdout, /SKIPPED build/, `and must not claim a skip it cannot certify: ${res.stdout}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('a build input the config IMPORTS is derived into the input set - editing it rebuilds (airhorn-aeu0)', () => {
   // vite.config.js imports tools/lib/sw-integrity.mjs and the build EXECUTES its code
   // (it rewrites dist/sw.js with the precache list and integrity digests). A hand list
