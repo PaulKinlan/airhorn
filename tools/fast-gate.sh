@@ -514,31 +514,45 @@ literal_read_targets() { # $@ = definition files -> relative paths the build rea
   [ -n "$_CACHE_READS" ] && printf '%s\n' "$_CACHE_READS"
 }
 
-read_root_literal() { # $1 = file -> an input root or the outDir it names as a literal, else nothing
-  # ONE grep for all the roots (each grep is a fork, and this is on the gate's own path).
-  local outdir hit
+arg_root_literal() { # $1 = a read call's argument text -> the root it is LITERALLY confined to
+  # Evidence must be the READ ITSELF (airhorn-2iuj). A root name that merely APPEARS somewhere in the
+  # same file is not evidence about this read: the reviewer showed an unused `const unused = "src"`
+  # certifying a computed tools/data.json read as safe, which kept a stale dist/ behind a SKIPPED
+  # receipt. So the only accepted evidence is a string literal INSIDE this argument expression that is
+  # rooted at the outDir or at an input root - `readdirSync(path.join('dist', f))` qualifies,
+  # `readFileSync(source)` does not, and neither does `readFileSync(distSw, 'sw.js')` (a literal
+  # filename is not a root). No cross-statement tracing, no importer hop, no substring search: what
+  # cannot be attributed to the read itself is UNKNOWN, and UNKNOWN builds.
+  local outdir arg lit
   outdir=$(build_outdir)
-  hit=$(grep -hoE "['\"](/)?(${outdir}|src|public)(['\"]|/)" "$ROOT/$1" 2>/dev/null | head -1)
-  [ -n "$hit" ] || return 1
-  hit=${hit#*[\"\'/]}; hit=${hit%%[\"\'/]*}
-  printf '%s\n' "$hit"
+  arg=$1
+  while IFS= read -r lit; do
+    lit=${lit#*[\"\']}; lit=${lit%%[\"\']*}
+    case "$lit" in
+      "$outdir"|"$outdir"/*) printf '%s\n' "$outdir"; return 0 ;;
+      src|src/*) printf 'src\n'; return 0 ;;
+      public|public/*) printf 'public\n'; return 0 ;;
+    esac
+  done < <(grep -oE "['\"][^'\"]+['\"]" <<< "$arg")
+  return 1
 }
 
 # derivation_audit: the receipt's facts, and the ONLY thing that may license a skip (airhorn-sjn4).
 #   DERIVED_FILES  - the build definition walked to here
 #   DERIVED_READS  - literal read targets it adds as build inputs
-#   DERIVED_ROOTS  - roots that BOUND the computed reads (so they cannot reach a skipped path)
-#   DERIVED_GAPS   - computed read sites NO literal root bounds. Non-empty = the derivation is SILENT
-#                    about where the build reads, so no changed path may be called 'outside the build
-#                    inputs': the classifier refuses and prints the site instead of guessing.
-# A computed path is bounded only by evidence in the tree: the reading file - or the closure file that
-# imports it - names an input root or the outDir literally. Deliberately narrow. It is what bounds this
-# repo (vite.config.js's dist/ walk, and tools/lib/sw-integrity.mjs, which vite.config.js calls with
-# that directory); anything wider names a site a human has to look at.
+#   DERIVED_ROOTS  - roots its computed reads are LITERALLY confined to (see arg_root_literal)
+#   DERIVED_GAPS   - computed read sites NO such evidence covers. Non-empty = the derivation cannot say
+#                    where the build reads, so no changed path may be called 'outside the build inputs':
+#                    the classifier BUILDS and prints the site, the candidate and why (airhorn-2iuj).
+# The bar for evidence is deliberately the read itself. An earlier version accepted a root name found
+# anywhere in the reading file (or in the closure file importing it), which is a coincidence of
+# substring rather than a fact about the read - the review reproduced a stale dist/ behind a green
+# SKIPPED receipt with an unused "src" literal in the same file (airhorn-2iuj). Nothing here infers
+# across statements or files any more: a path expression the gate cannot attribute to a root is
+# UNKNOWN, and UNKNOWN builds.
 derivation_audit() {
-  local files f chunk rest call args bound imp p site
-  local -A bounded=()
-  local -a sites=() files_with_sites=()
+  local files f chunk rest call args bound site
+  local -a sites=()
   files=$(build_definition_closure)
   DERIVED_FILES=$files
   DERIVED_READS=$(literal_read_targets $files)
@@ -550,39 +564,14 @@ derivation_audit() {
     rest=${site#*:}; call=${rest#*:}
     args=${call#*\(}
     args=${args#"${args%%[![:space:]]*}"}
-    case "$args" in \'*|\"*) continue ;; esac       # a literal path: already an input
-    f=${site%%:*}
-    case " ${files_with_sites[*]-} " in *" $f "*) ;; *) files_with_sites+=("$f") ;; esac
-  done < <(read_call_sites $files)
-
-  # Bounds are only asked about for files that actually compute a read path: a definition whose every
-  # read names its target needs no bound, so a plain config pays nothing here.
-  for f in ${files_with_sites[@]+"${files_with_sites[@]}"}; do
-    bound=$(read_root_literal "$f")
-    if [ -z "$bound" ]; then
-      for imp in $files; do
-        [ "$imp" = "$f" ] && continue
-        while IFS= read -r p; do
-          quote_strip_spec "$p" || continue
-          [ "${STRIPPED#./}" = "$f" ] || continue
-          bound=$(read_root_literal "$imp")
-          [ -n "$bound" ] && break
-        done < <(import_specifiers "$imp")
-        [ -n "$bound" ] && break
-      done
+    case "$args" in \'*|\"*) continue ;; esac       # a literal path: already a build input
+    if bound=$(arg_root_literal "$args"); then
+      case " $DERIVED_ROOTS " in *" $bound "*) ;; *) DERIVED_ROOTS="$DERIVED_ROOTS $bound" ;; esac
+      continue
     fi
-    bounded[$f]=$bound
-    [ -n "$bound" ] && case " $DERIVED_ROOTS " in *" $bound "*) ;; *) DERIVED_ROOTS="$DERIVED_ROOTS $bound" ;; esac
-  done
-  for site in ${sites[@]+"${sites[@]}"}; do
-    rest=${site#*:}; call=${rest#*:}
-    args=${call#*\(}
-    args=${args#"${args%%[![:space:]]*}"}
-    case "$args" in \'*|\"*) continue ;; esac
     f=${site%%:*}
-    [ -n "${bounded[$f]-}" ] && continue
-    DERIVED_GAPS="$DERIVED_GAPS ${site%%:*}:${rest%%:*}:$call"
-  done
+    DERIVED_GAPS="$DERIVED_GAPS $f:${rest%%:*}:$call"
+  done < <(read_call_sites $files)
   return 0
 }
 
@@ -923,11 +912,13 @@ build_decision() { # [suite...]; prints "<build|keep> <reason>"; never builds, n
         echo "build changed path $p is not a build input and not provably irrelevant - fail-closed rebuild"; return ;;
     esac
   done
-  # A computed read the derivation cannot bound means 'where the build reads' is SILENT, and a
-  # silent derivation cannot certify a changed path as irrelevant. Refusing here costs one build;
-  # the alternative is the receipt this bead is about, which claimed a proof it did not have.
+  # A computed read the derivation cannot attribute to a root means 'where the build reads' is UNKNOWN,
+  # and an unknown cannot certify a changed path as irrelevant (airhorn-2iuj). The receipt says which
+  # site it saw, that it could not attribute it, and that it therefore builds - never a skip it is
+  # unsure about. Refusing here costs one build; the alternative is a stale dist/ behind a green
+  # SKIPPED line, which is the defect this bead is about.
   if [ -n "$skipped" ] && [ -n "$DERIVED_GAPS" ]; then
-    echo "build the build reads paths it COMPUTES and nothing in the tree bounds them (${DERIVED_GAPS# }) - ${skipped# } cannot be certified outside the build inputs, so this fails toward building"; return
+    echo "build the build definition reads paths it COMPUTES that this gate cannot attribute to a root (${DERIVED_GAPS# }), so ${skipped# } cannot be certified as outside the build inputs - building instead of guessing"; return
   fi
   if [ -n "$skipped" ]; then
     echo "keep dist/ is stamped for these inputs and these output bytes (inputs=$want_in); SKIPPED build: changed paths outside the build inputs:$skipped (${DERIVED_FILES:-derived from: no build definition to walk}${DERIVED_READS:+; read by name: $(printf '%s' "$DERIVED_READS" | tr '\n' ' ')}${DERIVED_ROOTS:+; computed reads bounded by:$DERIVED_ROOTS})"

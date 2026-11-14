@@ -1720,10 +1720,92 @@ test('a build that COMPUTES a read path makes the skip REFUSE, naming the site (
     fs.writeFileSync(path.join(dir, 'tools', 'extra.js'), '// not imported by the config\n');
     const res = run(['--build-plan', '--changed', 'tools/extra.js', '--changed', 'tests/pass.test.js']);
     assert.equal(res.status, 0, res.stderr);
-    assert.match(res.stdout, /build-plan: build \(the build reads paths it COMPUTES/,
+    assert.match(res.stdout, /build-plan: build \(the build definition reads paths it COMPUTES that this gate cannot attribute to a root/,
       `an unbounded computed read must refuse the skip: ${res.stdout}`);
     assert.match(res.stdout, /build\.js:\d+:/, `the refusal must name the site: ${res.stdout}`);
     assert.doesNotMatch(res.stdout, /SKIPPED build/, `and must not claim a skip it cannot certify: ${res.stdout}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('an unrelated root string does NOT certify a computed read: the READ must be the evidence (airhorn-2iuj)', () => {
+  // The review's repro against 4e0393c5: read_root_literal accepted a root name found ANYWHERE in the
+  // reading file, so an unused `const unused = "src"` certified a computed `tools/data.json` read as
+  // safe - the gate kept a stale dist/ behind a green SKIPPED receipt. Evidence must be the read
+  // itself now: a literal INSIDE the argument expression rooted at the outDir/input root, or nothing.
+  // Unknown is not a licence to skip, so this BUILDS and names the site it could not attribute.
+  const gateProbe = buildGateProbe();
+  const dir = gateProbe.probe;
+  const run = gateProbe.run;
+  try {
+    fs.writeFileSync(path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'node build.js' } }));
+    fs.writeFileSync(path.join(dir, 'build.js'), [
+      "import fs from 'node:fs';",
+      'const unused = "src";                 // a root name that has NOTHING to do with the read below',
+      "const source = process.env.INPUT_PATH || 'tools/data.json';",
+      "const data = fs.readFileSync(source); // computed: no root literal in this argument",
+      "fs.mkdirSync('dist', { recursive: true });",
+      "fs.writeFileSync('dist/index.html', 'DATA:' + data);",
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(dir, 'tools', 'data.json'), '{"assets":["a"]}\n');
+    fs.appendFileSync(path.join(dir, 'tools', 'suite-map.tsv'), 'tools/data.json\ttests/pass.test.js\n');
+    const distFile = path.join(dir, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'DATA:{"assets":["a"]}\n');
+    for (const args of [['add', 'package.json', 'build.js', 'tools/data.json', 'tools/suite-map.tsv'], ['commit', '-m', 'coincidence-repro build']]) {
+      const g = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+      assert.equal(g.status, 0, `probe git ${args[0]} failed: ${g.stderr}`);
+    }
+    stampProbeDist(gateProbe);
+
+    fs.writeFileSync(path.join(dir, 'tools', 'data.json'), '{"assets":["a","b"]}\n');
+    const res = run(['--build-plan', '--changed', 'tools/data.json', '--changed', 'tests/pass.test.js']);
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /build-plan: build \(the build definition reads paths it COMPUTES that this gate cannot attribute to a root/,
+      `an unattributable computed read must build: ${res.stdout}`);
+    assert.match(res.stdout, /build\.js:\d+:readFileSync\(source/,
+      `the refusal must name the site it could not attribute: ${res.stdout}`);
+    assert.doesNotMatch(res.stdout, /SKIPPED build/, `no skip may be claimed on unknown evidence: ${res.stdout}`);
+    assert.doesNotMatch(res.stdout, /bounded by: src|bounded by:.* src/,
+      `the unused "src" string must never appear as a bound: ${res.stdout}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a computed read the argument LITERALLY confines to the outDir still skips, named (airhorn-2iuj)', () => {
+  // The other side of the same rule: the fast path must survive where the evidence IS the read.
+  // readdirSync(path.join(<outDir>, ...)) reads the OUTPUT tree, whose bytes are the other half of the
+  // stamp, so it cannot make dist/ stale - that read is attributable and does not cost a build.
+  const gateProbe = buildGateProbe();
+  const dir = gateProbe.probe;
+  const run = gateProbe.run;
+  try {
+    fs.writeFileSync(path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'gate-contract-probe', private: true, scripts: { build: 'node build.js' } }));
+    fs.writeFileSync(path.join(dir, 'build.js'), [
+      "import fs from 'node:fs';",
+      "import path from 'node:path';",
+      "const assets = fs.readdirSync(path.join('dist', 'assets')); // the argument names the outDir",
+      "fs.writeFileSync('dist/index.html', 'A:' + assets.length);",
+      '',
+    ].join('\n'));
+    const distFile = path.join(dir, 'dist', 'index.html');
+    fs.mkdirSync(path.dirname(distFile), { recursive: true });
+    fs.writeFileSync(distFile, 'A:0');
+    for (const args of [['add', 'package.json', 'build.js'], ['commit', '-m', 'attributable-read build']]) {
+      const g = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+      assert.equal(g.status, 0, `probe git ${args[0]} failed: ${g.stderr}`);
+    }
+    stampProbeDist(gateProbe);
+
+    fs.writeFileSync(path.join(dir, 'tools', 'extra.js'), '// not read by the build\n');
+    const res = run(['--build-plan', '--changed', 'tools/extra.js', '--changed', 'tests/pass.test.js']);
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /build-plan: keep \(dist\/ is stamped for these inputs/,
+      `an attributable computed read must not cost a build: ${res.stdout}`);
+    assert.match(res.stdout, /computed reads bounded by: dist/, `and the receipt must name the bound: ${res.stdout}`);
+    assert.match(res.stdout, /SKIPPED build: changed paths outside the build inputs: tools\/extra\.js/,
+      `the skip must still name its paths: ${res.stdout}`);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
